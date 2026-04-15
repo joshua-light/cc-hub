@@ -1,15 +1,21 @@
 mod app;
 mod conversation;
+mod focus;
 mod models;
+mod live_view;
 mod scanner;
 mod ui;
 
 use app::{App, View};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use log::LevelFilter;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use simplelog::{Config as LogConfig, WriteLogger};
+use std::fs::File;
 use std::io;
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -18,8 +24,28 @@ enum ScanMsg {
     Detail(models::SessionDetail),
 }
 
+fn init_logging() -> PathBuf {
+    let log_dir = dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("cc-hub");
+    std::fs::create_dir_all(&log_dir).ok();
+
+    let log_path = log_dir.join(format!(
+        "cc-hub_{}.log",
+        chrono::Local::now().format("%Y%m%d_%H%M%S")
+    ));
+
+    if let Ok(file) = File::create(&log_path) {
+        WriteLogger::init(LevelFilter::Debug, LogConfig::default(), file).ok();
+    }
+
+    log_path
+}
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    let log_path = init_logging();
+
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
     crossterm::execute!(stdout, EnterAlternateScreen)?;
@@ -32,6 +58,8 @@ async fn main() -> io::Result<()> {
     crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
+    eprintln!("Logs: {}", log_path.display());
+
     result
 }
 
@@ -43,7 +71,7 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
 
     // Scanner task — interval fires immediately on first tick, so no separate initial scan needed
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        let mut interval = tokio::time::interval(Duration::from_millis(250));
         let mut latest_sessions: Vec<models::SessionInfo> = Vec::new();
 
         loop {
@@ -72,9 +100,18 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
     });
 
     loop {
+        // Poll live view for new JSONL entries
+        if app.view == View::LiveTail {
+            if let Some(ref mut lv) = app.live_view {
+                lv.poll();
+            }
+        }
+
         terminal.draw(|frame| ui::render(frame, &mut app))?;
 
-        if event::poll(Duration::from_millis(50))? {
+        let poll_ms = 50;
+
+        if event::poll(Duration::from_millis(poll_ms))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
@@ -89,16 +126,54 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                     (View::Grid, KeyCode::Left | KeyCode::Char('h')) => app.move_left(),
                     (View::Grid, KeyCode::Down | KeyCode::Char('j')) => app.move_down(),
                     (View::Grid, KeyCode::Up | KeyCode::Char('k')) => app.move_up(),
+                    // Enter: open live tail view
                     (View::Grid, KeyCode::Enter) => {
+                        if let Some(session) = app.selected_session_info().cloned() {
+                            if let Some(path) = session.jsonl_path.clone() {
+                                let lv = live_view::LiveView::new(path);
+                                app.enter_live_tail(lv);
+                            } else {
+                                // No JSONL file, fall back to info popup
+                                let _ = detail_tx.send(session.session_id.clone()).await;
+                                app.enter_popup();
+                            }
+                        }
+                    }
+                    // 'i' for info popup (old Enter behavior)
+                    (View::Grid, KeyCode::Char('i')) => {
                         if let Some(id) = app.selected_session_id() {
                             let _ = detail_tx.send(id).await;
                             app.enter_popup();
+                        }
+                    }
+                    (View::Grid, KeyCode::Char('f')) => {
+                        if let Some(session) = app.selected_session_info() {
+                            focus::focus_window(session.pid);
                         }
                     }
                     // Popup navigation
                     (View::Popup, KeyCode::Esc | KeyCode::Char('q')) => app.close_popup(),
                     (View::Popup, KeyCode::Down | KeyCode::Char('j')) => app.scroll_down(),
                     (View::Popup, KeyCode::Up | KeyCode::Char('k')) => app.scroll_up(),
+                    // Live tail view
+                    (View::LiveTail, KeyCode::Esc | KeyCode::Char('q')) => {
+                        app.close_live_tail();
+                    }
+                    (View::LiveTail, KeyCode::Down | KeyCode::Char('j')) => {
+                        if let Some(ref mut lv) = app.live_view {
+                            lv.scroll_down();
+                        }
+                    }
+                    (View::LiveTail, KeyCode::Up | KeyCode::Char('k')) => {
+                        if let Some(ref mut lv) = app.live_view {
+                            lv.scroll_up();
+                        }
+                    }
+                    (View::LiveTail, KeyCode::Char('G')) => {
+                        if let Some(ref mut lv) = app.live_view {
+                            lv.scroll_bottom();
+                        }
+                    }
                     _ => {}
                 }
             }

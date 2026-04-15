@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::fmt;
+use std::path::PathBuf;
 
 #[derive(Deserialize)]
 pub struct RawSession {
@@ -13,21 +14,20 @@ pub struct RawSession {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionState {
-    WaitingForInput,
+    /// Active API calls — the agent is working.
     Processing,
-    ToolExecution,
+    /// Has conversation content, waiting for user input.
+    WaitingForInput,
+    /// Fresh session with no conversation content yet.
     Idle,
-    Dead,
 }
 
 impl SessionState {
     pub fn sort_key(&self) -> u8 {
         match self {
-            SessionState::WaitingForInput => 0,
-            SessionState::Processing => 1,
-            SessionState::ToolExecution => 2,
-            SessionState::Idle => 3,
-            SessionState::Dead => 4,
+            SessionState::Processing => 0,
+            SessionState::WaitingForInput => 1,
+            SessionState::Idle => 2,
         }
     }
 }
@@ -35,11 +35,9 @@ impl SessionState {
 impl fmt::Display for SessionState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SessionState::WaitingForInput => write!(f, "waiting for input"),
             SessionState::Processing => write!(f, "processing"),
-            SessionState::ToolExecution => write!(f, "tool execution"),
+            SessionState::WaitingForInput => write!(f, "waiting for input"),
             SessionState::Idle => write!(f, "idle"),
-            SessionState::Dead => write!(f, "dead"),
         }
     }
 }
@@ -53,16 +51,17 @@ pub struct SessionInfo {
     pub started_at: u64,
     pub last_activity: Option<u64>,
     pub state: SessionState,
-    pub alive: bool,
     pub last_user_message: Option<String>,
+    pub summary: Option<String>,
     pub model: Option<String>,
     pub git_branch: Option<String>,
     pub version: Option<String>,
+    pub jsonl_path: Option<PathBuf>,
 }
 
 impl SessionInfo {
     pub fn needs_attention(&self) -> bool {
-        self.alive && self.state == SessionState::WaitingForInput
+        self.state == SessionState::WaitingForInput
     }
 }
 
@@ -83,4 +82,11 @@ pub struct SessionDetail {
     pub recent_messages: Vec<ConversationMessage>,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProjectGroup {
+    pub name: String,
+    pub cwd: String,
+    pub sessions: Vec<SessionInfo>,
 }

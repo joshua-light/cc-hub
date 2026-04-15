@@ -1,5 +1,7 @@
 use crate::conversation;
 use crate::models::{RawSession, SessionDetail, SessionInfo, SessionState};
+use log::{debug, info, warn};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 fn claude_dir() -> Option<PathBuf> {
@@ -18,7 +20,7 @@ fn encode_path(path: &str) -> String {
     path.replace('/', "-").replace('.', "-")
 }
 
-fn find_jsonl(cwd: &str, session_id: &str) -> Option<PathBuf> {
+pub fn find_jsonl(cwd: &str, session_id: &str) -> Option<PathBuf> {
     let projects = projects_dir()?;
     let encoded = encode_path(cwd);
     let jsonl_path = projects.join(&encoded).join(format!("{}.jsonl", session_id));
@@ -29,36 +31,346 @@ fn find_jsonl(cwd: &str, session_id: &str) -> Option<PathBuf> {
     }
 }
 
+/// Check if a process has a real parent (not reparented to init).
+fn has_real_parent(pid: u32) -> bool {
+    crate::focus::parent_pid(pid).is_some_and(|ppid| ppid > 1)
+}
+
+/// Read /clear events from the tail of ~/.claude/history.jsonl.
+/// Returns session_id → latest clear timestamp (ms).
+fn read_clears_from_history() -> HashMap<String, u64> {
+    let path = match claude_dir() {
+        Some(d) => d.join("history.jsonl"),
+        None => return Default::default(),
+    };
+    let file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return Default::default(),
+    };
+
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut reader = std::io::BufReader::new(file);
+    let tail_bytes = 128 * 1024;
+    if len > tail_bytes {
+        use std::io::{Seek, SeekFrom};
+        let _ = reader.seek(SeekFrom::Start(len - tail_bytes));
+        let mut discard = String::new();
+        let _ = std::io::BufRead::read_line(&mut reader, &mut discard);
+    }
+
+    let mut clears = HashMap::new();
+    for line in std::io::BufRead::lines(reader) {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        if !line.contains("/clear") {
+            continue;
+        }
+        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
+            if obj.get("display").and_then(|d| d.as_str()) == Some("/clear") {
+                if let (Some(sid), Some(ts)) = (
+                    obj.get("sessionId").and_then(|s| s.as_str()),
+                    obj.get("timestamp").and_then(|t| t.as_u64()),
+                ) {
+                    let entry = clears.entry(sid.to_string()).or_insert(0u64);
+                    if ts > *entry {
+                        *entry = ts;
+                    }
+                }
+            }
+        }
+    }
+    clears
+}
+
+/// Resolve the JSONL path for every alive session.
+///
+/// After `/clear`, Claude Code creates a new JSONL with a fresh session ID
+/// but never updates the session metadata file.  This means the metadata
+/// still points to the OLD session ID whose JSONL contains stale data.
+///
+/// Resolution strategy:
+///   1. Non-cleared sessions → use their own JSONL (session_id match).
+///   2. Cleared sessions → follow the /clear chain.  Each /clear creates a
+///      new JSONL whose first entry timestamp matches the clear event within
+///      a few milliseconds.  If THAT JSONL was also cleared, follow the
+///      chain until we reach one that wasn't.
+fn resolve_jsonl_paths(
+    sessions: &[RawSession],
+    clears: &HashMap<String, u64>,
+    claimed: &HashSet<String>,
+) -> HashMap<String, Option<PathBuf>> {
+    let mut result: HashMap<String, Option<PathBuf>> = HashMap::new();
+
+    // Pass 1: non-cleared sessions use their own JSONL.
+    for raw in sessions {
+        if !clears.contains_key(&raw.session_id) {
+            let path = find_jsonl(&raw.cwd, &raw.session_id);
+            let sid_short = &raw.session_id[..8.min(raw.session_id.len())];
+            debug!(
+                "resolve sid={} (not cleared) → {}",
+                sid_short,
+                path.as_ref().map_or("not found", |_| "found")
+            );
+            result.insert(raw.session_id.clone(), path);
+        }
+    }
+
+    // Pass 2: cleared sessions — follow the /clear chain.
+    // Build the orphan index once per project directory.
+    let mut orphan_index: HashMap<String, OrphanIndex> = HashMap::new();
+    for raw in sessions.iter().filter(|r| clears.contains_key(&r.session_id)) {
+        orphan_index
+            .entry(raw.cwd.clone())
+            .or_insert_with(|| OrphanIndex::build(&raw.cwd, claimed));
+    }
+
+    for raw in sessions.iter().filter(|r| clears.contains_key(&r.session_id)) {
+        let sid_short = &raw.session_id[..8.min(raw.session_id.len())];
+        let clear_ts = clears.get(&raw.session_id).copied().unwrap_or(0);
+        let path = orphan_index
+            .get(&raw.cwd)
+            .and_then(|idx| idx.follow_chain(&raw.session_id, clears));
+        debug!(
+            "resolve sid={} (cleared at {}) → {}",
+            sid_short, clear_ts,
+            path.as_ref().map_or("chain broken".to_string(), |p| p.display().to_string())
+        );
+        result.insert(raw.session_id.clone(), path);
+    }
+
+    result
+}
+
+/// Index of orphan JSONLs in a project directory, keyed by first-entry
+/// timestamp for fast lookup during /clear chain resolution.
+struct OrphanIndex {
+    /// (first_entry_timestamp_ms, session_id, path)
+    entries: Vec<(u64, String, PathBuf)>,
+}
+
+impl OrphanIndex {
+    fn build(cwd: &str, claimed: &HashSet<String>) -> Self {
+        let proj_dir = match projects_dir().map(|p| p.join(encode_path(cwd))) {
+            Some(d) => d,
+            None => return Self { entries: Vec::new() },
+        };
+        let dir_entries = match std::fs::read_dir(&proj_dir) {
+            Ok(e) => e,
+            Err(_) => return Self { entries: Vec::new() },
+        };
+
+        let mut entries = Vec::new();
+        for entry in dir_entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let sid = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            if claimed.contains(&sid) {
+                continue;
+            }
+            if let Some(ts) = read_first_timestamp(&path) {
+                entries.push((ts, sid, path));
+            }
+        }
+        Self { entries }
+    }
+
+    /// Find the orphan whose first entry is within `max_delta` ms of `clear_ts`.
+    fn find_by_clear_ts(&self, clear_ts: u64) -> Option<(&str, &Path)> {
+        let max_delta = 30_000u64;
+        let mut best: Option<(usize, u64)> = None;
+        for (i, (first_ts, _, _)) in self.entries.iter().enumerate() {
+            if *first_ts < clear_ts {
+                continue;
+            }
+            let delta = first_ts - clear_ts;
+            if delta > max_delta {
+                continue;
+            }
+            if best.as_ref().map_or(true, |(_, d)| delta < *d) {
+                best = Some((i, delta));
+            }
+        }
+        best.map(|(i, _)| {
+            let (_, ref sid, ref path) = self.entries[i];
+            (sid.as_str(), path.as_path())
+        })
+    }
+
+    /// Follow the /clear chain starting from `start_sid` until we reach a
+    /// session ID that was NOT cleared.  Returns the JSONL path at the end
+    /// of the chain, or None if the chain is broken.
+    fn follow_chain(
+        &self,
+        start_sid: &str,
+        clears: &HashMap<String, u64>,
+    ) -> Option<PathBuf> {
+        let mut current_sid = start_sid.to_string();
+        let mut visited = HashSet::new();
+
+        loop {
+            let clear_ts = match clears.get(&current_sid) {
+                Some(&ts) => ts,
+                None => {
+                    // current_sid was NOT cleared — it's the head of the chain.
+                    // Find its JSONL path in our index.
+                    return self
+                        .entries
+                        .iter()
+                        .find(|(_, sid, _)| sid == &current_sid)
+                        .map(|(_, _, p)| p.clone());
+                }
+            };
+
+            visited.insert(current_sid.clone());
+
+            match self.find_by_clear_ts(clear_ts) {
+                Some((next_sid, _)) => {
+                    if visited.contains(next_sid) {
+                        return None; // cycle
+                    }
+                    current_sid = next_sid.to_string();
+                }
+                None => return None, // broken chain
+            }
+        }
+    }
+}
+
+/// Read the first timestamp (epoch ms) from a JSONL file.
+/// Only reads the first ~4 KB to keep it fast.
+fn read_first_timestamp(path: &Path) -> Option<u64> {
+    use std::io::{BufRead, BufReader};
+    let file = std::fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    // Only check first ~20 lines (well within 4 KB).
+    for line in reader.lines().take(20) {
+        let line = line.ok()?;
+        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
+            if let Some(ts) = obj.get("timestamp") {
+                return conversation::parse_timestamp_ms(ts);
+            }
+        }
+    }
+    None
+}
+
 fn is_pid_alive(pid: u32) -> bool {
-    // kill(pid, 0) checks process existence without sending a signal
-    unsafe { libc::kill(pid as i32, 0) == 0 }
+    // Check that the process exists AND is actually a claude process.
+    // This avoids false positives from PID reuse (another process gets the
+    // same PID after claude exits).
+    if unsafe { libc::kill(pid as i32, 0) } != 0 {
+        debug!("pid {} not alive (kill(0) failed)", pid);
+        return false;
+    }
+    let comm = crate::focus::proc_comm(pid);
+    if comm.is_empty() {
+        debug!("pid {} alive but /proc/comm unreadable", pid);
+        return false;
+    }
+    if comm != "claude" {
+        debug!("pid {} alive but not claude (comm={})", pid, comm);
+        return false;
+    }
+    // A claude process reparented to init (ppid=1) is an orphan from a
+    // killed terminal — it will never receive input again, so treat it
+    // as dead.
+    if !has_real_parent(pid) {
+        debug!("pid {} is claude but orphaned (reparented to init)", pid);
+        return false;
+    }
+    true
 }
 
 fn read_raw_sessions() -> Vec<RawSession> {
     let dir = match sessions_dir() {
         Some(d) => d,
-        None => return Vec::new(),
+        None => {
+            warn!("sessions dir not found");
+            return Vec::new();
+        }
     };
 
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            warn!("cannot read sessions dir: {}", e);
+            return Vec::new();
+        }
     };
 
-    let mut sessions = Vec::new();
+    // Collect all sessions, then deduplicate by session_id.
+    // When a session is resumed, Claude Code creates a new file with the same
+    // session_id but a different PID. We keep the entry whose process is still
+    // alive, or the most recently started one if both are dead.
+    let mut by_session_id = HashMap::<String, RawSession>::new();
+    let mut file_count = 0u32;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
+        file_count += 1;
         if let Ok(contents) = std::fs::read_to_string(&path) {
             if let Ok(raw) = serde_json::from_str::<RawSession>(&contents) {
-                sessions.push(raw);
+                debug!(
+                    "session file: pid={} sid={} cwd={}",
+                    raw.pid, &raw.session_id[..8.min(raw.session_id.len())], raw.cwd
+                );
+                let keep_existing = match by_session_id.get(&raw.session_id) {
+                    Some(existing) => {
+                        let existing_alive = is_pid_alive(existing.pid);
+                        let new_alive = is_pid_alive(raw.pid);
+                        let result = match (existing_alive, new_alive) {
+                            (false, true) => false, // new is alive, replace
+                            (true, false) => true,  // existing is alive, skip
+                            // Both alive: prefer the one with a real parent
+                            // (i.e. still attached to a terminal window).
+                            (true, true) => match (has_real_parent(existing.pid), has_real_parent(raw.pid)) {
+                                (true, false) => true,
+                                (false, true) => false,
+                                _ => existing.started_at >= raw.started_at,
+                            },
+                            // Both dead: keep the most recently started.
+                            (false, false) => existing.started_at >= raw.started_at,
+                        };
+                        debug!(
+                            "dedup sid={}: existing pid={} alive={} vs new pid={} alive={} → {}",
+                            &raw.session_id[..8.min(raw.session_id.len())],
+                            existing.pid, existing_alive,
+                            raw.pid, new_alive,
+                            if result { "keep existing" } else { "replace" }
+                        );
+                        result
+                    }
+                    None => false,
+                };
+                if !keep_existing {
+                    by_session_id.insert(raw.session_id.clone(), raw);
+                }
             }
         }
     }
 
-    sessions
+    debug!("read_raw_sessions: {} files, {} unique sessions", file_count, by_session_id.len());
+    by_session_id.into_values().collect()
+}
+
+/// Extracted JSONL data for a session, avoiding a 7-element tuple.
+struct JsonlData {
+    state: SessionState,
+    last_user_message: Option<String>,
+    last_activity: Option<u64>,
+    git_branch: Option<String>,
+    model: Option<String>,
+    version: Option<String>,
+    summary: Option<String>,
 }
 
 fn project_name(cwd: &str) -> String {
@@ -71,36 +383,87 @@ fn project_name(cwd: &str) -> String {
 
 pub fn scan_sessions() -> Vec<SessionInfo> {
     let raw_sessions = read_raw_sessions();
+    let clears = read_clears_from_history();
+    // Derive claimed session IDs from the sessions we already read,
+    // avoiding a redundant second pass over the session metadata files.
+    let claimed: HashSet<String> = raw_sessions.iter().map(|r| r.session_id.clone()).collect();
 
-    let mut sessions: Vec<SessionInfo> = raw_sessions
+    debug!(
+        "scan_sessions: {} raw sessions, {} clears, {} claimed ids",
+        raw_sessions.len(), clears.len(), claimed.len()
+    );
+
+    let alive: Vec<RawSession> = raw_sessions
+        .into_iter()
+        .filter(|raw| is_pid_alive(raw.pid))
+        .collect();
+
+    info!("scan_sessions: {} alive sessions", alive.len());
+
+    let jsonl_map = resolve_jsonl_paths(&alive, &clears, &claimed);
+
+    let mut sessions: Vec<SessionInfo> = alive
         .into_iter()
         .map(|raw| {
-            let alive = is_pid_alive(raw.pid);
-            let jsonl_path = find_jsonl(&raw.cwd, &raw.session_id);
+            let sid_short = &raw.session_id[..8.min(raw.session_id.len())];
+            let jsonl_path = jsonl_map
+                .get(&raw.session_id)
+                .cloned()
+                .flatten();
 
-            let (state, last_user_message, last_activity, git_branch, model, version) =
-                match &jsonl_path {
-                    Some(path) => {
-                        let entries = conversation::read_jsonl_tail(path, 8192);
-                        let state = if alive {
-                            conversation::extract_state(&entries)
-                        } else {
-                            SessionState::Dead
-                        };
-                        let last_msg = conversation::extract_last_user_message(&entries);
-                        let last_act = conversation::extract_last_activity(&entries);
-                        let (branch, mdl, ver) = conversation::extract_metadata(&entries);
-                        (state, last_msg, last_act, branch, mdl, ver)
+            let was_cleared = clears.contains_key(&raw.session_id);
+            debug!(
+                "pid={} sid={} cwd={} cleared={} jsonl={}",
+                raw.pid, sid_short, raw.cwd, was_cleared,
+                jsonl_path.as_ref().map_or("none".to_string(), |p| p.display().to_string())
+            );
+
+            let data = match &jsonl_path {
+                Some(path) => {
+                    let entries = conversation::read_jsonl_tail(path, 65536);
+                    let mut state = conversation::extract_state(&entries);
+                    let last_msg = conversation::extract_last_user_message(&entries);
+                    let last_act = conversation::extract_last_activity(&entries);
+                    let (branch, mdl, ver) = conversation::extract_metadata(&entries);
+                    let head_entries = conversation::read_jsonl_head(path, 4096);
+                    let summary = conversation::extract_first_user_message(&head_entries);
+
+                    debug!(
+                        "  sid={} tail_entries={} raw_state={} last_activity={:?}",
+                        sid_short, entries.len(), state, last_act
+                    );
+
+                    // If the JSONL was modified very recently but state
+                    // reads as Idle, the assistant likely hasn't written
+                    // its first response yet (e.g. right after a slash
+                    // command).  Upgrade to Processing.
+                    if state == SessionState::Idle {
+                        let mtime_age = path.metadata().ok()
+                            .and_then(|m| m.modified().ok())
+                            .and_then(|t| t.elapsed().ok());
+                        let recent = mtime_age.as_ref().is_some_and(|age| age.as_secs() < 30);
+                        if recent {
+                            debug!(
+                                "  sid={} upgrading Idle→Processing (mtime age={:.1}s)",
+                                sid_short,
+                                mtime_age.unwrap().as_secs_f64()
+                            );
+                            state = SessionState::Processing;
+                        }
                     }
-                    None => {
-                        let state = if alive {
-                            SessionState::Idle
-                        } else {
-                            SessionState::Dead
-                        };
-                        (state, None, None, None, None, None)
-                    }
-                };
+
+                    debug!(
+                        "  sid={} final_state={} model={:?} branch={:?}",
+                        sid_short, state, mdl, branch
+                    );
+
+                    JsonlData { state, last_user_message: last_msg, last_activity: last_act, git_branch: branch, model: mdl, version: ver, summary }
+                }
+                None => {
+                    debug!("  sid={} no jsonl → Idle", sid_short);
+                    JsonlData { state: SessionState::Idle, last_user_message: None, last_activity: None, git_branch: None, model: None, version: None, summary: None }
+                }
+            };
 
             SessionInfo {
                 pid: raw.pid,
@@ -108,13 +471,14 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
                 project_name: project_name(&raw.cwd),
                 cwd: raw.cwd,
                 started_at: raw.started_at,
-                last_activity,
-                state,
-                alive,
-                last_user_message,
-                model,
-                git_branch,
-                version,
+                last_activity: data.last_activity,
+                state: data.state,
+                last_user_message: data.last_user_message,
+                summary: data.summary,
+                model: data.model,
+                git_branch: data.git_branch,
+                version: data.version,
+                jsonl_path,
             }
         })
         .collect();
@@ -123,11 +487,7 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
         a.state
             .sort_key()
             .cmp(&b.state.sort_key())
-            .then_with(|| {
-                let a_time = a.last_activity.unwrap_or(a.started_at);
-                let b_time = b.last_activity.unwrap_or(b.started_at);
-                b_time.cmp(&a_time)
-            })
+            .then_with(|| b.started_at.cmp(&a.started_at))
     });
 
     sessions
@@ -135,7 +495,7 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
 
 pub fn load_detail(session_id: &str, sessions: &[SessionInfo]) -> Option<SessionDetail> {
     let info = sessions.iter().find(|s| s.session_id == session_id)?;
-    let jsonl_path = find_jsonl(&info.cwd, session_id)?;
+    let jsonl_path = info.jsonl_path.as_ref()?;
     let entries = conversation::read_jsonl_tail(&jsonl_path, 65536);
 
     let recent_messages = conversation::extract_messages(&entries, 15);

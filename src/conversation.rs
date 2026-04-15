@@ -1,4 +1,5 @@
 use crate::models::{ConversationMessage, SessionState};
+use log::debug;
 use serde_json::Value;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -44,11 +45,78 @@ pub fn read_jsonl_tail(path: &Path, max_bytes: u64) -> Vec<Value> {
     lines
 }
 
+pub fn read_jsonl_head(path: &Path, max_bytes: u64) -> Vec<Value> {
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+
+    let len = match file.metadata() {
+        Ok(m) => m.len(),
+        Err(_) => return Vec::new(),
+    };
+
+    let read_len = len.min(max_bytes);
+    let mut buf = vec![0u8; read_len as usize];
+    if std::io::Read::read_exact(&mut file, &mut buf).is_err() {
+        return Vec::new();
+    }
+
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines = Vec::new();
+    let line_iter: Vec<&str> = text.lines().collect();
+    let last_idx = if len > max_bytes {
+        // File was truncated — discard last (potentially partial) line
+        line_iter.len().saturating_sub(1)
+    } else {
+        line_iter.len()
+    };
+
+    for line in &line_iter[..last_idx] {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(val) = serde_json::from_str::<Value>(line) {
+            lines.push(val);
+        }
+    }
+
+    lines
+}
+
+/// Check if a content Value (string or array) contains a `<command-name>` tag,
+/// which indicates a local slash command (/clear, /compact, etc.).
+fn content_contains_command_name(content: &Value) -> bool {
+    if let Some(text) = content.as_str() {
+        if text.contains("<command-name>") {
+            return true;
+        }
+    }
+    if let Some(arr) = content.as_array() {
+        for block in arr {
+            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                    if text.contains("<command-name>") {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 fn is_meaningful_entry(entry: &Value) -> bool {
+    // Skip metadata entries (e.g. local-command-caveat after /clear).
+    if entry.get("isMeta").and_then(|v| v.as_bool()) == Some(true) {
+        return false;
+    }
+
     match entry.get("type").and_then(|t| t.as_str()) {
         Some("user") => {
-            // Skip tool_result messages (auto-generated, not real user input)
             if let Some(content) = entry.get("message").and_then(|m| m.get("content")) {
+                // Skip tool_result messages (auto-generated, not real user input)
                 if let Some(arr) = content.as_array() {
                     let only_tool_results = arr.iter().all(|b| {
                         b.get("type").and_then(|t| t.as_str()) == Some("tool_result")
@@ -57,64 +125,156 @@ fn is_meaningful_entry(entry: &Value) -> bool {
                         return false;
                     }
                 }
+                // Skip local slash commands (/clear, /compact, etc.)
+                if content_contains_command_name(content) {
+                    return false;
+                }
             }
             true
         }
-        Some("assistant") | Some("system") => true,
+        Some("assistant") => true,
+        Some("system") => {
+            // Skip local_command entries (/clear, /compact, etc.)
+            let sub = entry.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
+            sub != "local_command"
+        }
         _ => false,
     }
 }
 
-pub fn extract_state(entries: &[Value]) -> SessionState {
-    let last = entries.iter().rev().find(|e| is_meaningful_entry(e));
+/// Tools that block on user interaction (permission prompts, plan mode, etc.).
+/// When the assistant's last action is calling one of these, the session is
+/// waiting for user input, not actively processing.
+const USER_INPUT_TOOLS: &[&str] = &[
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "AskUserQuestion",
+];
 
-    match last {
-        None => SessionState::Idle,
-        Some(entry) => {
-            let msg_type = entry.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            match msg_type {
-                "assistant" => {
-                    let stop_reason = entry
-                        .get("message")
-                        .and_then(|m| m.get("stop_reason"))
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("");
-                    match stop_reason {
-                        "end_turn" => SessionState::WaitingForInput,
-                        "tool_use" => SessionState::ToolExecution,
-                        _ => SessionState::Idle,
-                    }
-                }
-                "user" => SessionState::Processing,
-                "system" => {
-                    let subtype = entry.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
-                    if subtype == "turn_duration" {
+/// Returns true if the assistant message contains a tool_use block for a tool
+/// that requires user interaction.
+fn assistant_awaits_user_input(entry: &Value) -> bool {
+    let content = match entry
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+    content.iter().any(|block| {
+        block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+            && block
+                .get("name")
+                .and_then(|n| n.as_str())
+                .is_some_and(|name| USER_INPUT_TOOLS.contains(&name))
+    })
+}
+
+/// Determine session state from the last meaningful user/assistant entry.
+///   Processing      — last entry indicates the agent is working
+///   WaitingForInput — last entry indicates a completed turn
+///   Idle            — no meaningful entries (fresh session)
+///
+/// System entries (turn_duration, stop_hook_summary, etc.) are metadata that
+/// appear between turns.  They must be skipped for state detection because
+/// during an active tool-use loop a `turn_duration` entry sits between the
+/// assistant's tool_use request and the tool result, causing a false
+/// WaitingForInput while the agent is actually executing a tool.
+pub fn extract_state(entries: &[Value]) -> SessionState {
+    let last = match entries
+        .iter()
+        .rev()
+        .filter(|e| is_meaningful_entry(e))
+        .find(|e| {
+            matches!(
+                e.get("type").and_then(|t| t.as_str()),
+                Some("user") | Some("assistant")
+            )
+        }) {
+        Some(e) => e,
+        None => {
+            debug!("extract_state: no meaningful user/assistant entry → Idle");
+            return SessionState::Idle;
+        }
+    };
+
+    let entry_type = last.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let state = match entry_type {
+        "user" => SessionState::Processing,
+        "assistant" => {
+            let stop = last
+                .get("message")
+                .and_then(|m| m.get("stop_reason"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+            match stop {
+                "end_turn" => SessionState::WaitingForInput,
+                // tool_use means the agent requested a tool call.
+                // Some tools block on user interaction — treat those as
+                // WaitingForInput so the UI shows them correctly.
+                "tool_use" => {
+                    let awaits = assistant_awaits_user_input(last);
+                    debug!(
+                        "extract_state: last=assistant stop=tool_use awaits_input={}",
+                        awaits
+                    );
+                    if awaits {
                         SessionState::WaitingForInput
                     } else {
-                        SessionState::Idle
+                        SessionState::Processing
                     }
                 }
-                _ => SessionState::Idle,
+                _ => {
+                    debug!("extract_state: last=assistant stop_reason={:?} → WaitingForInput", stop);
+                    SessionState::WaitingForInput
+                }
             }
         }
-    }
+        _ => SessionState::WaitingForInput,
+    };
+
+    debug!("extract_state: last_type={} → {}", entry_type, state);
+    state
 }
 
 pub fn extract_last_user_message(entries: &[Value]) -> Option<String> {
     entries
         .iter()
         .rev()
+        .filter(|e| is_meaningful_entry(e))
         .filter(|e| e.get("type").and_then(|t| t.as_str()) == Some("user"))
-        .find_map(|e| {
-            let content = e.get("message")?.get("content")?;
-            if let Some(text) = content.as_str() {
-                if !text.is_empty() {
-                    let truncated = truncate_str(text, 120);
-                    return Some(truncated);
+        .find_map(|e| extract_user_text(e, 120))
+}
+
+pub fn extract_first_user_message(entries: &[Value]) -> Option<String> {
+    entries
+        .iter()
+        .filter(|e| is_meaningful_entry(e))
+        .filter(|e| e.get("type").and_then(|t| t.as_str()) == Some("user"))
+        .find_map(|e| extract_user_text(e, 200))
+}
+
+/// Extract text from a user message entry, handling both string and array content.
+fn extract_user_text(entry: &Value, max_len: usize) -> Option<String> {
+    let content = entry.get("message")?.get("content")?;
+    if let Some(text) = content.as_str() {
+        if !text.is_empty() {
+            return Some(truncate_str(text, max_len));
+        }
+    }
+    if let Some(arr) = content.as_array() {
+        for block in arr {
+            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                    if !text.is_empty() {
+                        return Some(truncate_str(text, max_len));
+                    }
                 }
             }
-            None
-        })
+        }
+    }
+    None
 }
 
 pub fn extract_metadata(entries: &[Value]) -> (Option<String>, Option<String>, Option<String>) {
@@ -154,7 +314,25 @@ pub fn extract_last_activity(entries: &[Value]) -> Option<u64> {
     entries
         .iter()
         .rev()
-        .find_map(|e| e.get("timestamp").and_then(|t| t.as_u64()))
+        .find_map(|e| e.get("timestamp").and_then(parse_timestamp_ms))
+}
+
+/// Parse a JSONL timestamp field to epoch milliseconds.
+/// Handles both integer timestamps and ISO 8601 strings (e.g. "2026-04-15T18:14:30.201Z").
+pub fn parse_timestamp_ms(val: &Value) -> Option<u64> {
+    if let Some(n) = val.as_u64() {
+        return Some(n);
+    }
+    if let Some(s) = val.as_str() {
+        return parse_iso8601_ms(s);
+    }
+    None
+}
+
+fn parse_iso8601_ms(s: &str) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp_millis() as u64)
 }
 
 pub fn extract_messages(entries: &[Value], count: usize) -> Vec<ConversationMessage> {
@@ -321,12 +499,87 @@ fn extract_text_content(entry: &Value) -> String {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_iso8601_with_millis() {
+        let ms = parse_iso8601_ms("2026-04-15T18:14:30.201Z").unwrap();
+        // 2026-04-15T18:14:30.201Z
+        assert_eq!(ms % 1000, 201);
+        assert!(ms > 1_776_000_000_000); // sanity: after 2026
+    }
+
+    #[test]
+    fn parse_iso8601_no_millis() {
+        let ms = parse_iso8601_ms("2026-04-15T18:14:30Z").unwrap();
+        assert_eq!(ms % 1000, 0);
+    }
+
+    #[test]
+    fn parse_timestamp_ms_integer() {
+        let val = serde_json::json!(1776271524302u64);
+        assert_eq!(parse_timestamp_ms(&val), Some(1776271524302));
+    }
+
+    #[test]
+    fn parse_timestamp_ms_string() {
+        let val = serde_json::json!("2026-04-15T18:14:30.201Z");
+        let ms = parse_timestamp_ms(&val).unwrap();
+        assert_eq!(ms % 1000, 201);
+    }
+
+    #[test]
+    fn extract_last_activity_with_iso_timestamps() {
+        let entries = vec![
+            serde_json::json!({"type": "user", "timestamp": "2026-04-15T18:14:00.000Z"}),
+            serde_json::json!({"type": "assistant", "timestamp": "2026-04-15T18:14:30.201Z"}),
+        ];
+        let result = extract_last_activity(&entries);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap() % 1000, 201);
+    }
+}
+
+/// Strip XML-like tags (e.g. `<bash-stdout>`, `<system-reminder>`) that leak
+/// from Claude Code's internal JSONL format.
+fn strip_xml_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '<' {
+            // Consume everything up to and including the closing '>'
+            let mut found_close = false;
+            for inner in chars.by_ref() {
+                if inner == '>' {
+                    found_close = true;
+                    break;
+                }
+            }
+            if !found_close {
+                // Malformed — put the '<' back
+                out.push('<');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn truncate_str(s: &str, max: usize) -> String {
+    let s = strip_xml_tags(s);
     let s = s.trim();
     let first_line = s.lines().next().unwrap_or(s);
     if first_line.len() <= max {
         first_line.to_string()
     } else {
-        format!("{}...", &first_line[..max.min(first_line.len())])
+        // Find a char boundary at or before `max` to avoid splitting multi-byte chars.
+        let mut end = max.min(first_line.len());
+        while end > 0 && !first_line.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &first_line[..end])
     }
 }
