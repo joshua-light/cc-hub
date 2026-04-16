@@ -1,5 +1,5 @@
+use crate::platform::{Platform, ProcessInfo};
 use log::{debug, info, warn};
-use std::fs;
 use std::process::Command;
 
 /// Focus the terminal window that contains the given process.
@@ -9,12 +9,12 @@ use std::process::Command;
 /// Walk the process tree upward from `start`, appending ancestor PIDs.
 pub(crate) fn walk_ancestors(pids: &mut Vec<u32>, start: u32, label: &str) {
     let mut current = start;
-    while let Some(ppid) = parent_pid(current) {
+    while let Some(ppid) = Platform::parent_pid(current) {
         if ppid <= 1 {
             debug!("reached init (ppid={}), stopping {} walk", ppid, label);
             break;
         }
-        let comm = proc_comm(ppid);
+        let comm = Platform::name(ppid);
         debug!("  {} {} -> parent {} ({})", label, current, ppid, comm);
         pids.push(ppid);
         current = ppid;
@@ -60,7 +60,7 @@ fn collect_pid_chain(pid: u32) -> Vec<u32> {
     // session ID, and the session leader's parent is typically the terminal
     // emulator window we want to focus.
     if pids.len() <= 1 {
-        if let Some(sid) = proc_session_id(pid) {
+        if let Some(sid) = Platform::session_id(pid) {
             if sid != pid && sid > 1 {
                 debug!(
                     "pid {} reparented to init, falling back to session leader {}",
@@ -164,36 +164,6 @@ fn try_xdotool(pids: &[u32], action: &str) -> bool {
         }
     }
     false
-}
-
-pub(crate) fn stat_fields(pid: u32) -> Option<Vec<String>> {
-    let stat = fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
-    // /proc/<pid>/stat format: pid (comm) state ppid pgrp session ...
-    // comm can contain parens/spaces, so find last ')' first
-    let after_comm = stat.rfind(')')? + 2;
-    Some(
-        stat[after_comm..]
-            .split_whitespace()
-            .map(String::from)
-            .collect(),
-    )
-}
-
-pub(crate) fn parent_pid(pid: u32) -> Option<u32> {
-    // fields[1] = ppid
-    stat_fields(pid)?.get(1)?.parse().ok()
-}
-
-fn proc_session_id(pid: u32) -> Option<u32> {
-    // fields[3] = session
-    stat_fields(pid)?.get(3)?.parse().ok()
-}
-
-pub(crate) fn proc_comm(pid: u32) -> String {
-    fs::read_to_string(format!("/proc/{}/comm", pid))
-        .unwrap_or_default()
-        .trim()
-        .to_string()
 }
 
 /// Find the Hyprland workspace of the window owning `pid` (or any ancestor).

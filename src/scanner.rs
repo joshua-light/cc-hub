@@ -1,5 +1,6 @@
 use crate::conversation;
 use crate::models::{short_sid, RawSession, SessionDetail, SessionInfo, SessionState};
+use crate::platform::{Platform, ProcessInfo};
 use log::{debug, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -33,7 +34,7 @@ pub fn find_jsonl(cwd: &str, session_id: &str) -> Option<PathBuf> {
 
 /// Check if a process has a real parent (not reparented to init).
 fn has_real_parent(pid: u32) -> bool {
-    crate::focus::parent_pid(pid).is_some_and(|ppid| ppid > 1)
+    Platform::parent_pid(pid).is_some_and(|ppid| ppid > 1)
 }
 
 /// Read /clear events from the tail of ~/.claude/history.jsonl.
@@ -269,13 +270,8 @@ fn is_pid_alive(pid: u32) -> bool {
         debug!("pid {} not alive (kill(0) failed)", pid);
         return false;
     }
-    let comm = crate::focus::proc_comm(pid);
-    if comm.is_empty() {
-        debug!("pid {} alive but /proc/comm unreadable", pid);
-        return false;
-    }
-    if comm != "claude" {
-        debug!("pid {} alive but not claude (comm={})", pid, comm);
+    if !Platform::is_claude(pid) {
+        debug!("pid {} alive but not claude (name={})", pid, Platform::name(pid));
         return false;
     }
     // A claude process reparented to init (ppid=1) is an orphan from a

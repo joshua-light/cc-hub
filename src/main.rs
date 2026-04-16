@@ -4,6 +4,7 @@ mod conversation;
 mod focus;
 mod models;
 mod live_view;
+mod platform;
 mod scanner;
 mod spawn;
 mod ui;
