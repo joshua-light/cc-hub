@@ -1,9 +1,11 @@
+mod acks;
 mod app;
 mod conversation;
 mod focus;
 mod models;
 mod live_view;
 mod scanner;
+mod spawn;
 mod ui;
 
 use app::{App, View};
@@ -44,6 +46,10 @@ fn init_logging() -> PathBuf {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    if std::env::args().any(|a| a == "--no-tui") {
+        return run_no_tui();
+    }
+
     let log_path = init_logging();
 
     terminal::enable_raw_mode()?;
@@ -61,6 +67,23 @@ async fn main() -> io::Result<()> {
     eprintln!("Logs: {}", log_path.display());
 
     result
+}
+
+fn run_no_tui() -> io::Result<()> {
+    let sessions = scanner::scan_sessions();
+    for s in &sessions {
+        let last_msg = s.last_user_message.as_deref().unwrap_or("");
+        println!(
+            "{:>7}:{} [{:<17}] {:<24} {}",
+            s.pid,
+            models::short_sid(&s.session_id),
+            s.state,
+            s.project_name,
+            last_msg
+        );
+    }
+    println!("— {} sessions —", sessions.len());
+    Ok(())
 }
 
 async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
@@ -149,6 +172,21 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                     (View::Grid, KeyCode::Char('f')) => {
                         if let Some(session) = app.selected_session_info() {
                             focus::focus_window(session.pid);
+                        }
+                    }
+                    // Space: ack the selected WaitingForInput session until new activity.
+                    (View::Grid, KeyCode::Char(' ')) => {
+                        app.ack_selected();
+                    }
+                    // 'n' spawns a new ccyo session. Uses the selected session's cwd
+                    // and pid — the pid is used to place the new window on the same
+                    // Hyprland workspace.
+                    (View::Grid, KeyCode::Char('n')) => {
+                        if let Some(sess) = app.selected_session_info().cloned() {
+                            match spawn::spawn_claude_session(&sess.cwd, Some(sess.pid)) {
+                                Ok(msg) => app.set_status(msg),
+                                Err(e) => app.set_status(format!("spawn failed: {}", e)),
+                            }
                         }
                     }
                     // Popup navigation

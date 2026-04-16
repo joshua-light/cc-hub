@@ -7,7 +7,7 @@ use std::process::Command;
 /// Walks up the process tree from `pid` to collect ancestor PIDs,
 /// then tries Hyprland (hyprctl) first, falling back to X11 (xdotool).
 /// Walk the process tree upward from `start`, appending ancestor PIDs.
-fn walk_ancestors(pids: &mut Vec<u32>, start: u32, label: &str) {
+pub(crate) fn walk_ancestors(pids: &mut Vec<u32>, start: u32, label: &str) {
     let mut current = start;
     while let Some(ppid) = parent_pid(current) {
         if ppid <= 1 {
@@ -57,59 +57,54 @@ pub fn focus_window(pid: u32) {
     warn!("no window found for pid {} or any ancestor", pid);
 }
 
-/// Try focusing via Hyprland IPC (hyprctl dispatch focuswindow pid:N).
-fn try_hyprland(pids: &[u32]) -> bool {
-    // Get list of known client PIDs from Hyprland
-    let clients_output = match Command::new("hyprctl").args(["clients", "-j"]).output() {
-        Ok(out) => out,
-        Err(e) => {
-            debug!("hyprctl not available: {}", e);
-            return false;
-        }
-    };
-
-    let clients_json = String::from_utf8_lossy(&clients_output.stdout);
-    debug!("hyprctl clients returned {} bytes", clients_json.len());
-
-    // Parse client PIDs from JSON array
-    let client_pids: Vec<u32> = serde_json::from_str::<Vec<serde_json::Value>>(&clients_json)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|c| c.get("pid")?.as_u64().map(|p| p as u32))
-        .collect();
-
-    debug!("hyprland client pids: {:?}", client_pids);
-
-    // Find the first ancestor PID that matches a Hyprland client
+/// Fetch Hyprland clients and return the first `(pid, client_value)` whose
+/// pid matches one in `pids`. Returns None if hyprctl isn't reachable or no
+/// match exists.
+fn find_hypr_client(pids: &[u32]) -> Option<(u32, serde_json::Value)> {
+    let output = Command::new("hyprctl").args(["clients", "-j"]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let clients: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).ok()?;
     for p in pids {
-        if client_pids.contains(p) {
-            let addr = format!("pid:{}", p);
-            info!("hyprctl: focusing window with pid {}", p);
-            let result = Command::new("hyprctl")
-                .args(["dispatch", "focuswindow", &addr])
-                .output();
-            match result {
-                Ok(out) => {
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    info!(
-                        "  hyprctl dispatch status={}, stdout={:?}, stderr={:?}",
-                        out.status,
-                        stdout.trim(),
-                        stderr.trim()
-                    );
-                    return out.status.success();
-                }
-                Err(e) => {
-                    warn!("  hyprctl dispatch failed: {}", e);
-                    return false;
-                }
+        for client in &clients {
+            let cpid = client.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            if cpid == *p {
+                return Some((cpid, client.clone()));
             }
         }
     }
+    None
+}
 
-    debug!("no ancestor PID matched a hyprland client");
-    false
+/// Try focusing via Hyprland IPC (hyprctl dispatch focuswindow pid:N).
+fn try_hyprland(pids: &[u32]) -> bool {
+    let Some((p, _)) = find_hypr_client(pids) else {
+        debug!("no ancestor PID matched a hyprland client");
+        return false;
+    };
+    let addr = format!("pid:{}", p);
+    info!("hyprctl: focusing window with pid {}", p);
+    match Command::new("hyprctl")
+        .args(["dispatch", "focuswindow", &addr])
+        .output()
+    {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            info!(
+                "  hyprctl dispatch status={}, stdout={:?}, stderr={:?}",
+                out.status,
+                stdout.trim(),
+                stderr.trim()
+            );
+            out.status.success()
+        }
+        Err(e) => {
+            warn!("  hyprctl dispatch failed: {}", e);
+            false
+        }
+    }
 }
 
 /// Try focusing via X11 xdotool (fallback for X11/XWayland).
@@ -185,4 +180,16 @@ pub(crate) fn proc_comm(pid: u32) -> String {
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+/// Find the Hyprland workspace of the window owning `pid` (or any ancestor).
+/// Returns None if hyprctl isn't available or no matching client exists.
+pub fn workspace_for_pid(pid: u32) -> Option<i64> {
+    let mut pids = vec![pid];
+    walk_ancestors(&mut pids, pid, "ws");
+
+    let (cpid, client) = find_hypr_client(&pids)?;
+    let ws = client.get("workspace")?.get("id")?.as_i64()?;
+    debug!("pid {} -> client pid {} on workspace {}", pid, cpid, ws);
+    Some(ws)
 }

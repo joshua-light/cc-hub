@@ -1,5 +1,5 @@
 use crate::conversation;
-use crate::models::{RawSession, SessionDetail, SessionInfo, SessionState};
+use crate::models::{short_sid, RawSession, SessionDetail, SessionInfo, SessionState};
 use log::{debug, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -107,7 +107,7 @@ fn resolve_jsonl_paths(
     for raw in sessions {
         if !clears.contains_key(&raw.session_id) {
             let path = find_jsonl(&raw.cwd, &raw.session_id);
-            let sid_short = &raw.session_id[..8.min(raw.session_id.len())];
+            let sid_short = short_sid(&raw.session_id);
             debug!(
                 "resolve sid={} (not cleared) → {}",
                 sid_short,
@@ -127,7 +127,7 @@ fn resolve_jsonl_paths(
     }
 
     for raw in sessions.iter().filter(|r| clears.contains_key(&r.session_id)) {
-        let sid_short = &raw.session_id[..8.min(raw.session_id.len())];
+        let sid_short = short_sid(&raw.session_id);
         let clear_ts = clears.get(&raw.session_id).copied().unwrap_or(0);
         let path = orphan_index
             .get(&raw.cwd)
@@ -321,7 +321,7 @@ fn read_raw_sessions() -> Vec<RawSession> {
             if let Ok(raw) = serde_json::from_str::<RawSession>(&contents) {
                 debug!(
                     "session file: pid={} sid={} cwd={}",
-                    raw.pid, &raw.session_id[..8.min(raw.session_id.len())], raw.cwd
+                    raw.pid, short_sid(&raw.session_id), raw.cwd
                 );
                 let keep_existing = match by_session_id.get(&raw.session_id) {
                     Some(existing) => {
@@ -342,7 +342,7 @@ fn read_raw_sessions() -> Vec<RawSession> {
                         };
                         debug!(
                             "dedup sid={}: existing pid={} alive={} vs new pid={} alive={} → {}",
-                            &raw.session_id[..8.min(raw.session_id.len())],
+                            short_sid(&raw.session_id),
                             existing.pid, existing_alive,
                             raw.pid, new_alive,
                             if result { "keep existing" } else { "replace" }
@@ -405,7 +405,7 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
     let mut sessions: Vec<SessionInfo> = alive
         .into_iter()
         .map(|raw| {
-            let sid_short = &raw.session_id[..8.min(raw.session_id.len())];
+            let sid_short = short_sid(&raw.session_id);
             let jsonl_path = jsonl_map
                 .get(&raw.session_id)
                 .cloned()
@@ -421,7 +421,11 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
             let data = match &jsonl_path {
                 Some(path) => {
                     let entries = conversation::read_jsonl_tail(path, 65536);
-                    let mut state = conversation::extract_state(&entries);
+                    let mtime_age_secs = path.metadata().ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.elapsed().ok())
+                        .map(|d| d.as_secs());
+                    let mut state = conversation::extract_state(&entries, mtime_age_secs);
                     let last_msg = conversation::extract_last_user_message(&entries);
                     let last_act = conversation::extract_last_activity(&entries);
                     let (branch, mdl, ver) = conversation::extract_metadata(&entries);
@@ -437,19 +441,13 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
                     // reads as Idle, the assistant likely hasn't written
                     // its first response yet (e.g. right after a slash
                     // command).  Upgrade to Processing.
-                    if state == SessionState::Idle {
-                        let mtime_age = path.metadata().ok()
-                            .and_then(|m| m.modified().ok())
-                            .and_then(|t| t.elapsed().ok());
-                        let recent = mtime_age.as_ref().is_some_and(|age| age.as_secs() < 30);
-                        if recent {
-                            debug!(
-                                "  sid={} upgrading Idle→Processing (mtime age={:.1}s)",
-                                sid_short,
-                                mtime_age.unwrap().as_secs_f64()
-                            );
-                            state = SessionState::Processing;
-                        }
+                    if state == SessionState::Idle && mtime_age_secs.is_some_and(|s| s < 30) {
+                        debug!(
+                            "  sid={} upgrading Idle→Processing (mtime age={}s)",
+                            sid_short,
+                            mtime_age_secs.unwrap()
+                        );
+                        state = SessionState::Processing;
                     }
 
                     debug!(

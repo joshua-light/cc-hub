@@ -1,5 +1,5 @@
-use crate::app::{App, View};
-use crate::models::{SessionDetail, SessionInfo, SessionState};
+use crate::app::{App, View, STATUS_MSG_TTL};
+use crate::models::{short_sid, SessionDetail, SessionInfo, SessionState};
 use chrono::{Local, TimeZone};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -236,7 +236,7 @@ fn render_card(frame: &mut Frame, area: Rect, session: &SessionInfo, selected: b
             Style::default().fg(Color::Cyan),
         ),
         Span::styled(
-            format!("  {}:{}", session.pid, &session.session_id[..8.min(session.session_id.len())]),
+            format!("  {}:{}", session.pid, short_sid(&session.session_id)),
             Style::default().fg(Color::Rgb(50, 50, 60)),
         ),
     ]));
@@ -800,25 +800,38 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         format!("{}s ago", elapsed)
     };
 
-    let keybinds = match app.view {
-        View::Grid => "h/j/k/l:nav  enter:attach  i:info  f:focus  q:quit",
-        View::Popup => "j/k:scroll  esc:close  q:close",
-        View::LiveTail => "j/k:scroll  G:bottom  esc:close",
-    };
+    let fresh_status = app
+        .status_msg
+        .as_ref()
+        .filter(|(_, ts)| ts.elapsed() < STATUS_MSG_TTL)
+        .map(|(msg, _)| msg.as_str());
 
-    let status = Line::from(vec![
-        Span::styled(
+    let mut spans: Vec<Span> = Vec::new();
+
+    if let Some(msg) = fresh_status {
+        spans.push(Span::styled(
+            format!(" {} ", msg),
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        let keybinds = match app.view {
+            View::Grid => "h/j/k/l:nav  enter:attach  n:new  i:info  f:focus  q:quit",
+            View::Popup => "j/k:scroll  esc:close  q:close",
+            View::LiveTail => "j/k:scroll  G:bottom  esc:close",
+        };
+        spans.push(Span::styled(
             format!(" {} ", keybinds),
             Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(
-            format!("refreshed {} ", refresh_text),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]);
+        ));
+    }
+
+    spans.push(Span::styled(
+        format!("refreshed {} ", refresh_text),
+        Style::default().fg(Color::DarkGray),
+    ));
 
     frame.render_widget(
-        Paragraph::new(status).style(Style::default().bg(Color::Rgb(30, 30, 30))),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(30, 30, 30))),
         area,
     );
 }

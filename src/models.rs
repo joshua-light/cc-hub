@@ -2,6 +2,10 @@ use serde::Deserialize;
 use std::fmt;
 use std::path::PathBuf;
 
+pub fn short_sid(sid: &str) -> &str {
+    &sid[..8.min(sid.len())]
+}
+
 #[derive(Deserialize)]
 pub struct RawSession {
     pub pid: u32,
@@ -25,9 +29,9 @@ pub enum SessionState {
 impl SessionState {
     pub fn sort_key(&self) -> u8 {
         match self {
-            SessionState::Processing => 0,
-            SessionState::WaitingForInput => 1,
-            SessionState::Idle => 2,
+            SessionState::WaitingForInput => 0,
+            SessionState::Idle => 1,
+            SessionState::Processing => 2,
         }
     }
 }

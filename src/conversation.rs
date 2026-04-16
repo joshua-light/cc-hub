@@ -1,6 +1,7 @@
 use crate::models::{ConversationMessage, SessionState};
 use log::debug;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
@@ -171,6 +172,77 @@ fn assistant_awaits_user_input(entry: &Value) -> bool {
     })
 }
 
+/// Returns true if there's a dangling assistant `tool_use` (no matching
+/// `tool_result`) AND a `last-prompt` entry appears after it — the signature
+/// of an interrupted turn where the user typed a new message. A dangling
+/// `tool_use` alone can just mean the tool is still running, so we require
+/// the `last-prompt` marker to disambiguate.
+fn interrupted_tool_use(entries: &[Value]) -> bool {
+    let mut unresolved: Vec<(usize, &str)> = Vec::new();
+    let mut results: HashSet<&str> = HashSet::new();
+    let mut last_prompt_idx: Option<usize> = None;
+
+    for (i, entry) in entries.iter().enumerate() {
+        let t = entry.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if t == "last-prompt" {
+            last_prompt_idx = Some(i);
+            continue;
+        }
+        let arr = match entry
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        {
+            Some(a) => a,
+            None => continue,
+        };
+        for block in arr {
+            let bt = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            if t == "assistant" && bt == "tool_use" {
+                if let Some(id) = block.get("id").and_then(|v| v.as_str()) {
+                    unresolved.push((i, id));
+                }
+            } else if t == "user" && bt == "tool_result" {
+                if let Some(id) = block.get("tool_use_id").and_then(|v| v.as_str()) {
+                    results.insert(id);
+                }
+            }
+        }
+    }
+
+    let Some(lp_idx) = last_prompt_idx else {
+        return false;
+    };
+    unresolved
+        .iter()
+        .any(|(idx, id)| *idx < lp_idx && !results.contains(id))
+}
+
+/// Returns true if the last non-metadata entry is a user `tool_result`
+/// (meaning the agent's tool just finished and the next assistant response
+/// hasn't been written yet).
+fn last_entry_is_tool_result(entries: &[Value]) -> bool {
+    for entry in entries.iter().rev() {
+        match entry.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+            "assistant" => return false,
+            "user" => {
+                return entry
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array())
+                    .is_some_and(|arr| {
+                        !arr.is_empty()
+                            && arr.iter().all(|b| {
+                                b.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+                            })
+                    });
+            }
+            _ => continue,
+        }
+    }
+    false
+}
+
 /// Determine session state from the last meaningful user/assistant entry.
 ///   Processing      — last entry indicates the agent is working
 ///   WaitingForInput — last entry indicates a completed turn
@@ -181,7 +253,30 @@ fn assistant_awaits_user_input(entry: &Value) -> bool {
 /// during an active tool-use loop a `turn_duration` entry sits between the
 /// assistant's tool_use request and the tool result, causing a false
 /// WaitingForInput while the agent is actually executing a tool.
-pub fn extract_state(entries: &[Value]) -> SessionState {
+pub fn extract_state(entries: &[Value], mtime_age_secs: Option<u64>) -> SessionState {
+    // 1. Interrupted turn: dangling tool_use + trailing `last-prompt` marker
+    //    indicates the user hit Esc mid-tool and typed a new message — the
+    //    session is waiting for them to submit it.
+    if interrupted_tool_use(entries) {
+        debug!("extract_state: interrupted tool_use (last-prompt follows) → WaitingForInput");
+        return SessionState::WaitingForInput;
+    }
+
+    // 2. Trailing tool_result with stale mtime → agent finished a tool but
+    //    hasn't written its next response. If the file's been idle for more
+    //    than the threshold, it's almost certainly blocked on the next tool's
+    //    permission prompt (not yet serialized to JSONL).
+    const STALE_TOOL_RESULT_SECS: u64 = 30;
+    if last_entry_is_tool_result(entries)
+        && mtime_age_secs.is_some_and(|age| age >= STALE_TOOL_RESULT_SECS)
+    {
+        debug!(
+            "extract_state: stale tool_result (mtime age {:?}s) → WaitingForInput",
+            mtime_age_secs
+        );
+        return SessionState::WaitingForInput;
+    }
+
     let last = match entries
         .iter()
         .rev()
