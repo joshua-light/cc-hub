@@ -918,6 +918,11 @@ pub fn extract_token_totals(entries: &[Value]) -> (u64, u64) {
     (total_input, total_output)
 }
 
+pub(crate) const NO_CONTENT: &str = "(no content)";
+pub(crate) const NO_TEXT_CONTENT: &str = "(no text content)";
+pub(crate) const TOOL_MARKER_PREFIX: &str = "[tool: ";
+pub(crate) const THINKING_MARKER: &str = "[thinking...]";
+
 fn extract_text_content(entry: &Value) -> String {
     let msg_type = entry
         .get("type")
@@ -949,7 +954,7 @@ fn extract_text_content(entry: &Value) -> String {
                     return "(complex content)".to_string();
                 }
             }
-            "(no content)".to_string()
+            NO_CONTENT.to_string()
         }
         "assistant" => {
             if let Some(content) = entry.get("message").and_then(|m| m.get("content")) {
@@ -963,20 +968,16 @@ fn extract_text_content(entry: &Value) -> String {
                                 }
                             }
                             Some("tool_use") => {
-                                let name = block
-                                    .get("name")
-                                    .and_then(|n| n.as_str())
-                                    .unwrap_or("?");
-                                parts.push(format!("[tool: {}]", name));
+                                parts.push(format!("{}{}]", TOOL_MARKER_PREFIX, tool_display(block)));
                             }
                             Some("thinking") => {
-                                parts.push("[thinking...]".to_string());
+                                parts.push(THINKING_MARKER.to_string());
                             }
                             _ => {}
                         }
                     }
                     if parts.is_empty() {
-                        return "(no text content)".to_string();
+                        return NO_TEXT_CONTENT.to_string();
                     }
                     return parts.join(" ");
                 }
@@ -984,7 +985,7 @@ fn extract_text_content(entry: &Value) -> String {
                     return truncate_str(text, 200);
                 }
             }
-            "(no content)".to_string()
+            NO_CONTENT.to_string()
         }
         "system" => {
             let subtype = entry
@@ -1123,6 +1124,64 @@ fn strip_xml_tags(s: &str) -> String {
         }
     }
     out
+}
+
+fn tool_display(block: &serde_json::Value) -> String {
+    let name = block
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("?");
+    let Some(raw) = block.get("input").and_then(|i| tool_brief_arg(name, i)) else {
+        return name.to_string();
+    };
+    // `]` would terminate the surrounding `[tool: ...]` marker; whitespace
+    // collapses to single spaces so the display fits on one line.
+    let cleaned = raw.replace(']', ")");
+    let brief: String = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut end = brief.len().min(60);
+    while end > 0 && !brief.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end == 0 {
+        name.to_string()
+    } else if end < brief.len() {
+        format!("{}({}…)", name, &brief[..end])
+    } else {
+        format!("{}({})", name, brief)
+    }
+}
+
+fn tool_brief_arg(name: &str, input: &serde_json::Value) -> Option<String> {
+    let s = |key: &str| {
+        input
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string())
+    };
+    match name {
+        "Bash" => s("command"),
+        "Read" | "Edit" | "Write" | "NotebookEdit" | "MultiEdit" => s("file_path"),
+        "Glob" => s("pattern"),
+        "Grep" => {
+            let pat = s("pattern")?;
+            match s("glob") {
+                Some(g) if !g.is_empty() => Some(format!("{} in {}", pat, g)),
+                _ => Some(pat),
+            }
+        }
+        "WebFetch" => s("url"),
+        "WebSearch" => s("query"),
+        "Task" | "Agent" => s("description").or_else(|| s("subagent_type")),
+        "TodoWrite" | "TaskCreate" | "TaskUpdate" => {
+            s("title").or_else(|| s("description"))
+        }
+        _ => {
+            // Generic fallback: first string-valued field in the input object.
+            input
+                .as_object()
+                .and_then(|obj| obj.values().find_map(|v| v.as_str().map(String::from)))
+        }
+    }
 }
 
 fn truncate_str(s: &str, max: usize) -> String {

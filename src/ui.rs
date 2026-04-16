@@ -707,44 +707,47 @@ fn render_live_tail(frame: &mut Frame, area: Rect, app: &mut App) {
         None => return,
     };
 
-    let title = if lv.auto_scroll {
-        " Live Tail (streaming) "
+    let (title, status_color) = if lv.auto_scroll {
+        (" Live Tail · streaming ", Color::Green)
     } else {
-        " Live Tail (paused) "
+        (" Live Tail · paused ", Color::Yellow)
     };
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Rgb(80, 120, 150)))
         .title(Span::styled(
             title,
             Style::default()
-                .fg(Color::Cyan)
+                .fg(status_color)
                 .add_modifier(Modifier::BOLD),
         ));
 
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 
-    if inner.height == 0 || inner.width == 0 {
+    if inner.height < 3 || inner.width < 2 {
         return;
     }
 
-    // Build message lines
+    let content_area = Rect::new(
+        inner.x + 1,
+        inner.y + 1,
+        inner.width.saturating_sub(1),
+        inner.height.saturating_sub(2),
+    );
+
     let lines = build_live_tail_content(&lv.messages);
     let total_lines = lines.len() as u16;
 
-    // Store total for scroll calculations
     lv.total_content_lines = total_lines;
 
-    // Auto-scroll: set scroll so the bottom of content is visible
-    if lv.auto_scroll && total_lines > inner.height {
-        lv.scroll = total_lines.saturating_sub(inner.height);
+    if lv.auto_scroll && total_lines > content_area.height {
+        lv.scroll = total_lines.saturating_sub(content_area.height);
     }
 
-    // Clamp scroll
-    let max_scroll = total_lines.saturating_sub(inner.height);
+    let max_scroll = total_lines.saturating_sub(content_area.height);
     if lv.scroll > max_scroll {
         lv.scroll = max_scroll;
     }
@@ -752,9 +755,20 @@ fn render_live_tail(frame: &mut Frame, area: Rect, app: &mut App) {
     let content = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .scroll((lv.scroll, 0));
-    frame.render_widget(content, inner);
+    frame.render_widget(content, content_area);
 
-    // Scroll indicator on bottom border
+    let bottom_y = popup_area.y + popup_area.height - 1;
+
+    let hint_text = " ↑/↓ scroll · G bottom · esc close ";
+    let hint_width = (hint_text.chars().count() as u16).min(inner.width);
+    let hint = Paragraph::new(Line::from(Span::styled(
+        hint_text,
+        Style::default().fg(Color::Rgb(110, 110, 130)),
+    )));
+    let hint_area = Rect::new(inner.x, bottom_y, hint_width, 1);
+    frame.render_widget(hint, hint_area);
+
+    // Scroll indicator on the right of the bottom border
     let scroll_info = format!(
         " {}/{} ",
         (lv.scroll as usize).min(total_lines.saturating_sub(1) as usize) + 1,
@@ -762,16 +776,11 @@ fn render_live_tail(frame: &mut Frame, area: Rect, app: &mut App) {
     );
     let indicator = Paragraph::new(Line::from(Span::styled(
         scroll_info,
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(Color::Rgb(110, 110, 130)),
     )))
     .alignment(ratatui::layout::Alignment::Right);
 
-    let indicator_area = Rect::new(
-        inner.x,
-        popup_area.y + popup_area.height - 1,
-        inner.width,
-        1,
-    );
+    let indicator_area = Rect::new(inner.x, bottom_y, inner.width, 1);
     frame.render_widget(indicator, indicator_area);
 }
 
@@ -780,181 +789,198 @@ fn build_live_tail_content(messages: &[crate::models::ConversationMessage]) -> V
 
     if messages.is_empty() {
         lines.push(Line::from(Span::styled(
-            "Waiting for messages...",
+            "Waiting for messages…",
             Style::default().fg(Color::DarkGray),
         )));
         return lines;
     }
 
-    let mut i = 0;
-    while i < messages.len() {
-        let msg = &messages[i];
-
-        // Skip system messages (turn_duration, stop_hook_summary, etc.)
-        if msg.role == "system" {
-            i += 1;
-            continue;
-        }
-
-        // User message — render normally
-        if msg.role == "user" {
-            render_live_msg(&mut lines, msg, Color::Yellow, "user");
-            i += 1;
-            continue;
-        }
-
-        // Assistant message — check if it's a tool-use turn to collapse
-        if msg.role == "assistant" && msg.stop_reason.as_deref() == Some("tool_use") {
-            // Collect consecutive tool-use assistant messages into one block
-            let mut tools: Vec<String> = Vec::new();
-            let mut text_parts: Vec<String> = Vec::new();
-            let mut total_out: u64 = 0;
-            let first_time = msg.timestamp;
-
-            while i < messages.len()
-                && messages[i].role == "assistant"
-                && messages[i].stop_reason.as_deref() == Some("tool_use")
-            {
-                collect_tools_and_text(&messages[i].content_preview, &mut tools, &mut text_parts);
-                total_out += messages[i].output_tokens.unwrap_or(0);
-                i += 1;
-            }
-
-            // Render collapsed tool block
-            let time_str = format_time(first_time);
-            let tool_list = if tools.is_empty() {
-                "tools".to_string()
-            } else {
-                tools.join(", ")
-            };
-
-            lines.push(Line::from(vec![
-                Span::styled(
-                    "[tools] ",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(time_str, Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("  {}", tool_list),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::styled(
-                    format!("  {}out", format_tokens(total_out)),
-                    Style::default().fg(Color::Rgb(60, 60, 60)),
-                ),
-            ]));
-
-            // Show any text the assistant said during tool use
-            for text in &text_parts {
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(
-                        text.clone(),
-                        Style::default().fg(Color::Rgb(180, 180, 190)),
-                    ),
-                ]));
-            }
-
+    let separate = |lines: &mut Vec<Line<'static>>| {
+        if !lines.is_empty() {
             lines.push(Line::raw(""));
+        }
+    };
+
+    for msg in messages {
+        if msg.role == "system" {
             continue;
         }
 
-        // Assistant end_turn — this is the real response text
+        if msg.role == "user" {
+            let content = msg.content_preview.trim();
+            if is_placeholder_preview(content) {
+                continue;
+            }
+            separate(&mut lines);
+            render_prompt_block(&mut lines, content);
+            continue;
+        }
+
         if msg.role == "assistant" {
-            render_live_msg(&mut lines, msg, Color::Green, "asst");
-            i += 1;
-            continue;
+            for part in parse_preview(&msg.content_preview) {
+                separate(&mut lines);
+                match part {
+                    PreviewPart::Thinking => render_thinking(&mut lines),
+                    PreviewPart::Tool(name) => render_tool_bullet(&mut lines, &name),
+                    PreviewPart::Text(text) => render_asst_bullet(&mut lines, &text),
+                }
+            }
         }
-
-        i += 1;
     }
 
     lines
 }
 
-/// Render a single message (user or assistant end_turn).
-fn render_live_msg(
-    lines: &mut Vec<Line<'static>>,
-    msg: &crate::models::ConversationMessage,
-    color: Color,
-    label: &str,
-) {
-    let time_str = format_time(msg.timestamp);
-
-    let mut header = vec![
-        Span::styled(
-            format!("[{}] ", label),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(time_str, Style::default().fg(Color::DarkGray)),
-    ];
-
-    if let Some(model) = &msg.model {
-        header.push(Span::styled(
-            format!("  {}", short_model(model)),
-            Style::default().fg(Color::Rgb(80, 80, 80)),
-        ));
-    }
-
-    if let (Some(inp), Some(out)) = (msg.input_tokens, msg.output_tokens) {
-        header.push(Span::styled(
-            format!("  {}in/{}out", format_tokens(inp), format_tokens(out)),
-            Style::default().fg(Color::Rgb(60, 60, 60)),
-        ));
-    }
-
-    lines.push(Line::from(header));
-
-    // Show content, skip if it's just tool references
-    let content = &msg.content_preview;
-    if !content.is_empty() && content != "(no content)" && content != "(no text content)" {
-        for content_line in content.lines() {
-            let trimmed = content_line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(
-                    trimmed.to_string(),
-                    Style::default().fg(Color::Rgb(200, 200, 210)),
-                ),
-            ]));
-        }
-    }
-
-    lines.push(Line::raw(""));
+fn is_placeholder_preview(s: &str) -> bool {
+    s.is_empty()
+        || s == crate::conversation::NO_CONTENT
+        || s == crate::conversation::NO_TEXT_CONTENT
 }
 
-/// Extract tool names and text snippets from a content_preview string.
-fn collect_tools_and_text(preview: &str, tools: &mut Vec<String>, texts: &mut Vec<String>) {
-    for part in preview.split("[tool: ") {
-        if tools.is_empty() && !part.contains(']') {
-            // Text before first tool reference
-            let trimmed = part.trim();
-            if !trimmed.is_empty()
-                && trimmed != "(no text content)"
-                && trimmed != "(no content)"
-                && trimmed != "[thinking...]"
-            {
-                texts.push(trimmed.to_string());
+#[derive(Debug, Clone)]
+enum PreviewPart {
+    Thinking,
+    Tool(String),
+    Text(String),
+}
+
+/// Tokenize a preview back into the parts that produced it. The marker
+/// format is defined by `extract_text_content` in conversation.rs — keep
+/// the two in sync via the shared marker constants.
+fn parse_preview(preview: &str) -> Vec<PreviewPart> {
+    use crate::conversation::{THINKING_MARKER, TOOL_MARKER_PREFIX};
+
+    let mut out = Vec::new();
+    if is_placeholder_preview(preview) {
+        return out;
+    }
+    let mut rest = preview;
+    loop {
+        let t_idx = rest.find(THINKING_MARKER);
+        let u_idx = rest.find(TOOL_MARKER_PREFIX);
+        let next = match (t_idx, u_idx) {
+            (None, None) => None,
+            (Some(a), None) => Some((a, true)),
+            (None, Some(b)) => Some((b, false)),
+            (Some(a), Some(b)) => Some(if a < b { (a, true) } else { (b, false) }),
+        };
+        let Some((idx, is_thinking)) = next else {
+            let trimmed = rest.trim();
+            if !trimmed.is_empty() {
+                out.push(PreviewPart::Text(trimmed.to_string()));
             }
-        } else if let Some(end) = part.find(']') {
-            let name = &part[..end];
-            if !tools.contains(&name.to_string()) {
-                tools.push(name.to_string());
-            }
-            // Text after the tool reference
-            let after = part[end + 1..].trim();
-            if !after.is_empty()
-                && after != "(no text content)"
-                && after != "(no content)"
-            {
-                texts.push(after.to_string());
-            }
+            return out;
+        };
+
+        let before = rest[..idx].trim();
+        if !is_placeholder_preview(before) && !before.is_empty() {
+            out.push(PreviewPart::Text(before.to_string()));
         }
+
+        if is_thinking {
+            out.push(PreviewPart::Thinking);
+            rest = &rest[idx + THINKING_MARKER.len()..];
+        } else {
+            let after = &rest[idx + TOOL_MARKER_PREFIX.len()..];
+            let Some(end) = after.find(']') else {
+                return out;
+            };
+            let name = after[..end].trim();
+            if !name.is_empty() {
+                out.push(PreviewPart::Tool(name.to_string()));
+            }
+            rest = &after[end + 1..];
+        }
+    }
+}
+
+fn render_prompt_block(lines: &mut Vec<Line<'static>>, body: &str) {
+    push_bullet_block(
+        lines,
+        Span::styled(
+            "> ",
+            Style::default()
+                .fg(Color::Rgb(230, 230, 240))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Color::Rgb(230, 230, 240),
+        body,
+    );
+}
+
+fn render_asst_bullet(lines: &mut Vec<Line<'static>>, body: &str) {
+    push_bullet_block(
+        lines,
+        Span::styled("● ", Style::default().fg(Color::Green)),
+        Color::Rgb(220, 220, 230),
+        body,
+    );
+}
+
+fn render_tool_bullet(lines: &mut Vec<Line<'static>>, display: &str) {
+    let mut spans = vec![Span::styled(
+        "● ",
+        Style::default().fg(Color::Rgb(140, 180, 210)),
+    )];
+    match display.find('(') {
+        Some(paren) => {
+            let (name, rest) = display.split_at(paren);
+            spans.push(Span::styled(
+                name.to_string(),
+                Style::default()
+                    .fg(Color::Rgb(200, 215, 230))
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                rest.to_string(),
+                Style::default().fg(Color::Rgb(130, 150, 170)),
+            ));
+        }
+        None => {
+            spans.push(Span::styled(
+                display.to_string(),
+                Style::default()
+                    .fg(Color::Rgb(200, 215, 230))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+    lines.push(Line::from(spans));
+}
+
+fn render_thinking(lines: &mut Vec<Line<'static>>) {
+    lines.push(Line::from(vec![
+        Span::styled("✻ ", Style::default().fg(Color::Rgb(190, 150, 210))),
+        Span::styled(
+            "thinking…",
+            Style::default()
+                .fg(Color::Rgb(160, 140, 180))
+                .add_modifier(Modifier::ITALIC),
+        ),
+    ]));
+}
+
+// Continuation lines indent two spaces so body text lines up under the prefix.
+fn push_bullet_block(
+    lines: &mut Vec<Line<'static>>,
+    prefix: Span<'static>,
+    body_color: Color,
+    body: &str,
+) {
+    let mut prefix = Some(prefix);
+    for body_line in body.lines() {
+        let trimmed = body_line.trim_end();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let prefix_span = prefix.take().unwrap_or_else(|| Span::raw("  "));
+        lines.push(Line::from(vec![
+            prefix_span,
+            Span::styled(trimmed.to_string(), Style::default().fg(body_color)),
+        ]));
+    }
+    if let Some(p) = prefix {
+        lines.push(Line::from(p));
     }
 }
 
