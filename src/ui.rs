@@ -1,7 +1,9 @@
 use crate::app::{App, View, STATUS_MSG_TTL};
+use crate::conversation::{StateExplanation, Verdict};
 use crate::models::{short_sid, SessionDetail, SessionInfo, SessionState};
-use chrono::{Local, TimeZone};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use crate::usage::UsageInfo;
+use chrono::{DateTime, Local, TimeZone};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
@@ -23,27 +25,79 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Min(0),
             Constraint::Length(1),
         ])
         .split(frame.area());
 
     render_title_bar(frame, chunks[0], app);
-    render_grid(frame, chunks[1], app);
-    render_status_bar(frame, chunks[2], app);
+    render_grid(frame, chunks[2], app);
+    render_status_bar(frame, chunks[3], app);
 
     match app.view {
         View::Popup => render_popup(frame, frame.area(), app),
         View::LiveTail => render_live_tail(frame, frame.area(), app),
+        View::ConfirmClose => render_confirm_close(frame, frame.area(), app),
+        View::StateDebug => render_state_debug(frame, frame.area(), app),
         View::Grid => {}
     }
+}
+
+fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(pending) = &app.pending_close else {
+        return;
+    };
+
+    let w = 64.min(area.width);
+    let h = 7.min(area.height);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let popup = Rect::new(x, y, w, h);
+
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::Red))
+        .title(Span::styled(
+            " Close terminal? ",
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let lines = vec![
+        Line::raw(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                pending.display.clone(),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::raw(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("[y]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(" close   ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[n/esc]", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_title_bar(frame: &mut Frame, area: Rect, app: &App) {
     let total = app.session_count();
     let attention = app.attention_count();
 
-    let mut spans = vec![
+    let mut left_spans = vec![
         Span::styled(
             " 󱃾 cc-hub ",
             Style::default()
@@ -57,7 +111,7 @@ fn render_title_bar(frame: &mut Frame, area: Rect, app: &App) {
     ];
 
     if attention > 0 {
-        spans.push(Span::styled(
+        left_spans.push(Span::styled(
             format!("  󰂞 {} need attention", attention),
             Style::default()
                 .fg(Color::Yellow)
@@ -65,11 +119,97 @@ fn render_title_bar(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
 
+    let bg = Style::default().bg(Color::Rgb(30, 30, 40)).fg(Color::White);
+    let left_line = Line::from(left_spans);
+    let right_line = app.usage_line.clone();
+    let right_w = right_line.width() as u16;
+    let left_w = left_line.width() as u16;
+
+    // If usage would overflow, fall back to just the left line.
+    if right_w == 0 || left_w + right_w > area.width {
+        frame.render_widget(Paragraph::new(left_line).style(bg), area);
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(right_w)])
+        .split(area);
+
+    frame.render_widget(Paragraph::new(left_line).style(bg), chunks[0]);
     frame.render_widget(
-        Paragraph::new(Line::from(spans))
-            .style(Style::default().bg(Color::Rgb(30, 30, 40)).fg(Color::White)),
-        area,
+        Paragraph::new(right_line)
+            .style(bg)
+            .alignment(Alignment::Right),
+        chunks[1],
     );
+}
+
+pub fn build_usage_line(u: &UsageInfo) -> Line<'static> {
+    let mut spans: Vec<Span> = Vec::new();
+    let label_style = Style::default().fg(Color::DarkGray);
+    let reset_style = Style::default().fg(Color::Rgb(90, 90, 100));
+    let sep_style = Style::default().fg(Color::Rgb(60, 60, 70));
+    let pct_style = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+
+    spans.push(Span::styled(" 5h", label_style));
+    if let Some(fmt) = u
+        .five_hour_resets_at
+        .as_deref()
+        .and_then(|s| format_reset(s, "%-l%p"))
+    {
+        spans.push(Span::styled(format!(" {}", fmt), reset_style));
+    }
+    spans.push(Span::raw(" "));
+    append_bar(&mut spans, u.five_hour_pct, 10);
+    spans.push(Span::styled(format!(" {}%", u.five_hour_pct), pct_style));
+
+    spans.push(Span::styled(" │ ", sep_style));
+
+    spans.push(Span::styled("wk", label_style));
+    if let Some(fmt) = u
+        .seven_day_resets_at
+        .as_deref()
+        .and_then(|s| format_reset(s, "%a %-l%p"))
+    {
+        spans.push(Span::styled(format!(" {}", fmt), reset_style));
+    }
+    spans.push(Span::raw(" "));
+    append_bar(&mut spans, u.seven_day_pct, 10);
+    spans.push(Span::styled(format!(" {}% ", u.seven_day_pct), pct_style));
+
+    Line::from(spans)
+}
+
+fn append_bar(spans: &mut Vec<Span<'static>>, pct: u8, width: u16) {
+    let pct = pct.min(100);
+    let mut filled = (pct as u16 * width) / 100;
+    if pct > 0 && filled == 0 {
+        filled = 1;
+    }
+    let empty = width - filled;
+    let color = bar_color(pct);
+    let filled_s: String = "━".repeat(filled as usize);
+    let empty_s: String = "╌".repeat(empty as usize);
+    spans.push(Span::styled(filled_s, Style::default().fg(color)));
+    spans.push(Span::styled(empty_s, Style::default().fg(color)));
+}
+
+fn bar_color(pct: u8) -> Color {
+    if pct > 80 {
+        Color::Red
+    } else if pct >= 50 {
+        Color::Yellow
+    } else {
+        Color::Green
+    }
+}
+
+fn format_reset(iso: &str, fmt: &str) -> Option<String> {
+    let dt = DateTime::parse_from_rfc3339(iso).ok()?;
+    Some(dt.with_timezone(&Local).format(fmt).to_string().to_lowercase())
 }
 
 const GROUP_HEADER_HEIGHT: u16 = 1;
@@ -393,6 +533,168 @@ fn render_popup(frame: &mut Frame, area: Rect, app: &App) {
         .scroll((app.popup_scroll, 0));
 
     frame.render_widget(content, inner);
+}
+
+fn render_state_debug(frame: &mut Frame, area: Rect, app: &App) {
+    let popup_area = centered_rect(area, 0.9);
+    frame.render_widget(Clear, popup_area);
+
+    let Some((info, exp)) = app.state_debug.as_ref() else {
+        frame.render_widget(popup_block(" Why this state? — loading… "), popup_area);
+        return;
+    };
+
+    let title = format!(
+        " Why is {} (PID {}) in state \"{}\"? ",
+        info.project_name, info.pid, exp.final_state
+    );
+    let block = popup_block(Span::styled(
+        title,
+        Style::default()
+            .fg(state_color(&exp.final_state))
+            .add_modifier(Modifier::BOLD),
+    ));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let total_lines = app.state_debug_lines.len() as u16;
+
+    let scroll_info = format!(
+        " {}/{} ",
+        (app.state_debug_scroll as usize).min(total_lines.saturating_sub(1) as usize) + 1,
+        total_lines
+    );
+    let indicator_area = Rect::new(
+        inner.x,
+        popup_area.y + popup_area.height - 1,
+        inner.width,
+        1,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            scroll_info,
+            Style::default().fg(Color::DarkGray),
+        )))
+        .alignment(Alignment::Right),
+        indicator_area,
+    );
+
+    let content = Paragraph::new(app.state_debug_lines.clone())
+        .wrap(Wrap { trim: false })
+        .scroll((app.state_debug_scroll, 0));
+    frame.render_widget(content, inner);
+}
+
+pub fn build_state_debug_content(
+    info: &SessionInfo,
+    exp: &StateExplanation,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    let final_color = state_color(&exp.final_state);
+
+    lines.push(Line::from(vec![
+        Span::styled("Final state: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{}", exp.final_state),
+            Style::default().fg(final_color).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    let path_str = info
+        .jsonl_path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "(no jsonl)".to_string());
+    lines.push(Line::from(vec![
+        Span::styled("JSONL:       ", Style::default().fg(Color::DarkGray)),
+        Span::styled(path_str, Style::default().fg(Color::White)),
+    ]));
+
+    lines.push(Line::from(vec![
+        Span::styled("Tail size:   ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{} entries (last 64 KiB)", exp.entry_count),
+            Style::default().fg(Color::White),
+        ),
+    ]));
+
+    lines.push(Line::from(vec![
+        Span::styled("mtime age:   ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            exp.mtime_age_secs
+                .map_or("unknown".to_string(), |s| format!("{}s", s)),
+            Style::default().fg(Color::White),
+        ),
+    ]));
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "─── decision tree ───",
+        Style::default().fg(Color::Rgb(80, 80, 90)),
+    )));
+    lines.push(Line::raw(""));
+
+    for step in &exp.steps {
+        let (tag, tag_color) = match &step.verdict {
+            Verdict::Decided(s) => (format!("DECIDE → {}", s), state_color(s)),
+            Verdict::Passed => ("PASS".to_string(), Color::Green),
+            Verdict::Skipped => ("SKIP".to_string(), Color::Rgb(90, 90, 100)),
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("[{}] ", tag),
+                Style::default().fg(tag_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                step.name.to_string(),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        for d in &step.details {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(d.clone(), Style::default().fg(Color::Rgb(190, 190, 200))),
+            ]));
+        }
+        lines.push(Line::raw(""));
+    }
+
+    lines.push(Line::from(Span::styled(
+        "─── tail entries (most recent last) ───",
+        Style::default().fg(Color::Rgb(80, 80, 90)),
+    )));
+    lines.push(Line::raw(""));
+
+    for e in &exp.tail {
+        let blocks = if e.blocks.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", e.blocks.join(", "))
+        };
+        let stop = e
+            .stop_reason
+            .as_ref()
+            .map(|s| format!(" stop={}", s))
+            .unwrap_or_default();
+        let ts = e.timestamp.as_deref().unwrap_or("        ");
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {:>3}  ", e.idx),
+                Style::default().fg(Color::Rgb(80, 80, 90)),
+            ),
+            Span::styled(
+                format!("{}  ", ts),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(e.kind.clone(), Style::default().fg(Color::Cyan)),
+            Span::styled(stop, Style::default().fg(Color::Yellow)),
+            Span::styled(blocks, Style::default().fg(Color::Rgb(160, 160, 170))),
+        ]));
+    }
+
+    lines
 }
 
 fn render_live_tail(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -815,9 +1117,11 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         ));
     } else {
         let keybinds = match app.view {
-            View::Grid => "h/j/k/l:nav  enter:attach  n:new  i:info  f:focus  q:quit",
+            View::Grid => "h/j/k/l:nav  enter:attach  n:new  i:info  D:why?  f:focus  x:close  q:quit",
             View::Popup => "j/k:scroll  esc:close  q:close",
             View::LiveTail => "j/k:scroll  G:bottom  esc:close",
+            View::ConfirmClose => "y:close  n/esc:cancel",
+            View::StateDebug => "j/k:scroll  esc:close  q:close",
         };
         spans.push(Span::styled(
             format!(" {} ", keybinds),

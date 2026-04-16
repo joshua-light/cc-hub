@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
-/// Tracks user acknowledgements of `WaitingForInput` sessions.
+/// Tracks user acknowledgements that force a session to display as Idle.
 ///
 /// An ack is stamped with the session's `last_activity` at press time. While the
-/// live watermark still matches, the session is treated as not-waiting. Any new
-/// activity advances the watermark and auto-clears the ack.
+/// live watermark still matches, the session is treated as Idle regardless of
+/// its real state (WaitingForInput or Processing). Any new activity advances
+/// the watermark and auto-clears the ack.
 #[derive(Default)]
 pub struct Acks {
     entries: HashMap<String, Option<u64>>,

@@ -1,6 +1,9 @@
 use crate::acks::Acks;
+use crate::conversation::StateExplanation;
 use crate::live_view::LiveView;
 use crate::models::{ProjectGroup, SessionDetail, SessionInfo, SessionState};
+use crate::usage::UsageInfo;
+use ratatui::text::Line;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -11,6 +14,14 @@ pub enum View {
     Grid,
     Popup,
     LiveTail,
+    ConfirmClose,
+    StateDebug,
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingClose {
+    pub pid: u32,
+    pub display: String,
 }
 
 pub struct App {
@@ -28,6 +39,12 @@ pub struct App {
     pub live_view: Option<LiveView>,
     pub acks: Acks,
     pub status_msg: Option<(String, Instant)>,
+    pub pending_close: Option<PendingClose>,
+    pub state_debug: Option<(SessionInfo, StateExplanation)>,
+    pub state_debug_lines: Vec<Line<'static>>,
+    pub state_debug_scroll: u16,
+    pub usage: Option<UsageInfo>,
+    pub usage_line: Line<'static>,
 }
 
 impl App {
@@ -47,20 +64,54 @@ impl App {
             live_view: None,
             acks: Acks::new(),
             status_msg: None,
+            pending_close: None,
+            state_debug: None,
+            state_debug_lines: Vec::new(),
+            state_debug_scroll: 0,
+            usage: None,
+            usage_line: Line::default(),
         }
+    }
+
+    pub fn update_usage(&mut self, usage: UsageInfo, rendered: Line<'static>) {
+        self.usage = Some(usage);
+        self.usage_line = rendered;
+    }
+
+    pub fn enter_confirm_close(&mut self) {
+        let Some(session) = self.selected_session_info() else {
+            return;
+        };
+        self.pending_close = Some(PendingClose {
+            pid: session.pid,
+            display: format!("{} (PID {})", session.project_name, session.pid),
+        });
+        self.view = View::ConfirmClose;
+    }
+
+    pub fn cancel_confirm_close(&mut self) {
+        self.pending_close = None;
+        self.view = View::Grid;
+    }
+
+    pub fn take_pending_close(&mut self) -> Option<PendingClose> {
+        self.view = View::Grid;
+        self.pending_close.take()
     }
 
     pub fn set_status(&mut self, msg: String) {
         self.status_msg = Some((msg, Instant::now()));
     }
 
-    /// Stamp an ack for the currently-selected session if it's waiting for input.
+    /// Stamp an ack for the currently-selected session, forcing it to display
+    /// as Idle until new activity advances its watermark. Works for any
+    /// non-Idle state (WaitingForInput or Processing).
     /// Returns true if an ack was recorded.
     pub fn ack_selected(&mut self) -> bool {
         let Some(session) = self.selected_session_info() else {
             return false;
         };
-        if session.state != SessionState::WaitingForInput {
+        if session.state == SessionState::Idle {
             return false;
         }
         let id = session.session_id.clone();
@@ -164,6 +215,38 @@ impl App {
         self.view = View::Grid;
     }
 
+    pub fn enter_state_debug(&mut self) {
+        self.view = View::StateDebug;
+        self.state_debug = None;
+        self.state_debug_lines.clear();
+        self.state_debug_scroll = 0;
+    }
+
+    pub fn close_state_debug(&mut self) {
+        self.view = View::Grid;
+        self.state_debug = None;
+        self.state_debug_lines.clear();
+        self.state_debug_scroll = 0;
+    }
+
+    pub fn update_state_debug(
+        &mut self,
+        info: SessionInfo,
+        exp: StateExplanation,
+        rendered: Vec<Line<'static>>,
+    ) {
+        self.state_debug = Some((info, exp));
+        self.state_debug_lines = rendered;
+    }
+
+    pub fn debug_scroll_down(&mut self) {
+        self.state_debug_scroll = self.state_debug_scroll.saturating_add(3);
+    }
+
+    pub fn debug_scroll_up(&mut self) {
+        self.state_debug_scroll = self.state_debug_scroll.saturating_sub(3);
+    }
+
     pub fn selected_session_id(&self) -> Option<String> {
         self.selected_session_info()
             .map(|s| s.session_id.clone())
@@ -180,11 +263,11 @@ impl App {
 
         let acks_active = !self.acks.is_empty();
         if acks_active {
-            // Apply user acks: if a WaitingForInput session is still at its acked
+            // Apply user acks: if a non-Idle session is still at its acked
             // watermark, downgrade it to Idle. Any advance in last_activity clears
             // the ack inside is_acked(), so the real state takes over next tick.
             for s in &mut sessions {
-                if s.state == SessionState::WaitingForInput
+                if s.state != SessionState::Idle
                     && self.acks.is_acked(&s.session_id, s.last_activity)
                 {
                     s.state = SessionState::Idle;

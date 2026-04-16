@@ -23,7 +23,35 @@ pub(crate) fn walk_ancestors(pids: &mut Vec<u32>, start: u32, label: &str) {
 
 pub fn focus_window(pid: u32) {
     info!("focus_window called for pid={}", pid);
+    let pids = collect_pid_chain(pid);
+    info!("process chain: {:?}", pids);
+    if !act_on_window(&pids, "focuswindow", "windowactivate") {
+        warn!("no window found for pid {} or any ancestor", pid);
+    }
+}
 
+/// Ask the terminal window owning `pid` to close. Returns true on success.
+///
+/// On Hyprland, dispatches `closewindow`, which sends a close request to the
+/// terminal — the terminal then exits, sending SIGHUP to its foreground
+/// process group (killing the Claude session inside). On X11, sends a
+/// graceful WM_DELETE_WINDOW via `xdotool windowclose`.
+pub fn close_window(pid: u32) -> bool {
+    info!("close_window called for pid={}", pid);
+    let pids = collect_pid_chain(pid);
+    info!("process chain: {:?}", pids);
+    let ok = act_on_window(&pids, "closewindow", "windowclose");
+    if !ok {
+        warn!("no window found to close for pid {} or any ancestor", pid);
+    }
+    ok
+}
+
+fn act_on_window(pids: &[u32], hypr_dispatch: &str, xdotool_action: &str) -> bool {
+    try_hyprland(pids, hypr_dispatch) || try_xdotool(pids, xdotool_action)
+}
+
+fn collect_pid_chain(pid: u32) -> Vec<u32> {
     let mut pids = vec![pid];
     walk_ancestors(&mut pids, pid, "pid");
 
@@ -44,17 +72,7 @@ pub fn focus_window(pid: u32) {
         }
     }
 
-    info!("process chain: {:?}", pids);
-
-    if try_hyprland(&pids) {
-        return;
-    }
-
-    if try_xdotool(&pids) {
-        return;
-    }
-
-    warn!("no window found for pid {} or any ancestor", pid);
+    pids
 }
 
 /// Fetch Hyprland clients and return the first `(pid, client_value)` whose
@@ -77,23 +95,23 @@ fn find_hypr_client(pids: &[u32]) -> Option<(u32, serde_json::Value)> {
     None
 }
 
-/// Try focusing via Hyprland IPC (hyprctl dispatch focuswindow pid:N).
-fn try_hyprland(pids: &[u32]) -> bool {
+fn try_hyprland(pids: &[u32], dispatch: &str) -> bool {
     let Some((p, _)) = find_hypr_client(pids) else {
         debug!("no ancestor PID matched a hyprland client");
         return false;
     };
     let addr = format!("pid:{}", p);
-    info!("hyprctl: focusing window with pid {}", p);
+    info!("hyprctl: {} pid {}", dispatch, p);
     match Command::new("hyprctl")
-        .args(["dispatch", "focuswindow", &addr])
+        .args(["dispatch", dispatch, &addr])
         .output()
     {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
             info!(
-                "  hyprctl dispatch status={}, stdout={:?}, stderr={:?}",
+                "  hyprctl dispatch {} status={}, stdout={:?}, stderr={:?}",
+                dispatch,
                 out.status,
                 stdout.trim(),
                 stderr.trim()
@@ -101,16 +119,14 @@ fn try_hyprland(pids: &[u32]) -> bool {
             out.status.success()
         }
         Err(e) => {
-            warn!("  hyprctl dispatch failed: {}", e);
+            warn!("  hyprctl dispatch {} failed: {}", dispatch, e);
             false
         }
     }
 }
 
-/// Try focusing via X11 xdotool (fallback for X11/XWayland).
-fn try_xdotool(pids: &[u32]) -> bool {
+fn try_xdotool(pids: &[u32], action: &str) -> bool {
     for p in pids {
-        debug!("trying xdotool search --pid {}", p);
         let output = Command::new("xdotool")
             .args(["search", "--pid", &p.to_string()])
             .output();
@@ -118,29 +134,27 @@ fn try_xdotool(pids: &[u32]) -> bool {
         match output {
             Ok(out) => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                debug!(
-                    "  xdotool search --pid {}: status={}, stdout={:?}, stderr={:?}",
-                    p, out.status, stdout.trim(), stderr.trim()
-                );
-
                 if let Some(window_id) = stdout.lines().next().filter(|s| !s.is_empty()) {
-                    info!("found window {} for pid {}, activating", window_id, p);
-                    let activate = Command::new("xdotool")
-                        .args(["windowactivate", window_id])
+                    info!("found window {} for pid {}, {}", window_id, p, action);
+                    let result = Command::new("xdotool")
+                        .args([action, window_id])
                         .output();
-                    match activate {
+                    match result {
                         Ok(a) => {
                             let astderr = String::from_utf8_lossy(&a.stderr);
                             info!(
-                                "  windowactivate status={}, stderr={:?}",
+                                "  {} status={}, stderr={:?}",
+                                action,
                                 a.status,
                                 astderr.trim()
                             );
+                            return a.status.success();
                         }
-                        Err(e) => warn!("  windowactivate failed to spawn: {}", e),
+                        Err(e) => {
+                            warn!("  {} failed to spawn: {}", action, e);
+                            return false;
+                        }
                     }
-                    return true;
                 }
             }
             Err(e) => {

@@ -7,6 +7,7 @@ mod live_view;
 mod scanner;
 mod spawn;
 mod ui;
+mod usage;
 
 use app::{App, View};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -24,6 +25,8 @@ use tokio::sync::mpsc;
 enum ScanMsg {
     SessionList(Vec<models::SessionInfo>),
     Detail(models::SessionDetail),
+    StateDebug(models::SessionInfo, conversation::StateExplanation),
+    Usage(usage::UsageInfo),
 }
 
 fn init_logging() -> PathBuf {
@@ -91,6 +94,22 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
 
     let (scan_tx, mut scan_rx) = mpsc::channel::<ScanMsg>(16);
     let (detail_tx, mut detail_rx) = mpsc::channel::<String>(4);
+    let (state_debug_tx, mut state_debug_rx) = mpsc::channel::<String>(4);
+
+    let usage_tx = scan_tx.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            if let Some(u) = tokio::task::spawn_blocking(usage::fetch_usage)
+                .await
+                .ok()
+                .flatten()
+            {
+                let _ = usage_tx.send(ScanMsg::Usage(u)).await;
+            }
+        }
+    });
 
     // Scanner task — interval fires immediately on first tick, so no separate initial scan needed
     tokio::spawn(async move {
@@ -116,6 +135,18 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                     .flatten();
                     if let Some(d) = detail {
                         let _ = scan_tx.send(ScanMsg::Detail(d)).await;
+                    }
+                }
+                Some(session_id) = state_debug_rx.recv() => {
+                    let sessions = latest_sessions.clone();
+                    let exp = tokio::task::spawn_blocking(move || {
+                        scanner::load_state_explanation(&session_id, &sessions)
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    if let Some((info, e)) = exp {
+                        let _ = scan_tx.send(ScanMsg::StateDebug(info, e)).await;
                     }
                 }
             }
@@ -169,12 +200,48 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                             app.enter_popup();
                         }
                     }
+                    (View::Grid, KeyCode::Char('D')) => {
+                        if let Some(id) = app.selected_session_id() {
+                            let _ = state_debug_tx.send(id).await;
+                            app.enter_state_debug();
+                        }
+                    }
+                    (View::StateDebug, KeyCode::Esc | KeyCode::Char('q')) => {
+                        app.close_state_debug();
+                    }
+                    (View::StateDebug, KeyCode::Down | KeyCode::Char('j')) => {
+                        app.debug_scroll_down();
+                    }
+                    (View::StateDebug, KeyCode::Up | KeyCode::Char('k')) => {
+                        app.debug_scroll_up();
+                    }
                     (View::Grid, KeyCode::Char('f')) => {
                         if let Some(session) = app.selected_session_info() {
                             focus::focus_window(session.pid);
                         }
                     }
-                    // Space: ack the selected WaitingForInput session until new activity.
+                    (View::Grid, KeyCode::Char('x')) => {
+                        app.enter_confirm_close();
+                    }
+                    (View::ConfirmClose, KeyCode::Char('y') | KeyCode::Char('Y')) => {
+                        if let Some(pending) = app.take_pending_close() {
+                            let ok = focus::close_window(pending.pid);
+                            let msg = if ok {
+                                format!("closed {}", pending.display)
+                            } else {
+                                format!("failed to close {}", pending.display)
+                            };
+                            app.set_status(msg);
+                        }
+                    }
+                    (
+                        View::ConfirmClose,
+                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q'),
+                    ) => {
+                        app.cancel_confirm_close();
+                    }
+                    // Space: force selected session to display as Idle until new
+                    // activity advances its watermark.
                     (View::Grid, KeyCode::Char(' ')) => {
                         app.ack_selected();
                     }
@@ -222,6 +289,14 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
             match msg {
                 ScanMsg::SessionList(sessions) => app.update_sessions(sessions),
                 ScanMsg::Detail(detail) => app.update_detail(detail),
+                ScanMsg::StateDebug(info, exp) => {
+                    let lines = ui::build_state_debug_content(&info, &exp);
+                    app.update_state_debug(info, exp, lines);
+                }
+                ScanMsg::Usage(u) => {
+                    let line = ui::build_usage_line(&u);
+                    app.update_usage(u, line);
+                }
             }
         }
 
