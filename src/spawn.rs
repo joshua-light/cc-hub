@@ -1,15 +1,22 @@
+//! Spawn a new `ccyo` session in a fresh terminal window (or tmux window).
+//!
+//! Strategy:
+//! - In tmux: open a sibling `new-window`, no terminal spawn.
+//! - Otherwise: pick a [`terminal::Launcher`] via
+//!   [`crate::platform::terminal::pick`] and hand the spawn to the detected
+//!   [`window::WindowManager`] for workspace placement; fall back to a direct
+//!   `Command::spawn` when no WM can place it.
+
+use crate::platform::{paths, terminal, window};
 use log::{error, info};
 use std::io;
 use std::process::{Command, Stdio};
 
 /// Spawn a new Claude session for `cwd`.
 ///
-/// If cc-hub is running inside tmux, we open a sibling tmux window so the user
-/// can switch to it with the usual tmux bindings.
-///
-/// Otherwise we launch a new terminal emulator window running `ccyo`. `pid_hint`
-/// is the pid of the currently-selected session; when provided, we try to place
-/// the new window on the same Hyprland workspace as that session.
+/// `pid_hint` is the pid of the currently-selected session; when provided,
+/// we ask the window manager which workspace that window is on so the new
+/// window lands there without pulling focus from cc-hub.
 pub fn spawn_claude_session(cwd: &str, pid_hint: Option<u32>) -> io::Result<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
 
@@ -17,7 +24,7 @@ pub fn spawn_claude_session(cwd: &str, pid_hint: Option<u32>) -> io::Result<Stri
         spawn_tmux_window(cwd, &shell)
     } else {
         let workspace = pid_hint.and_then(crate::focus::workspace_for_pid);
-        spawn_terminal(cwd, &shell, workspace)
+        spawn_terminal(cwd, &shell, workspace.as_deref())
     }
 }
 
@@ -53,57 +60,31 @@ fn spawn_tmux_window(cwd: &str, shell: &str) -> io::Result<String> {
     Ok(format!("spawned ccyo in tmux window {}", stdout))
 }
 
-fn spawn_terminal(cwd: &str, shell: &str, workspace: Option<i64>) -> io::Result<String> {
-    let term = pick_terminal().ok_or_else(|| {
+fn spawn_terminal(cwd: &str, shell: &str, workspace: Option<&str>) -> io::Result<String> {
+    let launcher = terminal::pick().ok_or_else(|| {
         io::Error::other("no terminal emulator found (set $TERMINAL or install kitty/foot/alacritty)")
     })?;
 
-    let argv = term_argv(&term, cwd, shell);
-    // Resolve the actual binary to run — some users wrap their terminal via a
-    // dotfiles script (e.g. ~/.config/hypr/scripts/alacritty) that applies a
-    // custom --config-file. Prefer that wrapper when it exists so the new
-    // window matches the user's SUPER+Enter experience.
-    let bin = resolve_terminal_binary(&term);
+    let argv = launcher.argv(cwd, shell);
+    // Prefer a user-provided Hyprland wrapper script when one exists — users
+    // with ~/.config/hypr/scripts/<term> tend to pass a personal --config-file
+    // and expect our spawned terminals to look the same as their SUPER+Enter
+    // ones. Harmless on non-Hyprland hosts (the file just won't exist).
+    let bin = paths::terminal_wrapper_script(launcher.name())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| launcher.name().to_string());
 
-    // If we know the target Hyprland workspace, route the spawn through
-    // `hyprctl dispatch exec` with a `[workspace N silent]` rule so Hyprland
-    // places the new window there without switching focus away from cc-hub.
     if let Some(ws) = workspace {
-        let mut parts: Vec<String> = Vec::with_capacity(argv.len() + 1);
-        parts.push(shell_quote(&bin));
-        for a in &argv {
-            parts.push(shell_quote(a));
-        }
-        let exec_str = format!("[workspace {} silent] {}", ws, parts.join(" "));
-        info!("spawn: hyprctl dispatch exec {}", exec_str);
-
-        let output = Command::new("hyprctl")
-            .args(["dispatch", "exec", &exec_str])
-            .output();
-        match output {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                info!(
-                    "spawn: hyprctl exec ok, stdout={:?}",
-                    stdout.trim()
-                );
-                return Ok(format!("spawned ccyo in {} on workspace {}", term, ws));
-            }
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                error!(
-                    "spawn: hyprctl exec failed status={} stderr={:?}, falling back",
-                    out.status,
-                    stderr.trim()
-                );
+        match window::current().spawn_on_workspace(ws, &bin, &argv) {
+            Ok(()) => {
+                return Ok(format!("spawned ccyo in {} on workspace {}", launcher.name(), ws));
             }
             Err(e) => {
-                error!("spawn: hyprctl not available ({}), falling back", e);
+                error!("spawn: workspace placement failed ({}), falling back", e);
             }
         }
     }
 
-    // Fallback: direct spawn (no workspace placement).
     info!("spawn: {} {}", bin, argv.join(" "));
     let child = Command::new(&bin)
         .args(&argv)
@@ -114,75 +95,12 @@ fn spawn_terminal(cwd: &str, shell: &str, workspace: Option<i64>) -> io::Result<
 
     match child {
         Ok(c) => {
-            info!("spawn: {} pid={}", term, c.id());
-            Ok(format!("spawned ccyo in {} window", term))
+            info!("spawn: {} pid={}", launcher.name(), c.id());
+            Ok(format!("spawned ccyo in {} window", launcher.name()))
         }
         Err(e) => {
-            error!("spawn: {} failed: {}", term, e);
+            error!("spawn: {} failed: {}", launcher.name(), e);
             Err(e)
         }
-    }
-}
-
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn resolve_terminal_binary(name: &str) -> String {
-    if let Ok(home) = std::env::var("HOME") {
-        let candidate = format!("{}/.config/hypr/scripts/{}", home, name);
-        if std::path::Path::new(&candidate).is_file() {
-            return candidate;
-        }
-    }
-    name.to_string()
-}
-
-fn pick_terminal() -> Option<String> {
-    if let Ok(t) = std::env::var("TERMINAL") {
-        if !t.is_empty() && has_binary(&t) {
-            return Some(t);
-        }
-    }
-    for t in ["kitty", "foot", "alacritty", "wezterm", "ghostty"] {
-        if has_binary(t) {
-            return Some(t.to_string());
-        }
-    }
-    None
-}
-
-fn has_binary(name: &str) -> bool {
-    Command::new("sh")
-        .args(["-c", &format!("command -v {} >/dev/null 2>&1", name)])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-fn term_argv(term: &str, cwd: &str, shell: &str) -> Vec<String> {
-    let s = shell.to_string();
-    match term {
-        "alacritty" => vec![
-            "--working-directory".into(), cwd.into(),
-            "-e".into(), s, "-ic".into(), "ccyo".into(),
-        ],
-        "kitty" => vec![
-            "--directory".into(), cwd.into(),
-            s, "-ic".into(), "ccyo".into(),
-        ],
-        "foot" => vec![
-            format!("--working-directory={}", cwd),
-            s, "-ic".into(), "ccyo".into(),
-        ],
-        "wezterm" => vec![
-            "start".into(), "--cwd".into(), cwd.into(),
-            "--".into(), s, "-ic".into(), "ccyo".into(),
-        ],
-        "ghostty" => vec![
-            format!("--working-directory={}", cwd),
-            "-e".into(), format!("{} -ic ccyo", s),
-        ],
-        _ => vec!["-e".into(), s, "-ic".into(), "ccyo".into()],
     }
 }
