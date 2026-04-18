@@ -2,6 +2,7 @@ use crate::acks::Acks;
 use crate::conversation::StateExplanation;
 use crate::folder_picker::FolderPicker;
 use crate::live_view::LiveView;
+use crate::metrics::MetricsAnalysis;
 use crate::models::{ProjectGroup, SessionDetail, SessionInfo, SessionState};
 use crate::tmux_pane::TmuxPaneView;
 use crate::usage::UsageInfo;
@@ -23,6 +24,30 @@ pub enum View {
     TmuxPane,
     FolderPicker,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Tab {
+    Sessions,
+    Metrics,
+}
+
+impl Tab {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Tab::Sessions => "Sessions",
+            Tab::Metrics => "Metrics",
+        }
+    }
+
+    pub fn cycle(&self) -> Self {
+        match self {
+            Tab::Sessions => Tab::Metrics,
+            Tab::Metrics => Tab::Sessions,
+        }
+    }
+}
+
+pub const TABS: &[Tab] = &[Tab::Sessions, Tab::Metrics];
 
 #[derive(Clone, Debug)]
 pub struct PendingClose {
@@ -74,6 +99,9 @@ pub struct App {
     pub dispatch_target: Option<(u32, String, String)>,
     pub tmux_pane: Option<TmuxPaneView>,
     pub folder_picker: Option<FolderPicker>,
+    pub current_tab: Tab,
+    pub metrics: Option<MetricsAnalysis>,
+    pub metrics_scroll: u16,
     pub pending_dispatch: Option<PendingDispatch>,
     /// Session ids seen on the previous scan tick. `None` means the first
     /// scan hasn't happened yet — used to skip cursor-jump on initial load.
@@ -107,9 +135,32 @@ impl App {
             dispatch_target: None,
             tmux_pane: None,
             folder_picker: None,
+            current_tab: Tab::Sessions,
+            metrics: None,
+            metrics_scroll: 0,
             pending_dispatch: None,
             known_session_ids: None,
         }
+    }
+
+    pub fn set_tab(&mut self, tab: Tab) {
+        self.current_tab = tab;
+    }
+
+    pub fn cycle_tab(&mut self) {
+        self.set_tab(self.current_tab.cycle());
+    }
+
+    pub fn update_metrics(&mut self, m: MetricsAnalysis) {
+        self.metrics = Some(m);
+    }
+
+    pub fn metrics_scroll_down(&mut self) {
+        self.metrics_scroll = self.metrics_scroll.saturating_add(3);
+    }
+
+    pub fn metrics_scroll_up(&mut self) {
+        self.metrics_scroll = self.metrics_scroll.saturating_sub(3);
     }
 
     pub fn enter_folder_picker(&mut self) {

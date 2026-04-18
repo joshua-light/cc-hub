@@ -4,6 +4,7 @@ pub mod conversation;
 pub mod focus;
 pub mod folder_picker;
 pub mod live_view;
+pub mod metrics;
 pub mod models;
 pub mod platform;
 pub mod scanner;

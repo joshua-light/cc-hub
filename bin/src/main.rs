@@ -1,9 +1,9 @@
 use cc_hub_lib::{
-    app, conversation, focus, live_view, models, platform, scanner, send, spawn, tmux_pane, ui,
-    usage, watcher,
+    app, conversation, focus, live_view, metrics, models, platform, scanner, send, spawn,
+    tmux_pane, ui, usage, watcher,
 };
 
-use app::{App, View};
+use app::{App, Tab, View};
 
 #[cfg(feature = "hot-reload")]
 #[hot_lib_reloader::hot_module(dylib = "cc_hub_lib", lib_dir = "target/debug")]
@@ -34,6 +34,7 @@ enum ScanMsg {
     Detail(models::SessionDetail),
     StateDebug(models::SessionInfo, conversation::StateExplanation),
     Usage(usage::UsageInfo),
+    Metrics(metrics::MetricsAnalysis),
 }
 
 fn init_logging() -> PathBuf {
@@ -102,6 +103,7 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
     let (state_debug_tx, mut state_debug_rx) = mpsc::channel::<String>(4);
 
     let usage_tx = scan_tx.clone();
+    let scan_tx_main = scan_tx.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
@@ -173,6 +175,15 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
         }
     });
 
+    let spawn_metrics = || {
+        let tx = scan_tx_main.clone();
+        tokio::spawn(async move {
+            if let Ok(m) = tokio::task::spawn_blocking(metrics::analyze).await {
+                let _ = tx.send(ScanMsg::Metrics(m)).await;
+            }
+        });
+    };
+
     loop {
         // Poll live view for new JSONL entries
         if app.view == View::LiveTail {
@@ -196,18 +207,54 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
+                let on_sessions = app.view == View::Grid && app.current_tab == Tab::Sessions;
+                let on_metrics = app.view == View::Grid && app.current_tab == Tab::Metrics;
+
                 match (&app.view, key.code) {
                     // Quit
                     (View::Grid, KeyCode::Char('q')) => {
                         app.should_quit = true;
                     }
-                    // Grid navigation
-                    (View::Grid, KeyCode::Right | KeyCode::Char('l')) => app.move_right(),
-                    (View::Grid, KeyCode::Left | KeyCode::Char('h')) => app.move_left(),
-                    (View::Grid, KeyCode::Down | KeyCode::Char('j')) => app.move_down(),
-                    (View::Grid, KeyCode::Up | KeyCode::Char('k')) => app.move_up(),
-                    // Enter: open live tail view
-                    (View::Grid, KeyCode::Enter) => {
+                    (View::Grid, KeyCode::Tab | KeyCode::BackTab) => {
+                        let was_metrics = app.current_tab == Tab::Metrics;
+                        app.cycle_tab();
+                        if !was_metrics
+                            && app.current_tab == Tab::Metrics
+                            && app.metrics.is_none()
+                        {
+                            spawn_metrics();
+                        }
+                    }
+                    (View::Grid, KeyCode::Char('m')) if on_sessions => {
+                        let needs_compute = app.metrics.is_none();
+                        app.set_tab(Tab::Metrics);
+                        if needs_compute {
+                            spawn_metrics();
+                        }
+                    }
+                    (View::Grid, KeyCode::Right | KeyCode::Char('l')) if on_sessions => {
+                        app.move_right()
+                    }
+                    (View::Grid, KeyCode::Left | KeyCode::Char('h')) if on_sessions => {
+                        app.move_left()
+                    }
+                    (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_sessions => {
+                        app.move_down()
+                    }
+                    (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_sessions => {
+                        app.move_up()
+                    }
+                    (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_metrics => {
+                        app.metrics_scroll_down();
+                    }
+                    (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_metrics => {
+                        app.metrics_scroll_up();
+                    }
+                    (View::Grid, KeyCode::Char('r')) if on_metrics => {
+                        app.metrics = None;
+                        spawn_metrics();
+                    }
+                    (View::Grid, KeyCode::Enter) if on_sessions => {
                         if let Some(session) = app.selected_session_info().cloned() {
                             if let Some(path) = session.jsonl_path.clone() {
                                 let lv = live_view::LiveView::new(path);
@@ -220,13 +267,13 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                         }
                     }
                     // 'i' for info popup (old Enter behavior)
-                    (View::Grid, KeyCode::Char('i')) => {
+                    (View::Grid, KeyCode::Char('i')) if on_sessions => {
                         if let Some(id) = app.selected_session_id() {
                             let _ = detail_tx.send(id).await;
                             app.enter_popup();
                         }
                     }
-                    (View::Grid, KeyCode::Char('D')) => {
+                    (View::Grid, KeyCode::Char('D')) if on_sessions => {
                         if let Some(id) = app.selected_session_id() {
                             let _ = state_debug_tx.send(id).await;
                             app.enter_state_debug();
@@ -241,7 +288,7 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                     (View::StateDebug, KeyCode::Up | KeyCode::Char('k')) => {
                         app.debug_scroll_up();
                     }
-                    (View::Grid, KeyCode::Char('f')) => {
+                    (View::Grid, KeyCode::Char('f')) if on_sessions => {
                         if let Some(session) = app.selected_session_info().cloned() {
                             if let Some(tmux_name) = session.tmux_session.clone() {
                                 // Size: frame inner minus a generous margin. The
@@ -283,7 +330,7 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                             pane.send_key(key);
                         }
                     }
-                    (View::Grid, KeyCode::Char('x')) => {
+                    (View::Grid, KeyCode::Char('x')) if on_sessions => {
                         app.enter_confirm_close();
                     }
                     (View::ConfirmClose, KeyCode::Char('y') | KeyCode::Char('Y')) => {
@@ -305,10 +352,10 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                     }
                     // Space: force selected session to display as Idle until new
                     // activity advances its watermark.
-                    (View::Grid, KeyCode::Char(' ')) => {
+                    (View::Grid, KeyCode::Char(' ')) if on_sessions => {
                         app.ack_selected();
                     }
-                    (View::Grid, KeyCode::Char('n')) => {
+                    (View::Grid, KeyCode::Char('n')) if on_sessions => {
                         if let Some(sess) = app.selected_session_info().cloned() {
                             let status = match spawn::spawn_claude_session(&sess.cwd) {
                                 Ok(name) => format!("started ccyo [{}]", name),
@@ -317,7 +364,7 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                             app.set_status(status);
                         }
                     }
-                    (View::Grid, KeyCode::Char('N')) => {
+                    (View::Grid, KeyCode::Char('N')) if on_sessions => {
                         app.enter_folder_picker();
                     }
                     (View::FolderPicker, KeyCode::Esc | KeyCode::Char('q')) => {
@@ -343,7 +390,22 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                             p.ascend();
                         }
                     }
-                    (View::FolderPicker, KeyCode::Char('s') | KeyCode::Char(' ')) => {
+                    (View::FolderPicker, KeyCode::Char(' ')) => {
+                        let cwd = app.folder_picker.as_ref().and_then(|p| {
+                            p.entries
+                                .get(p.selection)
+                                .map(|name| p.current_dir.join(name).display().to_string())
+                        });
+                        app.close_folder_picker();
+                        if let Some(cwd) = cwd {
+                            let status = match spawn::spawn_claude_session(&cwd) {
+                                Ok(name) => format!("started ccyo [{}]", name),
+                                Err(e) => format!("spawn failed: {}", e),
+                            };
+                            app.set_status(status);
+                        }
+                    }
+                    (View::FolderPicker, KeyCode::Char('.')) => {
                         let cwd = app
                             .folder_picker
                             .as_ref()
@@ -357,7 +419,7 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                             app.set_status(status);
                         }
                     }
-                    (View::Grid, KeyCode::Char('p')) => {
+                    (View::Grid, KeyCode::Char('p')) if on_sessions => {
                         app.enter_prompt_input();
                     }
                     (View::PromptInput, KeyCode::Esc) => {
@@ -462,6 +524,9 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                 ScanMsg::Usage(u) => {
                     let line = ui::build_usage_line(&u);
                     app.update_usage(u, line);
+                }
+                ScanMsg::Metrics(m) => {
+                    app.update_metrics(m);
                 }
             }
         }

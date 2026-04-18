@@ -1,7 +1,9 @@
-use crate::app::{App, View, STATUS_MSG_TTL};
+use crate::app::{App, Tab, View, STATUS_MSG_TTL, TABS};
 use crate::conversation::{StateExplanation, Verdict};
+use crate::metrics::{MetricsAnalysis, ModelStats, SessionSummary};
 use crate::models::{short_sid, SessionDetail, SessionInfo, SessionState};
 use crate::usage::UsageInfo;
+use chrono::Duration as ChronoDuration;
 use chrono::{DateTime, Local, TimeZone};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -25,14 +27,18 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(3),
             Constraint::Min(0),
             Constraint::Length(1),
         ])
         .split(frame.area());
 
     render_title_bar(frame, chunks[0], app);
-    render_grid(frame, chunks[2], app);
+    render_tab_strip(frame, chunks[1], app);
+    match app.current_tab {
+        Tab::Sessions => render_grid(frame, chunks[2], app),
+        Tab::Metrics => render_metrics_body(frame, chunks[2], app),
+    }
     render_status_bar(frame, chunks[3], app);
 
     match app.view {
@@ -45,6 +51,52 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         View::FolderPicker => render_folder_picker(frame, frame.area(), app),
         View::Grid => {}
     }
+}
+
+fn render_tab_strip(frame: &mut Frame, area: Rect, app: &App) {
+    if area.height == 0 {
+        return;
+    }
+    let band_bg = Color::Rgb(20, 20, 28);
+    let bg = Style::default().bg(band_bg);
+
+    // Paint the full band (top padding + tabs row + bottom padding) so the
+    // background colour reads as a continuous header strip.
+    frame.render_widget(Paragraph::new("").style(bg), area);
+
+    let mut spans: Vec<Span<'static>> = vec![Span::styled("  ", bg)];
+    for (i, tab) in TABS.iter().enumerate() {
+        let is_active = *tab == app.current_tab;
+        let (fg, bgc, modi) = if is_active {
+            (
+                Color::Black,
+                Color::Rgb(180, 200, 230),
+                Modifier::BOLD,
+            )
+        } else {
+            (
+                Color::Rgb(170, 170, 190),
+                Color::Rgb(40, 40, 52),
+                Modifier::empty(),
+            )
+        };
+        spans.push(Span::styled(
+            format!(" {} ", tab.label()),
+            Style::default().fg(fg).bg(bgc).add_modifier(modi),
+        ));
+        if i + 1 < TABS.len() {
+            spans.push(Span::styled(" ", bg));
+        }
+    }
+    spans.push(Span::styled(
+        "   ⇥ next tab",
+        Style::default().fg(Color::Rgb(80, 80, 95)).bg(band_bg),
+    ));
+
+    // Tabs go on the visual middle row (or first row if the band is shorter).
+    let row_y = area.y + area.height / 2;
+    let row_area = Rect::new(area.x, row_y, area.width, 1);
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(bg), row_area);
 }
 
 fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
@@ -1323,15 +1375,18 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
         ));
     } else {
-        let keybinds = match app.view {
-            View::Grid => "h/j/k/l:nav  enter:attach  n:new  N:new in…  i:info  D:why?  f:focus  x:close  q:quit",
+        let keybinds: &str = match app.view {
+            View::Grid => match app.current_tab {
+                Tab::Sessions => "tab:next tab  h/j/k/l:nav  enter:attach  n:new  N:new in…  i:info  D:why?  f:focus  x:close  q:quit",
+                Tab::Metrics => "tab:next tab  j/k:scroll  r:refresh  q:quit",
+            },
             View::Popup => "j/k:scroll  esc:close  q:close",
             View::LiveTail => "j/k:scroll  G:bottom  esc:close",
             View::ConfirmClose => "y:close  n/esc:cancel",
             View::StateDebug => "j/k:scroll  esc:close  q:close",
             View::PromptInput => "type prompt  enter:dispatch  esc:cancel",
             View::TmuxPane => "forwarding keys to tmux · F1: detach & close",
-            View::FolderPicker => "j/k:move  enter:descend  bksp:parent  s:start here  esc:cancel",
+            View::FolderPicker => "j/k:move  enter:descend  bksp:parent  space:pick  .:pick cwd  esc:cancel",
         };
         spans.push(Span::styled(
             format!(" {} ", keybinds),
@@ -1420,3 +1475,278 @@ fn format_tokens(count: u64) -> String {
         format!("{}", count)
     }
 }
+
+fn fmt_cost(c: f64) -> String {
+    if c >= 100.0 {
+        format!("${:.0}", c)
+    } else if c >= 10.0 {
+        format!("${:.1}", c)
+    } else {
+        format!("${:.2}", c)
+    }
+}
+
+fn render_metrics_body(frame: &mut Frame, area: Rect, app: &App) {
+    if area.height < 2 {
+        return;
+    }
+
+    let m = match &app.metrics {
+        Some(m) => m,
+        None => {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    " Scanning ~/.claude/projects …",
+                    Style::default().fg(Color::DarkGray),
+                ))),
+                area,
+            );
+            return;
+        }
+    };
+
+    let lines = build_metrics_content(m);
+    let total_lines = lines.len() as u16;
+
+    let scroll_info = format!(
+        " {}/{} ",
+        (app.metrics_scroll as usize).min(total_lines.saturating_sub(1) as usize) + 1,
+        total_lines
+    );
+    let indicator_area = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            scroll_info,
+            Style::default().fg(Color::Rgb(80, 80, 95)),
+        )))
+        .alignment(Alignment::Right),
+        indicator_area,
+    );
+
+    let body_area = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
+    let content = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((app.metrics_scroll, 0));
+    frame.render_widget(content, body_area);
+}
+
+fn build_metrics_content(m: &MetricsAnalysis) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let dim = Style::default().fg(Color::DarkGray);
+    let label = Style::default().fg(Color::Rgb(140, 140, 160));
+    let val = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+
+    lines.push(section_header("Overview"));
+    lines.push(Line::from(vec![
+        Span::styled("  Total cost   ", label),
+        Span::styled(fmt_cost(m.total_cost), val.fg(Color::Green)),
+        Span::styled("    Sessions ", label),
+        Span::styled(format!("{}", m.total_sessions), val),
+        Span::styled("    Messages ", label),
+        Span::styled(format!("{}", m.total_messages), val),
+        Span::styled("    Cache hit ", label),
+        Span::styled(format!("{:.0}%", m.cache_hit_rate * 100.0), val),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Tokens      ", label),
+        Span::styled(
+            format!(
+                "{} in / {} out / {} cache_r / {} cache_w",
+                format_tokens(m.total_tokens.input),
+                format_tokens(m.total_tokens.output),
+                format_tokens(m.total_tokens.cache_read),
+                format_tokens(m.total_tokens.cache_creation),
+            ),
+            val,
+        ),
+    ]));
+    lines.push(Line::raw(""));
+
+    lines.push(section_header("Cost breakdown"));
+    let breakdown = [
+        ("input        ", m.total_tokens.input, Color::Rgb(120, 200, 240)),
+        ("output       ", m.total_tokens.output, Color::Rgb(240, 180, 120)),
+        ("cache read   ", m.total_tokens.cache_read, Color::Rgb(160, 220, 160)),
+        ("cache create ", m.total_tokens.cache_creation, Color::Rgb(220, 160, 200)),
+    ];
+    let max_tokens = breakdown.iter().map(|(_, t, _)| *t).max().unwrap_or(0).max(1);
+    for (name, toks, col) in breakdown {
+        let bar_w = ((toks as f64 / max_tokens as f64) * 30.0).round() as usize;
+        let bar: String = "━".repeat(bar_w);
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {}", name), label),
+            Span::styled(bar, Style::default().fg(col)),
+            Span::raw(" "),
+            Span::styled(format_tokens(toks), dim),
+        ]));
+    }
+    lines.push(Line::raw(""));
+
+    lines.push(section_header("Cost by model"));
+    let mut models: Vec<(&String, &ModelStats)> = m.by_model.iter().collect();
+    models.sort_by(|a, b| {
+        b.1.cost
+            .partial_cmp(&a.1.cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let max_model_cost = models.first().map(|(_, s)| s.cost).unwrap_or(0.0).max(0.01);
+    for (name, s) in models.iter().take(8) {
+        let pct = if m.total_cost > 0.0 {
+            s.cost / m.total_cost * 100.0
+        } else {
+            0.0
+        };
+        let bar_w = ((s.cost / max_model_cost) * 26.0).round() as usize;
+        let short = short_model(name);
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<22}", truncate_str(short, 22)), label),
+            Span::styled("━".repeat(bar_w), Style::default().fg(model_color(name))),
+            Span::raw(" "),
+            Span::styled(fmt_cost(s.cost), val),
+            Span::styled(format!(" {:>4.1}%", pct), dim),
+            Span::styled(format!("  {} msgs", s.messages), dim),
+        ]));
+    }
+    lines.push(Line::raw(""));
+
+    lines.push(section_header("Daily spending (last 30 days)"));
+    let today = chrono::Local::now().date_naive();
+    let mut days: Vec<f64> = (0..30)
+        .rev()
+        .map(|n| {
+            let day = today - ChronoDuration::days(n as i64);
+            m.by_day.get(&day).map(|d| d.cost).unwrap_or(0.0)
+        })
+        .collect();
+    let day_max = days.iter().cloned().fold(0f64, f64::max).max(0.01);
+    let blocks = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let spark: String = days
+        .iter_mut()
+        .map(|c| {
+            if *c <= 0.0 {
+                ' '
+            } else {
+                let idx = ((*c / day_max) * 7.0).round().clamp(0.0, 7.0) as usize;
+                blocks[idx]
+            }
+        })
+        .collect();
+    let last_7_total: f64 = days.iter().rev().take(7).sum();
+    let last_30_total: f64 = days.iter().sum();
+    lines.push(Line::from(vec![
+        Span::styled("  ", dim),
+        Span::styled(spark, Style::default().fg(Color::Rgb(150, 200, 240))),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  last 7d ", label),
+        Span::styled(fmt_cost(last_7_total), val),
+        Span::styled("    last 30d ", label),
+        Span::styled(fmt_cost(last_30_total), val),
+        Span::styled("    peak day ", label),
+        Span::styled(fmt_cost(day_max), val),
+    ]));
+    lines.push(Line::raw(""));
+
+    lines.push(section_header("Top projects"));
+    let max_proj = m.top_projects.first().map(|(_, s)| s.cost).unwrap_or(0.0).max(0.01);
+    for (name, s) in &m.top_projects {
+        let bar_w = ((s.cost / max_proj) * 24.0).round() as usize;
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<26}", truncate_str(name, 26)), label),
+            Span::styled("━".repeat(bar_w), Style::default().fg(Color::Rgb(120, 180, 220))),
+            Span::raw(" "),
+            Span::styled(fmt_cost(s.cost), val),
+            Span::styled(format!("  {} sess", s.sessions), dim),
+            Span::styled(format!("  {} msgs", s.messages), dim),
+        ]));
+    }
+    lines.push(Line::raw(""));
+
+    lines.push(section_header("Top sessions"));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  {:<10} {:>8} {:>10} {:<22} {:<24}",
+            "session", "cost", "tokens", "model", "project"
+        ),
+        dim,
+    )));
+    for s in &m.top_sessions {
+        lines.push(format_session_row(s, dim, val));
+    }
+
+    lines
+}
+
+fn format_session_row(s: &SessionSummary, dim: Style, val: Style) -> Line<'static> {
+    let sid = short_sid(&s.session_id).to_string();
+    let mark = if s.is_subagent { "  ⑂" } else { "   " };
+    let toks = format_tokens(s.tokens.total());
+    let model = short_model(&s.model);
+    Line::from(vec![
+        Span::styled(format!("{}{:<8}", mark, sid), Style::default().fg(Color::Cyan)),
+        Span::raw(" "),
+        Span::styled(format!("{:>8}", fmt_cost(s.cost)), val.fg(Color::Green)),
+        Span::raw(" "),
+        Span::styled(format!("{:>10}", toks), dim),
+        Span::raw(" "),
+        Span::styled(format!("{:<22}", truncate_str(model, 22)), dim),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:<24}", truncate_str(&s.project, 24)),
+            Style::default().fg(Color::Rgb(180, 180, 200)),
+        ),
+    ])
+}
+
+fn truncate_str(s: &str, w: usize) -> String {
+    if s.is_ascii() && s.len() <= w {
+        return s.to_string();
+    }
+    if w == 0 {
+        return String::new();
+    }
+    if s.chars().count() <= w {
+        return s.to_string();
+    }
+    if w == 1 {
+        return "…".to_string();
+    }
+    let mut out = String::with_capacity(w * 4);
+    for c in s.chars().take(w - 1) {
+        out.push(c);
+    }
+    out.push('…');
+    out
+}
+
+fn section_header(title: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            "▎ ",
+            Style::default().fg(Color::Rgb(120, 140, 180)),
+        ),
+        Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+fn model_color(model: &str) -> Color {
+    let s = short_model(model);
+    if s.contains("opus") {
+        Color::Rgb(220, 150, 220)
+    } else if s.contains("sonnet") {
+        Color::Rgb(150, 200, 240)
+    } else if s.contains("haiku") {
+        Color::Rgb(160, 220, 180)
+    } else {
+        Color::Rgb(180, 180, 180)
+    }
+}
+
+
