@@ -399,6 +399,10 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
 
     let jsonl_map = resolve_jsonl_paths(&alive, &clears, &claimed);
 
+    // Snapshot tmux once per scan so we can tag each session with its hosting
+    // tmux session name (if any) without reshelling per pid.
+    let tmux_panes = crate::send::tmux_panes();
+
     let mut sessions: Vec<SessionInfo> = alive
         .into_iter()
         .map(|raw| {
@@ -460,6 +464,8 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
                 }
             };
 
+            let tmux_session = crate::send::tmux_session_for_pid_in(raw.pid, &tmux_panes);
+
             SessionInfo {
                 pid: raw.pid,
                 session_id: raw.session_id,
@@ -474,6 +480,7 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
                 git_branch: data.git_branch,
                 version: data.version,
                 jsonl_path,
+                tmux_session,
             }
         })
         .collect();

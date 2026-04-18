@@ -6,25 +6,10 @@
 //! where every operation is a no-op.
 
 use log::info;
-use std::io;
 use std::sync::OnceLock;
 
 pub trait WindowManager: Send + Sync {
     fn name(&self) -> &'static str;
-
-    /// Workspace identifier (opaque string) for the window owning any pid in
-    /// `pids`. None if the WM can't determine one or has no workspace concept.
-    fn workspace_for_pids(&self, pids: &[u32]) -> Option<String>;
-
-    /// Spawn `bin argv` placed on `workspace` without stealing focus.
-    /// Returns Err when the WM can't honour the placement — caller should
-    /// fall back to an ordinary spawn.
-    fn spawn_on_workspace(
-        &self,
-        workspace: &str,
-        bin: &str,
-        argv: &[String],
-    ) -> io::Result<()>;
 
     /// Focus the window owning any pid in `pids`. Returns true on success.
     fn focus(&self, pids: &[u32]) -> bool;
@@ -65,30 +50,6 @@ impl WindowManager for Chain {
         "chain"
     }
 
-    fn workspace_for_pids(&self, pids: &[u32]) -> Option<String> {
-        self.managers
-            .iter()
-            .find_map(|m| m.workspace_for_pids(pids))
-    }
-
-    fn spawn_on_workspace(
-        &self,
-        workspace: &str,
-        bin: &str,
-        argv: &[String],
-    ) -> io::Result<()> {
-        let mut last_err: Option<io::Error> = None;
-        for m in &self.managers {
-            match m.spawn_on_workspace(workspace, bin, argv) {
-                Ok(()) => return Ok(()),
-                Err(e) => last_err = Some(e),
-            }
-        }
-        Err(last_err.unwrap_or_else(|| {
-            io::Error::other("no window manager can place on a workspace")
-        }))
-    }
-
     fn focus(&self, pids: &[u32]) -> bool {
         self.managers.iter().any(|m| m.focus(pids))
     }
@@ -98,14 +59,9 @@ impl WindowManager for Chain {
     }
 }
 
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
 mod hyprland {
-    use super::{shell_quote, WindowManager};
+    use super::WindowManager;
     use log::{debug, info, warn};
-    use std::io;
     use std::process::Command;
 
     pub struct Hyprland;
@@ -174,44 +130,6 @@ mod hyprland {
             "hyprland"
         }
 
-        fn workspace_for_pids(&self, pids: &[u32]) -> Option<String> {
-            let (cpid, client) = find_client(pids)?;
-            let ws = client.get("workspace")?.get("id")?.as_i64()?;
-            debug!("pid {} on workspace {}", cpid, ws);
-            Some(ws.to_string())
-        }
-
-        fn spawn_on_workspace(
-            &self,
-            workspace: &str,
-            bin: &str,
-            argv: &[String],
-        ) -> io::Result<()> {
-            let mut parts: Vec<String> = Vec::with_capacity(argv.len() + 1);
-            parts.push(shell_quote(bin));
-            for a in argv {
-                parts.push(shell_quote(a));
-            }
-            let exec_str = format!("[workspace {} silent] {}", workspace, parts.join(" "));
-            info!("spawn: hyprctl dispatch exec {}", exec_str);
-
-            let output = Command::new("hyprctl")
-                .args(["dispatch", "exec", &exec_str])
-                .output()?;
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                info!("spawn: hyprctl exec ok, stdout={:?}", stdout.trim());
-                Ok(())
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                Err(io::Error::other(format!(
-                    "hyprctl exec failed status={} stderr={:?}",
-                    output.status,
-                    stderr.trim()
-                )))
-            }
-        }
-
         fn focus(&self, pids: &[u32]) -> bool {
             dispatch("focuswindow", pids)
         }
@@ -225,7 +143,6 @@ mod hyprland {
 mod xdotool {
     use super::WindowManager;
     use log::{debug, info, warn};
-    use std::io;
     use std::process::Command;
 
     pub struct Xdotool;
@@ -282,21 +199,6 @@ mod xdotool {
     impl WindowManager for Xdotool {
         fn name(&self) -> &'static str {
             "xdotool"
-        }
-
-        fn workspace_for_pids(&self, _pids: &[u32]) -> Option<String> {
-            None
-        }
-
-        fn spawn_on_workspace(
-            &self,
-            _workspace: &str,
-            _bin: &str,
-            _argv: &[String],
-        ) -> io::Result<()> {
-            Err(io::Error::other(
-                "xdotool does not support scripted workspace placement",
-            ))
         }
 
         fn focus(&self, pids: &[u32]) -> bool {

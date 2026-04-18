@@ -41,6 +41,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         View::ConfirmClose => render_confirm_close(frame, frame.area(), app),
         View::StateDebug => render_state_debug(frame, frame.area(), app),
         View::PromptInput => render_prompt_input(frame, frame.area(), app),
+        View::TmuxPane => render_tmux_pane(frame, frame.area(), app),
         View::Grid => {}
     }
 }
@@ -111,6 +112,45 @@ fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
     ];
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn render_tmux_pane(frame: &mut Frame, area: Rect, app: &mut App) {
+    let popup_area = centered_rect(area, 0.92);
+    frame.render_widget(Clear, popup_area);
+
+    let Some(pane) = app.tmux_pane.as_mut() else {
+        return;
+    };
+
+    let title = format!(" tmux: {} ", pane.session_name);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Rgb(120, 140, 180)))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(
+            " F1 detach & close ",
+            Style::default().fg(Color::Rgb(110, 110, 130)),
+        ));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    pane.resize(inner.height, inner.width);
+
+    let Ok(guard) = pane.parser.lock() else {
+        return;
+    };
+    let term = tui_term::widget::PseudoTerminal::new(guard.screen());
+    frame.render_widget(term, inner);
 }
 
 fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
@@ -1218,6 +1258,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             View::ConfirmClose => "y:close  n/esc:cancel",
             View::StateDebug => "j/k:scroll  esc:close  q:close",
             View::PromptInput => "type prompt  enter:dispatch  esc:cancel",
+            View::TmuxPane => "forwarding keys to tmux · F1: detach & close",
         };
         spans.push(Span::styled(
             format!(" {} ", keybinds),

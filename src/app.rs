@@ -2,6 +2,7 @@ use crate::acks::Acks;
 use crate::conversation::StateExplanation;
 use crate::live_view::LiveView;
 use crate::models::{ProjectGroup, SessionDetail, SessionInfo, SessionState};
+use crate::tmux_pane::TmuxPaneView;
 use crate::usage::UsageInfo;
 use ratatui::text::Line;
 use std::collections::{HashMap, HashSet};
@@ -17,6 +18,7 @@ pub enum View {
     ConfirmClose,
     StateDebug,
     PromptInput,
+    TmuxPane,
 }
 
 #[derive(Clone, Debug)]
@@ -48,6 +50,7 @@ pub struct App {
     pub usage_line: Line<'static>,
     pub prompt_buffer: String,
     pub dispatch_target: Option<(u32, String, String)>,
+    pub tmux_pane: Option<TmuxPaneView>,
 }
 
 impl App {
@@ -75,7 +78,18 @@ impl App {
             usage_line: Line::default(),
             prompt_buffer: String::new(),
             dispatch_target: None,
+            tmux_pane: None,
         }
+    }
+
+    pub fn enter_tmux_pane(&mut self, view: TmuxPaneView) {
+        self.tmux_pane = Some(view);
+        self.view = View::TmuxPane;
+    }
+
+    pub fn close_tmux_pane(&mut self) {
+        self.tmux_pane = None;
+        self.view = View::Grid;
     }
 
     pub fn enter_prompt_input(&mut self) {
@@ -409,5 +423,75 @@ impl App {
             .flat_map(|g| &g.sessions)
             .filter(|s| s.needs_attention())
             .count()
+    }
+
+    pub fn log_state_dump(&self) {
+        log::info!("=== state dump on quit ===");
+        log::info!(
+            "view={:?} sel_group={} sel_in_group={} grid_cols={} groups={} sessions={} attention={}",
+            self.view,
+            self.sel_group,
+            self.sel_in_group,
+            self.grid_cols,
+            self.groups.len(),
+            self.session_count(),
+            self.attention_count()
+        );
+        if let Some(sel) = self.selected_session_info() {
+            log::info!(
+                "selected: pid={} sid={} project={} state={}",
+                sel.pid,
+                crate::models::short_sid(&sel.session_id),
+                sel.project_name,
+                sel.state
+            );
+        }
+        if let Some(u) = &self.usage {
+            log::info!("usage: {:?}", u);
+        }
+        if let Some((msg, _)) = &self.status_msg {
+            log::info!("status_msg: {}", msg);
+        }
+        if let Some(pc) = &self.pending_close {
+            log::info!("pending_close: pid={} display={}", pc.pid, pc.display);
+        }
+        if let Some((target_pid, name, tmux)) = &self.dispatch_target {
+            log::info!(
+                "dispatch_target: pid={} project={} tmux={}",
+                target_pid, name, tmux
+            );
+        }
+        if !self.acks.is_empty() {
+            log::info!("acks: active");
+        }
+        for (gi, group) in self.groups.iter().enumerate() {
+            log::info!(
+                "group[{}]: name={} cwd={} sessions={}",
+                gi,
+                group.name,
+                group.cwd,
+                group.sessions.len()
+            );
+            for (si, s) in group.sessions.iter().enumerate() {
+                log::info!(
+                    "  session[{}]: pid={} sid={} state={} started_at={} last_activity={:?} model={:?} branch={:?} version={:?} tmux={:?} last_msg={:?}",
+                    si,
+                    s.pid,
+                    crate::models::short_sid(&s.session_id),
+                    s.state,
+                    s.started_at,
+                    s.last_activity,
+                    s.model,
+                    s.git_branch,
+                    s.version,
+                    s.tmux_session,
+                    s.last_user_message.as_deref().map(|m| {
+                        let trimmed: String = m.chars().take(80).collect();
+                        trimmed
+                    })
+                );
+            }
+        }
+        log::info!("=== end state dump ===");
     }
 }

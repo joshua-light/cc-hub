@@ -1,6 +1,6 @@
 [package]
 name = "cc-hub"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 
 [dependencies]
@@ -16,6 +16,9 @@ log = "0.4"
 simplelog = "0.12"
 notify = "8"
 notify-debouncer-mini = "0.6"
+tui-term = { version = "0.3", features = ["unstable"] }
+portable-pty = "0.9"
+vt100 = "0.16"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libproc = "0.14"

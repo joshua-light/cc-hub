@@ -16,13 +16,10 @@ pub trait Launcher: Send + Sync {
         has_binary(self.name())
     }
 
-    /// argv to pass so the emulator opens in `cwd` and runs `shell -ic cmd`.
-    fn argv(&self, cwd: &str, shell: &str, cmd: &str) -> Vec<String>;
-
     /// argv to pass so the emulator opens in `cwd` and exec's `cmd_argv`
-    /// directly, bypassing the user's shell. Use this when the command is
-    /// self-contained (e.g. `tmux attach -t NAME`) and you want to avoid
-    /// interference from a shell rc that auto-launches tmux/tools.
+    /// directly, bypassing the user's shell. Used for self-contained commands
+    /// (e.g. `tmux attach -t NAME`) to avoid interference from a shell rc
+    /// that auto-launches tmux/tools.
     fn argv_bare(&self, cwd: &str, cmd_argv: &[&str]) -> Vec<String>;
 }
 
@@ -34,12 +31,6 @@ pub struct Ghostty;
 
 impl Launcher for Kitty {
     fn name(&self) -> &'static str { "kitty" }
-    fn argv(&self, cwd: &str, shell: &str, cmd: &str) -> Vec<String> {
-        vec![
-            "--directory".into(), cwd.into(),
-            shell.into(), "-ic".into(), cmd.into(),
-        ]
-    }
     fn argv_bare(&self, cwd: &str, cmd_argv: &[&str]) -> Vec<String> {
         let mut v = vec!["--directory".into(), cwd.into()];
         v.extend(cmd_argv.iter().map(|s| s.to_string()));
@@ -49,12 +40,6 @@ impl Launcher for Kitty {
 
 impl Launcher for Alacritty {
     fn name(&self) -> &'static str { "alacritty" }
-    fn argv(&self, cwd: &str, shell: &str, cmd: &str) -> Vec<String> {
-        vec![
-            "--working-directory".into(), cwd.into(),
-            "-e".into(), shell.into(), "-ic".into(), cmd.into(),
-        ]
-    }
     fn argv_bare(&self, cwd: &str, cmd_argv: &[&str]) -> Vec<String> {
         let mut v = vec![
             "--working-directory".into(), cwd.into(),
@@ -67,12 +52,6 @@ impl Launcher for Alacritty {
 
 impl Launcher for Foot {
     fn name(&self) -> &'static str { "foot" }
-    fn argv(&self, cwd: &str, shell: &str, cmd: &str) -> Vec<String> {
-        vec![
-            format!("--working-directory={}", cwd),
-            shell.into(), "-ic".into(), cmd.into(),
-        ]
-    }
     fn argv_bare(&self, cwd: &str, cmd_argv: &[&str]) -> Vec<String> {
         let mut v = vec![format!("--working-directory={}", cwd)];
         v.extend(cmd_argv.iter().map(|s| s.to_string()));
@@ -82,12 +61,6 @@ impl Launcher for Foot {
 
 impl Launcher for Wezterm {
     fn name(&self) -> &'static str { "wezterm" }
-    fn argv(&self, cwd: &str, shell: &str, cmd: &str) -> Vec<String> {
-        vec![
-            "start".into(), "--cwd".into(), cwd.into(),
-            "--".into(), shell.into(), "-ic".into(), cmd.into(),
-        ]
-    }
     fn argv_bare(&self, cwd: &str, cmd_argv: &[&str]) -> Vec<String> {
         let mut v = vec![
             "start".into(), "--cwd".into(), cwd.into(),
@@ -100,14 +73,6 @@ impl Launcher for Wezterm {
 
 impl Launcher for Ghostty {
     fn name(&self) -> &'static str { "ghostty" }
-    fn argv(&self, cwd: &str, shell: &str, cmd: &str) -> Vec<String> {
-        // Ghostty's -e takes a single command string that it re-parses, so
-        // quote `cmd` to survive the extra shell split.
-        vec![
-            format!("--working-directory={}", cwd),
-            "-e".into(), format!("{} -ic {}", shell, shell_quote(cmd)),
-        ]
-    }
     fn argv_bare(&self, cwd: &str, cmd_argv: &[&str]) -> Vec<String> {
         // Ghostty's -e takes a single command string it re-parses, so quote
         // each argv entry to survive.

@@ -8,6 +8,7 @@ mod platform;
 mod scanner;
 mod send;
 mod spawn;
+mod tmux_pane;
 mod ui;
 mod usage;
 mod watcher;
@@ -177,9 +178,15 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
             }
         }
 
+        if app.view == View::TmuxPane
+            && app.tmux_pane.as_ref().is_some_and(|p| p.is_exited())
+        {
+            app.close_tmux_pane();
+        }
+
         terminal.draw(|frame| ui::render(frame, &mut app))?;
 
-        let poll_ms = 50;
+        let poll_ms = if app.view == View::TmuxPane { 16 } else { 50 };
 
         if event::poll(Duration::from_millis(poll_ms))? {
             if let Event::Key(key) = event::read()? {
@@ -233,19 +240,44 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                     }
                     (View::Grid, KeyCode::Char('f')) => {
                         if let Some(session) = app.selected_session_info().cloned() {
-                            match focus::focus_window(session.pid) {
-                                focus::FocusOutcome::Focused => {}
-                                focus::FocusOutcome::NeedsReattach(name) => {
-                                    let msg = match spawn::attach_tmux_session(&name, &session.cwd) {
-                                        Ok(_) => format!("reattached terminal to {}", name),
-                                        Err(e) => format!("reattach failed: {}", e),
-                                    };
-                                    app.set_status(msg);
+                            if let Some(tmux_name) = session.tmux_session.clone() {
+                                // Size: frame inner minus a generous margin. The
+                                // renderer re-resizes on first draw anyway, so a
+                                // rough starting size is fine.
+                                let (cols, rows) = terminal.size()
+                                    .map(|s| (s.width.saturating_sub(6).max(20), s.height.saturating_sub(6).max(10)))
+                                    .unwrap_or((120, 30));
+                                match tmux_pane::TmuxPaneView::spawn(&tmux_name, rows, cols) {
+                                    Ok(pane) => {
+                                        app.enter_tmux_pane(pane);
+                                    }
+                                    Err(e) => {
+                                        app.set_status(format!("tmux attach failed: {}", e));
+                                    }
                                 }
-                                focus::FocusOutcome::Failed(msg) => {
-                                    app.set_status(msg);
+                            } else {
+                                match focus::focus_window(session.pid) {
+                                    focus::FocusOutcome::Focused => {}
+                                    focus::FocusOutcome::NeedsReattach(name) => {
+                                        let msg = match spawn::attach_tmux_session(&name, &session.cwd) {
+                                            Ok(_) => format!("reattached terminal to {}", name),
+                                            Err(e) => format!("reattach failed: {}", e),
+                                        };
+                                        app.set_status(msg);
+                                    }
+                                    focus::FocusOutcome::Failed(msg) => {
+                                        app.set_status(msg);
+                                    }
                                 }
                             }
+                        }
+                    }
+                    (View::TmuxPane, KeyCode::F(1)) => {
+                        app.close_tmux_pane();
+                    }
+                    (View::TmuxPane, _) => {
+                        if let Some(pane) = app.tmux_pane.as_mut() {
+                            pane.send_key(key);
                         }
                     }
                     (View::Grid, KeyCode::Char('x')) => {
@@ -273,12 +305,9 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                     (View::Grid, KeyCode::Char(' ')) => {
                         app.ack_selected();
                     }
-                    // 'n' spawns a new ccyo session. Uses the selected session's cwd
-                    // and pid — the pid is used to place the new window on the same
-                    // Hyprland workspace.
                     (View::Grid, KeyCode::Char('n')) => {
                         if let Some(sess) = app.selected_session_info().cloned() {
-                            match spawn::spawn_claude_session(&sess.cwd, Some(sess.pid)) {
+                            match spawn::spawn_claude_session(&sess.cwd) {
                                 Ok(msg) => app.set_status(msg),
                                 Err(e) => app.set_status(format!("spawn failed: {}", e)),
                             }
@@ -366,6 +395,7 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
         }
 
         if app.should_quit {
+            app.log_state_dump();
             break;
         }
     }

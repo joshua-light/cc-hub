@@ -15,7 +15,7 @@
 
 use crate::platform::{process, window};
 use crate::send;
-use log::{debug, info, warn};
+use log::{info, warn};
 
 pub enum FocusOutcome {
     Focused,
@@ -77,29 +77,6 @@ pub fn close_window(pid: u32) -> bool {
         warn!("no window found to close for pid {} or any ancestor", pid);
     }
     ok
-}
-
-/// Workspace identifier for the window owning `pid` (opaque string understood
-/// by the detected WM). None when no WM knows about the pid or no WM supports
-/// workspaces.
-pub fn workspace_for_pid(pid: u32) -> Option<String> {
-    let pids = window_lookup_pids(pid);
-    window::current().workspace_for_pids(&pids)
-}
-
-/// PIDs to hand to `WindowManager::{focus, workspace_for_pids}`. Prefers
-/// tmux client pids (which live under the terminal window); falls back to
-/// the Claude pid's own ancestor chain for non-tmux sessions.
-fn window_lookup_pids(pid: u32) -> Vec<u32> {
-    if let Some(name) = send::tmux_session_for_pid(pid) {
-        let pids = tmux_client_chain(&name);
-        if !pids.is_empty() {
-            debug!("tmux client chain for {}: {:?}", name, pids);
-            return pids;
-        }
-        debug!("no tmux clients attached to {}, falling back", name);
-    }
-    process::collect_pid_chain(pid)
 }
 
 /// Attached-client pids for `name` plus each client's ancestor chain, which

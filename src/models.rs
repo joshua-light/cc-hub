@@ -61,6 +61,10 @@ pub struct SessionInfo {
     pub git_branch: Option<String>,
     pub version: Option<String>,
     pub jsonl_path: Option<PathBuf>,
+    /// Name of the tmux session hosting this Claude process, if any. None
+    /// means the session is not running under tmux (focus falls back to
+    /// walking the pid's own ancestor chain to find a window).
+    pub tmux_session: Option<String>,
 }
 
 impl SessionInfo {
