@@ -1,0 +1,18 @@
+[package]
+name = "cc-hub"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+hot-reload = ["dep:hot-lib-reloader", "cc-hub-lib/hot-reload"]
+
+[dependencies]
+cc-hub-lib = { path = "../lib" }
+ratatui.workspace = true
+crossterm.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+log.workspace = true
+simplelog.workspace = true
+hot-lib-reloader = { version = "0.7", optional = true }

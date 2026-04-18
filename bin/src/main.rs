@@ -1,20 +1,22 @@
-mod acks;
-mod app;
-mod conversation;
-mod focus;
-mod folder_picker;
-mod models;
-mod live_view;
-mod platform;
-mod scanner;
-mod send;
-mod spawn;
-mod tmux_pane;
-mod ui;
-mod usage;
-mod watcher;
+use cc_hub_lib::{
+    app, conversation, focus, live_view, models, platform, scanner, send, spawn, tmux_pane, ui,
+    usage, watcher,
+};
 
 use app::{App, View};
+
+#[cfg(feature = "hot-reload")]
+#[hot_lib_reloader::hot_module(dylib = "cc_hub_lib", lib_dir = "target/debug")]
+mod hot {
+    use cc_hub_lib::app;
+    use ratatui::Frame;
+    hot_functions_from_file!("lib/src/lib.rs");
+}
+
+#[cfg(not(feature = "hot-reload"))]
+mod hot {
+    pub use cc_hub_lib::render;
+}
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use log::LevelFilter;
@@ -185,7 +187,7 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
             app.close_tmux_pane();
         }
 
-        terminal.draw(|frame| ui::render(frame, &mut app))?;
+        terminal.draw(|frame| hot::render(frame, &mut app))?;
 
         let poll_ms = if app.view == View::TmuxPane { 16 } else { 50 };
 
