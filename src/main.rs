@@ -2,6 +2,7 @@ mod acks;
 mod app;
 mod conversation;
 mod focus;
+mod folder_picker;
 mod models;
 mod live_view;
 mod platform;
@@ -307,10 +308,51 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                     }
                     (View::Grid, KeyCode::Char('n')) => {
                         if let Some(sess) = app.selected_session_info().cloned() {
-                            match spawn::spawn_claude_session(&sess.cwd) {
-                                Ok(msg) => app.set_status(msg),
-                                Err(e) => app.set_status(format!("spawn failed: {}", e)),
-                            }
+                            let status = match spawn::spawn_claude_session(&sess.cwd) {
+                                Ok(name) => format!("started ccyo [{}]", name),
+                                Err(e) => format!("spawn failed: {}", e),
+                            };
+                            app.set_status(status);
+                        }
+                    }
+                    (View::Grid, KeyCode::Char('N')) => {
+                        app.enter_folder_picker();
+                    }
+                    (View::FolderPicker, KeyCode::Esc | KeyCode::Char('q')) => {
+                        app.close_folder_picker();
+                    }
+                    (View::FolderPicker, KeyCode::Down | KeyCode::Char('j')) => {
+                        if let Some(p) = app.folder_picker.as_mut() {
+                            p.move_down();
+                        }
+                    }
+                    (View::FolderPicker, KeyCode::Up | KeyCode::Char('k')) => {
+                        if let Some(p) = app.folder_picker.as_mut() {
+                            p.move_up();
+                        }
+                    }
+                    (View::FolderPicker, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) => {
+                        if let Some(p) = app.folder_picker.as_mut() {
+                            p.descend();
+                        }
+                    }
+                    (View::FolderPicker, KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h')) => {
+                        if let Some(p) = app.folder_picker.as_mut() {
+                            p.ascend();
+                        }
+                    }
+                    (View::FolderPicker, KeyCode::Char('s') | KeyCode::Char(' ')) => {
+                        let cwd = app
+                            .folder_picker
+                            .as_ref()
+                            .map(|p| p.current_dir.display().to_string());
+                        app.close_folder_picker();
+                        if let Some(cwd) = cwd {
+                            let status = match spawn::spawn_claude_session(&cwd) {
+                                Ok(name) => format!("started ccyo [{}]", name),
+                                Err(e) => format!("spawn failed: {}", e),
+                            };
+                            app.set_status(status);
                         }
                     }
                     (View::Grid, KeyCode::Char('p')) => {
@@ -326,29 +368,57 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                         app.prompt_buffer.push(c);
                     }
                     (View::PromptInput, KeyCode::Enter) => {
-                        let Some((pid, name, tmux)) = app.dispatch_target().cloned() else {
-                            log::info!("dispatch: no tmux-backed target available");
+                        let target = app.dispatch_target().cloned();
+                        if app.prompt_buffer.trim().is_empty() {
                             app.close_prompt_input();
-                            app.set_status("no idle tmux-backed agent".into());
-                            continue;
-                        };
-                        let prompt = app.submit_prompt_input();
-                        log::info!(
-                            "dispatch: target {} (PID {}) [{}] prompt_len={}",
-                            name, pid, tmux, prompt.len()
-                        );
-                        if prompt.is_empty() {
                             app.set_status("empty prompt — dispatch cancelled".into());
                             continue;
                         }
-                        let status = match send::send_prompt(&tmux, &prompt) {
-                            Ok(()) => format!("dispatched to {} (PID {}) [{}]", name, pid, tmux),
-                            Err(e) => {
-                                log::warn!("dispatch: send_prompt failed: {}", e);
-                                format!("dispatch failed: {}", e)
-                            }
+                        let prompt = app.submit_prompt_input();
+
+                        if let Some((pid, name, tmux)) = target {
+                            log::info!(
+                                "dispatch: idle target {} (PID {}) [{}] prompt_len={}",
+                                name, pid, tmux, prompt.len()
+                            );
+                            let status = match send::send_prompt(&tmux, &prompt) {
+                                Ok(()) => format!("dispatched to {} (PID {}) [{}]", name, pid, tmux),
+                                Err(e) => {
+                                    log::warn!("dispatch: send_prompt failed: {}", e);
+                                    format!("dispatch failed: {}", e)
+                                }
+                            };
+                            app.set_status(status);
+                            continue;
+                        }
+
+                        if app.has_pending_dispatch() {
+                            app.set_status(
+                                "dispatch already pending — wait for the new agent to come up".into(),
+                            );
+                            continue;
+                        }
+                        let Some(cwd) = app.default_spawn_cwd() else {
+                            app.set_status("no idle agent and no cwd to spawn in".into());
+                            continue;
                         };
-                        app.set_status(status);
+                        match spawn::spawn_claude_session(&cwd) {
+                            Ok(tmux_name) => {
+                                log::info!(
+                                    "dispatch: no idle agent, spawned [{}] in {} — queueing prompt (len={})",
+                                    tmux_name, cwd, prompt.len()
+                                );
+                                app.queue_pending_dispatch(tmux_name.clone(), prompt);
+                                app.set_status(format!(
+                                    "no idle agent — spawned [{}], prompt queued",
+                                    tmux_name
+                                ));
+                            }
+                            Err(e) => {
+                                log::warn!("dispatch: auto-spawn failed: {}", e);
+                                app.set_status(format!("auto-spawn failed: {}", e));
+                            }
+                        }
                     }
                     // Popup navigation
                     (View::Popup, KeyCode::Esc | KeyCode::Char('q')) => app.close_popup(),
@@ -392,6 +462,33 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                     app.update_usage(u, line);
                 }
             }
+        }
+
+        // If a prompt was queued for an auto-spawned session, send it once the
+        // session reports Idle in the latest scan.
+        match app.poll_pending_dispatch() {
+            app::DispatchAction::Send { tmux, prompt } => {
+                log::info!(
+                    "dispatch: pending target [{}] now idle, sending (len={})",
+                    tmux, prompt.len()
+                );
+                let status = match send::send_prompt(&tmux, &prompt) {
+                    Ok(()) => format!("dispatched queued prompt to [{}]", tmux),
+                    Err(e) => {
+                        log::warn!("dispatch: queued send_prompt failed: {}", e);
+                        format!("queued dispatch failed: {}", e)
+                    }
+                };
+                app.set_status(status);
+            }
+            app::DispatchAction::Timeout { tmux } => {
+                log::warn!("dispatch: pending target [{}] never became idle", tmux);
+                app.set_status(format!(
+                    "queued dispatch timed out — [{}] never became idle",
+                    tmux
+                ));
+            }
+            app::DispatchAction::Wait => {}
         }
 
         if app.should_quit {

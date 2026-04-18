@@ -1,11 +1,13 @@
 use crate::acks::Acks;
 use crate::conversation::StateExplanation;
+use crate::folder_picker::FolderPicker;
 use crate::live_view::LiveView;
 use crate::models::{ProjectGroup, SessionDetail, SessionInfo, SessionState};
 use crate::tmux_pane::TmuxPaneView;
 use crate::usage::UsageInfo;
 use ratatui::text::Line;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 pub const STATUS_MSG_TTL: Duration = Duration::from_secs(5);
@@ -19,12 +21,32 @@ pub enum View {
     StateDebug,
     PromptInput,
     TmuxPane,
+    FolderPicker,
 }
 
 #[derive(Clone, Debug)]
 pub struct PendingClose {
     pub pid: u32,
     pub display: String,
+}
+
+/// A prompt queued for a freshly-spawned tmux session that isn't yet Idle.
+/// Drained by [`App::poll_pending_dispatch`] once the session shows up in the
+/// next scan and its state flips to Idle, or times out after
+/// [`PENDING_DISPATCH_TIMEOUT`].
+#[derive(Clone, Debug)]
+pub struct PendingDispatch {
+    tmux: String,
+    prompt: String,
+    queued_at: Instant,
+}
+
+pub const PENDING_DISPATCH_TIMEOUT: Duration = Duration::from_secs(60);
+
+pub enum DispatchAction {
+    Send { tmux: String, prompt: String },
+    Timeout { tmux: String },
+    Wait,
 }
 
 pub struct App {
@@ -51,6 +73,11 @@ pub struct App {
     pub prompt_buffer: String,
     pub dispatch_target: Option<(u32, String, String)>,
     pub tmux_pane: Option<TmuxPaneView>,
+    pub folder_picker: Option<FolderPicker>,
+    pub pending_dispatch: Option<PendingDispatch>,
+    /// Session ids seen on the previous scan tick. `None` means the first
+    /// scan hasn't happened yet — used to skip cursor-jump on initial load.
+    known_session_ids: Option<HashSet<String>>,
 }
 
 impl App {
@@ -79,7 +106,33 @@ impl App {
             prompt_buffer: String::new(),
             dispatch_target: None,
             tmux_pane: None,
+            folder_picker: None,
+            pending_dispatch: None,
+            known_session_ids: None,
         }
+    }
+
+    pub fn enter_folder_picker(&mut self) {
+        let start = self
+            .selected_session_info()
+            .map(|s| PathBuf::from(&s.cwd))
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        self.folder_picker = Some(FolderPicker::new(start));
+        self.view = View::FolderPicker;
+    }
+
+    /// Best-guess cwd to spawn a new agent in: the selected session's cwd, or
+    /// the user's home directory.
+    pub fn default_spawn_cwd(&self) -> Option<String> {
+        self.selected_session_info()
+            .map(|s| s.cwd.clone())
+            .or_else(|| dirs::home_dir().map(|p| p.display().to_string()))
+    }
+
+    pub fn close_folder_picker(&mut self) {
+        self.folder_picker = None;
+        self.view = View::Grid;
     }
 
     pub fn enter_tmux_pane(&mut self, view: TmuxPaneView) {
@@ -113,6 +166,40 @@ impl App {
         self.dispatch_target.as_ref()
     }
 
+    pub fn queue_pending_dispatch(&mut self, tmux: String, prompt: String) {
+        self.pending_dispatch = Some(PendingDispatch {
+            tmux,
+            prompt,
+            queued_at: Instant::now(),
+        });
+    }
+
+    pub fn has_pending_dispatch(&self) -> bool {
+        self.pending_dispatch.is_some()
+    }
+
+    /// If a pending dispatch exists and the target session now reports Idle,
+    /// consume it and return [`DispatchAction::Send`]. If the deadline has
+    /// passed, return [`DispatchAction::Timeout`]. Otherwise, put it back and
+    /// wait.
+    pub fn poll_pending_dispatch(&mut self) -> DispatchAction {
+        let Some(pd) = self.pending_dispatch.take() else {
+            return DispatchAction::Wait;
+        };
+        let ready = self.groups.iter().flat_map(|g| &g.sessions).any(|s| {
+            s.tmux_session.as_deref() == Some(pd.tmux.as_str())
+                && s.state == SessionState::Idle
+        });
+        if ready {
+            return DispatchAction::Send { tmux: pd.tmux, prompt: pd.prompt };
+        }
+        if pd.queued_at.elapsed() > PENDING_DISPATCH_TIMEOUT {
+            return DispatchAction::Timeout { tmux: pd.tmux };
+        }
+        self.pending_dispatch = Some(pd);
+        DispatchAction::Wait
+    }
+
     fn compute_dispatch_target(
         groups: &[crate::models::ProjectGroup],
     ) -> Option<(u32, String, String)> {
@@ -120,7 +207,7 @@ impl App {
         groups
             .iter()
             .flat_map(|g| &g.sessions)
-            .filter(|s| s.state != SessionState::Processing)
+            .filter(|s| s.state == SessionState::Idle)
             .filter_map(|s| {
                 let tmux = crate::send::tmux_session_for_pid_in(s.pid, &panes)?;
                 Some((s, tmux))
@@ -377,6 +464,30 @@ impl App {
         }
 
         self.last_refresh = Instant::now();
+
+        let current_ids: HashSet<String> = self
+            .groups
+            .iter()
+            .flat_map(|g| g.sessions.iter().map(|s| s.session_id.clone()))
+            .collect();
+        // First tick seeds known ids without hijacking the cursor; later ticks
+        // jump selection to a freshly-appeared session so it gets focus.
+        let new_selection = self.known_session_ids.as_ref().and_then(|known| {
+            self.groups.iter().enumerate().find_map(|(gi, group)| {
+                group
+                    .sessions
+                    .iter()
+                    .position(|s| !known.contains(&s.session_id))
+                    .map(|si| (gi, si))
+            })
+        });
+        self.known_session_ids = Some(current_ids);
+
+        if let Some((gi, si)) = new_selection {
+            self.sel_group = gi;
+            self.sel_in_group = si;
+            return;
+        }
 
         // Restore selection by session id
         if let Some(id) = prev_id {

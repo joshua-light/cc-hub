@@ -42,27 +42,96 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         View::StateDebug => render_state_debug(frame, frame.area(), app),
         View::PromptInput => render_prompt_input(frame, frame.area(), app),
         View::TmuxPane => render_tmux_pane(frame, frame.area(), app),
+        View::FolderPicker => render_folder_picker(frame, frame.area(), app),
         View::Grid => {}
     }
 }
 
-fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
-    let w = 80.min(area.width);
-    let h = 9.min(area.height);
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let popup = Rect::new(x, y, w, h);
+fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(picker) = app.folder_picker.as_ref() else {
+        return;
+    };
 
+    let popup = centered_fixed(area, 80, 24);
+    frame.render_widget(Clear, popup);
+
+    let block = popup_block(Span::styled(
+        " New session · pick folder ",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .title_bottom(Span::styled(
+        " enter: descend · bksp: parent · s: start here · esc: cancel ",
+        Style::default().fg(Color::Rgb(110, 110, 130)),
+    ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if inner.height < 3 {
+        return;
+    }
+
+    let path_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    let path_str = picker.current_dir.display().to_string();
+    let path_line = Line::from(vec![
+        Span::styled(" 󰉋 ", Style::default().fg(Color::Cyan)),
+        Span::styled(
+            path_str,
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(path_line), path_area);
+
+    let list_h = inner.height - 2;
+    let list_area = Rect::new(inner.x, inner.y + 2, inner.width, list_h);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if picker.entries.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (no subdirectories)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        let visible = list_h as usize;
+        let start = picker
+            .selection
+            .saturating_sub(visible.saturating_sub(1));
+        for (i, name) in picker.entries.iter().enumerate().skip(start).take(visible) {
+            let selected = i == picker.selection;
+            let (marker, style) = if selected {
+                (
+                    "▶ ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                ("  ", Style::default().fg(Color::Rgb(200, 200, 210)))
+            };
+            lines.push(Line::from(vec![
+                Span::styled(marker, style),
+                Span::styled(format!("{}/", name), style),
+            ]));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines), list_area);
+}
+
+fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
+    let popup = centered_fixed(area, 80, 9);
     frame.render_widget(Clear, popup);
 
     let target = app.dispatch_target();
     let target_label = target
         .map(|(pid, name, tmux)| format!(" → {} (PID {}) [{}] ", name, pid, tmux))
-        .unwrap_or_else(|| " → no idle tmux agent ".to_string());
+        .unwrap_or_else(|| " → no idle agent — will spawn a new one ".to_string());
     let title_color = if target.is_some() {
         Color::Green
     } else {
-        Color::Red
+        Color::Yellow
     };
 
     let block = popup_block(Span::styled(
@@ -158,12 +227,7 @@ fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
         return;
     };
 
-    let w = 64.min(area.width);
-    let h = 7.min(area.height);
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let popup = Rect::new(x, y, w, h);
-
+    let popup = centered_fixed(area, 64, 7);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -572,6 +636,14 @@ fn popup_block<'a>(title: impl Into<ratatui::text::Line<'a>>) -> Block<'a> {
 fn centered_rect(area: Rect, ratio: f32) -> Rect {
     let w = (area.width as f32 * ratio) as u16;
     let h = (area.height as f32 * ratio) as u16;
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    Rect::new(x, y, w, h)
+}
+
+fn centered_fixed(area: Rect, w: u16, h: u16) -> Rect {
+    let w = w.min(area.width);
+    let h = h.min(area.height);
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     Rect::new(x, y, w, h)
@@ -1252,13 +1324,14 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         ));
     } else {
         let keybinds = match app.view {
-            View::Grid => "h/j/k/l:nav  enter:attach  n:new  i:info  D:why?  f:focus  x:close  q:quit",
+            View::Grid => "h/j/k/l:nav  enter:attach  n:new  N:new in…  i:info  D:why?  f:focus  x:close  q:quit",
             View::Popup => "j/k:scroll  esc:close  q:close",
             View::LiveTail => "j/k:scroll  G:bottom  esc:close",
             View::ConfirmClose => "y:close  n/esc:cancel",
             View::StateDebug => "j/k:scroll  esc:close  q:close",
             View::PromptInput => "type prompt  enter:dispatch  esc:cancel",
             View::TmuxPane => "forwarding keys to tmux · F1: detach & close",
+            View::FolderPicker => "j/k:move  enter:descend  bksp:parent  s:start here  esc:cancel",
         };
         spans.push(Span::styled(
             format!(" {} ", keybinds),

@@ -10,13 +10,12 @@ use std::io;
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Spawn a new Claude session for `cwd`.
+/// Spawn a new Claude session for `cwd`, returning the tmux session name.
 pub fn spawn_claude_session(cwd: &str) -> io::Result<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
     let name = unique_session_name();
-
     create_detached_tmux_session(&name, cwd, &shell)?;
-    Ok(format!("started ccyo [{}]", name))
+    Ok(name)
 }
 
 /// Open a new terminal window that attaches to an existing detached tmux
