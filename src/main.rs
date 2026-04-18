@@ -6,9 +6,11 @@ mod models;
 mod live_view;
 mod platform;
 mod scanner;
+mod send;
 mod spawn;
 mod ui;
 mod usage;
+mod watcher;
 
 use app::{App, View};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -110,14 +112,29 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
         }
     });
 
-    // Scanner task — interval fires immediately on first tick, so no separate initial scan needed
+    // Fallback timer catches PID deaths (not a filesystem event) and events
+    // missed when a watched dir is rotated or recreated. Its initial tick
+    // fires immediately, serving as the startup scan.
+    let (fs_tx, mut fs_rx) = mpsc::channel::<()>(8);
+    watcher::spawn_fs_watcher(fs_tx);
+
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(250));
+        let mut fallback = tokio::time::interval(Duration::from_secs(2));
+        fallback.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut latest_sessions: Vec<models::SessionInfo> = Vec::new();
 
         loop {
             tokio::select! {
-                _ = interval.tick() => {
+                _ = fallback.tick() => {
+                    let sessions = tokio::task::spawn_blocking(scanner::scan_sessions)
+                        .await
+                        .unwrap_or_default();
+                    latest_sessions = sessions.clone();
+                    let _ = scan_tx.send(ScanMsg::SessionList(sessions)).await;
+                }
+                Some(()) = fs_rx.recv() => {
+                    // Drain coalesced signals — one scan per burst is enough.
+                    while fs_rx.try_recv().is_ok() {}
                     let sessions = tokio::task::spawn_blocking(scanner::scan_sessions)
                         .await
                         .unwrap_or_default();
@@ -215,8 +232,20 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                         app.debug_scroll_up();
                     }
                     (View::Grid, KeyCode::Char('f')) => {
-                        if let Some(session) = app.selected_session_info() {
-                            focus::focus_window(session.pid);
+                        if let Some(session) = app.selected_session_info().cloned() {
+                            match focus::focus_window(session.pid) {
+                                focus::FocusOutcome::Focused => {}
+                                focus::FocusOutcome::NeedsReattach(name) => {
+                                    let msg = match spawn::attach_tmux_session(&name, &session.cwd) {
+                                        Ok(_) => format!("reattached terminal to {}", name),
+                                        Err(e) => format!("reattach failed: {}", e),
+                                    };
+                                    app.set_status(msg);
+                                }
+                                focus::FocusOutcome::Failed(msg) => {
+                                    app.set_status(msg);
+                                }
+                            }
                         }
                     }
                     (View::Grid, KeyCode::Char('x')) => {
@@ -254,6 +283,43 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                                 Err(e) => app.set_status(format!("spawn failed: {}", e)),
                             }
                         }
+                    }
+                    (View::Grid, KeyCode::Char('p')) => {
+                        app.enter_prompt_input();
+                    }
+                    (View::PromptInput, KeyCode::Esc) => {
+                        app.close_prompt_input();
+                    }
+                    (View::PromptInput, KeyCode::Backspace) => {
+                        app.prompt_buffer.pop();
+                    }
+                    (View::PromptInput, KeyCode::Char(c)) => {
+                        app.prompt_buffer.push(c);
+                    }
+                    (View::PromptInput, KeyCode::Enter) => {
+                        let Some((pid, name, tmux)) = app.dispatch_target().cloned() else {
+                            log::info!("dispatch: no tmux-backed target available");
+                            app.close_prompt_input();
+                            app.set_status("no idle tmux-backed agent".into());
+                            continue;
+                        };
+                        let prompt = app.submit_prompt_input();
+                        log::info!(
+                            "dispatch: target {} (PID {}) [{}] prompt_len={}",
+                            name, pid, tmux, prompt.len()
+                        );
+                        if prompt.is_empty() {
+                            app.set_status("empty prompt — dispatch cancelled".into());
+                            continue;
+                        }
+                        let status = match send::send_prompt(&tmux, &prompt) {
+                            Ok(()) => format!("dispatched to {} (PID {}) [{}]", name, pid, tmux),
+                            Err(e) => {
+                                log::warn!("dispatch: send_prompt failed: {}", e);
+                                format!("dispatch failed: {}", e)
+                            }
+                        };
+                        app.set_status(status);
                     }
                     // Popup navigation
                     (View::Popup, KeyCode::Esc | KeyCode::Char('q')) => app.close_popup(),

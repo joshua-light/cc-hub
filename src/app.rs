@@ -16,6 +16,7 @@ pub enum View {
     LiveTail,
     ConfirmClose,
     StateDebug,
+    PromptInput,
 }
 
 #[derive(Clone, Debug)]
@@ -45,6 +46,8 @@ pub struct App {
     pub state_debug_scroll: u16,
     pub usage: Option<UsageInfo>,
     pub usage_line: Line<'static>,
+    pub prompt_buffer: String,
+    pub dispatch_target: Option<(u32, String, String)>,
 }
 
 impl App {
@@ -70,7 +73,46 @@ impl App {
             state_debug_scroll: 0,
             usage: None,
             usage_line: Line::default(),
+            prompt_buffer: String::new(),
+            dispatch_target: None,
         }
+    }
+
+    pub fn enter_prompt_input(&mut self) {
+        self.prompt_buffer.clear();
+        self.dispatch_target = Self::compute_dispatch_target(&self.groups);
+        self.view = View::PromptInput;
+    }
+
+    pub fn close_prompt_input(&mut self) {
+        self.prompt_buffer.clear();
+        self.dispatch_target = None;
+        self.view = View::Grid;
+    }
+
+    pub fn submit_prompt_input(&mut self) -> String {
+        self.view = View::Grid;
+        std::mem::take(&mut self.prompt_buffer)
+    }
+
+    pub fn dispatch_target(&self) -> Option<&(u32, String, String)> {
+        self.dispatch_target.as_ref()
+    }
+
+    fn compute_dispatch_target(
+        groups: &[crate::models::ProjectGroup],
+    ) -> Option<(u32, String, String)> {
+        let panes = crate::send::tmux_panes();
+        groups
+            .iter()
+            .flat_map(|g| &g.sessions)
+            .filter(|s| s.state != SessionState::Processing)
+            .filter_map(|s| {
+                let tmux = crate::send::tmux_session_for_pid_in(s.pid, &panes)?;
+                Some((s, tmux))
+            })
+            .max_by_key(|(s, _)| s.last_activity.unwrap_or(s.started_at))
+            .map(|(s, tmux)| (s.pid, s.project_name.clone(), tmux))
     }
 
     pub fn update_usage(&mut self, usage: UsageInfo, rendered: Line<'static>) {
@@ -315,6 +357,10 @@ impl App {
 
         // Sort groups alphabetically by name for stable ordering.
         self.groups.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+        if self.view == View::PromptInput {
+            self.dispatch_target = Self::compute_dispatch_target(&self.groups);
+        }
 
         self.last_refresh = Instant::now();
 

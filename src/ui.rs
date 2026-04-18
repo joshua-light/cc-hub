@@ -40,8 +40,77 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         View::LiveTail => render_live_tail(frame, frame.area(), app),
         View::ConfirmClose => render_confirm_close(frame, frame.area(), app),
         View::StateDebug => render_state_debug(frame, frame.area(), app),
+        View::PromptInput => render_prompt_input(frame, frame.area(), app),
         View::Grid => {}
     }
+}
+
+fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
+    let w = 80.min(area.width);
+    let h = 9.min(area.height);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let popup = Rect::new(x, y, w, h);
+
+    frame.render_widget(Clear, popup);
+
+    let target = app.dispatch_target();
+    let target_label = target
+        .map(|(pid, name, tmux)| format!(" → {} (PID {}) [{}] ", name, pid, tmux))
+        .unwrap_or_else(|| " → no idle tmux agent ".to_string());
+    let title_color = if target.is_some() {
+        Color::Green
+    } else {
+        Color::Red
+    };
+
+    let block = popup_block(Span::styled(
+        " Dispatch prompt ",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .title_bottom(Span::styled(
+        target_label,
+        Style::default().fg(title_color).add_modifier(Modifier::BOLD),
+    ));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let mut input_line = app.prompt_buffer.clone();
+    input_line.push('▎');
+
+    let lines = vec![
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                input_line,
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::raw(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                "[enter]",
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" dispatch   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "[esc]",
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
@@ -99,7 +168,7 @@ fn render_title_bar(frame: &mut Frame, area: Rect, app: &App) {
 
     let mut left_spans = vec![
         Span::styled(
-            " 󱃾 cc-hub ",
+            " 󰚩 cc-hub ",
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
@@ -1148,6 +1217,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             View::LiveTail => "j/k:scroll  G:bottom  esc:close",
             View::ConfirmClose => "y:close  n/esc:cancel",
             View::StateDebug => "j/k:scroll  esc:close  q:close",
+            View::PromptInput => "type prompt  enter:dispatch  esc:cancel",
         };
         spans.push(Span::styled(
             format!(" {} ", keybinds),

@@ -6,6 +6,40 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
 
+/// Read the tail of a JSONL session log, expanding the window until it
+/// contains enough context to classify session state — i.e. at least one
+/// `assistant` entry — or the whole file has been read (up to a sane cap).
+///
+/// The 64 KiB fixed tail misbehaves when parallel tool-uses generate many
+/// large `tool_result` entries: the spawning assistant `tool_use` entries
+/// scroll out of view, leaving `extract_state` with no meaningful user/
+/// assistant entry to judge from.
+pub fn read_jsonl_tail_for_state(path: &Path) -> Vec<Value> {
+    const INITIAL: u64 = 64 * 1024;
+    const MAX: u64 = 4 * 1024 * 1024;
+
+    let total_len = match std::fs::metadata(path) {
+        Ok(m) => m.len(),
+        Err(_) => return Vec::new(),
+    };
+
+    let mut window = INITIAL;
+    loop {
+        let entries = read_jsonl_tail(path, window);
+        let has_assistant = entries
+            .iter()
+            .any(|e| e.get("type").and_then(|t| t.as_str()) == Some("assistant"));
+        if has_assistant || window >= total_len || window >= MAX {
+            debug!(
+                "read_jsonl_tail_for_state: window={}B entries={} has_assistant={} total={}B",
+                window, entries.len(), has_assistant, total_len
+            );
+            return entries;
+        }
+        window = window.saturating_mul(2);
+    }
+}
+
 pub fn read_jsonl_tail(path: &Path, max_bytes: u64) -> Vec<Value> {
     let mut file = match File::open(path) {
         Ok(f) => f,
@@ -218,6 +252,39 @@ fn interrupted_tool_use(entries: &[Value]) -> bool {
         .any(|(idx, id)| *idx < lp_idx && !results.contains(id))
 }
 
+/// Returns true if any assistant `tool_use` in the visible tail has no
+/// matching `tool_result` — a signal that at least one tool (e.g. a sibling
+/// Agent in a parallel launch) is still in flight, even if the most recent
+/// entry is a completed peer's `tool_result`.
+fn has_unresolved_tool_use(entries: &[Value]) -> bool {
+    let mut unresolved: HashSet<&str> = HashSet::new();
+    let mut results: HashSet<&str> = HashSet::new();
+    for entry in entries {
+        let t = entry.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let arr = match entry
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        {
+            Some(a) => a,
+            None => continue,
+        };
+        for block in arr {
+            let bt = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            if t == "assistant" && bt == "tool_use" {
+                if let Some(id) = block.get("id").and_then(|v| v.as_str()) {
+                    unresolved.insert(id);
+                }
+            } else if t == "user" && bt == "tool_result" {
+                if let Some(id) = block.get("tool_use_id").and_then(|v| v.as_str()) {
+                    results.insert(id);
+                }
+            }
+        }
+    }
+    unresolved.iter().any(|id| !results.contains(id))
+}
+
 /// Returns true if the last non-metadata entry is a user `tool_result`
 /// (meaning the agent's tool just finished and the next assistant response
 /// hasn't been written yet).
@@ -265,10 +332,14 @@ pub fn extract_state(entries: &[Value], mtime_age_secs: Option<u64>) -> SessionS
     // 2. Trailing tool_result with stale mtime → agent finished a tool but
     //    hasn't written its next response. If the file's been idle for more
     //    than the threshold, it's almost certainly blocked on the next tool's
-    //    permission prompt (not yet serialized to JSONL).
+    //    permission prompt (not yet serialized to JSONL). Skip this if any
+    //    sibling `tool_use` is still unresolved — with parallel agents, a
+    //    finished peer's `tool_result` can be last while others are still
+    //    running silently.
     const STALE_TOOL_RESULT_SECS: u64 = 30;
     if last_entry_is_tool_result(entries)
         && mtime_age_secs.is_some_and(|age| age >= STALE_TOOL_RESULT_SECS)
+        && !has_unresolved_tool_use(entries)
     {
         debug!(
             "extract_state: stale tool_result (mtime age {:?}s) → WaitingForInput",
@@ -536,6 +607,7 @@ fn explain_stale_tool_result(
     const STALE: u64 = 30;
     let last_is_tr = last_entry_is_tool_result(entries);
     let mtime_stale = mtime_age_secs.is_some_and(|age| age >= STALE);
+    let siblings_in_flight = has_unresolved_tool_use(entries);
 
     let details = vec![
         format!("last meaningful entry is user tool_result-only: {}", last_is_tr),
@@ -544,11 +616,12 @@ fn explain_stale_tool_result(
             mtime_age_secs.map_or("unknown".to_string(), |s| format!("{}s", s)),
             STALE
         ),
+        format!("unresolved sibling tool_use in tail: {}", siblings_in_flight),
     ];
 
-    if last_is_tr && mtime_stale {
+    if last_is_tr && mtime_stale && !siblings_in_flight {
         let mut details = details;
-        details.push("both conditions met → likely blocked on permission prompt → WaitingForInput".into());
+        details.push("conditions met → likely blocked on permission prompt → WaitingForInput".into());
         ExplanationStep {
             name: "stale_tool_result + mtime",
             verdict: Verdict::Decided(SessionState::WaitingForInput),
@@ -1086,6 +1159,115 @@ mod tests {
             int_step.details.iter().any(|d| d.contains("agent_c")),
             "explanation should name the dangling tool_use that triggered the verdict"
         );
+    }
+
+    #[test]
+    fn stale_tool_result_skipped_when_sibling_tool_use_unresolved() {
+        // Parallel agents: 3 Agent tool_uses launched, only 1 has returned.
+        // Last entry is a tool_result and mtime is stale, but siblings are
+        // still in flight — the stale_tool_result rule should not fire, and
+        // the session should resolve to Processing (via mtime upgrade or
+        // last_meaningful_entry).
+        let entries = vec![
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "id": "agent_a", "name": "Agent", "input": {}}]}
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "id": "agent_b", "name": "Agent", "input": {}}]}
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "id": "agent_c", "name": "Agent", "input": {}}]}
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": {"role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "agent_a"}]}
+            }),
+        ];
+
+        // mtime_age >= 30s would previously trigger WaitingForInput.
+        let state = extract_state(&entries, Some(60));
+        assert_ne!(
+            state,
+            SessionState::WaitingForInput,
+            "should not flip to WaitingForInput while sibling tool_uses are unresolved"
+        );
+
+        let exp = explain_state(&entries, Some(60));
+        let stale_step = exp
+            .steps
+            .iter()
+            .find(|s| s.name == "stale_tool_result + mtime")
+            .expect("stale_tool_result step present");
+        assert_eq!(stale_step.verdict, Verdict::Skipped);
+        assert!(
+            stale_step
+                .details
+                .iter()
+                .any(|d| d.contains("unresolved sibling tool_use in tail: true")),
+            "explanation should call out the unresolved siblings"
+        );
+    }
+
+    #[test]
+    fn read_jsonl_tail_for_state_expands_past_64k_of_tool_results() {
+        use std::io::Write;
+        let tmp = std::env::temp_dir().join(format!(
+            "cc_hub_expand_test_{}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&tmp);
+
+        let mut f = std::fs::File::create(&tmp).expect("create tmp");
+        // Assistant launches 2 parallel agents at the top of the file.
+        writeln!(
+            f,
+            r#"{{"type":"assistant","message":{{"role":"assistant","stop_reason":"tool_use","content":[{{"type":"tool_use","id":"agent_a","name":"Agent","input":{{}}}},{{"type":"tool_use","id":"agent_b","name":"Agent","input":{{}}}}]}}}}"#
+        ).unwrap();
+        // Pad with ~120 KiB of fat tool_result entries so the spawning
+        // assistant entry falls outside a single 64 KiB tail window.
+        let fat_payload: String = "x".repeat(2000);
+        for i in 0..60 {
+            writeln!(
+                f,
+                r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"pad{}","content":"{}"}}]}}}}"#,
+                i, fat_payload
+            )
+            .unwrap();
+        }
+        // Final tool_result is one of the sibling agents finishing.
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"agent_a"}}]}}}}"#
+        ).unwrap();
+        drop(f);
+
+        // Fixed 64 KiB tail would miss the assistant entry entirely.
+        let fixed = read_jsonl_tail(&tmp, 65536);
+        assert!(
+            !fixed.iter().any(|e| e.get("type").and_then(|t| t.as_str()) == Some("assistant")),
+            "precondition: fixed 64 KiB tail must not contain the spawning assistant entry"
+        );
+
+        // Expanding reader should pull it in.
+        let expanded = read_jsonl_tail_for_state(&tmp);
+        assert!(
+            expanded.iter().any(|e| e.get("type").and_then(|t| t.as_str()) == Some("assistant")),
+            "expanding reader should surface the assistant entry"
+        );
+
+        // And the state resolves to Processing (unresolved agent_b tool_use
+        // means siblings are still in flight).
+        let state = extract_state(&expanded, Some(60));
+        assert_ne!(state, SessionState::WaitingForInput);
+
+        let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]

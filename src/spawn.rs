@@ -1,16 +1,18 @@
-//! Spawn a new `ccyo` session in a fresh terminal window (or tmux window).
+//! Spawn a new `ccyo` session backed by a detached tmux session.
 //!
 //! Strategy:
-//! - In tmux: open a sibling `new-window`, no terminal spawn.
-//! - Otherwise: pick a [`terminal::Launcher`] via
-//!   [`crate::platform::terminal::pick`] and hand the spawn to the detected
-//!   [`window::WindowManager`] for workspace placement; fall back to a direct
-//!   `Command::spawn` when no WM can place it.
+//! 1. Create a detached tmux session running `ccyo` (the agent lives there).
+//! 2. Open a terminal window that `tmux attach`-es to it (the user's UI).
+//!
+//! The detachment matters: it lets the hub inject prompts via
+//! `tmux send-keys` without stealing focus, and the agent survives an
+//! accidentally-closed terminal.
 
 use crate::platform::{paths, terminal, window};
 use log::{error, info};
 use std::io;
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Spawn a new Claude session for `cwd`.
 ///
@@ -19,53 +21,91 @@ use std::process::{Command, Stdio};
 /// window lands there without pulling focus from cc-hub.
 pub fn spawn_claude_session(cwd: &str, pid_hint: Option<u32>) -> io::Result<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+    let name = unique_session_name();
 
-    if std::env::var("TMUX").is_ok() {
-        spawn_tmux_window(cwd, &shell)
-    } else {
-        let workspace = pid_hint.and_then(crate::focus::workspace_for_pid);
-        spawn_terminal(cwd, &shell, workspace.as_deref())
+    create_detached_tmux_session(&name, cwd, &shell)?;
+
+    let workspace = pid_hint.and_then(crate::focus::workspace_for_pid);
+    match spawn_terminal_attaching(&name, cwd, &shell, workspace.as_deref()) {
+        Ok(status) => Ok(format!("{} [{}]", status, name)),
+        Err(e) => {
+            // Best-effort cleanup so we don't leak the detached session.
+            let _ = Command::new("tmux")
+                .args(["kill-session", "-t", &name])
+                .status();
+            Err(e)
+        }
     }
 }
 
-fn spawn_tmux_window(cwd: &str, shell: &str) -> io::Result<String> {
+/// Open a new terminal window that attaches to an existing detached tmux
+/// session. Used to recover a session whose terminal was closed — the agent
+/// kept running headlessly, this brings it back into view.
+///
+/// Unlike the `ccyo`-spawn path, this execs `tmux attach` directly as the
+/// terminal's child (no intervening shell). A user shell rc that auto-starts
+/// tmux on every interactive shell would otherwise hijack `zsh -ic 'tmux
+/// attach …'` and never run the attach.
+pub fn attach_tmux_session(tmux_name: &str, cwd: &str) -> io::Result<String> {
+    let launcher = terminal::pick().ok_or_else(|| {
+        io::Error::other("no terminal emulator found (set $TERMINAL or install kitty/foot/alacritty)")
+    })?;
+    let argv = launcher.argv_bare(cwd, &["tmux", "attach", "-t", tmux_name]);
+    let bin = paths::terminal_wrapper_script(launcher.name())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| launcher.name().to_string());
+
+    info!("attach: {} {}", bin, argv.join(" "));
+    Command::new(&bin)
+        .args(&argv)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(format!("reattached {} in {}", tmux_name, launcher.name()))
+}
+
+fn unique_session_name() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("cchub-{}-{}", std::process::id(), nanos)
+}
+
+fn create_detached_tmux_session(name: &str, cwd: &str, shell: &str) -> io::Result<()> {
     let shell_cmd = format!("{} -ic ccyo", shell);
-    let args = [
-        "new-window",
-        "-c",
-        cwd,
-        "-n",
-        "claude",
-        "-P",
-        "-F",
-        "#{session_name}:#{window_index}",
-        &shell_cmd,
-    ];
+    let args = ["new-session", "-d", "-s", name, "-c", cwd, &shell_cmd];
     info!("spawn: tmux {}", args.join(" "));
 
     let output = Command::new("tmux").args(args).output()?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    info!(
-        "spawn: new-window status={} stdout={:?} stderr={:?}",
-        output.status, stdout, stderr
-    );
     if !output.status.success() {
-        error!("spawn: new-window failed: {}", stderr);
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        error!("spawn: new-session failed: {}", stderr);
         return Err(io::Error::other(format!(
-            "tmux new-window failed: {}",
-            if stderr.is_empty() { output.status.to_string() } else { stderr }
+            "tmux new-session failed: {}",
+            if stderr.is_empty() {
+                output.status.to_string()
+            } else {
+                stderr
+            }
         )));
     }
-    Ok(format!("spawned ccyo in tmux window {}", stdout))
+    Ok(())
 }
 
-fn spawn_terminal(cwd: &str, shell: &str, workspace: Option<&str>) -> io::Result<String> {
+fn spawn_terminal_attaching(
+    tmux_name: &str,
+    cwd: &str,
+    shell: &str,
+    workspace: Option<&str>,
+) -> io::Result<String> {
     let launcher = terminal::pick().ok_or_else(|| {
         io::Error::other("no terminal emulator found (set $TERMINAL or install kitty/foot/alacritty)")
     })?;
 
-    let argv = launcher.argv(cwd, shell);
+    let attach_cmd = format!("tmux attach -t {}", tmux_name);
+    let argv = launcher.argv(cwd, shell, &attach_cmd);
     // Prefer a user-provided Hyprland wrapper script when one exists — users
     // with ~/.config/hypr/scripts/<term> tend to pass a personal --config-file
     // and expect our spawned terminals to look the same as their SUPER+Enter

@@ -417,7 +417,7 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
 
             let data = match &jsonl_path {
                 Some(path) => {
-                    let entries = conversation::read_jsonl_tail(path, 65536);
+                    let entries = conversation::read_jsonl_tail_for_state(path);
                     let mtime_age_secs = path.metadata().ok()
                         .and_then(|m| m.modified().ok())
                         .and_then(|t| t.elapsed().ok())
@@ -510,7 +510,7 @@ pub fn load_state_explanation(
 ) -> Option<(SessionInfo, conversation::StateExplanation)> {
     let info = sessions.iter().find(|s| s.session_id == session_id)?;
     let jsonl_path = info.jsonl_path.as_ref()?;
-    let entries = conversation::read_jsonl_tail(jsonl_path, 65536);
+    let entries = conversation::read_jsonl_tail_for_state(jsonl_path);
     let mtime_age_secs = jsonl_path
         .metadata()
         .ok()
