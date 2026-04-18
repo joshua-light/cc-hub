@@ -1,12 +1,13 @@
 use crate::conversation;
 use crate::models::{short_sid, RawSession, SessionDetail, SessionInfo, SessionState};
-use crate::platform::{Platform, ProcessInfo};
+use crate::platform::paths;
+use crate::platform::process::{Process, ProcessInfo};
 use log::{debug, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 fn claude_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude"))
+    paths::claude_home()
 }
 
 fn sessions_dir() -> Option<PathBuf> {
@@ -34,7 +35,7 @@ pub fn find_jsonl(cwd: &str, session_id: &str) -> Option<PathBuf> {
 
 /// Check if a process has a real parent (not reparented to init).
 fn has_real_parent(pid: u32) -> bool {
-    Platform::parent_pid(pid).is_some_and(|ppid| ppid > 1)
+    Process::parent_pid(pid).is_some_and(|ppid| ppid > 1)
 }
 
 /// Read /clear events from the tail of ~/.claude/history.jsonl.
@@ -266,12 +267,12 @@ fn is_pid_alive(pid: u32) -> bool {
     // Check that the process exists AND is actually a claude process.
     // This avoids false positives from PID reuse (another process gets the
     // same PID after claude exits).
-    if unsafe { libc::kill(pid as i32, 0) } != 0 {
+    if !Process::is_alive(pid) {
         debug!("pid {} not alive (kill(0) failed)", pid);
         return false;
     }
-    if !Platform::is_claude(pid) {
-        debug!("pid {} alive but not claude (name={})", pid, Platform::name(pid));
+    if !Process::is_claude(pid) {
+        debug!("pid {} alive but not claude (name={})", pid, Process::name(pid));
         return false;
     }
     // A claude process reparented to init (ppid=1) is an orphan from a

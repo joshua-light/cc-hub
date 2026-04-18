@@ -1,10 +1,10 @@
+use crate::platform::paths;
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-const CACHE_PATH: &str = "/tmp/claude-statusline-usage.json";
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Deserialize)]
@@ -37,7 +37,7 @@ pub fn fetch_usage() -> Option<UsageInfo> {
 }
 
 fn cache_is_fresh() -> bool {
-    let Ok(meta) = fs::metadata(CACHE_PATH) else {
+    let Ok(meta) = fs::metadata(paths::usage_cache_file()) else {
         return false;
     };
     let Ok(modified) = meta.modified() else {
@@ -50,7 +50,7 @@ fn cache_is_fresh() -> bool {
 }
 
 fn read_cache() -> Option<UsageInfo> {
-    let data = fs::read_to_string(CACHE_PATH).ok()?;
+    let data = fs::read_to_string(paths::usage_cache_file()).ok()?;
     let resp: UsageResponse = serde_json::from_str(&data).ok()?;
     Some(usage_info_from(resp))
 }
@@ -91,9 +91,13 @@ fn fetch_via_curl() -> Option<UsageInfo> {
     let resp: UsageResponse = serde_json::from_slice(&output.stdout).ok()?;
 
     // Cache file lets sibling tools (statusline, etc.) skip their own fetch.
-    let tmp = PathBuf::from(format!("{}.tmp.{}", CACHE_PATH, std::process::id()));
+    let cache = paths::usage_cache_file();
+    if let Some(parent) = cache.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let tmp: PathBuf = cache.with_extension(format!("tmp.{}", std::process::id()));
     if fs::write(&tmp, &output.stdout).is_ok() {
-        let _ = fs::rename(&tmp, CACHE_PATH);
+        let _ = fs::rename(&tmp, &cache);
     }
 
     Some(usage_info_from(resp))

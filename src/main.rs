@@ -31,9 +31,7 @@ enum ScanMsg {
 }
 
 fn init_logging() -> PathBuf {
-    let log_dir = dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("cc-hub");
+    let log_dir = platform::paths::cache_dir();
     std::fs::create_dir_all(&log_dir).ok();
 
     let log_path = log_dir.join(format!(
