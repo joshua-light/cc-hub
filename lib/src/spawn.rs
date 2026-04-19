@@ -5,6 +5,7 @@
 //! Users attach on demand via the hub UI.
 
 use crate::platform::{paths, terminal};
+use crate::send;
 use log::{error, info};
 use std::io;
 use std::process::{Command, Stdio};
@@ -80,6 +81,9 @@ fn create_detached_tmux_session(name: &str, cwd: &str, shell_cmd: &str) -> io::R
             }
         )));
     }
+
+    // Session-scoped so we don't flip the user's global mouse setting.
+    send::enable_session_mouse(name);
     Ok(())
 }
 

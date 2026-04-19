@@ -1,6 +1,6 @@
 //! Embed a tmux session as a live, interactive pane inside cc-hub.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use log::{info, warn};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
@@ -12,6 +12,7 @@ pub struct TmuxPaneView {
     pub parser: Arc<Mutex<vt100::Parser>>,
     pub rows: u16,
     pub cols: u16,
+    viewport_origin: (u16, u16),
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -21,6 +22,10 @@ pub struct TmuxPaneView {
 
 impl TmuxPaneView {
     pub fn spawn(session_name: &str, rows: u16, cols: u16) -> std::io::Result<Self> {
+        // Redundant with the spawn-time enable for cc-hub-created sessions,
+        // but needed for sessions that predate that code path.
+        crate::send::enable_session_mouse(session_name);
+
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -94,6 +99,7 @@ impl TmuxPaneView {
             parser,
             rows,
             cols,
+            viewport_origin: (0, 0),
             master: pair.master,
             writer,
             child,
@@ -141,6 +147,44 @@ impl TmuxPaneView {
         }
         if let Ok(mut p) = self.parser.lock() {
             p.screen_mut().set_size(rows, cols);
+        }
+    }
+
+    pub fn set_viewport_origin(&mut self, col: u16, row: u16) {
+        self.viewport_origin = (col, row);
+    }
+
+    /// Encode `ev` as an SGR mouse report (`CSI < b ; x ; y M/m`) and write
+    /// it to the pty. Events that land outside the pane's current viewport
+    /// are dropped.
+    pub fn send_mouse(&mut self, ev: MouseEvent) {
+        let (ox, oy) = self.viewport_origin;
+        if ev.column < ox || ev.row < oy {
+            return;
+        }
+        let x = ev.column - ox;
+        let y = ev.row - oy;
+        if x >= self.cols || y >= self.rows {
+            return;
+        }
+
+        let Some((mut b, release)) = mouse_button_code(ev.kind) else {
+            return;
+        };
+        if ev.modifiers.contains(KeyModifiers::SHIFT) {
+            b |= 4;
+        }
+        if ev.modifiers.contains(KeyModifiers::ALT) {
+            b |= 8;
+        }
+        if ev.modifiers.contains(KeyModifiers::CONTROL) {
+            b |= 16;
+        }
+        let terminator = if release { 'm' } else { 'M' };
+        if let Err(e) = write!(self.writer, "\x1b[<{};{};{}{}", b, x + 1, y + 1, terminator) {
+            warn!("tmux_pane: mouse write failed: {}", e);
+        } else {
+            let _ = self.writer.flush();
         }
     }
 
@@ -256,6 +300,29 @@ fn csi_tilde(code: u8, mods: &KeyModifiers) -> Vec<u8> {
         format!("\x1b[{}~", code).into_bytes()
     } else {
         format!("\x1b[{};{}~", code, m).into_bytes()
+    }
+}
+
+fn mouse_button_code(kind: MouseEventKind) -> Option<(u32, bool)> {
+    match kind {
+        MouseEventKind::Down(b) => Some((button_base(b), false)),
+        MouseEventKind::Up(b) => Some((button_base(b), true)),
+        MouseEventKind::Drag(b) => Some((button_base(b) | 32, false)),
+        MouseEventKind::ScrollUp => Some((64, false)),
+        MouseEventKind::ScrollDown => Some((65, false)),
+        // Plain motion and horizontal scroll would flood the pty and tmux
+        // does nothing useful with them.
+        MouseEventKind::Moved
+        | MouseEventKind::ScrollLeft
+        | MouseEventKind::ScrollRight => None,
+    }
+}
+
+fn button_base(b: MouseButton) -> u32 {
+    match b {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
     }
 }
 

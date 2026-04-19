@@ -17,7 +17,9 @@ mod hot {
 mod hot {
     pub use cc_hub_lib::render;
 }
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind,
+};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use log::LevelFilter;
 use ratatui::backend::CrosstermBackend;
@@ -78,6 +80,7 @@ async fn main() -> io::Result<()> {
 
     let result = run(&mut terminal).await;
 
+    let _ = crossterm::execute!(terminal.backend_mut(), DisableMouseCapture);
     terminal::disable_raw_mode()?;
     crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -193,6 +196,10 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
         });
     };
 
+    // Capture only while the embedded tmux pane is visible so the host
+    // terminal's native wheel scroll keeps working elsewhere.
+    let mut mouse_captured = false;
+
     loop {
         // Poll live view for new JSONL entries
         if app.view == View::LiveTail {
@@ -207,12 +214,35 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
             app.close_tmux_pane();
         }
 
+        let want_mouse = app.view == View::TmuxPane;
+        if want_mouse != mouse_captured {
+            let backend = terminal.backend_mut();
+            let res = if want_mouse {
+                crossterm::execute!(backend, EnableMouseCapture)
+            } else {
+                crossterm::execute!(backend, DisableMouseCapture)
+            };
+            match res {
+                Ok(()) => mouse_captured = want_mouse,
+                Err(e) => log::warn!("mouse capture toggle failed: {}", e),
+            }
+        }
+
         terminal.draw(|frame| hot::render(frame, &mut app))?;
 
         let poll_ms = if app.view == View::TmuxPane { 16 } else { 50 };
 
         if event::poll(Duration::from_millis(poll_ms))? {
-            if let Event::Key(key) = event::read()? {
+            let evt = event::read()?;
+            if let Event::Mouse(m) = evt {
+                if app.view == View::TmuxPane {
+                    if let Some(pane) = app.tmux_pane.as_mut() {
+                        pane.send_mouse(m);
+                    }
+                }
+                continue;
+            }
+            if let Event::Key(key) = evt {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }

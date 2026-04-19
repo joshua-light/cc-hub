@@ -266,6 +266,7 @@ fn render_tmux_pane(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     pane.resize(inner.height, inner.width);
+    pane.set_viewport_origin(inner.x, inner.y);
 
     let Ok(guard) = pane.parser.lock() else {
         return;

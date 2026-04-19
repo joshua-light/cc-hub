@@ -29,9 +29,9 @@ pub fn send_prompt(tmux_session: &str, text: &str) -> io::Result<()> {
         tmux_session,
         text.len()
     );
-    run_tmux(&["send-keys", "-t", tmux_session, "-l", text], "literal")?;
+    run_tmux(&["send-keys", "-t", tmux_session, "-l", text], "send-keys literal")?;
     // Separate call — `-l` would type the literal word "Enter".
-    run_tmux(&["send-keys", "-t", tmux_session, "Enter"], "Enter")?;
+    run_tmux(&["send-keys", "-t", tmux_session, "Enter"], "send-keys Enter")?;
     Ok(())
 }
 
@@ -41,9 +41,9 @@ fn run_tmux(args: &[&str], label: &str) -> io::Result<()> {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-    error!("send: send-keys {} failed: {}", label, stderr);
+    error!("tmux {} failed: {}", label, stderr);
     Err(io::Error::other(format!(
-        "tmux send-keys {} failed: {}",
+        "tmux {} failed: {}",
         label,
         if stderr.is_empty() {
             out.status.to_string()
@@ -79,6 +79,18 @@ pub fn tmux_client_pids(session_name: &str) -> Vec<u32> {
 /// terminal windows).
 pub fn kill_tmux_session(session_name: &str) -> io::Result<()> {
     run_tmux(&["kill-session", "-t", session_name], "kill-session")
+}
+
+/// Turn on tmux's `mouse` option for `session_name`. Best-effort: failure is
+/// logged but not returned — the caller treats missing mouse as a degraded
+/// experience, not a spawn failure.
+pub fn enable_session_mouse(session_name: &str) {
+    if let Err(e) = run_tmux(
+        &["set-option", "-t", session_name, "mouse", "on"],
+        "set-option mouse",
+    ) {
+        warn!("enable_session_mouse {}: {}", session_name, e);
+    }
 }
 
 /// Snapshot of all tmux panes. Callers that need to look up many sessions
