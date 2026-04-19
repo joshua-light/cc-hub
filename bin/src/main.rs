@@ -37,6 +37,15 @@ enum ScanMsg {
     Metrics(metrics::MetricsAnalysis),
 }
 
+/// Size for a popup tmux pane: terminal minus a margin, with floor. The
+/// renderer re-resizes on first draw, so a rough starting size is fine.
+fn popup_pane_size(terminal: &Terminal<CrosstermBackend<io::Stdout>>) -> (u16, u16) {
+    terminal
+        .size()
+        .map(|s| (s.width.saturating_sub(6).max(20), s.height.saturating_sub(6).max(10)))
+        .unwrap_or((120, 30))
+}
+
 fn init_logging() -> PathBuf {
     let log_dir = platform::paths::cache_dir();
     std::fs::create_dir_all(&log_dir).ok();
@@ -291,12 +300,7 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                     (View::Grid, KeyCode::Char('f')) if on_sessions => {
                         if let Some(session) = app.selected_session_info().cloned() {
                             if let Some(tmux_name) = session.tmux_session.clone() {
-                                // Size: frame inner minus a generous margin. The
-                                // renderer re-resizes on first draw anyway, so a
-                                // rough starting size is fine.
-                                let (cols, rows) = terminal.size()
-                                    .map(|s| (s.width.saturating_sub(6).max(20), s.height.saturating_sub(6).max(10)))
-                                    .unwrap_or((120, 30));
+                                let (cols, rows) = popup_pane_size(terminal);
                                 match tmux_pane::TmuxPaneView::spawn(&tmux_name, rows, cols) {
                                     Ok(pane) => {
                                         app.enter_tmux_pane(pane);
@@ -318,6 +322,20 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                                     focus::FocusOutcome::Failed(msg) => {
                                         app.set_status(msg);
                                     }
+                                }
+                            }
+                        }
+                    }
+                    (View::Grid, KeyCode::Char('o')) if on_sessions => {
+                        if let Some(session) = app.selected_session_info().cloned() {
+                            let (cols, rows) = popup_pane_size(terminal);
+                            match spawn::spawn_shell_tmux_session(&session.cwd) {
+                                Ok(tmux_name) => match tmux_pane::TmuxPaneView::spawn_owned(&tmux_name, rows, cols) {
+                                    Ok(pane) => app.enter_tmux_pane(pane),
+                                    Err(e) => app.set_status(format!("shell attach failed: {}", e)),
+                                },
+                                Err(e) => {
+                                    app.set_status(format!("shell spawn failed: {}", e));
                                 }
                             }
                         }

@@ -1377,7 +1377,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         let keybinds: &str = match app.view {
             View::Grid => match app.current_tab {
-                Tab::Sessions => "tab:next tab  h/j/k/l:nav  enter:attach  n:new  N:new in…  i:info  D:why?  f:focus  x:close  q:quit",
+                Tab::Sessions => "tab:next tab  h/j/k/l:nav  enter:attach  n:new  N:new in…  i:info  D:why?  f:focus  o:shell  x:close  q:quit",
                 Tab::Metrics => "tab:next tab  j/k:scroll  r:refresh  q:quit",
             },
             View::Popup => "j/k:scroll  esc:close  q:close",

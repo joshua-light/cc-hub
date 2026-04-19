@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "cc-hub"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "cc-hub-lib",
  "chrono",
@@ -166,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "cc-hub-lib"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "chrono",
  "crossterm",

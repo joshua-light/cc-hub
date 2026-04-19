@@ -16,6 +16,7 @@ pub struct TmuxPaneView {
     writer: Box<dyn Write + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     exited: Arc<AtomicBool>,
+    owns_session: bool,
 }
 
 impl TmuxPaneView {
@@ -97,7 +98,24 @@ impl TmuxPaneView {
             writer,
             child,
             exited,
+            owns_session: false,
         })
+    }
+
+    /// Attach like [`spawn`], but take ownership of `session_name`: Drop runs
+    /// `tmux kill-session`, and a construction failure kills the session before
+    /// returning so the caller does not leak it.
+    pub fn spawn_owned(session_name: &str, rows: u16, cols: u16) -> std::io::Result<Self> {
+        match Self::spawn(session_name, rows, cols) {
+            Ok(mut pane) => {
+                pane.owns_session = true;
+                Ok(pane)
+            }
+            Err(e) => {
+                let _ = crate::send::kill_tmux_session(session_name);
+                Err(e)
+            }
+        }
     }
 
     pub fn is_exited(&self) -> bool {
@@ -143,6 +161,11 @@ impl TmuxPaneView {
 impl Drop for TmuxPaneView {
     fn drop(&mut self) {
         let _ = self.child.kill();
+        if self.owns_session {
+            if let Err(e) = crate::send::kill_tmux_session(&self.session_name) {
+                warn!("tmux_pane: kill-session {} failed: {}", self.session_name, e);
+            }
+        }
     }
 }
 

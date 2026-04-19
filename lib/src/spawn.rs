@@ -13,7 +13,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Spawn a new Claude session for `cwd`, returning the tmux session name.
 pub fn spawn_claude_session(cwd: &str) -> io::Result<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-    let name = unique_session_name();
+    let name = unique_session_name("cchub");
+    create_detached_tmux_session(&name, cwd, &format!("{} -ic ccyo", shell))?;
+    Ok(name)
+}
+
+/// Spawn an ephemeral tmux session that runs an interactive shell in `cwd`.
+/// Pair with [`crate::tmux_pane::TmuxPaneView::spawn_owned`] so closing the
+/// popup tears the session down.
+pub fn spawn_shell_tmux_session(cwd: &str) -> io::Result<String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+    let name = unique_session_name("cchub-sh");
     create_detached_tmux_session(&name, cwd, &shell)?;
     Ok(name)
 }
@@ -45,17 +55,16 @@ pub fn attach_tmux_session(tmux_name: &str, cwd: &str) -> io::Result<String> {
     Ok(format!("reattached {} in {}", tmux_name, launcher.name()))
 }
 
-fn unique_session_name() -> String {
+fn unique_session_name(prefix: &str) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("cchub-{}-{}", std::process::id(), nanos)
+    format!("{}-{}-{}", prefix, std::process::id(), nanos)
 }
 
-fn create_detached_tmux_session(name: &str, cwd: &str, shell: &str) -> io::Result<()> {
-    let shell_cmd = format!("{} -ic ccyo", shell);
-    let args = ["new-session", "-d", "-s", name, "-c", cwd, &shell_cmd];
+fn create_detached_tmux_session(name: &str, cwd: &str, shell_cmd: &str) -> io::Result<()> {
+    let args = ["new-session", "-d", "-s", name, "-c", cwd, shell_cmd];
     info!("spawn: tmux {}", args.join(" "));
 
     let output = Command::new("tmux").args(args).output()?;
