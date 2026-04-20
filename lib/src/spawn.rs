@@ -12,6 +12,8 @@ use crate::platform::{paths, terminal};
 #[cfg(not(windows))]
 use log::info;
 use std::io;
+use std::io::Write;
+use std::path::Path;
 #[cfg(not(windows))]
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,8 +28,69 @@ pub fn spawn_claude_session(cwd: &str, resume_id: Option<&str>) -> io::Result<St
         Some(sid) => format!("{} --resume {}", base, sid),
         None => base.to_string(),
     };
+    ensure_home_trusted(cwd)?;
     mux::spawn_detached(&name, cwd, Some(&cmd))?;
     Ok(name)
+}
+
+/// Flip `hasTrustDialogAccepted` to `true` in `~/.claude.json` when spawning
+/// into `$HOME`. Without this, claude blocks on a "trust this folder?" prompt
+/// the user never sees — the detached pane just hangs and no session
+/// metadata file is ever written, so nothing surfaces in the hub. Scoped to
+/// `$HOME` only because folder-picker-selected dev dirs are usually already
+/// trusted by past manual runs; $HOME is the one most people never start
+/// claude from directly.
+fn ensure_home_trusted(cwd: &str) -> io::Result<()> {
+    let Some(home) = dirs::home_dir() else {
+        return Ok(());
+    };
+    if Path::new(cwd) != home.as_path() {
+        return Ok(());
+    }
+    let config_path = home.join(".claude.json");
+    let data = match std::fs::read_to_string(&config_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let mut root: serde_json::Value = serde_json::from_str(&data)
+        .map_err(|e| io::Error::other(format!("parse ~/.claude.json: {}", e)))?;
+    let root_obj = root
+        .as_object_mut()
+        .ok_or_else(|| io::Error::other("~/.claude.json root is not an object"))?;
+    let projects = root_obj
+        .entry("projects".to_string())
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| io::Error::other("~/.claude.json projects is not an object"))?;
+    let home_key = home.to_string_lossy().into_owned();
+    let project = projects
+        .entry(home_key)
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| io::Error::other("~/.claude.json project entry is not an object"))?;
+    if project
+        .get("hasTrustDialogAccepted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    project.insert(
+        "hasTrustDialogAccepted".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    let body = serde_json::to_string_pretty(&root)
+        .map_err(|e| io::Error::other(format!("serialize ~/.claude.json: {}", e)))?;
+    let tmp = config_path.with_extension(format!("tmp.{}", std::process::id()));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, &config_path)?;
+    log::info!("marked $HOME trusted in ~/.claude.json before spawning claude");
+    Ok(())
 }
 
 /// Spawn an ephemeral multiplexer session that runs an interactive shell in
