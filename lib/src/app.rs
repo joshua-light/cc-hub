@@ -2,7 +2,7 @@ use crate::acks::Acks;
 use crate::conversation::StateExplanation;
 use crate::folder_picker::FolderPicker;
 use crate::live_view::LiveView;
-use crate::metrics::MetricsAnalysis;
+use crate::metrics::{MetricsAnalysis, SelectableSession};
 use crate::models::{ProjectGroup, SessionDetail, SessionInfo, SessionState};
 use crate::tmux_pane::TmuxPaneView;
 use crate::usage::UsageInfo;
@@ -114,6 +114,8 @@ pub struct App {
     pub current_tab: Tab,
     pub metrics: Option<MetricsAnalysis>,
     pub metrics_scroll: u16,
+    pub metrics_rows: Vec<SelectableSession>,
+    pub metrics_selected: Option<usize>,
     pub pending_dispatch: Option<PendingDispatch>,
     pub show_inactive: bool,
     /// Latest scan snapshot; drives [`rebuild_groups`].
@@ -154,6 +156,8 @@ impl App {
             current_tab: Tab::Sessions,
             metrics: None,
             metrics_scroll: 0,
+            metrics_rows: Vec::new(),
+            metrics_selected: None,
             pending_dispatch: None,
             show_inactive: false,
             last_sessions: Vec::new(),
@@ -175,7 +179,20 @@ impl App {
     }
 
     pub fn update_metrics(&mut self, m: MetricsAnalysis) {
+        let prev_sid = self
+            .metrics_selected
+            .and_then(|i| self.metrics_rows.get(i))
+            .map(|r| r.session_id.clone());
+        self.metrics_rows = m.selectable_sessions();
         self.metrics = Some(m);
+        self.metrics_selected = match prev_sid {
+            Some(sid) => self
+                .metrics_rows
+                .iter()
+                .position(|r| r.session_id == sid)
+                .or_else(|| (!self.metrics_rows.is_empty()).then_some(0)),
+            None => (!self.metrics_rows.is_empty()).then_some(0),
+        };
     }
 
     pub fn metrics_scroll_down(&mut self) {
@@ -184,6 +201,35 @@ impl App {
 
     pub fn metrics_scroll_up(&mut self) {
         self.metrics_scroll = self.metrics_scroll.saturating_sub(3);
+    }
+
+    pub fn metrics_sel_next(&mut self) {
+        if self.metrics_rows.is_empty() {
+            self.metrics_selected = None;
+            return;
+        }
+        let next = match self.metrics_selected {
+            Some(i) => (i + 1).min(self.metrics_rows.len() - 1),
+            None => 0,
+        };
+        self.metrics_selected = Some(next);
+    }
+
+    pub fn metrics_sel_prev(&mut self) {
+        if self.metrics_rows.is_empty() {
+            self.metrics_selected = None;
+            return;
+        }
+        let prev = match self.metrics_selected {
+            Some(i) => i.saturating_sub(1),
+            None => 0,
+        };
+        self.metrics_selected = Some(prev);
+    }
+
+    pub fn selected_metrics_session(&self) -> Option<&SelectableSession> {
+        self.metrics_selected
+            .and_then(|i| self.metrics_rows.get(i))
     }
 
     pub fn enter_folder_picker(&mut self) {

@@ -33,6 +33,7 @@ impl TmuxPaneView {
         // Redundant with the spawn-time enable for cc-hub-created sessions,
         // but needed for sessions that predate that code path.
         crate::send::enable_session_mouse(session_name);
+        crate::platform::mux::configure_clipboard();
 
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -225,6 +226,18 @@ impl TmuxPaneView {
         }
     }
 
+    /// Paste `text` into the pane through tmux's buffer mechanism.
+    ///
+    /// Writing bracketed-paste markers straight to the attach pty doesn't
+    /// work: tmux's client input parser sits in between and strips or
+    /// reinterprets them, so embedded newlines end up as submitted Enters.
+    /// `paste-buffer -p` injects the markers at the target pane instead.
+    pub fn paste_text(&self, text: &str) -> std::io::Result<()> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        crate::platform::mux::paste_buffer(&self.session_name, text)
+    }
 }
 
 impl Drop for TmuxPaneView {

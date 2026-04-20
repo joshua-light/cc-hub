@@ -633,6 +633,8 @@ fn render_card(frame: &mut Frame, area: Rect, session: &SessionInfo, selected: b
 
     let border_type = if selected {
         BorderType::Double
+    } else if session.state == SessionState::Inactive {
+        BorderType::LightDoubleDashed
     } else {
         BorderType::Rounded
     };
@@ -1006,7 +1008,9 @@ fn render_live_tail(frame: &mut Frame, area: Rect, app: &mut App) {
         None => return,
     };
 
-    let (title, status_color) = if lv.auto_scroll {
+    let (title, status_color) = if lv.review_mode {
+        (" Transcript · review ", Color::Rgb(230, 180, 90))
+    } else if lv.auto_scroll {
         (" Live Tail · streaming ", Color::Green)
     } else {
         (" Live Tail · paused ", Color::Yellow)
@@ -1037,13 +1041,28 @@ fn render_live_tail(frame: &mut Frame, area: Rect, app: &mut App) {
         inner.height.saturating_sub(2),
     );
 
-    let lines = build_live_tail_content(&lv.messages);
+    let (lines, highlight_range) = build_live_tail_content(&lv.messages, lv.highlight_msg_idx);
     let total_lines = lines.len() as u16;
 
     lv.total_content_lines = total_lines;
 
     if lv.auto_scroll && total_lines > content_area.height {
         lv.scroll = total_lines.saturating_sub(content_area.height);
+    }
+
+    // One-shot: consuming the flag lets manual scrolls stick afterwards.
+    // If the highlight didn't resolve, clear the flag anyway so we don't
+    // keep retrying on every frame.
+    if lv.scroll_to_highlight.is_some() {
+        if let Some((start, _end)) = highlight_range {
+            let h = content_area.height.max(1);
+            let target = (start as u16).saturating_sub(h / 3);
+            let max_scroll = total_lines.saturating_sub(h);
+            lv.scroll = target.min(max_scroll);
+            lv.scroll_to_highlight = None;
+        } else if !lv.messages.is_empty() {
+            lv.scroll_to_highlight = None;
+        }
     }
 
     let max_scroll = total_lines.saturating_sub(content_area.height);
@@ -1083,15 +1102,19 @@ fn render_live_tail(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_widget(indicator, indicator_area);
 }
 
-fn build_live_tail_content(messages: &[crate::models::ConversationMessage]) -> Vec<Line<'static>> {
+fn build_live_tail_content(
+    messages: &[crate::models::ConversationMessage],
+    highlight_msg_idx: Option<usize>,
+) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut highlight_range: Option<(usize, usize)> = None;
 
     if messages.is_empty() {
         lines.push(Line::from(Span::styled(
             "Waiting for messages…",
             Style::default().fg(Color::DarkGray),
         )));
-        return lines;
+        return (lines, highlight_range);
     }
 
     let separate = |lines: &mut Vec<Line<'static>>| {
@@ -1100,7 +1123,7 @@ fn build_live_tail_content(messages: &[crate::models::ConversationMessage]) -> V
         }
     };
 
-    for msg in messages {
+    for (idx, msg) in messages.iter().enumerate() {
         if msg.role == "system" {
             continue;
         }
@@ -1116,6 +1139,18 @@ fn build_live_tail_content(messages: &[crate::models::ConversationMessage]) -> V
         }
 
         if msg.role == "assistant" {
+            let is_peak = highlight_msg_idx == Some(idx);
+            let start = lines.len();
+            if is_peak {
+                separate(&mut lines);
+                lines.push(Line::from(Span::styled(
+                    "  ◆ peak context-growth turn".to_string(),
+                    Style::default()
+                        .fg(Color::Rgb(20, 20, 20))
+                        .bg(Color::Rgb(230, 180, 90))
+                        .add_modifier(Modifier::BOLD),
+                )));
+            }
             for part in parse_preview(&msg.content_preview) {
                 separate(&mut lines);
                 match part {
@@ -1124,10 +1159,13 @@ fn build_live_tail_content(messages: &[crate::models::ConversationMessage]) -> V
                     PreviewPart::Text(text) => render_asst_bullet(&mut lines, &text),
                 }
             }
+            if is_peak && highlight_range.is_none() {
+                highlight_range = Some((start, lines.len()));
+            }
         }
     }
 
-    lines
+    (lines, highlight_range)
 }
 
 fn is_placeholder_preview(s: &str) -> bool {
@@ -1444,7 +1482,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         let keybinds: &str = match app.view {
             View::Grid => match app.current_tab {
                 Tab::Sessions => "tab:next  h/j/k/l:nav  enter:attach  n:new  N:new in…  i:info  D:why?  f:focus/resume  o:shell  x:close  H:inactive  q:quit",
-                Tab::Metrics => "tab:next tab  j/k:scroll  r:refresh  q:quit",
+                Tab::Metrics => "tab:next  j/k:select  enter:view transcript  r:refresh  q:quit",
             },
             View::Popup => "j/k:scroll  esc:close  q:close",
             View::LiveTail => "j/k:scroll  G:bottom  esc:close",
@@ -1573,12 +1611,30 @@ fn render_metrics_body(frame: &mut Frame, area: Rect, app: &App) {
         }
     };
 
-    let lines = build_metrics_content(m);
+    let (lines, row_lines) = build_metrics_content(m, app.metrics_selected);
     let total_lines = lines.len() as u16;
+
+    // Auto-scroll so the selected session row sits inside the body. Falls
+    // back to whatever raw scroll the user has when no selection is active.
+    let body_height = area.height.saturating_sub(1);
+    let scroll = match app.metrics_selected.and_then(|i| row_lines.get(i).copied()) {
+        Some(line_idx) => {
+            let line = line_idx as u16;
+            let current = app.metrics_scroll;
+            if line < current {
+                line
+            } else if body_height > 0 && line >= current + body_height {
+                line + 1 - body_height
+            } else {
+                current
+            }
+        }
+        None => app.metrics_scroll,
+    };
 
     let scroll_info = format!(
         " {}/{} ",
-        (app.metrics_scroll as usize).min(total_lines.saturating_sub(1) as usize) + 1,
+        (scroll as usize).min(total_lines.saturating_sub(1) as usize) + 1,
         total_lines
     );
     let indicator_area = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
@@ -1591,15 +1647,24 @@ fn render_metrics_body(frame: &mut Frame, area: Rect, app: &App) {
         indicator_area,
     );
 
-    let body_area = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
+    let body_area = Rect::new(area.x, area.y, area.width, body_height);
     let content = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .scroll((app.metrics_scroll, 0));
+        .scroll((scroll, 0));
     frame.render_widget(content, body_area);
 }
 
-fn build_metrics_content(m: &MetricsAnalysis) -> Vec<Line<'static>> {
+/// Returns the rendered line buffer plus the logical-line index of every
+/// selectable session row, in the same canonical order as
+/// [`MetricsAnalysis::selectable_sessions`]. `selected` (an index into that
+/// flat list) controls which row, if any, gets highlighted.
+fn build_metrics_content(
+    m: &MetricsAnalysis,
+    selected: Option<usize>,
+) -> (Vec<Line<'static>>, Vec<usize>) {
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut row_lines: Vec<usize> = Vec::new();
+    let mut global_row: usize = 0;
     let dim = Style::default().fg(Color::DarkGray);
     let label = Style::default().fg(Color::Rgb(140, 140, 160));
     let val = Style::default()
@@ -1732,38 +1797,10 @@ fn build_metrics_content(m: &MetricsAnalysis) -> Vec<Line<'static>> {
     }
     lines.push(Line::raw(""));
 
-    lines.push(section_header("Tool usage"));
-    let mut tools: Vec<(&String, &ToolStats)> = m.by_tool.iter().collect();
-    tools.sort_by_key(|t| std::cmp::Reverse(t.1.count));
-    let total_tool_calls: u64 = tools.iter().map(|(_, s)| s.count).sum();
-    let max_tool_count = tools.first().map(|(_, s)| s.count).unwrap_or(0).max(1);
-    if tools.is_empty() {
-        lines.push(Line::from(Span::styled("  (no tool calls recorded)", dim)));
-    } else {
-        for (name, s) in tools.iter().take(TOOLS_DISPLAY_LIMIT) {
-            let bar_w = ((s.count as f64 / max_tool_count as f64) * 24.0).round() as usize;
-            let pct = if total_tool_calls > 0 {
-                s.count as f64 / total_tool_calls as f64 * 100.0
-            } else {
-                0.0
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {:<22}", truncate_str(name, 22)), label),
-                Span::styled("━".repeat(bar_w), Style::default().fg(tool_color(name))),
-                Span::raw(" "),
-                Span::styled(format!("{:>6} calls", s.count), val),
-                Span::styled(format!("  {:>4.1}%", pct), dim),
-                Span::styled(format!("  {} sess", s.sessions), dim),
-            ]));
-        }
-        if tools.len() > TOOLS_DISPLAY_LIMIT {
-            lines.push(Line::from(Span::styled(
-                format!("  … {} more tools", tools.len() - TOOLS_DISPLAY_LIMIT),
-                dim,
-            )));
-        }
-    }
-    lines.push(Line::raw(""));
+    let styles = MetricsStyles { dim, label, val };
+    render_bar_chart_section(&mut lines, "Tool usage", "tool calls", "tools", &m.by_tool, &styles);
+    render_bar_chart_section(&mut lines, "Shell commands", "shell commands", "commands", &m.by_shell, &styles);
+    render_bar_chart_section(&mut lines, "MCP servers", "MCP calls", "servers", &m.by_mcp, &styles);
 
     lines.push(section_header("Interruptions (Esc'd mid-tool-call)"));
     let i = &m.interruptions;
@@ -1778,10 +1815,12 @@ fn build_metrics_content(m: &MetricsAnalysis) -> Vec<Line<'static>> {
             Span::styled("    Sessions ", label),
             Span::styled(format!("{}", i.sessions_affected), val),
         ]));
-        for entry in i.by_session.iter().take(SESSION_LIST_LIMIT) {
+        for entry in i.by_session.iter() {
             let sid = short_sid(&entry.session_id).to_string();
+            let (marker, sid_style) = selection_row_style(selected == Some(global_row));
+            row_lines.push(lines.len());
             lines.push(Line::from(vec![
-                Span::styled(format!("    {:<10}", sid), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{}{:<10}", marker, sid), sid_style),
                 Span::styled(format!("{:>8}", fmt_cost(entry.wasted_cost)), val.fg(Color::Rgb(220, 140, 140))),
                 Span::styled(format!("  {:>3} orphan", entry.orphan_count), dim),
                 Span::raw("  "),
@@ -1794,6 +1833,7 @@ fn build_metrics_content(m: &MetricsAnalysis) -> Vec<Line<'static>> {
                     Style::default().fg(Color::Rgb(180, 180, 200)),
                 ),
             ]));
+            global_row += 1;
         }
     }
     lines.push(Line::raw(""));
@@ -1811,10 +1851,12 @@ fn build_metrics_content(m: &MetricsAnalysis) -> Vec<Line<'static>> {
     if g.findings.is_empty() {
         lines.push(Line::from(Span::styled("  (no runaway sessions)", dim)));
     } else {
-        for f in g.findings.iter().take(SESSION_LIST_LIMIT) {
+        for f in g.findings.iter() {
             let sid = short_sid(&f.session_id).to_string();
+            let (marker, sid_style) = selection_row_style(selected == Some(global_row));
+            row_lines.push(lines.len());
             lines.push(Line::from(vec![
-                Span::styled(format!("    {:<10}", sid), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{}{:<10}", marker, sid), sid_style),
                 Span::styled(format!("{:>5.1}x", f.score), val.fg(Color::Rgb(220, 180, 130))),
                 Span::styled(format!("  {:>8}", fmt_cost(f.total_cost)), val.fg(Color::Green)),
                 Span::styled(
@@ -1832,6 +1874,7 @@ fn build_metrics_content(m: &MetricsAnalysis) -> Vec<Line<'static>> {
                     Style::default().fg(Color::Rgb(180, 180, 200)),
                 ),
             ]));
+            global_row += 1;
         }
     }
     lines.push(Line::raw(""));
@@ -1845,14 +1888,68 @@ fn build_metrics_content(m: &MetricsAnalysis) -> Vec<Line<'static>> {
         dim,
     )));
     for s in &m.top_sessions {
-        lines.push(format_session_row(s, dim, val));
+        let is_sel = selected == Some(global_row);
+        row_lines.push(lines.len());
+        lines.push(format_session_row(s, dim, val, is_sel));
+        global_row += 1;
     }
 
-    lines
+    (lines, row_lines)
 }
 
 const TOOLS_DISPLAY_LIMIT: usize = 15;
-const SESSION_LIST_LIMIT: usize = 6;
+
+struct MetricsStyles {
+    dim: Style,
+    label: Style,
+    val: Style,
+}
+
+fn render_bar_chart_section(
+    lines: &mut Vec<Line<'static>>,
+    header: &str,
+    empty_noun: &str,
+    overflow_noun: &str,
+    stats: &std::collections::BTreeMap<String, ToolStats>,
+    s: &MetricsStyles,
+) {
+    let (dim, label, val) = (s.dim, s.label, s.val);
+    lines.push(section_header(header));
+    let mut rows: Vec<(&String, &ToolStats)> = stats.iter().collect();
+    rows.sort_by_key(|t| std::cmp::Reverse(t.1.count));
+    let total_calls: u64 = rows.iter().map(|(_, s)| s.count).sum();
+    let max_count = rows.first().map(|(_, s)| s.count).unwrap_or(0).max(1);
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  (no {} recorded)", empty_noun),
+            dim,
+        )));
+    } else {
+        for (name, s) in rows.iter().take(TOOLS_DISPLAY_LIMIT) {
+            let bar_w = ((s.count as f64 / max_count as f64) * 24.0).round() as usize;
+            let pct = if total_calls > 0 {
+                s.count as f64 / total_calls as f64 * 100.0
+            } else {
+                0.0
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {:<22}", truncate_str(name, 22)), label),
+                Span::styled("━".repeat(bar_w), Style::default().fg(tool_color(name))),
+                Span::raw(" "),
+                Span::styled(format!("{:>6} calls", s.count), val),
+                Span::styled(format!("  {:>4.1}%", pct), dim),
+                Span::styled(format!("  {} sess", s.sessions), dim),
+            ]));
+        }
+        if rows.len() > TOOLS_DISPLAY_LIMIT {
+            lines.push(Line::from(Span::styled(
+                format!("  … {} more {}", rows.len() - TOOLS_DISPLAY_LIMIT, overflow_noun),
+                dim,
+            )));
+        }
+    }
+    lines.push(Line::raw(""));
+}
 
 fn tool_color(name: &str) -> Color {
     // Stable hash → palette so the same tool keeps the same color.
@@ -1874,13 +1971,30 @@ fn tool_color(name: &str) -> Color {
     palette[(h as usize) % palette.len()]
 }
 
-fn format_session_row(s: &SessionSummary, dim: Style, val: Style) -> Line<'static> {
+fn selection_row_style(selected: bool) -> (&'static str, Style) {
+    if selected {
+        (
+            "  ▸ ",
+            Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        ("    ", Style::default().fg(Color::Cyan))
+    }
+}
+
+fn format_session_row(s: &SessionSummary, dim: Style, val: Style, selected: bool) -> Line<'static> {
     let sid = short_sid(&s.session_id).to_string();
-    let mark = if s.is_subagent { "  ⑂" } else { "   " };
+    let subagent = if s.is_subagent { "⑂" } else { " " };
+    let mark = if selected {
+        format!("▸ {}", subagent)
+    } else {
+        format!("  {}", subagent)
+    };
     let toks = format_tokens(s.tokens.total());
     let model = short_model(&s.model);
+    let (_, sid_style) = selection_row_style(selected);
     Line::from(vec![
-        Span::styled(format!("{}{:<8}", mark, sid), Style::default().fg(Color::Cyan)),
+        Span::styled(format!("{}{:<8}", mark, sid), sid_style),
         Span::raw(" "),
         Span::styled(format!("{:>8}", fmt_cost(s.cost)), val.fg(Color::Green)),
         Span::raw(" "),

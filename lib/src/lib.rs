@@ -1,5 +1,6 @@
 pub mod acks;
 pub mod app;
+pub mod clipboard;
 pub mod conversation;
 pub mod focus;
 pub mod folder_picker;

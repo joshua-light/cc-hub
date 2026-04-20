@@ -109,57 +109,49 @@ fn read_clears_from_history() -> HashMap<String, u64> {
 
 /// Resolve the JSONL path for every alive session.
 ///
-/// After `/clear`, Claude Code creates a new JSONL with a fresh session ID
-/// but never updates the session metadata file.  This means the metadata
-/// still points to the OLD session ID whose JSONL contains stale data.
+/// After `/clear`, Claude Code forks into a new JSONL under a fresh session
+/// ID but leaves the session metadata file pointing at the OLD sid — whose
+/// JSONL is frozen at pre-clear content. To find the live file we follow
+/// the `/clear` chain: each clear event has a timestamp that lines up
+/// (within a few ms) with the first entry of the next JSONL, so we walk
+/// orphan JSONLs in the same project dir until we reach an uncleared sid.
 ///
 /// Resolution strategy:
-///   1. Non-cleared sessions → use their own JSONL (session_id match).
-///   2. Cleared sessions → follow the /clear chain.  Each /clear creates a
-///      new JSONL whose first entry timestamp matches the clear event within
-///      a few milliseconds.  If THAT JSONL was also cleared, follow the
-///      chain until we reach one that wasn't.
+///   1. Non-cleared sessions → use their own JSONL.
+///   2. Cleared sessions → follow the `/clear` chain. If the chain breaks
+///      (no orphan within the timestamp window), fall back to the session's
+///      own JSONL so we at least show its pre-clear state instead of nothing.
 fn resolve_jsonl_paths(
     sessions: &[RawSession],
     clears: &HashMap<String, u64>,
     claimed: &HashSet<String>,
 ) -> HashMap<String, Option<PathBuf>> {
     let mut result: HashMap<String, Option<PathBuf>> = HashMap::new();
-
-    // Pass 1: non-cleared sessions use their own JSONL.
-    for raw in sessions {
-        if !clears.contains_key(&raw.session_id) {
-            let path = find_jsonl(&raw.cwd, &raw.session_id);
-            let sid_short = short_sid(&raw.session_id);
-            debug!(
-                "resolve sid={} (not cleared) → {}",
-                sid_short,
-                path.as_ref().map_or("not found", |_| "found")
-            );
-            result.insert(raw.session_id.clone(), path);
-        }
-    }
-
-    // Pass 2: cleared sessions — follow the /clear chain.
-    // Build the orphan index once per project directory.
     let mut orphan_index: HashMap<String, OrphanIndex> = HashMap::new();
-    for raw in sessions.iter().filter(|r| clears.contains_key(&r.session_id)) {
-        orphan_index
-            .entry(raw.cwd.clone())
-            .or_insert_with(|| OrphanIndex::build(&raw.cwd, claimed));
-    }
 
-    for raw in sessions.iter().filter(|r| clears.contains_key(&r.session_id)) {
+    for raw in sessions {
         let sid_short = short_sid(&raw.session_id);
-        let clear_ts = clears.get(&raw.session_id).copied().unwrap_or(0);
-        let path = orphan_index
-            .get(&raw.cwd)
-            .and_then(|idx| idx.follow_chain(&raw.session_id, clears));
-        debug!(
-            "resolve sid={} (cleared at {}) → {}",
-            sid_short, clear_ts,
-            path.as_ref().map_or("chain broken".to_string(), |p| p.display().to_string())
-        );
+        let path = if let Some(&clear_ts) = clears.get(&raw.session_id) {
+            let chained = orphan_index
+                .entry(raw.cwd.clone())
+                .or_insert_with(|| OrphanIndex::build(&raw.cwd, claimed))
+                .follow_chain(&raw.session_id, clears);
+            let resolved = chained.or_else(|| find_jsonl(&raw.cwd, &raw.session_id));
+            debug!(
+                "resolve sid={} (cleared at {}) → {}",
+                sid_short, clear_ts,
+                resolved.as_ref().map_or("not found".to_string(), |p| p.display().to_string())
+            );
+            resolved
+        } else {
+            let direct = find_jsonl(&raw.cwd, &raw.session_id);
+            debug!(
+                "resolve sid={} direct → {}",
+                sid_short,
+                direct.as_ref().map_or("not found", |_| "found")
+            );
+            direct
+        };
         result.insert(raw.session_id.clone(), path);
     }
 
@@ -560,7 +552,7 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
                         .and_then(|m| m.modified().ok())
                         .and_then(|t| t.elapsed().ok())
                         .map(|d| d.as_secs());
-                    let mut state = conversation::extract_state(&entries, mtime_age_secs);
+                    let mut state = conversation::extract_state(&entries);
                     let last_msg = conversation::extract_last_user_message(&entries);
                     let last_act = conversation::extract_last_activity(&entries);
                     let (branch, mdl, ver) = conversation::extract_metadata(&entries);

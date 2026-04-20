@@ -19,8 +19,8 @@
 //!   [`crate::tmux_pane`] rather than in separate terminal windows.
 
 use log::{error, info, warn};
-use std::io;
-use std::process::Command;
+use std::io::{self, Write};
+use std::process::{Command, Stdio};
 
 /// Binary invoked for every mux operation. On Windows this resolves to
 /// psmux's `tmux.exe` shim; on Unix to real tmux.
@@ -31,6 +31,7 @@ const MUX_BIN: &str = "tmux";
 pub fn spawn_detached(name: &str, cwd: &str, initial_cmd: Option<&str>) -> io::Result<()> {
     spawn_detached_impl(name, cwd, initial_cmd)?;
     enable_mouse(name);
+    configure_clipboard();
     Ok(())
 }
 
@@ -131,6 +132,67 @@ pub fn client_pids(_session: &str) -> Vec<u32> {
 
 pub fn kill_session(session: &str) -> io::Result<()> {
     run(&["kill-session", "-t", session], "kill-session")
+}
+
+/// Paste `text` into `session`'s active pane via tmux's buffer mechanism.
+///
+/// Wraps the payload in bracketed-paste markers (`\x1b[200~…\x1b[201~`)
+/// inside the buffer itself. `paste-buffer -p` would do it automatically,
+/// but only when tmux thinks the target app has DECSET 2004 enabled —
+/// unreliable for the embedded-tmux case, where failure mode is "each
+/// newline arrives as Enter and submits the partial line."
+pub fn paste_buffer(session: &str, text: &str) -> io::Result<()> {
+    const BUF_NAME: &str = "cchub-paste";
+    let mut payload = Vec::with_capacity(text.len() + 12);
+    payload.extend_from_slice(b"\x1b[200~");
+    payload.extend_from_slice(text.as_bytes());
+    payload.extend_from_slice(b"\x1b[201~");
+
+    let mut child = Command::new(MUX_BIN)
+        .args(["load-buffer", "-b", BUF_NAME, "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| io::Error::other("load-buffer: no stdin"))?;
+        stdin.write_all(&payload)?;
+    }
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(io::Error::other(format!("load-buffer failed: {}", stderr)));
+    }
+    // `-r` suppresses tmux's LF→CR translation; without it every embedded
+    // newline arrives at the app as Enter. `-d` deletes the buffer after
+    // use.
+    run(
+        &["paste-buffer", "-b", BUF_NAME, "-r", "-d", "-t", session],
+        "paste-buffer",
+    )
+}
+
+/// Wire tmux's `copy-command` (a server option, tmux 3.2+) to the same
+/// shell fallback chain cc-hub uses, so a mouse-drag selection in an
+/// embedded pane lands in the host clipboard via the default
+/// `copy-pipe-and-cancel` binding. Best-effort — server-wide, clobbers any
+/// pre-existing `copy-command`; users who want different behaviour can
+/// re-set it in their tmux.conf after cc-hub spawns a session.
+pub fn configure_clipboard() {
+    if let Err(e) = run(
+        &[
+            "set-option",
+            "-s",
+            "copy-command",
+            crate::clipboard::COPY_SHELL,
+        ],
+        "set-option copy-command",
+    ) {
+        warn!("configure_clipboard: {}", e);
+    }
 }
 
 /// Best-effort: log and swallow failures, since a missing mouse option is

@@ -1,6 +1,6 @@
 use cc_hub_lib::{
-    app, conversation, focus, gh, live_view, metrics, models, platform, scanner, send, spawn,
-    tmux_pane, ui, usage, watcher,
+    app, clipboard, conversation, focus, gh, live_view, metrics, models, platform, scanner, send,
+    spawn, tmux_pane, ui, usage, watcher,
 };
 
 use app::{App, Tab, View};
@@ -18,7 +18,9 @@ mod hot {
     pub use cc_hub_lib::render;
 }
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use log::LevelFilter;
@@ -79,12 +81,32 @@ async fn main() -> io::Result<()> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
     crossterm::execute!(stdout, EnterAlternateScreen)?;
+    // Best-effort: kitty-protocol disambiguation makes Ctrl+Shift+V report
+    // the SHIFT modifier (plain xterm folds it into Ctrl+V). Silently
+    // ignored by terminals that don't implement the protocol.
+    let kb_enhanced = crossterm::execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )
+    .is_ok();
+    // Most terminals intercept Ctrl+Shift+V themselves and "type" the
+    // clipboard as individual keystrokes — which breaks multi-line pastes
+    // because embedded newlines arrive as Enter. Enabling bracketed-paste
+    // mode tells the host terminal to wrap pastes in markers so crossterm
+    // surfaces them as a single `Event::Paste(String)` instead.
+    let bracketed_paste = crossterm::execute!(stdout, EnableBracketedPaste).is_ok();
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let result = run(&mut terminal).await;
 
     let _ = crossterm::execute!(terminal.backend_mut(), DisableMouseCapture);
+    if bracketed_paste {
+        let _ = crossterm::execute!(terminal.backend_mut(), DisableBracketedPaste);
+    }
+    if kb_enhanced {
+        let _ = crossterm::execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+    }
     terminal::disable_raw_mode()?;
     crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -246,6 +268,16 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                 }
                 continue;
             }
+            if let Event::Paste(text) = evt {
+                if app.view == View::TmuxPane {
+                    if let Some(pane) = app.tmux_pane.as_ref() {
+                        if let Err(e) = pane.paste_text(&text) {
+                            app.set_status(format!("paste failed: {}", e));
+                        }
+                    }
+                }
+                continue;
+            }
             if let Event::Key(key) = evt {
                 if key.kind != KeyEventKind::Press {
                     continue;
@@ -288,10 +320,35 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                         app.move_up()
                     }
                     (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_metrics => {
-                        app.metrics_scroll_down();
+                        if app.metrics_rows.is_empty() {
+                            app.metrics_scroll_down();
+                        } else {
+                            app.metrics_sel_next();
+                        }
                     }
                     (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_metrics => {
-                        app.metrics_scroll_up();
+                        if app.metrics_rows.is_empty() {
+                            app.metrics_scroll_up();
+                        } else {
+                            app.metrics_sel_prev();
+                        }
+                    }
+                    (View::Grid, KeyCode::Enter) if on_metrics => {
+                        if let Some(row) = app.selected_metrics_session().cloned() {
+                            let lv = live_view::LiveView::review(
+                                row.jsonl_path.clone(),
+                                row.peak_timestamp_ms,
+                            );
+                            if lv.messages.is_empty() {
+                                app.set_status(format!(
+                                    "can't open {}: {} missing or empty",
+                                    models::short_sid(&row.session_id),
+                                    row.jsonl_path.display()
+                                ));
+                            } else {
+                                app.enter_live_tail(lv);
+                            }
+                        }
                     }
                     (View::Grid, KeyCode::Char('r')) if on_metrics => {
                         app.metrics = None;
@@ -394,6 +451,26 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                     }
                     (View::TmuxPane, KeyCode::F(1)) => {
                         app.close_tmux_pane();
+                    }
+                    (View::TmuxPane, KeyCode::Char(c))
+                        if (c == 'v' || c == 'V')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                            && key.modifiers.contains(KeyModifiers::SHIFT) =>
+                    {
+                        let status = match clipboard::paste() {
+                            Ok(text) if text.is_empty() => Some("clipboard empty".to_string()),
+                            Ok(text) => match app.tmux_pane.as_ref() {
+                                Some(pane) => pane
+                                    .paste_text(&text)
+                                    .err()
+                                    .map(|e| format!("paste failed: {}", e)),
+                                None => None,
+                            },
+                            Err(e) => Some(format!("paste failed: {}", e)),
+                        };
+                        if let Some(msg) = status {
+                            app.set_status(msg);
+                        }
                     }
                     (View::TmuxPane, _) => {
                         if let Some(pane) = app.tmux_pane.as_mut() {

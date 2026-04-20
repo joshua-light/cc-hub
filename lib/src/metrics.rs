@@ -120,6 +120,8 @@ pub struct ProjectStats {
 pub struct SessionSummary {
     pub session_id: String,
     pub project: String,
+    pub cwd: String,
+    pub jsonl_path: PathBuf,
     pub model: String,
     pub cost: f64,
     pub tokens: Tokens,
@@ -143,6 +145,8 @@ pub struct ToolStats {
 pub struct SessionInterruption {
     pub session_id: String,
     pub project: String,
+    pub cwd: String,
+    pub jsonl_path: PathBuf,
     pub orphan_count: usize,
     pub wasted_cost: f64,
     pub last_tool_name: String,
@@ -160,10 +164,13 @@ pub struct InterruptionAnalysis {
 pub struct ContextGrowthFinding {
     pub session_id: String,
     pub project: String,
+    pub cwd: String,
+    pub jsonl_path: PathBuf,
     pub score: f64,
     pub total_cost: f64,
     pub peak_delta_tokens: u64,
     pub peak_turn_index: usize,
+    pub peak_timestamp_ms: u64,
     pub assistant_turns: usize,
 }
 
@@ -172,6 +179,22 @@ pub struct ContextGrowthAnalysis {
     pub sessions_scored: usize,
     pub anomalous_cost: f64,
     pub findings: Vec<ContextGrowthFinding>,
+}
+
+/// A session reference surfaced in the Metrics tab that the user can
+/// select and resume. The flat index used by the UI walks the analysis
+/// in the order shown on screen: Top sessions → Interruptions →
+/// Context-growth findings.
+#[derive(Clone, Debug)]
+pub struct SelectableSession {
+    pub session_id: String,
+    pub cwd: String,
+    pub project: String,
+    pub jsonl_path: PathBuf,
+    /// Timestamp (ms) of the assistant turn worth highlighting when the
+    /// transcript opens — currently only populated for context-growth
+    /// findings, where it marks the peak-delta turn.
+    pub peak_timestamp_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -187,8 +210,57 @@ pub struct MetricsAnalysis {
     pub top_sessions: Vec<SessionSummary>,
     pub top_projects: Vec<(String, ProjectStats)>,
     pub by_tool: BTreeMap<String, ToolStats>,
+    pub by_shell: BTreeMap<String, ToolStats>,
+    pub by_mcp: BTreeMap<String, ToolStats>,
     pub interruptions: InterruptionAnalysis,
     pub context_growth: ContextGrowthAnalysis,
+}
+
+#[derive(Default)]
+struct ToolUse {
+    name: String,
+    id: String,
+    /// Parsed argv-0 basenames of every segment of a `Bash` command.
+    /// Empty for non-Bash tools.
+    bash_commands: Vec<String>,
+}
+
+impl MetricsAnalysis {
+    /// Flat list of every session the user can select from the Metrics tab.
+    /// Canonical order matches the sections in [`crate::ui`]: top sessions,
+    /// then interruption offenders, then context-growth anomalies.
+    pub fn selectable_sessions(&self) -> Vec<SelectableSession> {
+        let mut out =
+            Vec::with_capacity(self.interruptions.by_session.len() + self.context_growth.findings.len() + self.top_sessions.len());
+        for s in &self.interruptions.by_session {
+            out.push(SelectableSession {
+                session_id: s.session_id.clone(),
+                cwd: s.cwd.clone(),
+                project: s.project.clone(),
+                jsonl_path: s.jsonl_path.clone(),
+                peak_timestamp_ms: None,
+            });
+        }
+        for f in &self.context_growth.findings {
+            out.push(SelectableSession {
+                session_id: f.session_id.clone(),
+                cwd: f.cwd.clone(),
+                project: f.project.clone(),
+                jsonl_path: f.jsonl_path.clone(),
+                peak_timestamp_ms: (f.peak_timestamp_ms > 0).then_some(f.peak_timestamp_ms),
+            });
+        }
+        for s in &self.top_sessions {
+            out.push(SelectableSession {
+                session_id: s.session_id.clone(),
+                cwd: s.cwd.clone(),
+                project: s.project.clone(),
+                jsonl_path: s.jsonl_path.clone(),
+                peak_timestamp_ms: None,
+            });
+        }
+        out
+    }
 }
 
 /// One canonical assistant API call after dedup.
@@ -197,13 +269,14 @@ struct AssistantCall {
     model: String,
     tokens: Tokens,
     timestamp_ms: u64,
-    /// (tool_name, tool_use_id) for every tool_use block in this message.
-    tool_uses: Vec<(String, String)>,
+    tool_uses: Vec<ToolUse>,
 }
 
 struct ParsedSession {
     session_id: String,
     project: String,
+    cwd: String,
+    jsonl_path: PathBuf,
     is_subagent: bool,
     end_time_ms: u64,
     calls: Vec<AssistantCall>,
@@ -217,6 +290,7 @@ fn parse_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSession> {
 
     let session_id = path.file_stem()?.to_string_lossy().to_string();
     let mut project: Option<String> = None;
+    let mut cwd: Option<String> = None;
     let mut end_time_ms: u64 = 0;
 
     // Dedup: requestId → AssistantCall (latest usage wins).
@@ -242,9 +316,10 @@ fn parse_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSession> {
             Err(_) => continue,
         };
 
-        if project.is_none() {
-            if let Some(cwd) = v.get("cwd").and_then(|c| c.as_str()) {
-                project = Some(project_name_from_cwd(cwd));
+        if cwd.is_none() {
+            if let Some(c) = v.get("cwd").and_then(|c| c.as_str()) {
+                project = Some(project_name_from_cwd(c));
+                cwd = Some(c.to_string());
             }
         }
 
@@ -358,7 +433,21 @@ fn parse_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSession> {
                 if !id.is_empty() && !seen_tool_use_ids.insert(id.to_string()) {
                     continue;
                 }
-                entry.tool_uses.push((name.to_string(), id.to_string()));
+                let bash_commands = if name == "Bash" {
+                    block
+                        .get("input")
+                        .and_then(|i| i.get("command"))
+                        .and_then(|c| c.as_str())
+                        .map(extract_bash_commands)
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                entry.tool_uses.push(ToolUse {
+                    name: name.to_string(),
+                    id: id.to_string(),
+                    bash_commands,
+                });
             }
         }
     }
@@ -375,6 +464,8 @@ fn parse_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSession> {
     Some(ParsedSession {
         session_id,
         project: project.unwrap_or_else(|| "unknown".to_string()),
+        cwd: cwd.unwrap_or_default(),
+        jsonl_path: path.to_path_buf(),
         is_subagent,
         end_time_ms,
         calls,
@@ -447,6 +538,8 @@ pub fn analyze() -> MetricsAnalysis {
     let mut by_day: BTreeMap<NaiveDate, DayStats> = BTreeMap::new();
     let mut top_sessions: Vec<SessionSummary> = Vec::new();
     let mut by_tool: BTreeMap<String, ToolStats> = BTreeMap::new();
+    let mut by_shell: BTreeMap<String, ToolStats> = BTreeMap::new();
+    let mut by_mcp: BTreeMap<String, ToolStats> = BTreeMap::new();
     let mut interruptions = InterruptionAnalysis::default();
     let mut growth = ContextGrowthAnalysis::default();
 
@@ -455,6 +548,8 @@ pub fn analyze() -> MetricsAnalysis {
         let mut session_cost = 0.0;
         let mut top_model: HashMap<String, u64> = HashMap::new();
         let mut session_tools: HashSet<&str> = HashSet::new();
+        let mut session_shell: HashSet<&str> = HashSet::new();
+        let mut session_mcp: HashSet<&str> = HashSet::new();
         let mut session_orphans = 0usize;
         let mut session_wasted = 0.0f64;
         let mut session_last_orphan_tool = String::new();
@@ -492,11 +587,24 @@ pub fn analyze() -> MetricsAnalysis {
 
             let mut call_orphans = 0usize;
             let mut call_last_orphan: &str = "";
-            for (name, id) in &call.tool_uses {
-                let entry = by_tool.entry(name.clone()).or_default();
-                entry.count += 1;
-                session_tools.insert(name.as_str());
-                if !id.is_empty() && !s.tool_result_ids.contains(id) {
+            for tu in &call.tool_uses {
+                let name = &tu.name;
+                if let Some(rest) = name.strip_prefix("mcp__") {
+                    let server = rest.split("__").next().unwrap_or(rest);
+                    let entry = by_mcp.entry(server.to_string()).or_default();
+                    entry.count += 1;
+                    session_mcp.insert(server);
+                } else {
+                    let entry = by_tool.entry(name.clone()).or_default();
+                    entry.count += 1;
+                    session_tools.insert(name.as_str());
+                }
+                for bc in &tu.bash_commands {
+                    let entry = by_shell.entry(bc.clone()).or_default();
+                    entry.count += 1;
+                    session_shell.insert(bc.as_str());
+                }
+                if !tu.id.is_empty() && !s.tool_result_ids.contains(&tu.id) {
                     call_orphans += 1;
                     call_last_orphan = name.as_str();
                 }
@@ -518,6 +626,16 @@ pub fn analyze() -> MetricsAnalysis {
                 stats.sessions += 1;
             }
         }
+        for cmd in &session_shell {
+            if let Some(stats) = by_shell.get_mut(*cmd) {
+                stats.sessions += 1;
+            }
+        }
+        for server in &session_mcp {
+            if let Some(stats) = by_mcp.get_mut(*server) {
+                stats.sessions += 1;
+            }
+        }
 
         // Context-growth scoring — short sessions skip the sort entirely.
         let mut series_calls: Vec<&AssistantCall> = s
@@ -534,13 +652,20 @@ pub fn analyze() -> MetricsAnalysis {
             growth.sessions_scored += 1;
             if let Some((score, peak_delta, peak_idx)) = score_growth(&series) {
                 if score >= GROWTH_THRESHOLD && peak_delta > 0 {
+                    let peak_ts = series_calls
+                        .get(peak_idx)
+                        .map(|c| c.timestamp_ms)
+                        .unwrap_or(0);
                     growth.findings.push(ContextGrowthFinding {
                         session_id: s.session_id.clone(),
                         project: s.project.clone(),
+                        cwd: s.cwd.clone(),
+                        jsonl_path: s.jsonl_path.clone(),
                         score,
                         total_cost: session_cost,
                         peak_delta_tokens: peak_delta,
                         peak_turn_index: peak_idx,
+                        peak_timestamp_ms: peak_ts,
                         assistant_turns: series.len(),
                     });
                     growth.anomalous_cost += session_cost;
@@ -555,6 +680,8 @@ pub fn analyze() -> MetricsAnalysis {
             interruptions.by_session.push(SessionInterruption {
                 session_id: s.session_id.clone(),
                 project: s.project.clone(),
+                cwd: s.cwd.clone(),
+                jsonl_path: s.jsonl_path.clone(),
                 orphan_count: session_orphans,
                 wasted_cost: session_wasted,
                 last_tool_name: session_last_orphan_tool,
@@ -572,6 +699,8 @@ pub fn analyze() -> MetricsAnalysis {
             top_sessions.push(SessionSummary {
                 session_id: std::mem::take(&mut s.session_id),
                 project: s.project.clone(),
+                cwd: s.cwd.clone(),
+                jsonl_path: s.jsonl_path.clone(),
                 model,
                 cost: session_cost,
                 tokens: session_tokens,
@@ -643,9 +772,66 @@ pub fn analyze() -> MetricsAnalysis {
         top_sessions: top_n,
         top_projects,
         by_tool,
+        by_shell,
+        by_mcp,
         interruptions,
         context_growth: growth,
     }
+}
+
+/// Split a Bash invocation into the basenames of its constituent commands.
+///
+/// Mirrors codeburn's approach: strip quoted strings (so `;` / `|` / `&`
+/// inside a literal don't split), tokenize on `;`, `|`, `&`, and take the
+/// argv-0 basename of each segment. `cd` and empty segments are dropped.
+fn extract_bash_commands(command: &str) -> Vec<String> {
+    if command.trim().is_empty() {
+        return Vec::new();
+    }
+    let stripped: String = {
+        let mut out = String::with_capacity(command.len());
+        let mut quote: Option<char> = None;
+        for c in command.chars() {
+            match quote {
+                Some(q) if c == q => {
+                    quote = None;
+                    out.push(' ');
+                }
+                Some(_) => out.push(' '),
+                None if c == '"' || c == '\'' => {
+                    quote = Some(c);
+                    out.push(' ');
+                }
+                None => out.push(c),
+            }
+        }
+        out
+    };
+    let mut segments: Vec<&str> = vec![stripped.as_str()];
+    for sep in ["&&", "||", ";", "|"] {
+        segments = segments.into_iter().flat_map(|s| s.split(sep)).collect();
+    }
+
+    let mut cmds = Vec::new();
+    for segment in segments {
+        let seg = segment.trim();
+        if seg.is_empty() {
+            continue;
+        }
+        let first = match seg.split_whitespace().next() {
+            Some(t) => t,
+            None => continue,
+        };
+        let base = Path::new(first)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(first);
+        if base.is_empty() || base == "cd" {
+            continue;
+        }
+        cmds.push(base.to_string());
+    }
+    cmds
 }
 
 /// Minimum assistant turns before context-growth scoring is meaningful.

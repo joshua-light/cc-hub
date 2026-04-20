@@ -40,6 +40,34 @@ pub fn read_jsonl_tail_for_state(path: &Path) -> Vec<Value> {
     }
 }
 
+fn parse_jsonl_values<R: BufRead>(reader: R) -> Vec<Value> {
+    let mut out = Vec::new();
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(val) = serde_json::from_str::<Value>(&line) {
+            out.push(val);
+        }
+    }
+    out
+}
+
+/// Read every JSONL entry in `path`, start to end. Intended for one-shot
+/// review flows (e.g. Metrics → Enter on a context-growth finding); the
+/// hot path should still use [`read_jsonl_tail`] / [`read_jsonl_tail_for_state`].
+pub fn read_jsonl_all(path: &Path) -> Vec<Value> {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    parse_jsonl_values(BufReader::new(file))
+}
+
 pub fn read_jsonl_tail(path: &Path, max_bytes: u64) -> Vec<Value> {
     let mut file = match File::open(path) {
         Ok(f) => f,
@@ -56,28 +84,13 @@ pub fn read_jsonl_tail(path: &Path, max_bytes: u64) -> Vec<Value> {
         return Vec::new();
     }
 
-    let reader = BufReader::new(&mut file);
-    let mut lines = Vec::new();
-    let mut first = seek_pos > 0;
-
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        if first {
-            first = false;
-            continue;
-        }
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Ok(val) = serde_json::from_str::<Value>(&line) {
-            lines.push(val);
-        }
+    let mut reader = BufReader::new(&mut file);
+    if seek_pos > 0 {
+        // Partial line at the seek boundary — consume and discard.
+        let mut discard = String::new();
+        let _ = reader.read_line(&mut discard);
     }
-
-    lines
+    parse_jsonl_values(reader)
 }
 
 pub fn read_jsonl_head(path: &Path, max_bytes: u64) -> Vec<Value> {
@@ -252,64 +265,6 @@ fn interrupted_tool_use(entries: &[Value]) -> bool {
         .any(|(idx, id)| *idx < lp_idx && !results.contains(id))
 }
 
-/// Returns true if any assistant `tool_use` in the visible tail has no
-/// matching `tool_result` — a signal that at least one tool (e.g. a sibling
-/// Agent in a parallel launch) is still in flight, even if the most recent
-/// entry is a completed peer's `tool_result`.
-fn has_unresolved_tool_use(entries: &[Value]) -> bool {
-    let mut unresolved: HashSet<&str> = HashSet::new();
-    let mut results: HashSet<&str> = HashSet::new();
-    for entry in entries {
-        let t = entry.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        let arr = match entry
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_array())
-        {
-            Some(a) => a,
-            None => continue,
-        };
-        for block in arr {
-            let bt = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            if t == "assistant" && bt == "tool_use" {
-                if let Some(id) = block.get("id").and_then(|v| v.as_str()) {
-                    unresolved.insert(id);
-                }
-            } else if t == "user" && bt == "tool_result" {
-                if let Some(id) = block.get("tool_use_id").and_then(|v| v.as_str()) {
-                    results.insert(id);
-                }
-            }
-        }
-    }
-    unresolved.iter().any(|id| !results.contains(id))
-}
-
-/// Returns true if the last non-metadata entry is a user `tool_result`
-/// (meaning the agent's tool just finished and the next assistant response
-/// hasn't been written yet).
-fn last_entry_is_tool_result(entries: &[Value]) -> bool {
-    for entry in entries.iter().rev() {
-        match entry.get("type").and_then(|t| t.as_str()).unwrap_or("") {
-            "assistant" => return false,
-            "user" => {
-                return entry
-                    .get("message")
-                    .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_array())
-                    .is_some_and(|arr| {
-                        !arr.is_empty()
-                            && arr.iter().all(|b| {
-                                b.get("type").and_then(|t| t.as_str()) == Some("tool_result")
-                            })
-                    });
-            }
-            _ => continue,
-        }
-    }
-    false
-}
-
 /// Determine session state from the last meaningful user/assistant entry.
 ///   Processing      — last entry indicates the agent is working
 ///   WaitingForInput — last entry indicates a completed turn
@@ -320,31 +275,12 @@ fn last_entry_is_tool_result(entries: &[Value]) -> bool {
 /// during an active tool-use loop a `turn_duration` entry sits between the
 /// assistant's tool_use request and the tool result, causing a false
 /// WaitingForInput while the agent is actually executing a tool.
-pub fn extract_state(entries: &[Value], mtime_age_secs: Option<u64>) -> SessionState {
-    // 1. Interrupted turn: dangling tool_use + trailing `last-prompt` marker
-    //    indicates the user hit Esc mid-tool and typed a new message — the
-    //    session is waiting for them to submit it.
+pub fn extract_state(entries: &[Value]) -> SessionState {
+    // Interrupted turn: dangling tool_use + trailing `last-prompt` marker
+    // indicates the user hit Esc mid-tool and typed a new message — the
+    // session is waiting for them to submit it.
     if interrupted_tool_use(entries) {
         debug!("extract_state: interrupted tool_use (last-prompt follows) → WaitingForInput");
-        return SessionState::WaitingForInput;
-    }
-
-    // 2. Trailing tool_result with stale mtime → agent finished a tool but
-    //    hasn't written its next response. If the file's been idle for more
-    //    than the threshold, it's almost certainly blocked on the next tool's
-    //    permission prompt (not yet serialized to JSONL). Skip this if any
-    //    sibling `tool_use` is still unresolved — with parallel agents, a
-    //    finished peer's `tool_result` can be last while others are still
-    //    running silently.
-    const STALE_TOOL_RESULT_SECS: u64 = 30;
-    if last_entry_is_tool_result(entries)
-        && mtime_age_secs.is_some_and(|age| age >= STALE_TOOL_RESULT_SECS)
-        && !has_unresolved_tool_use(entries)
-    {
-        debug!(
-            "extract_state: stale tool_result (mtime age {:?}s) → WaitingForInput",
-            mtime_age_secs
-        );
         return SessionState::WaitingForInput;
     }
 
@@ -392,12 +328,12 @@ pub fn extract_state(entries: &[Value], mtime_age_secs: Option<u64>) -> SessionS
                     }
                 }
                 _ => {
-                    debug!("extract_state: last=assistant stop_reason={:?} → WaitingForInput", stop);
-                    SessionState::WaitingForInput
+                    debug!("extract_state: last=assistant stop_reason={:?} → Processing", stop);
+                    SessionState::Processing
                 }
             }
         }
-        _ => SessionState::WaitingForInput,
+        _ => SessionState::Processing,
     };
 
     debug!("extract_state: last_type={} → {}", entry_type, state);
@@ -448,13 +384,6 @@ pub fn explain_state(entries: &[Value], mtime_age_secs: Option<u64>) -> StateExp
     let interrupted = matches!(int_step.verdict, Verdict::Decided(_));
     steps.push(int_step);
     if interrupted {
-        return finalize(SessionState::WaitingForInput, mtime_age_secs, entries, steps);
-    }
-
-    let stale_step = explain_stale_tool_result(entries, mtime_age_secs);
-    let stale = matches!(stale_step.verdict, Verdict::Decided(_));
-    steps.push(stale_step);
-    if stale {
         return finalize(SessionState::WaitingForInput, mtime_age_secs, entries, steps);
     }
 
@@ -600,42 +529,6 @@ fn explain_interrupted_tool_use(entries: &[Value]) -> ExplanationStep {
     }
 }
 
-fn explain_stale_tool_result(
-    entries: &[Value],
-    mtime_age_secs: Option<u64>,
-) -> ExplanationStep {
-    const STALE: u64 = 30;
-    let last_is_tr = last_entry_is_tool_result(entries);
-    let mtime_stale = mtime_age_secs.is_some_and(|age| age >= STALE);
-    let siblings_in_flight = has_unresolved_tool_use(entries);
-
-    let details = vec![
-        format!("last meaningful entry is user tool_result-only: {}", last_is_tr),
-        format!(
-            "mtime age: {} (stale threshold ≥ {}s)",
-            mtime_age_secs.map_or("unknown".to_string(), |s| format!("{}s", s)),
-            STALE
-        ),
-        format!("unresolved sibling tool_use in tail: {}", siblings_in_flight),
-    ];
-
-    if last_is_tr && mtime_stale && !siblings_in_flight {
-        let mut details = details;
-        details.push("conditions met → likely blocked on permission prompt → WaitingForInput".into());
-        ExplanationStep {
-            name: "stale_tool_result + mtime",
-            verdict: Verdict::Decided(SessionState::WaitingForInput),
-            details,
-        }
-    } else {
-        ExplanationStep {
-            name: "stale_tool_result + mtime",
-            verdict: Verdict::Skipped,
-            details,
-        }
-    }
-}
-
 fn explain_last_meaningful(entries: &[Value]) -> (ExplanationStep, SessionState) {
     let last = entries
         .iter()
@@ -703,16 +596,16 @@ fn explain_last_meaningful(entries: &[Value]) -> (ExplanationStep, SessionState)
                 }
             }
             _ => {
-                details.push(format!("stop_reason={:?} (other) → WaitingForInput", stop));
-                SessionState::WaitingForInput
+                details.push(format!("stop_reason={:?} (other) → Processing", stop));
+                SessionState::Processing
             }
         },
         _ => {
             details.push(format!(
-                "entry_type={:?} (unexpected) → WaitingForInput",
+                "entry_type={:?} (unexpected) → Processing",
                 entry_type
             ));
-            SessionState::WaitingForInput
+            SessionState::Processing
         }
     };
 
@@ -920,7 +813,10 @@ pub fn extract_messages(entries: &[Value], count: usize) -> Vec<ConversationMess
                 .to_string();
 
             let content_preview = extract_text_content(e);
-            let timestamp = e.get("timestamp").and_then(|t| t.as_u64()).unwrap_or(0);
+            let timestamp = e
+                .get("timestamp")
+                .and_then(parse_timestamp_ms)
+                .unwrap_or(0);
 
             let model = e
                 .get("message")
@@ -1162,60 +1058,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_tool_result_skipped_when_sibling_tool_use_unresolved() {
-        // Parallel agents: 3 Agent tool_uses launched, only 1 has returned.
-        // Last entry is a tool_result and mtime is stale, but siblings are
-        // still in flight — the stale_tool_result rule should not fire, and
-        // the session should resolve to Processing (via mtime upgrade or
-        // last_meaningful_entry).
-        let entries = vec![
-            serde_json::json!({
-                "type": "assistant",
-                "message": {"role": "assistant", "stop_reason": "tool_use",
-                    "content": [{"type": "tool_use", "id": "agent_a", "name": "Agent", "input": {}}]}
-            }),
-            serde_json::json!({
-                "type": "assistant",
-                "message": {"role": "assistant", "stop_reason": "tool_use",
-                    "content": [{"type": "tool_use", "id": "agent_b", "name": "Agent", "input": {}}]}
-            }),
-            serde_json::json!({
-                "type": "assistant",
-                "message": {"role": "assistant", "stop_reason": "tool_use",
-                    "content": [{"type": "tool_use", "id": "agent_c", "name": "Agent", "input": {}}]}
-            }),
-            serde_json::json!({
-                "type": "user",
-                "message": {"role": "user",
-                    "content": [{"type": "tool_result", "tool_use_id": "agent_a"}]}
-            }),
-        ];
-
-        // mtime_age >= 30s would previously trigger WaitingForInput.
-        let state = extract_state(&entries, Some(60));
-        assert_ne!(
-            state,
-            SessionState::WaitingForInput,
-            "should not flip to WaitingForInput while sibling tool_uses are unresolved"
-        );
-
-        let exp = explain_state(&entries, Some(60));
-        let stale_step = exp
-            .steps
-            .iter()
-            .find(|s| s.name == "stale_tool_result + mtime")
-            .expect("stale_tool_result step present");
-        assert_eq!(stale_step.verdict, Verdict::Skipped);
-        assert!(
-            stale_step
-                .details
-                .iter()
-                .any(|d| d.contains("unresolved sibling tool_use in tail: true")),
-            "explanation should call out the unresolved siblings"
-        );
-    }
-
-    #[test]
     fn read_jsonl_tail_for_state_expands_past_64k_of_tool_results() {
         use std::io::Write;
         let tmp = std::env::temp_dir().join(format!(
@@ -1264,7 +1106,7 @@ mod tests {
 
         // And the state resolves to Processing (unresolved agent_b tool_use
         // means siblings are still in flight).
-        let state = extract_state(&expanded, Some(60));
+        let state = extract_state(&expanded);
         assert_ne!(state, SessionState::WaitingForInput);
 
         let _ = std::fs::remove_file(&tmp);
