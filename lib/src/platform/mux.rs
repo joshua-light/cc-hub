@@ -37,10 +37,13 @@ pub fn spawn_detached(name: &str, cwd: &str, initial_cmd: Option<&str>) -> io::R
 #[cfg(not(windows))]
 fn spawn_detached_impl(name: &str, cwd: &str, initial_cmd: Option<&str>) -> io::Result<()> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-    // `-ic CMD` keeps the user's shell rc in the loop (aliases, PATH) so
-    // `ccyo` resolves the same way it does in an interactive terminal.
+    // tmux runs the trailing arg via `/bin/sh -c`, which word-splits on
+    // spaces. The command must be a single quoted token for `-c`, otherwise
+    // `zsh -ic cc-hub-new --resume SID` becomes `zsh -i -c cc-hub-new` with
+    // `--resume SID` attached to zsh's positional params — never reaching
+    // the alias. `-ic` keeps the user's shell rc in the loop (aliases, PATH).
     let shell_cmd = match initial_cmd {
-        Some(cmd) => format!("{} -ic {}", shell, cmd),
+        Some(cmd) => format!("{} -ic {}", shell, super::terminal::shell_quote(cmd)),
         None => shell,
     };
     let args = ["new-session", "-d", "-s", name, "-c", cwd, &shell_cmd];

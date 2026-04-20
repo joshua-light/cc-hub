@@ -1,5 +1,5 @@
 use cc_hub_lib::{
-    app, conversation, focus, live_view, metrics, models, platform, scanner, send, spawn,
+    app, conversation, focus, gh, live_view, metrics, models, platform, scanner, send, spawn,
     tmux_pane, ui, usage, watcher,
 };
 
@@ -37,6 +37,10 @@ enum ScanMsg {
     StateDebug(models::SessionInfo, conversation::StateExplanation),
     Usage(usage::UsageInfo),
     Metrics(metrics::MetricsAnalysis),
+    GhCreateDone {
+        name: String,
+        result: Result<String, String>,
+    },
 }
 
 /// Size for a popup tmux pane: terminal minus a margin, with floor. The
@@ -327,9 +331,27 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                     (View::StateDebug, KeyCode::Up | KeyCode::Char('k')) => {
                         app.debug_scroll_up();
                     }
+                    (View::Grid, KeyCode::Char('H')) if on_sessions => {
+                        app.toggle_show_inactive();
+                        let state = if app.show_inactive { "shown" } else { "hidden" };
+                        app.set_status(format!("inactive sessions {}", state));
+                    }
                     (View::Grid, KeyCode::Char('f')) if on_sessions => {
                         if let Some(session) = app.selected_session_info().cloned() {
-                            if let Some(tmux_name) = session.tmux_session.clone() {
+                            if session.state == models::SessionState::Inactive {
+                                let status = match spawn::spawn_claude_session(
+                                    &session.cwd,
+                                    Some(&session.session_id),
+                                ) {
+                                    Ok(name) => format!(
+                                        "resumed {} [{}]",
+                                        models::short_sid(&session.session_id),
+                                        name
+                                    ),
+                                    Err(e) => format!("resume failed: {}", e),
+                                };
+                                app.set_status(status);
+                            } else if let Some(tmux_name) = session.tmux_session.clone() {
                                 let (cols, rows) = popup_pane_size(terminal);
                                 match tmux_pane::TmuxPaneView::spawn(&tmux_name, rows, cols) {
                                     Ok(pane) => {
@@ -405,7 +427,7 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                     }
                     (View::Grid, KeyCode::Char('n')) if on_sessions => {
                         if let Some(sess) = app.selected_session_info().cloned() {
-                            let status = match spawn::spawn_claude_session(&sess.cwd) {
+                            let status = match spawn::spawn_claude_session(&sess.cwd, None) {
                                 Ok(name) => format!("started cc-hub-new [{}]", name),
                                 Err(e) => format!("spawn failed: {}", e),
                             };
@@ -446,7 +468,7 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                         });
                         app.close_folder_picker();
                         if let Some(cwd) = cwd {
-                            let status = match spawn::spawn_claude_session(&cwd) {
+                            let status = match spawn::spawn_claude_session(&cwd, None) {
                                 Ok(name) => format!("started cc-hub-new [{}]", name),
                                 Err(e) => format!("spawn failed: {}", e),
                             };
@@ -460,11 +482,68 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                             .map(|p| p.current_dir.display().to_string());
                         app.close_folder_picker();
                         if let Some(cwd) = cwd {
-                            let status = match spawn::spawn_claude_session(&cwd) {
+                            let status = match spawn::spawn_claude_session(&cwd, None) {
                                 Ok(name) => format!("started cc-hub-new [{}]", name),
                                 Err(e) => format!("spawn failed: {}", e),
                             };
                             app.set_status(status);
+                        }
+                    }
+                    (View::FolderPicker, KeyCode::Char('c')) => {
+                        app.enter_gh_create_input(false);
+                    }
+                    (View::FolderPicker, KeyCode::Char('C')) => {
+                        app.enter_gh_create_input(true);
+                    }
+                    (View::GhCreateInput, KeyCode::Esc) => {
+                        app.close_gh_create_input();
+                    }
+                    (View::GhCreateInput, KeyCode::Tab) => {
+                        if let Some(input) = app.gh_create_input.as_mut() {
+                            input.private = !input.private;
+                        }
+                    }
+                    (View::GhCreateInput, KeyCode::Backspace) => {
+                        if let Some(input) = app.gh_create_input.as_mut() {
+                            input.name.pop();
+                        }
+                    }
+                    (View::GhCreateInput, KeyCode::Char(c)) => {
+                        if let Some(input) = app.gh_create_input.as_mut() {
+                            input.name.push(c);
+                        }
+                    }
+                    (View::GhCreateInput, KeyCode::Enter) => {
+                        let name_empty = app
+                            .gh_create_input
+                            .as_ref()
+                            .is_none_or(|i| i.name.trim().is_empty());
+                        if name_empty {
+                            app.set_status("repo name cannot be empty".into());
+                            continue;
+                        }
+                        if let Some((cwd, name, private)) = app.submit_gh_create_input() {
+                            let trimmed = name.trim().to_string();
+                            let tx = scan_tx_main.clone();
+                            let name_for_msg = trimmed.clone();
+                            tokio::spawn(async move {
+                                let result = tokio::task::spawn_blocking(move || {
+                                    gh::create_repo(&cwd, &trimmed, private)
+                                })
+                                .await
+                                .unwrap_or_else(|e| Err(format!("task panicked: {}", e)));
+                                let _ = tx
+                                    .send(ScanMsg::GhCreateDone {
+                                        name: name_for_msg,
+                                        result,
+                                    })
+                                    .await;
+                            });
+                            app.set_status(format!(
+                                "creating {} repo {}…",
+                                if private { "private" } else { "public" },
+                                name
+                            ));
                         }
                     }
                     (View::Grid, KeyCode::Char('p')) if on_sessions => {
@@ -514,7 +593,7 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                             app.set_status("no idle agent and no cwd to spawn in".into());
                             continue;
                         };
-                        match spawn::spawn_claude_session(&cwd) {
+                        match spawn::spawn_claude_session(&cwd, None) {
                             Ok(tmux_name) => {
                                 log::info!(
                                     "dispatch: no idle agent, spawned [{}] in {} — queueing prompt (len={})",
@@ -575,6 +654,22 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                 }
                 ScanMsg::Metrics(m) => {
                     app.update_metrics(m);
+                }
+                ScanMsg::GhCreateDone { name, result } => {
+                    if let Some(picker) = app.folder_picker.as_mut() {
+                        picker.reload();
+                        if result.is_ok() {
+                            if let Some(idx) = picker.entries.iter().position(|e| e == &name) {
+                                picker.selection = idx;
+                            }
+                        }
+                    }
+                    let status = match result {
+                        Ok(url) if !url.is_empty() => format!("created {} — press space to spawn", url),
+                        Ok(_) => format!("created {} — press space to spawn", name),
+                        Err(e) => format!("gh create failed: {}", e),
+                    };
+                    app.set_status(status);
                 }
             }
         }

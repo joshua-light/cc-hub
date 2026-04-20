@@ -3,6 +3,7 @@ pub mod app;
 pub mod conversation;
 pub mod focus;
 pub mod folder_picker;
+pub mod gh;
 pub mod live_view;
 pub mod metrics;
 pub mod models;

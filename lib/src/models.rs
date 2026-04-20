@@ -24,6 +24,9 @@ pub enum SessionState {
     WaitingForInput,
     /// Fresh session with no conversation content yet.
     Idle,
+    /// Process is gone but the JSONL was modified within the inactive window.
+    /// Can be brought back with `cc-hub-new --resume <sid>`.
+    Inactive,
 }
 
 impl SessionState {
@@ -32,6 +35,7 @@ impl SessionState {
             SessionState::WaitingForInput => 0,
             SessionState::Idle => 1,
             SessionState::Processing => 2,
+            SessionState::Inactive => 3,
         }
     }
 }
@@ -42,6 +46,7 @@ impl fmt::Display for SessionState {
             SessionState::Processing => write!(f, "processing"),
             SessionState::WaitingForInput => write!(f, "waiting for input"),
             SessionState::Idle => write!(f, "idle"),
+            SessionState::Inactive => write!(f, "inactive"),
         }
     }
 }

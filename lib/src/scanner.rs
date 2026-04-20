@@ -5,6 +5,27 @@ use crate::platform::process::{Process, ProcessInfo};
 use log::{debug, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+/// Seconds since `path` was last modified, or `None` if stat fails.
+fn mtime_age_secs(path: &Path) -> Option<u64> {
+    path.metadata()
+        .ok()?
+        .modified()
+        .ok()?
+        .elapsed()
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+/// Keep dead sessions visible if their JSONL was touched within this window.
+/// Hardcoded for now — surface as a CLI/env knob once the UX settles.
+const INACTIVE_WINDOW_SECS: u64 = 3 * 86_400;
+
+/// Cap on how many inactive sessions we surface per project (cwd), ranked by
+/// most recent activity. Keeps the grid navigable when a single project has
+/// dozens of touched JSONLs in the window.
+const INACTIVE_MAX_PER_PROJECT: usize = 5;
 
 fn claude_dir() -> Option<PathBuf> {
     paths::claude_home()
@@ -378,6 +399,103 @@ fn project_name(cwd: &str) -> String {
         .to_string()
 }
 
+/// Build a [`SessionInfo`] from an orphan JSONL alone — no metadata file, no
+/// live process. `cwd` is taken from the first JSONL entry that carries one;
+/// the encoded directory name isn't losslessly decodable, so files without a
+/// usable `cwd` entry are skipped.
+fn synthesize_inactive_from_jsonl(path: &Path) -> Option<SessionInfo> {
+    let session_id = path.file_stem().and_then(|s| s.to_str())?.to_string();
+    let head_entries = conversation::read_jsonl_head(path, 4096);
+
+    let cwd = head_entries
+        .iter()
+        .find_map(|e| e.get("cwd").and_then(|c| c.as_str()))?
+        .to_string();
+
+    let started_at = head_entries
+        .iter()
+        .find_map(|e| e.get("timestamp").and_then(conversation::parse_timestamp_ms))
+        .unwrap_or(0);
+
+    let tail_entries = conversation::read_jsonl_tail_for_state(path);
+    let last_user_message = conversation::extract_last_user_message(&tail_entries);
+    let last_activity = conversation::extract_last_activity(&tail_entries);
+    let (git_branch, model, version) = conversation::extract_metadata(&tail_entries);
+    let summary = conversation::extract_first_user_message(&head_entries);
+
+    Some(SessionInfo {
+        pid: 0,
+        session_id,
+        project_name: project_name(&cwd),
+        cwd,
+        started_at,
+        last_activity,
+        state: SessionState::Inactive,
+        last_user_message,
+        summary,
+        model,
+        git_branch,
+        version,
+        jsonl_path: Some(path.to_path_buf()),
+        tmux_session: None,
+    })
+}
+
+/// Walk `~/.claude/projects/**/*.jsonl` and synthesize Inactive sessions for
+/// any JSONL touched within `INACTIVE_WINDOW_SECS` whose path isn't already
+/// represented by an alive session. Caps each project at
+/// [`INACTIVE_MAX_PER_PROJECT`] (ranked by mtime) before parsing JSONLs so a
+/// project with dozens of touched files doesn't dominate a scan tick.
+///
+/// Returns `(sessions, total_in_window)` — the count reflects how many files
+/// were eligible before the per-project cap.
+fn scan_orphan_jsonls(claimed_paths: &HashSet<PathBuf>) -> (Vec<SessionInfo>, usize) {
+    let Some(projects) = projects_dir() else {
+        return (Vec::new(), 0);
+    };
+    let Ok(project_dirs) = std::fs::read_dir(&projects) else {
+        return (Vec::new(), 0);
+    };
+
+    let mut out = Vec::new();
+    let mut total_in_window = 0usize;
+    for proj in project_dirs.flatten() {
+        let Ok(files) = std::fs::read_dir(proj.path()) else {
+            continue;
+        };
+        let mut candidates: Vec<(PathBuf, SystemTime)> = Vec::new();
+        for file in files.flatten() {
+            let path = file.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if claimed_paths.contains(&path) {
+                continue;
+            }
+            let Some((mtime, age)) = path
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.elapsed().ok().map(|d| (t, d.as_secs())))
+            else {
+                continue;
+            };
+            if age > INACTIVE_WINDOW_SECS {
+                continue;
+            }
+            candidates.push((path, mtime));
+        }
+        total_in_window += candidates.len();
+        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+        for (path, _) in candidates.into_iter().take(INACTIVE_MAX_PER_PROJECT) {
+            if let Some(info) = synthesize_inactive_from_jsonl(&path) {
+                out.push(info);
+            }
+        }
+    }
+    (out, total_in_window)
+}
+
 pub fn scan_sessions() -> Vec<SessionInfo> {
     let raw_sessions = read_raw_sessions();
     let clears = read_clears_from_history();
@@ -390,36 +508,52 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
         raw_sessions.len(), clears.len(), claimed.len()
     );
 
-    let alive: Vec<RawSession> = raw_sessions
-        .into_iter()
-        .filter(|raw| is_pid_alive(raw.pid))
+    let alive_by_pid: HashMap<u32, bool> = raw_sessions
+        .iter()
+        .map(|r| (r.pid, is_pid_alive(r.pid)))
         .collect();
+    let alive_count = alive_by_pid.values().filter(|&&v| v).count();
 
-    info!("scan_sessions: {} alive sessions", alive.len());
+    info!(
+        "scan_sessions: {} raw → {} alive, {} dead (subject to inactive window)",
+        raw_sessions.len(),
+        alive_count,
+        raw_sessions.len() - alive_count
+    );
 
-    let jsonl_map = resolve_jsonl_paths(&alive, &clears, &claimed);
+    let jsonl_map = resolve_jsonl_paths(&raw_sessions, &clears, &claimed);
 
     // Snapshot tmux once per scan so we can tag each session with its hosting
     // tmux session name (if any) without reshelling per pid.
     let tmux_panes = crate::send::tmux_panes();
 
-    let mut sessions: Vec<SessionInfo> = alive
+    let mut sessions: Vec<SessionInfo> = raw_sessions
         .into_iter()
-        .map(|raw| {
+        .filter_map(|raw| {
+            let is_alive = alive_by_pid.get(&raw.pid).copied().unwrap_or(false);
+            let jsonl_path = jsonl_map.get(&raw.session_id).cloned().flatten();
+            if !is_alive {
+                let within_window = jsonl_path
+                    .as_deref()
+                    .and_then(mtime_age_secs)
+                    .is_some_and(|s| s <= INACTIVE_WINDOW_SECS);
+                if !within_window {
+                    return None;
+                }
+            }
+            Some((raw, is_alive, jsonl_path))
+        })
+        .map(|(raw, is_alive, jsonl_path)| {
             let sid_short = short_sid(&raw.session_id);
-            let jsonl_path = jsonl_map
-                .get(&raw.session_id)
-                .cloned()
-                .flatten();
 
             let was_cleared = clears.contains_key(&raw.session_id);
             debug!(
-                "pid={} sid={} cwd={} cleared={} jsonl={}",
-                raw.pid, sid_short, raw.cwd, was_cleared,
+                "pid={} sid={} cwd={} alive={} cleared={} jsonl={}",
+                raw.pid, sid_short, raw.cwd, is_alive, was_cleared,
                 jsonl_path.as_ref().map_or("none".to_string(), |p| p.display().to_string())
             );
 
-            let data = match &jsonl_path {
+            let mut data = match &jsonl_path {
                 Some(path) => {
                     let entries = conversation::read_jsonl_tail_for_state(path);
                     let mtime_age_secs = path.metadata().ok()
@@ -441,8 +575,11 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
                     // If the JSONL was modified very recently but state
                     // reads as Idle, the assistant likely hasn't written
                     // its first response yet (e.g. right after a slash
-                    // command).  Upgrade to Processing.
-                    if state == SessionState::Idle && mtime_age_secs.is_some_and(|s| s < 30) {
+                    // command). Upgrade to Processing.
+                    if is_alive
+                        && state == SessionState::Idle
+                        && mtime_age_secs.is_some_and(|s| s < 30)
+                    {
                         debug!(
                             "  sid={} upgrading Idle→Processing (mtime age={}s)",
                             sid_short,
@@ -464,7 +601,15 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
                 }
             };
 
-            let tmux_session = crate::send::tmux_session_for_pid_in(raw.pid, &tmux_panes);
+            if !is_alive {
+                data.state = SessionState::Inactive;
+            }
+
+            let tmux_session = if is_alive {
+                crate::send::tmux_session_for_pid_in(raw.pid, &tmux_panes)
+            } else {
+                None
+            };
 
             SessionInfo {
                 pid: raw.pid,
@@ -484,6 +629,20 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
             }
         })
         .collect();
+
+    let claimed_paths: HashSet<PathBuf> = sessions
+        .iter()
+        .filter_map(|s| s.jsonl_path.clone())
+        .collect();
+    let (orphans, total_in_window) = scan_orphan_jsonls(&claimed_paths);
+    info!(
+        "scan_sessions: {} from metadata + {} orphan JSONLs (of {} within window, capped at {} per project)",
+        sessions.len(),
+        orphans.len(),
+        total_in_window,
+        INACTIVE_MAX_PER_PROJECT
+    );
+    sessions.extend(orphans);
 
     sessions.sort_by(|a, b| {
         a.state

@@ -49,6 +49,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         View::PromptInput => render_prompt_input(frame, frame.area(), app),
         View::TmuxPane => render_tmux_pane(frame, frame.area(), app),
         View::FolderPicker => render_folder_picker(frame, frame.area(), app),
+        View::GhCreateInput => {
+            render_folder_picker(frame, frame.area(), app);
+            render_gh_create_input(frame, frame.area(), app);
+        }
         View::Grid => {}
     }
 }
@@ -114,7 +118,7 @@ fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
             .add_modifier(Modifier::BOLD),
     ))
     .title_bottom(Span::styled(
-        " enter: descend · bksp: parent · s: start here · esc: cancel ",
+        " enter:descend · bksp:parent · space:pick · .:pick cwd · c/C:gh new · esc:cancel ",
         Style::default().fg(Color::Rgb(110, 110, 130)),
     ));
     let inner = block.inner(popup);
@@ -170,6 +174,67 @@ fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     frame.render_widget(Paragraph::new(lines), list_area);
+}
+
+fn render_gh_create_input(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(input) = app.gh_create_input.as_ref() else {
+        return;
+    };
+
+    let popup = centered_fixed(area, 70, 9);
+    frame.render_widget(Clear, popup);
+
+    let (vis_label, vis_color) = if input.private {
+        ("private", Color::Rgb(220, 170, 90))
+    } else {
+        ("public", Color::Rgb(120, 200, 140))
+    };
+
+    let block = popup_block(Span::styled(
+        " gh repo create ",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .title_bottom(Span::styled(
+        " type name · tab: toggle public/private · enter: create · esc: cancel ",
+        Style::default().fg(Color::Rgb(110, 110, 130)),
+    ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if inner.height < 4 || inner.width == 0 {
+        return;
+    }
+
+    let cwd_line = Line::from(vec![
+        Span::styled(" in ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            input.cwd.clone(),
+            Style::default().fg(Color::Rgb(180, 200, 230)),
+        ),
+    ]);
+
+    let mut name_str = input.name.clone();
+    name_str.push('▎');
+    let name_line = Line::from(vec![
+        Span::styled(" name: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            name_str,
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
+    let vis_line = Line::from(vec![
+        Span::styled(" visibility: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            vis_label,
+            Style::default().fg(vis_color).add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
+    let lines = vec![cwd_line, Line::raw(""), name_line, vis_line];
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
@@ -1378,7 +1443,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         let keybinds: &str = match app.view {
             View::Grid => match app.current_tab {
-                Tab::Sessions => "tab:next tab  h/j/k/l:nav  enter:attach  n:new  N:new in…  i:info  D:why?  f:focus  o:shell  x:close  q:quit",
+                Tab::Sessions => "tab:next  h/j/k/l:nav  enter:attach  n:new  N:new in…  i:info  D:why?  f:focus/resume  o:shell  x:close  H:inactive  q:quit",
                 Tab::Metrics => "tab:next tab  j/k:scroll  r:refresh  q:quit",
             },
             View::Popup => "j/k:scroll  esc:close  q:close",
@@ -1387,7 +1452,8 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             View::StateDebug => "j/k:scroll  esc:close  q:close",
             View::PromptInput => "type prompt  enter:dispatch  esc:cancel",
             View::TmuxPane => "forwarding keys to tmux · F1: detach & close",
-            View::FolderPicker => "j/k:move  enter:descend  bksp:parent  space:pick  .:pick cwd  esc:cancel",
+            View::FolderPicker => "j/k:move  enter:descend  bksp:parent  space:pick  .:pick cwd  c/C:gh new (pub/priv)  esc:cancel",
+            View::GhCreateInput => "type name  tab:toggle public/private  enter:create  esc:cancel",
         };
         spans.push(Span::styled(
             format!(" {} ", keybinds),
@@ -1411,6 +1477,7 @@ fn state_indicator(state: &SessionState) -> (&'static str, Color) {
         SessionState::Processing => ("󰑮", Color::Green),
         SessionState::WaitingForInput => ("󰂞", Color::Yellow),
         SessionState::Idle => ("󰒲", Color::Rgb(100, 100, 120)),
+        SessionState::Inactive => ("󰜎", Color::Rgb(80, 80, 90)),
     }
 }
 

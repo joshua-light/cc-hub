@@ -23,6 +23,17 @@ pub enum View {
     PromptInput,
     TmuxPane,
     FolderPicker,
+    GhCreateInput,
+}
+
+/// Overlay on top of [`View::FolderPicker`] that prompts for a new GitHub
+/// repo name. `cwd` is captured at open time so the run target can't drift
+/// if the picker is reloaded while the input is active.
+#[derive(Clone, Debug)]
+pub struct GhCreateInput {
+    pub name: String,
+    pub private: bool,
+    pub cwd: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -99,10 +110,14 @@ pub struct App {
     pub dispatch_target: Option<(u32, String, String)>,
     pub tmux_pane: Option<TmuxPaneView>,
     pub folder_picker: Option<FolderPicker>,
+    pub gh_create_input: Option<GhCreateInput>,
     pub current_tab: Tab,
     pub metrics: Option<MetricsAnalysis>,
     pub metrics_scroll: u16,
     pub pending_dispatch: Option<PendingDispatch>,
+    pub show_inactive: bool,
+    /// Latest scan snapshot; drives [`rebuild_groups`].
+    last_sessions: Vec<SessionInfo>,
     /// Session ids seen on the previous scan tick. `None` means the first
     /// scan hasn't happened yet — used to skip cursor-jump on initial load.
     known_session_ids: Option<HashSet<String>>,
@@ -135,12 +150,20 @@ impl App {
             dispatch_target: None,
             tmux_pane: None,
             folder_picker: None,
+            gh_create_input: None,
             current_tab: Tab::Sessions,
             metrics: None,
             metrics_scroll: 0,
             pending_dispatch: None,
+            show_inactive: false,
+            last_sessions: Vec::new(),
             known_session_ids: None,
         }
+    }
+
+    pub fn toggle_show_inactive(&mut self) {
+        self.show_inactive = !self.show_inactive;
+        self.rebuild_groups();
     }
 
     pub fn set_tab(&mut self, tab: Tab) {
@@ -183,7 +206,43 @@ impl App {
 
     pub fn close_folder_picker(&mut self) {
         self.folder_picker = None;
+        self.gh_create_input = None;
         self.view = View::Grid;
+    }
+
+    /// Open the "create GitHub repo" overlay rooted in the picker's current
+    /// directory. Prefills the repo name with the basename.
+    pub fn enter_gh_create_input(&mut self, private: bool) {
+        let Some(picker) = self.folder_picker.as_ref() else {
+            return;
+        };
+        let cwd = picker.current_dir.display().to_string();
+        let name = picker
+            .current_dir
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.gh_create_input = Some(GhCreateInput { name, private, cwd });
+        self.view = View::GhCreateInput;
+    }
+
+    pub fn close_gh_create_input(&mut self) {
+        self.gh_create_input = None;
+        if self.folder_picker.is_some() {
+            self.view = View::FolderPicker;
+        } else {
+            self.view = View::Grid;
+        }
+    }
+
+    pub fn submit_gh_create_input(&mut self) -> Option<(String, String, bool)> {
+        let input = self.gh_create_input.take()?;
+        if self.folder_picker.is_some() {
+            self.view = View::FolderPicker;
+        } else {
+            self.view = View::Grid;
+        }
+        Some((input.cwd, input.name, input.private))
     }
 
     pub fn enter_tmux_pane(&mut self, view: TmuxPaneView) {
@@ -453,8 +512,6 @@ impl App {
     }
 
     pub fn update_sessions(&mut self, mut sessions: Vec<SessionInfo>) {
-        let prev_id = self.selected_session_id();
-
         let acks_active = !self.acks.is_empty();
         if acks_active {
             // Apply user acks: if a non-Idle session is still at its acked
@@ -462,6 +519,7 @@ impl App {
             // the ack inside is_acked(), so the real state takes over next tick.
             for s in &mut sessions {
                 if s.state != SessionState::Idle
+                    && s.state != SessionState::Inactive
                     && self.acks.is_acked(&s.session_id, s.last_activity)
                 {
                     s.state = SessionState::Idle;
@@ -471,6 +529,44 @@ impl App {
                 sessions.iter().map(|s| s.session_id.as_str()).collect();
             self.acks.retain_existing(&live_ids);
         }
+
+        self.last_sessions = sessions;
+        self.rebuild_groups();
+        self.last_refresh = Instant::now();
+
+        let current_ids: HashSet<String> = self
+            .groups
+            .iter()
+            .flat_map(|g| g.sessions.iter().map(|s| s.session_id.clone()))
+            .collect();
+        // First tick seeds known ids without hijacking the cursor; later ticks
+        // jump selection to a freshly-appeared session so it gets focus.
+        let new_selection = self.known_session_ids.as_ref().and_then(|known| {
+            self.groups.iter().enumerate().find_map(|(gi, group)| {
+                group
+                    .sessions
+                    .iter()
+                    .position(|s| !known.contains(&s.session_id))
+                    .map(|si| (gi, si))
+            })
+        });
+        self.known_session_ids = Some(current_ids);
+        if let Some((gi, si)) = new_selection {
+            self.sel_group = gi;
+            self.sel_in_group = si;
+        }
+    }
+
+    fn rebuild_groups(&mut self) {
+        let prev_id = self.selected_session_id();
+        let acks_active = !self.acks.is_empty();
+
+        let sessions: Vec<SessionInfo> = self
+            .last_sessions
+            .iter()
+            .filter(|s| self.show_inactive || s.state != SessionState::Inactive)
+            .cloned()
+            .collect();
 
         // Group sessions by cwd
         let mut group_map: HashMap<String, Vec<SessionInfo>> = HashMap::new();
@@ -512,32 +608,6 @@ impl App {
 
         if self.view == View::PromptInput {
             self.dispatch_target = Self::compute_dispatch_target(&self.groups);
-        }
-
-        self.last_refresh = Instant::now();
-
-        let current_ids: HashSet<String> = self
-            .groups
-            .iter()
-            .flat_map(|g| g.sessions.iter().map(|s| s.session_id.clone()))
-            .collect();
-        // First tick seeds known ids without hijacking the cursor; later ticks
-        // jump selection to a freshly-appeared session so it gets focus.
-        let new_selection = self.known_session_ids.as_ref().and_then(|known| {
-            self.groups.iter().enumerate().find_map(|(gi, group)| {
-                group
-                    .sessions
-                    .iter()
-                    .position(|s| !known.contains(&s.session_id))
-                    .map(|si| (gi, si))
-            })
-        });
-        self.known_session_ids = Some(current_ids);
-
-        if let Some((gi, si)) = new_selection {
-            self.sel_group = gi;
-            self.sel_in_group = si;
-            return;
         }
 
         // Restore selection by session id

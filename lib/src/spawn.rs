@@ -14,10 +14,16 @@ use std::io;
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Spawn a new Claude session for `cwd`, returning the multiplexer session name.
-pub fn spawn_claude_session(cwd: &str) -> io::Result<String> {
+/// Spawn a new Claude session for `cwd`, returning the multiplexer session
+/// name. When `resume_id` is `Some`, the pane runs `cc-hub-new --resume <id>`
+/// instead of a fresh `cc-hub-new`.
+pub fn spawn_claude_session(cwd: &str, resume_id: Option<&str>) -> io::Result<String> {
     let name = unique_session_name("cchub");
-    mux::spawn_detached(&name, cwd, Some("cc-hub-new"))?;
+    let cmd = match resume_id {
+        Some(sid) => format!("cc-hub-new --resume {}", sid),
+        None => "cc-hub-new".into(),
+    };
+    mux::spawn_detached(&name, cwd, Some(&cmd))?;
     Ok(name)
 }
 

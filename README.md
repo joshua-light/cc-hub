@@ -106,10 +106,11 @@ differ:
 | `h j k l` / arrows | Navigate the grid |
 | `Enter` | Live-tail the selected session's JSONL |
 | `i` | Session info popup |
-| `f` | Attach: embedded pane if the session is in a mux, else focus its terminal window |
+| `f` | Attach: embedded pane if the session is in a mux, else focus its terminal window. For an inactive session, spawn a new tmux session running `cc-hub-new --resume <id>` |
+| `H` | Toggle visibility of inactive sessions (hidden by default; window is 3 days) |
 | `o` | Open an embedded shell pane in the selected session's cwd |
 | `n` | Spawn a new `cc-hub-new` session in the selected session's cwd |
-| `N` | Folder picker → spawn a new `cc-hub-new` session |
+| `N` | Folder picker → spawn a new `cc-hub-new` session (`c` / `C` in the picker creates a public/private GitHub repo via `gh`) |
 | `p` | Dispatch a prompt to the first idle agent (auto-spawns if none) |
 | `x` | Close the selected session's window (Unix WM only) |
 | `Space` | Ack / mark selected session idle |

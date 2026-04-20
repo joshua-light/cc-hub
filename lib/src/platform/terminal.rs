@@ -122,6 +122,8 @@ fn has_binary(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn shell_quote(s: &str) -> String {
+/// Wrap `s` in single quotes for safe inclusion inside a `/bin/sh -c` string.
+/// Embedded single quotes are closed, escaped, and reopened the POSIX way.
+pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
