@@ -1,6 +1,7 @@
 pub mod acks;
 pub mod app;
 pub mod clipboard;
+pub mod config;
 pub mod conversation;
 pub mod focus;
 pub mod folder_picker;
@@ -12,6 +13,7 @@ pub mod platform;
 pub mod scanner;
 pub mod send;
 pub mod spawn;
+pub mod title;
 pub mod tmux_pane;
 pub mod ui;
 pub mod usage;

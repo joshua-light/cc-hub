@@ -1,11 +1,10 @@
+use crate::config;
 use crate::platform::paths;
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{Duration, SystemTime};
-
-const CACHE_TTL: Duration = Duration::from_secs(60);
+use std::time::SystemTime;
 
 #[derive(Debug, Clone, Deserialize)]
 struct UsageWindow {
@@ -45,7 +44,7 @@ fn cache_is_fresh() -> bool {
     };
     SystemTime::now()
         .duration_since(modified)
-        .map(|age| age < CACHE_TTL)
+        .map(|age| age < config::get().scan.usage_cache_ttl())
         .unwrap_or(false)
 }
 

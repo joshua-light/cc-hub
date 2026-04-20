@@ -62,6 +62,15 @@ pub struct SessionInfo {
     pub state: SessionState,
     pub last_user_message: Option<String>,
     pub summary: Option<String>,
+    /// 2-3 word Haiku-generated title, cached once per session_id by
+    /// [`crate::title`]. `None` until the background titler finishes (or if
+    /// it fails — UI falls back to `summary`/`last_user_message`).
+    pub title: Option<String>,
+    /// True while a background Haiku call is in flight for this session.
+    /// Drives the "generating…" indicator in the card so the user can tell
+    /// an active titler from a session whose title is simply never going
+    /// to arrive (no summary, or resolution failed).
+    pub titling: bool,
     pub model: Option<String>,
     pub git_branch: Option<String>,
     pub version: Option<String>,
@@ -70,6 +79,15 @@ pub struct SessionInfo {
     /// means the session is not running under tmux (focus falls back to
     /// walking the pid's own ancestor chain to find a window).
     pub tmux_session: Option<String>,
+    /// Name of the most recent unresolved assistant `tool_use` — the tool
+    /// the agent is currently running (Processing) or the blocking tool it's
+    /// waiting on user input for (WaitingForInput). None if no tool is in
+    /// flight.
+    pub current_tool: Option<String>,
+    /// True when the most recent assistant content block is a `thinking`
+    /// block (no follow-up tool_use/text has been written yet). Only
+    /// meaningful while the session is `Processing`.
+    pub is_thinking: bool,
 }
 
 impl SessionInfo {
@@ -87,6 +105,8 @@ pub struct ConversationMessage {
     pub stop_reason: Option<String>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    pub cache_read_input_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
 }
 
 #[derive(Clone, Debug)]

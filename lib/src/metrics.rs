@@ -10,6 +10,7 @@
 //! entry per `requestId`, redirecting via `message.id` when two
 //! `requestId`s share the same canonical API response.
 
+use crate::config;
 use crate::conversation::parse_timestamp_ms;
 use crate::platform::paths;
 use chrono::{Local, NaiveDate, TimeZone};
@@ -181,6 +182,28 @@ pub struct ContextGrowthAnalysis {
     pub findings: Vec<ContextGrowthFinding>,
 }
 
+/// Per-session record of the largest absolute context size reached,
+/// i.e. max(input + cache_read + cache_creation) across assistant calls.
+/// This is the direct answer to "how big did this session's context get",
+/// independent of how the growth was shaped.
+#[derive(Clone, Debug)]
+pub struct PeakContextFinding {
+    pub session_id: String,
+    pub project: String,
+    pub cwd: String,
+    pub jsonl_path: PathBuf,
+    pub peak_ctx_tokens: u64,
+    pub peak_turn_index: usize,
+    pub peak_timestamp_ms: u64,
+    pub assistant_turns: usize,
+    pub total_cost: f64,
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct PeakContextAnalysis {
+    pub findings: Vec<PeakContextFinding>,
+}
+
 /// A session reference surfaced in the Metrics tab that the user can
 /// select and resume. The flat index used by the UI walks the analysis
 /// in the order shown on screen: Top sessions → Interruptions →
@@ -214,6 +237,7 @@ pub struct MetricsAnalysis {
     pub by_mcp: BTreeMap<String, ToolStats>,
     pub interruptions: InterruptionAnalysis,
     pub context_growth: ContextGrowthAnalysis,
+    pub peak_context: PeakContextAnalysis,
 }
 
 #[derive(Default)]
@@ -227,11 +251,16 @@ struct ToolUse {
 
 impl MetricsAnalysis {
     /// Flat list of every session the user can select from the Metrics tab.
-    /// Canonical order matches the sections in [`crate::ui`]: top sessions,
-    /// then interruption offenders, then context-growth anomalies.
+    /// Canonical order matches the sections in [`crate::ui`]: interruption
+    /// offenders, peak-context sessions, token-spike findings, then top
+    /// sessions.
     pub fn selectable_sessions(&self) -> Vec<SelectableSession> {
-        let mut out =
-            Vec::with_capacity(self.interruptions.by_session.len() + self.context_growth.findings.len() + self.top_sessions.len());
+        let mut out = Vec::with_capacity(
+            self.interruptions.by_session.len()
+                + self.peak_context.findings.len()
+                + self.context_growth.findings.len()
+                + self.top_sessions.len(),
+        );
         for s in &self.interruptions.by_session {
             out.push(SelectableSession {
                 session_id: s.session_id.clone(),
@@ -239,6 +268,15 @@ impl MetricsAnalysis {
                 project: s.project.clone(),
                 jsonl_path: s.jsonl_path.clone(),
                 peak_timestamp_ms: None,
+            });
+        }
+        for f in &self.peak_context.findings {
+            out.push(SelectableSession {
+                session_id: f.session_id.clone(),
+                cwd: f.cwd.clone(),
+                project: f.project.clone(),
+                jsonl_path: f.jsonl_path.clone(),
+                peak_timestamp_ms: (f.peak_timestamp_ms > 0).then_some(f.peak_timestamp_ms),
             });
         }
         for f in &self.context_growth.findings {
@@ -524,11 +562,24 @@ fn discover_session_files() -> Vec<(PathBuf, bool)> {
 }
 
 pub fn analyze() -> MetricsAnalysis {
+    analyze_with_progress(|_, _| {})
+}
+
+/// Like [`analyze`], but invokes `on_progress(scanned, total)` after each
+/// session file is parsed. Called once with `(0, total)` up front so callers
+/// can render an initial "0 / N" state before any file has been opened.
+pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> MetricsAnalysis {
+    let metrics_cfg = &config::get().metrics;
     let files = discover_session_files();
-    let mut sessions: Vec<ParsedSession> = files
-        .into_iter()
-        .filter_map(|(p, is_sub)| parse_session_file(&p, is_sub))
-        .collect();
+    let total = files.len();
+    on_progress(0, total);
+    let mut sessions: Vec<ParsedSession> = Vec::with_capacity(total);
+    for (i, (p, is_sub)) in files.into_iter().enumerate() {
+        if let Some(s) = parse_session_file(&p, is_sub) {
+            sessions.push(s);
+        }
+        on_progress(i + 1, total);
+    }
 
     let mut total_cost = 0.0;
     let mut total_tokens = Tokens::default();
@@ -542,6 +593,7 @@ pub fn analyze() -> MetricsAnalysis {
     let mut by_mcp: BTreeMap<String, ToolStats> = BTreeMap::new();
     let mut interruptions = InterruptionAnalysis::default();
     let mut growth = ContextGrowthAnalysis::default();
+    let mut peak_ctx_findings: Vec<PeakContextFinding> = Vec::new();
 
     for s in &mut sessions {
         let mut session_tokens = Tokens::default();
@@ -637,21 +689,49 @@ pub fn analyze() -> MetricsAnalysis {
             }
         }
 
-        // Context-growth scoring — short sessions skip the sort entirely.
+        // Build the per-turn context series once; both peak-context and
+        // growth-scoring read from it. Sessions with zero timestamped calls
+        // contribute nothing to either.
         let mut series_calls: Vec<&AssistantCall> = s
             .calls
             .iter()
             .filter(|c| c.timestamp_ms > 0)
             .collect();
-        if series_calls.len() >= MIN_GROWTH_TURNS {
-            series_calls.sort_by_key(|c| c.timestamp_ms);
-            let series: Vec<u64> = series_calls
-                .iter()
-                .map(|c| c.tokens.input + c.tokens.cache_read + c.tokens.cache_creation)
-                .collect();
+        series_calls.sort_by_key(|c| c.timestamp_ms);
+        let series: Vec<u64> = series_calls
+            .iter()
+            .map(|c| c.tokens.input + c.tokens.cache_read + c.tokens.cache_creation)
+            .collect();
+
+        if let Some((peak_idx, &peak_ctx)) = series
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, v)| **v)
+        {
+            if peak_ctx > 0 {
+                let peak_ts = series_calls
+                    .get(peak_idx)
+                    .map(|c| c.timestamp_ms)
+                    .unwrap_or(0);
+                peak_ctx_findings.push(PeakContextFinding {
+                    session_id: s.session_id.clone(),
+                    project: s.project.clone(),
+                    cwd: s.cwd.clone(),
+                    jsonl_path: s.jsonl_path.clone(),
+                    peak_ctx_tokens: peak_ctx,
+                    peak_turn_index: peak_idx + 1,
+                    peak_timestamp_ms: peak_ts,
+                    assistant_turns: series.len(),
+                    total_cost: session_cost,
+                });
+            }
+        }
+
+        // Token-spike scoring — short sessions skip the scoring entirely.
+        if series.len() >= metrics_cfg.min_growth_turns {
             growth.sessions_scored += 1;
             if let Some((score, peak_delta, peak_idx)) = score_growth(&series) {
-                if score >= GROWTH_THRESHOLD && peak_delta > 0 {
+                if score >= metrics_cfg.growth_threshold && peak_delta > 0 {
                     let peak_ts = series_calls
                         .get(peak_idx)
                         .map(|c| c.timestamp_ms)
@@ -718,14 +798,20 @@ pub fn analyze() -> MetricsAnalysis {
     interruptions
         .by_session
         .sort_by(|a, b| b.wasted_cost.partial_cmp(&a.wasted_cost).unwrap_or(std::cmp::Ordering::Equal));
-    interruptions.by_session.truncate(TOP_INTERRUPTIONS);
+    interruptions.by_session.truncate(metrics_cfg.top_interruptions);
 
     growth.findings.sort_by(|a, b| {
         let ka = a.score * a.total_cost;
         let kb = b.score * b.total_cost;
         kb.partial_cmp(&ka).unwrap_or(std::cmp::Ordering::Equal)
     });
-    growth.findings.truncate(TOP_GROWTH_FINDINGS);
+    growth.findings.truncate(metrics_cfg.top_growth_findings);
+
+    peak_ctx_findings.sort_by(|a, b| b.peak_ctx_tokens.cmp(&a.peak_ctx_tokens));
+    peak_ctx_findings.truncate(metrics_cfg.top_peak_context_findings);
+    let peak_context = PeakContextAnalysis {
+        findings: peak_ctx_findings,
+    };
 
     // Bump per-model session counts after the per-call loop.
     for s in &top_sessions {
@@ -776,6 +862,7 @@ pub fn analyze() -> MetricsAnalysis {
         by_mcp,
         interruptions,
         context_growth: growth,
+        peak_context,
     }
 }
 
@@ -833,14 +920,6 @@ fn extract_bash_commands(command: &str) -> Vec<String> {
     }
     cmds
 }
-
-/// Minimum assistant turns before context-growth scoring is meaningful.
-const MIN_GROWTH_TURNS: usize = 20;
-/// Anomaly threshold: peak delta >= this many times the median absolute delta.
-const GROWTH_THRESHOLD: f64 = 6.0;
-/// How many interruption / growth findings to retain after sorting.
-const TOP_INTERRUPTIONS: usize = 10;
-const TOP_GROWTH_FINDINGS: usize = 10;
 
 /// Score a per-turn context-size series via `max(delta) / median(|delta|)`.
 ///

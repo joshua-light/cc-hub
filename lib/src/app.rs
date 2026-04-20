@@ -1,4 +1,5 @@
 use crate::acks::Acks;
+use crate::config;
 use crate::conversation::StateExplanation;
 use crate::folder_picker::FolderPicker;
 use crate::live_view::LiveView;
@@ -11,7 +12,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-pub const STATUS_MSG_TTL: Duration = Duration::from_secs(5);
+pub fn status_msg_ttl() -> Duration {
+    config::get().ui.status_msg_ttl()
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum View {
@@ -69,15 +72,13 @@ pub struct PendingClose {
 /// A prompt queued for a freshly-spawned tmux session that isn't yet Idle.
 /// Drained by [`App::poll_pending_dispatch`] once the session shows up in the
 /// next scan and its state flips to Idle, or times out after
-/// [`PENDING_DISPATCH_TIMEOUT`].
+/// [`config::UiConfig::pending_dispatch_timeout_secs`].
 #[derive(Clone, Debug)]
 pub struct PendingDispatch {
     tmux: String,
     prompt: String,
     queued_at: Instant,
 }
-
-pub const PENDING_DISPATCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub enum DispatchAction {
     Send { tmux: String, prompt: String },
@@ -116,6 +117,9 @@ pub struct App {
     pub metrics_scroll: u16,
     pub metrics_rows: Vec<SelectableSession>,
     pub metrics_selected: Option<usize>,
+    /// (scanned, total) for the in-flight metrics scan, shown while
+    /// [`Self::metrics`] is `None`. Cleared once analysis completes.
+    pub metrics_progress: Option<(usize, usize)>,
     pub pending_dispatch: Option<PendingDispatch>,
     pub show_inactive: bool,
     /// Latest scan snapshot; drives [`rebuild_groups`].
@@ -158,6 +162,7 @@ impl App {
             metrics_scroll: 0,
             metrics_rows: Vec::new(),
             metrics_selected: None,
+            metrics_progress: None,
             pending_dispatch: None,
             show_inactive: false,
             last_sessions: Vec::new(),
@@ -185,6 +190,7 @@ impl App {
             .map(|r| r.session_id.clone());
         self.metrics_rows = m.selectable_sessions();
         self.metrics = Some(m);
+        self.metrics_progress = None;
         self.metrics_selected = match prev_sid {
             Some(sid) => self
                 .metrics_rows
@@ -193,6 +199,13 @@ impl App {
                 .or_else(|| (!self.metrics_rows.is_empty()).then_some(0)),
             None => (!self.metrics_rows.is_empty()).then_some(0),
         };
+    }
+
+    pub fn update_metrics_progress(&mut self, scanned: usize, total: usize) {
+        if self.metrics.is_some() {
+            return;
+        }
+        self.metrics_progress = Some((scanned, total));
     }
 
     pub fn metrics_scroll_down(&mut self) {
@@ -349,7 +362,7 @@ impl App {
         if ready {
             return DispatchAction::Send { tmux: pd.tmux, prompt: pd.prompt };
         }
-        if pd.queued_at.elapsed() > PENDING_DISPATCH_TIMEOUT {
+        if pd.queued_at.elapsed() > config::get().ui.pending_dispatch_timeout() {
             return DispatchAction::Timeout { tmux: pd.tmux };
         }
         self.pending_dispatch = Some(pd);
@@ -687,7 +700,7 @@ impl App {
     }
 
     pub fn update_grid_cols(&mut self, width: u16) {
-        let cell_width = 42u16;
+        let cell_width = config::get().ui.cell_width.max(1);
         self.grid_cols = (width / cell_width).max(1);
     }
 

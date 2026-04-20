@@ -340,6 +340,71 @@ pub fn extract_state(entries: &[Value]) -> SessionState {
     state
 }
 
+/// Whether the session's most recent assistant entry ends with a `thinking`
+/// block — Claude Code writes each content block as its own JSONL entry, so
+/// a trailing `thinking` entry with no follow-up `text` or `tool_use` means
+/// the agent is still mid-reasoning. Claude Code does not persist the
+/// thinking text (only the signature), so we can only report the *fact* that
+/// thinking is happening.
+pub fn is_currently_thinking(entries: &[Value]) -> bool {
+    entries
+        .iter()
+        .rev()
+        .find(|e| e.get("type").and_then(|t| t.as_str()) == Some("assistant"))
+        .and_then(|e| {
+            let arr = e.get("message")?.get("content")?.as_array()?;
+            let last_block = arr.last()?;
+            Some(last_block.get("type").and_then(|t| t.as_str()) == Some("thinking"))
+        })
+        .unwrap_or(false)
+}
+
+/// Return the name of the most recent unresolved assistant `tool_use` — the
+/// tool the agent is currently executing, or the blocking tool it's waiting
+/// on user input for. Returns None if every `tool_use` has a matching
+/// `tool_result`, or if the last meaningful assistant turn had no tool_use.
+///
+/// We scan the whole window rather than just the last assistant entry so
+/// parallel tool calls (multiple tool_use blocks across several assistant
+/// entries with results trickling in) resolve to the outstanding one, not
+/// an already-completed sibling.
+pub fn extract_current_tool(entries: &[Value]) -> Option<String> {
+    let mut unresolved: Vec<(String, String)> = Vec::new();
+    let mut results: HashSet<String> = HashSet::new();
+
+    for entry in entries {
+        let t = entry.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let arr = match entry
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        {
+            Some(a) => a,
+            None => continue,
+        };
+        for block in arr {
+            let bt = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            if t == "assistant" && bt == "tool_use" {
+                let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                if !id.is_empty() && !name.is_empty() {
+                    unresolved.push((id.to_string(), name.to_string()));
+                }
+            } else if t == "user" && bt == "tool_result" {
+                if let Some(id) = block.get("tool_use_id").and_then(|v| v.as_str()) {
+                    results.insert(id.to_string());
+                }
+            }
+        }
+    }
+
+    unresolved
+        .into_iter()
+        .rev()
+        .find(|(id, _)| !results.contains(id))
+        .map(|(_, name)| name)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Verdict {
     /// Rule fired and chose this state. The decision-tree walk stops here.
@@ -830,17 +895,16 @@ pub fn extract_messages(entries: &[Value], count: usize) -> Vec<ConversationMess
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
 
-            let input_tokens = e
-                .get("message")
-                .and_then(|m| m.get("usage"))
-                .and_then(|u| u.get("input_tokens"))
-                .and_then(|v| v.as_u64());
-
-            let output_tokens = e
-                .get("message")
-                .and_then(|m| m.get("usage"))
-                .and_then(|u| u.get("output_tokens"))
-                .and_then(|v| v.as_u64());
+            let usage_u64 = |field: &str| -> Option<u64> {
+                e.get("message")
+                    .and_then(|m| m.get("usage"))
+                    .and_then(|u| u.get(field))
+                    .and_then(|v| v.as_u64())
+            };
+            let input_tokens = usage_u64("input_tokens");
+            let output_tokens = usage_u64("output_tokens");
+            let cache_read_input_tokens = usage_u64("cache_read_input_tokens");
+            let cache_creation_input_tokens = usage_u64("cache_creation_input_tokens");
 
             ConversationMessage {
                 role,
@@ -850,6 +914,8 @@ pub fn extract_messages(entries: &[Value], count: usize) -> Vec<ConversationMess
                 stop_reason,
                 input_tokens,
                 output_tokens,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
             }
         })
         .collect::<Vec<_>>();
@@ -1121,6 +1187,103 @@ mod tests {
         let result = extract_last_activity(&entries);
         assert!(result.is_some());
         assert_eq!(result.unwrap() % 1000, 201);
+    }
+
+    #[test]
+    fn extract_current_tool_returns_unresolved_among_parallel_calls() {
+        // Two parallel Bash + Edit tool_uses, only the Bash one resolved.
+        let entries = vec![
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "stop_reason": "tool_use",
+                    "content": [
+                        {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}},
+                        {"type": "tool_use", "id": "t2", "name": "Edit", "input": {}}
+                    ]}
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": {"role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "t1"}]}
+            }),
+        ];
+        assert_eq!(extract_current_tool(&entries).as_deref(), Some("Edit"));
+    }
+
+    #[test]
+    fn extract_current_tool_none_when_all_resolved() {
+        let entries = vec![
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "stop_reason": "end_turn",
+                    "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {}}]}
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": {"role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "t1"}]}
+            }),
+        ];
+        assert_eq!(extract_current_tool(&entries), None);
+    }
+
+    #[test]
+    fn is_currently_thinking_true_when_last_assistant_block_is_thinking() {
+        // Claude Code writes each content block as its own JSONL entry — a
+        // trailing thinking entry with no text/tool_use follow-up means the
+        // agent is still mid-reasoning.
+        let entries = vec![
+            serde_json::json!({"type": "user", "message": {"role": "user", "content": "hi"}}),
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "stop_reason": "tool_use",
+                    "content": [{"type": "thinking", "thinking": ""}]}
+            }),
+        ];
+        assert!(is_currently_thinking(&entries));
+    }
+
+    #[test]
+    fn is_currently_thinking_false_when_tool_use_follows() {
+        let entries = vec![
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "stop_reason": "tool_use",
+                    "content": [{"type": "thinking", "thinking": ""}]}
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]}
+            }),
+        ];
+        assert!(!is_currently_thinking(&entries));
+    }
+
+    #[test]
+    fn is_currently_thinking_false_when_no_assistant_entry() {
+        let entries = vec![
+            serde_json::json!({"type": "user", "message": {"role": "user", "content": "hi"}}),
+        ];
+        assert!(!is_currently_thinking(&entries));
+    }
+
+    #[test]
+    fn extract_current_tool_prefers_most_recent_unresolved() {
+        // Two assistant turns with unresolved tool_uses; the newer one wins.
+        let entries = vec![
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "id": "old", "name": "Bash", "input": {}}]}
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "id": "new", "name": "Grep", "input": {}}]}
+            }),
+        ];
+        assert_eq!(extract_current_tool(&entries).as_deref(), Some("Grep"));
     }
 }
 

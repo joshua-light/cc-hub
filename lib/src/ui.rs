@@ -1,4 +1,5 @@
-use crate::app::{App, Tab, View, STATUS_MSG_TTL, TABS};
+use crate::app::{status_msg_ttl, App, Tab, View, TABS};
+use crate::config;
 use crate::conversation::{StateExplanation, Verdict};
 use crate::metrics::{MetricsAnalysis, ModelStats, SessionSummary, ToolStats};
 use crate::models::{short_sid, SessionDetail, SessionInfo, SessionState};
@@ -11,7 +12,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-const CELL_HEIGHT: u16 = 8;
+fn cell_height() -> u16 {
+    config::get().ui.cell_height.max(1)
+}
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -524,15 +527,15 @@ fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
     for group in &app.groups {
         group_offsets.push(y_acc);
         let rows = ((group.sessions.len() + cols - 1) / cols) as u16;
-        y_acc = y_acc.saturating_add(GROUP_HEADER_HEIGHT + rows * CELL_HEIGHT + GROUP_GAP);
+        y_acc = y_acc.saturating_add(GROUP_HEADER_HEIGHT + rows * cell_height() + GROUP_GAP);
     }
 
     // Auto-scroll to keep selected card visible (prefer showing group header too)
     {
         let g_offset = group_offsets[app.sel_group];
         let card_row = (app.sel_in_group / cols) as u16;
-        let card_y = g_offset + GROUP_HEADER_HEIGHT + card_row * CELL_HEIGHT;
-        let card_bottom = card_y + CELL_HEIGHT;
+        let card_y = g_offset + GROUP_HEADER_HEIGHT + card_row * cell_height();
+        let card_bottom = card_y + cell_height();
 
         if card_bottom.saturating_sub(g_offset) <= area.height {
             // Both header and card fit — keep both visible
@@ -597,11 +600,11 @@ fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
             let col = (si % cols) as u16;
             let row = (si / cols) as u16;
 
-            let card_cy = g_y + GROUP_HEADER_HEIGHT + row * CELL_HEIGHT;
+            let card_cy = g_y + GROUP_HEADER_HEIGHT + row * cell_height();
             let card_sy = card_cy as i32 - scroll as i32;
 
             // Only render if fully visible within the area
-            if card_sy < 0 || card_sy + CELL_HEIGHT as i32 > area.height as i32 {
+            if card_sy < 0 || card_sy + cell_height() as i32 > area.height as i32 {
                 continue;
             }
 
@@ -614,7 +617,7 @@ fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
             };
 
             let is_selected = gi == app.sel_group && si == app.sel_in_group;
-            let cell_area = Rect::new(x, cy, w, CELL_HEIGHT);
+            let cell_area = Rect::new(x, cy, w, cell_height());
             render_card(frame, cell_area, session, is_selected, now);
         }
     }
@@ -639,7 +642,21 @@ fn render_card(frame: &mut Frame, area: Rect, session: &SessionInfo, selected: b
         BorderType::Rounded
     };
 
-    let title = format!("{} {}", indicator, session.project_name);
+    // Border title is the primary skim surface — prepending the Haiku-
+    // generated 2-3 word title when available lets users scan what each
+    // session is about without having to read the (truncated, often mid-
+    // sentence) last user message inside the card body. A `✎` placeholder
+    // marks cards with an in-flight Haiku call so the user can tell a
+    // pending title from one that's never going to arrive.
+    let title = match session.title.as_deref() {
+        Some(t) if !t.is_empty() => {
+            format!("{} {} — {}", indicator, session.project_name, t)
+        }
+        _ if session.titling => {
+            format!("{} {} — ✎ …", indicator, session.project_name)
+        }
+        _ => format!("{} {}", indicator, session.project_name),
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(border_type)
@@ -692,12 +709,44 @@ fn render_card(frame: &mut Frame, area: Rect, session: &SessionInfo, selected: b
         Span::styled(duration_display, Style::default().fg(Color::DarkGray)),
     ]));
 
-    // Last-activity elapsed time
-    let elapsed_str = session.last_activity.map(|ts| format!("󰔟 {}", format_elapsed(now, ts)));
+    // Last-activity elapsed time (left) + in-flight activity (right).
+    // Tool wins over thinking when both are present — a running tool is
+    // always more actionable context than recent reasoning.
+    let elapsed_raw = session.last_activity.map(|ts| format_elapsed(now, ts));
+    let (activity_label, activity_color): (Option<String>, Color) =
+        if let Some(tool) = session.current_tool.as_deref() {
+            (
+                Some(format!("󰖷 {}", short_tool(tool))),
+                state_color(&session.state),
+            )
+        } else if session.is_thinking && session.state == SessionState::Processing {
+            (Some("󰛨 Thinking".to_string()), Color::Rgb(170, 140, 210))
+        } else {
+            (None, Color::DarkGray)
+        };
+
+    let elapsed_cols = elapsed_raw.as_ref().map(|s| 2 + 1 + s.len()).unwrap_or(0);
+    let activity_cols = activity_label
+        .as_ref()
+        .map(|s| s.chars().count() + 1)
+        .unwrap_or(0);
 
     let mut state_spans: Vec<Span> = Vec::new();
-    if let Some(elapsed) = &elapsed_str {
-        state_spans.push(Span::styled(elapsed.clone(), Style::default().fg(Color::DarkGray)));
+    if let Some(elapsed) = &elapsed_raw {
+        state_spans.push(Span::styled(
+            format!("󰔟 {}", elapsed),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    if let Some(label) = &activity_label {
+        let padding = inner_w
+            .saturating_sub(elapsed_cols)
+            .saturating_sub(activity_cols);
+        state_spans.push(Span::raw(" ".repeat(padding)));
+        state_spans.push(Span::styled(
+            label.clone(),
+            Style::default().fg(activity_color),
+        ));
     }
 
     lines.push(Line::from(state_spans));
@@ -1123,6 +1172,13 @@ fn build_live_tail_content(
         }
     };
 
+    // Running session cost. cache_read tokens are the reused prefix — they
+    // do count toward the billed input_tokens of the call, but summing them
+    // across turns double-counts the same cached prefix over and over, so
+    // billed_in tracks only the *new* input contributed by each turn.
+    let mut billed_in: u64 = 0;
+    let mut total_out: u64 = 0;
+
     for (idx, msg) in messages.iter().enumerate() {
         if msg.role == "system" {
             continue;
@@ -1159,6 +1215,21 @@ fn build_live_tail_content(
                     PreviewPart::Text(text) => render_asst_bullet(&mut lines, &text),
                 }
             }
+
+            let input = msg.input_tokens.unwrap_or(0);
+            let output = msg.output_tokens.unwrap_or(0);
+            let cache_read = msg.cache_read_input_tokens.unwrap_or(0);
+            let cache_create = msg.cache_creation_input_tokens.unwrap_or(0);
+            let ctx = input + cache_read + cache_create;
+            let turn_new = input + cache_create;
+
+            billed_in = billed_in.saturating_add(turn_new);
+            total_out = total_out.saturating_add(output);
+
+            if ctx > 0 || output > 0 {
+                render_turn_stats(&mut lines, turn_new, output, ctx, billed_in, total_out);
+            }
+
             if is_peak && highlight_range.is_none() {
                 highlight_range = Some((start, lines.len()));
             }
@@ -1166,6 +1237,36 @@ fn build_live_tail_content(
     }
 
     (lines, highlight_range)
+}
+
+fn render_turn_stats(
+    lines: &mut Vec<Line<'static>>,
+    turn_in: u64,
+    turn_out: u64,
+    ctx: u64,
+    cum_in: u64,
+    cum_out: u64,
+) {
+    let dim = Style::default().fg(Color::Rgb(95, 95, 115));
+    let accent = Style::default().fg(Color::Rgb(170, 150, 205));
+    let ctx_accent = Style::default()
+        .fg(Color::Rgb(200, 175, 230))
+        .add_modifier(Modifier::BOLD);
+
+    let mut spans = vec![
+        Span::styled("  └─ ctx ", dim),
+        Span::styled(format_tokens(ctx), ctx_accent),
+    ];
+    spans.push(Span::styled("  · turn +", dim));
+    spans.push(Span::styled(format_tokens(turn_in), accent));
+    spans.push(Span::styled(" in / ", dim));
+    spans.push(Span::styled(format_tokens(turn_out), accent));
+    spans.push(Span::styled(" out  · Σ ", dim));
+    spans.push(Span::styled(format_tokens(cum_in), accent));
+    spans.push(Span::styled(" in / ", dim));
+    spans.push(Span::styled(format_tokens(cum_out), accent));
+    spans.push(Span::styled(" out", dim));
+    lines.push(Line::from(spans));
 }
 
 fn is_placeholder_preview(s: &str) -> bool {
@@ -1468,7 +1569,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     let fresh_status = app
         .status_msg
         .as_ref()
-        .filter(|(_, ts)| ts.elapsed() < STATUS_MSG_TTL)
+        .filter(|(_, ts)| ts.elapsed() < status_msg_ttl())
         .map(|(msg, _)| msg.as_str());
 
     let mut spans: Vec<Span> = Vec::new();
@@ -1525,6 +1626,21 @@ fn state_color(state: &SessionState) -> Color {
 
 fn short_model(model: &str) -> &str {
     model.strip_prefix("claude-").unwrap_or(model)
+}
+
+/// Tool names for the card HUD: strip MCP-server prefixes and cap at 18 chars
+/// so long names like `mcp__claude_ai_Notion__notion-search` fit in narrow
+/// cards.
+fn short_tool(tool: &str) -> String {
+    // `mcp__<server>__<name>` → just the name (the leaf is what's distinctive).
+    let leaf = tool.rsplit("__").next().unwrap_or(tool);
+    let chars: Vec<char> = leaf.chars().collect();
+    if chars.len() <= 18 {
+        return leaf.to_string();
+    }
+    let mut s: String = chars.into_iter().take(17).collect();
+    s.push('…');
+    s
 }
 
 fn format_time(timestamp_ms: u64) -> String {
@@ -1600,9 +1716,19 @@ fn render_metrics_body(frame: &mut Frame, area: Rect, app: &App) {
     let m = match &app.metrics {
         Some(m) => m,
         None => {
+            let text = match app.metrics_progress {
+                Some((scanned, total)) if total > 0 => {
+                    let pct = (scanned as f64 / total as f64 * 100.0).round() as u64;
+                    format!(
+                        " Scanning ~/.claude/projects … {} / {} sessions ({}%)",
+                        scanned, total, pct
+                    )
+                }
+                _ => " Scanning ~/.claude/projects …".to_string(),
+            };
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
-                    " Scanning ~/.claude/projects …",
+                    text,
                     Style::default().fg(Color::DarkGray),
                 ))),
                 area,
@@ -1838,18 +1964,53 @@ fn build_metrics_content(
     }
     lines.push(Line::raw(""));
 
-    lines.push(section_header("Context-growth anomalies"));
+    lines.push(section_header("Peak context reached"));
+    let pc = &m.peak_context;
+    if pc.findings.is_empty() {
+        lines.push(Line::from(Span::styled("  (no sessions)", dim)));
+    } else {
+        for f in pc.findings.iter() {
+            let sid = short_sid(&f.session_id).to_string();
+            let (marker, sid_style) = selection_row_style(selected == Some(global_row));
+            row_lines.push(lines.len());
+            lines.push(Line::from(vec![
+                Span::styled(format!("{}{:<10}", marker, sid), sid_style),
+                Span::styled(
+                    format!("{:>8} ctx", format_tokens(f.peak_ctx_tokens)),
+                    val.fg(Color::Rgb(220, 180, 130)),
+                ),
+                Span::styled(format!("  {:>8}", fmt_cost(f.total_cost)), val.fg(Color::Green)),
+                Span::styled(
+                    format!("  @ turn {}/{}", f.peak_turn_index, f.assistant_turns),
+                    dim,
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    format!("{:<24}", truncate_str(&f.project, 24)),
+                    Style::default().fg(Color::Rgb(180, 180, 200)),
+                ),
+            ]));
+            global_row += 1;
+        }
+    }
+    lines.push(Line::raw(""));
+
+    lines.push(section_header("Token spikes (outlier single-turn deltas)"));
     let g = &m.context_growth;
     lines.push(Line::from(vec![
         Span::styled("  Scored ", label),
         Span::styled(format!("{}", g.sessions_scored), val),
-        Span::styled("    Anomalous ", label),
+        Span::styled("    Spikes ", label),
         Span::styled(format!("{}", g.findings.len()), val),
-        Span::styled("    Cost in anomalies ", label),
+        Span::styled("    Cost in flagged sessions ", label),
         Span::styled(fmt_cost(g.anomalous_cost), val.fg(Color::Rgb(220, 180, 130))),
     ]));
+    lines.push(Line::from(Span::styled(
+        "  score = peak turn delta / median turn delta — flags one-shot bursts, not total growth",
+        dim,
+    )));
     if g.findings.is_empty() {
-        lines.push(Line::from(Span::styled("  (no runaway sessions)", dim)));
+        lines.push(Line::from(Span::styled("  (no spikes)", dim)));
     } else {
         for f in g.findings.iter() {
             let sid = short_sid(&f.session_id).to_string();

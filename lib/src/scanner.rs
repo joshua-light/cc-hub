@@ -1,3 +1,4 @@
+use crate::config;
 use crate::conversation;
 use crate::models::{short_sid, RawSession, SessionDetail, SessionInfo, SessionState};
 use crate::platform::paths;
@@ -17,15 +18,6 @@ fn mtime_age_secs(path: &Path) -> Option<u64> {
         .ok()
         .map(|d| d.as_secs())
 }
-
-/// Keep dead sessions visible if their JSONL was touched within this window.
-/// Hardcoded for now — surface as a CLI/env knob once the UX settles.
-const INACTIVE_WINDOW_SECS: u64 = 3 * 86_400;
-
-/// Cap on how many inactive sessions we surface per project (cwd), ranked by
-/// most recent activity. Keeps the grid navigable when a single project has
-/// dozens of touched JSONLs in the window.
-const INACTIVE_MAX_PER_PROJECT: usize = 5;
 
 fn claude_dir() -> Option<PathBuf> {
     paths::claude_home()
@@ -329,6 +321,17 @@ fn read_raw_sessions() -> Vec<RawSession> {
         file_count += 1;
         if let Ok(contents) = std::fs::read_to_string(&path) {
             if let Ok(raw) = serde_json::from_str::<RawSession>(&contents) {
+                // Skip the one-shot `cc-hub-new -p` children our titler
+                // spawns — they live briefly in scratch_cwd and would
+                // otherwise surface as a spurious "cc-hub-summaries"
+                // project in the grid.
+                if is_scratch_cwd(&raw.cwd) {
+                    debug!(
+                        "session file: skipping scratch-cwd sid={} pid={}",
+                        short_sid(&raw.session_id), raw.pid
+                    );
+                    continue;
+                }
                 debug!(
                     "session file: pid={} sid={} cwd={}",
                     raw.pid, short_sid(&raw.session_id), raw.cwd
@@ -381,6 +384,8 @@ struct JsonlData {
     model: Option<String>,
     version: Option<String>,
     summary: Option<String>,
+    current_tool: Option<String>,
+    is_thinking: bool,
 }
 
 fn project_name(cwd: &str) -> String {
@@ -394,8 +399,13 @@ fn project_name(cwd: &str) -> String {
 /// Build a [`SessionInfo`] from an orphan JSONL alone — no metadata file, no
 /// live process. `cwd` is taken from the first JSONL entry that carries one;
 /// the encoded directory name isn't losslessly decodable, so files without a
-/// usable `cwd` entry are skipped.
-fn synthesize_inactive_from_jsonl(path: &Path) -> Option<SessionInfo> {
+/// usable `cwd` entry are skipped. Files whose cwd matches
+/// [`crate::title::scratch_cwd`] are also skipped — those are the one-shot
+/// `cc-hub-new -p` runs the titler fires, not real sessions.
+fn synthesize_inactive_from_jsonl(
+    path: &Path,
+    titles: &HashMap<String, String>,
+) -> Option<SessionInfo> {
     let session_id = path.file_stem().and_then(|s| s.to_str())?.to_string();
     let head_entries = conversation::read_jsonl_head(path, 4096);
 
@@ -403,6 +413,10 @@ fn synthesize_inactive_from_jsonl(path: &Path) -> Option<SessionInfo> {
         .iter()
         .find_map(|e| e.get("cwd").and_then(|c| c.as_str()))?
         .to_string();
+
+    if is_scratch_cwd(&cwd) {
+        return None;
+    }
 
     let started_at = head_entries
         .iter()
@@ -414,6 +428,7 @@ fn synthesize_inactive_from_jsonl(path: &Path) -> Option<SessionInfo> {
     let last_activity = conversation::extract_last_activity(&tail_entries);
     let (git_branch, model, version) = conversation::extract_metadata(&tail_entries);
     let summary = conversation::extract_first_user_message(&head_entries);
+    let title = titles.get(&session_id).cloned();
 
     Some(SessionInfo {
         pid: 0,
@@ -425,23 +440,38 @@ fn synthesize_inactive_from_jsonl(path: &Path) -> Option<SessionInfo> {
         state: SessionState::Inactive,
         last_user_message,
         summary,
+        title,
         model,
         git_branch,
         version,
         jsonl_path: Some(path.to_path_buf()),
         tmux_session: None,
+        current_tool: None,
+        is_thinking: false,
+        titling: false,
     })
 }
 
+fn is_scratch_cwd(cwd: &str) -> bool {
+    crate::title::scratch_cwd()
+        .to_str()
+        .is_some_and(|s| s == cwd)
+}
+
 /// Walk `~/.claude/projects/**/*.jsonl` and synthesize Inactive sessions for
-/// any JSONL touched within `INACTIVE_WINDOW_SECS` whose path isn't already
-/// represented by an alive session. Caps each project at
-/// [`INACTIVE_MAX_PER_PROJECT`] (ranked by mtime) before parsing JSONLs so a
-/// project with dozens of touched files doesn't dominate a scan tick.
+/// any JSONL touched within [`config::InactiveConfig::window_secs`] whose path
+/// isn't already represented by an alive session. Caps each project at
+/// [`config::InactiveConfig::max_per_project`] (ranked by mtime) before
+/// parsing JSONLs so a project with dozens of touched files doesn't dominate
+/// a scan tick.
 ///
 /// Returns `(sessions, total_in_window)` — the count reflects how many files
 /// were eligible before the per-project cap.
-fn scan_orphan_jsonls(claimed_paths: &HashSet<PathBuf>) -> (Vec<SessionInfo>, usize) {
+fn scan_orphan_jsonls(
+    claimed_paths: &HashSet<PathBuf>,
+    titles: &HashMap<String, String>,
+) -> (Vec<SessionInfo>, usize) {
+    let cfg = &config::get().inactive;
     let Some(projects) = projects_dir() else {
         return (Vec::new(), 0);
     };
@@ -449,9 +479,22 @@ fn scan_orphan_jsonls(claimed_paths: &HashSet<PathBuf>) -> (Vec<SessionInfo>, us
         return (Vec::new(), 0);
     };
 
+    // Encoded form of the titler's scratch cwd, e.g. `-tmp-cc-hub-summaries`.
+    // Skipping this project dir up front avoids reading dozens of one-shot
+    // `cc-hub-new -p` JSONLs every scan just to throw them away inside
+    // `synthesize_inactive_from_jsonl`.
+    let scratch_proj_dir = crate::title::scratch_cwd()
+        .to_str()
+        .map(encode_path);
+
     let mut out = Vec::new();
     let mut total_in_window = 0usize;
     for proj in project_dirs.flatten() {
+        if let Some(skip) = scratch_proj_dir.as_deref() {
+            if proj.file_name().to_str() == Some(skip) {
+                continue;
+            }
+        }
         let Ok(files) = std::fs::read_dir(proj.path()) else {
             continue;
         };
@@ -472,15 +515,15 @@ fn scan_orphan_jsonls(claimed_paths: &HashSet<PathBuf>) -> (Vec<SessionInfo>, us
             else {
                 continue;
             };
-            if age > INACTIVE_WINDOW_SECS {
+            if age > cfg.window_secs {
                 continue;
             }
             candidates.push((path, mtime));
         }
         total_in_window += candidates.len();
         candidates.sort_by(|a, b| b.1.cmp(&a.1));
-        for (path, _) in candidates.into_iter().take(INACTIVE_MAX_PER_PROJECT) {
-            if let Some(info) = synthesize_inactive_from_jsonl(&path) {
+        for (path, _) in candidates.into_iter().take(cfg.max_per_project) {
+            if let Some(info) = synthesize_inactive_from_jsonl(&path, titles) {
                 out.push(info);
             }
         }
@@ -519,6 +562,11 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
     // tmux session name (if any) without reshelling per pid.
     let tmux_panes = crate::send::tmux_panes();
 
+    // Titles are cheap to load and don't change within a scan — read once and
+    // hand a reference to every site that builds a SessionInfo.
+    let titles = crate::title::load();
+
+    let inactive_window_secs = config::get().inactive.window_secs;
     let mut sessions: Vec<SessionInfo> = raw_sessions
         .into_iter()
         .filter_map(|raw| {
@@ -528,7 +576,7 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
                 let within_window = jsonl_path
                     .as_deref()
                     .and_then(mtime_age_secs)
-                    .is_some_and(|s| s <= INACTIVE_WINDOW_SECS);
+                    .is_some_and(|s| s <= inactive_window_secs);
                 if !within_window {
                     return None;
                 }
@@ -558,6 +606,8 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
                     let (branch, mdl, ver) = conversation::extract_metadata(&entries);
                     let head_entries = conversation::read_jsonl_head(path, 4096);
                     let summary = conversation::extract_first_user_message(&head_entries);
+                    let current_tool = conversation::extract_current_tool(&entries);
+                    let is_thinking = conversation::is_currently_thinking(&entries);
 
                     debug!(
                         "  sid={} tail_entries={} raw_state={} last_activity={:?}",
@@ -585,11 +635,11 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
                         sid_short, state, mdl, branch
                     );
 
-                    JsonlData { state, last_user_message: last_msg, last_activity: last_act, git_branch: branch, model: mdl, version: ver, summary }
+                    JsonlData { state, last_user_message: last_msg, last_activity: last_act, git_branch: branch, model: mdl, version: ver, summary, current_tool, is_thinking }
                 }
                 None => {
                     debug!("  sid={} no jsonl → Idle", sid_short);
-                    JsonlData { state: SessionState::Idle, last_user_message: None, last_activity: None, git_branch: None, model: None, version: None, summary: None }
+                    JsonlData { state: SessionState::Idle, last_user_message: None, last_activity: None, git_branch: None, model: None, version: None, summary: None, current_tool: None, is_thinking: false }
                 }
             };
 
@@ -603,6 +653,8 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
                 None
             };
 
+            let title = titles.get(&raw.session_id).cloned();
+
             SessionInfo {
                 pid: raw.pid,
                 session_id: raw.session_id,
@@ -613,11 +665,15 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
                 state: data.state,
                 last_user_message: data.last_user_message,
                 summary: data.summary,
+                title,
                 model: data.model,
                 git_branch: data.git_branch,
                 version: data.version,
                 jsonl_path,
                 tmux_session,
+                current_tool: data.current_tool,
+                is_thinking: data.is_thinking,
+                titling: false,
             }
         })
         .collect();
@@ -626,13 +682,13 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
         .iter()
         .filter_map(|s| s.jsonl_path.clone())
         .collect();
-    let (orphans, total_in_window) = scan_orphan_jsonls(&claimed_paths);
+    let (orphans, total_in_window) = scan_orphan_jsonls(&claimed_paths, &titles);
     info!(
         "scan_sessions: {} from metadata + {} orphan JSONLs (of {} within window, capped at {} per project)",
         sessions.len(),
         orphans.len(),
         total_in_window,
-        INACTIVE_MAX_PER_PROJECT
+        config::get().inactive.max_per_project,
     );
     sessions.extend(orphans);
 

@@ -75,6 +75,82 @@ cargo run --release -- --no-tui
 Logs are written to `$XDG_CACHE_HOME/cc-hub/` (Linux), `~/Library/Caches/cc-hub/`
 (macOS), or `%LOCALAPPDATA%\cc-hub\` (Windows). The path is printed on exit.
 
+## Configuration
+
+cc-hub reads `~/.cc-hub/config.toml` once at startup. The file is optional —
+every field falls back to the default below, and a missing file is equivalent
+to an empty one. Unknown fields are rejected so typos surface in the log
+instead of being silently ignored.
+
+Full schema with defaults:
+
+```toml
+[spawn]
+# Command invoked inside each multiplexer pane. Resolved through the user's
+# interactive shell so rc-file aliases/functions expand. The title feature
+# reuses this name for its `-p` calls.
+command = "cc-hub-new"
+
+[title]
+# Master switch for the background Haiku titler. When false, cards fall back
+# to the first-user-message summary instead of a generated 2-3 word title.
+enabled = true
+# Passed as `--model <model>` to the resolved spawn command.
+model = "haiku"
+# Clamp on the sanitized Haiku output (utf8-safe).
+max_length = 40
+# Per-call subprocess timeout. A hung `claude -p` is killed past this.
+run_timeout_secs = 45
+# One-time shell alias resolution timeout (paid once per process).
+resolve_timeout_secs = 10
+# Max simultaneous `-p` subprocesses. Keeps the first scan from fork-storming.
+concurrency = 2
+# Prompt prepended to the first user message. Keep the trailing `Request:`
+# marker so Haiku has a cue.
+prompt = """Output a 2 or 3 word title summarizing this Claude Code user request. Output only the title — no quotes, no punctuation, no prefix like "Title:". Just the words.
+
+Request:
+"""
+
+[inactive]
+# How long a dead session's JSONL stays visible after its last touch.
+window_secs = 259200  # 3 days
+# Per-cwd cap on inactive sessions, ranked by mtime.
+max_per_project = 5
+
+[scan]
+# Fallback timer that catches PID deaths and missed fs events.
+fs_fallback_interval_secs = 2
+# How often to re-fetch the Anthropic usage API.
+usage_refresh_interval_secs = 60
+# How long the on-disk usage response is trusted before re-fetching.
+usage_cache_ttl_secs = 60
+
+[ui]
+# How long status-bar messages (spawn/dispatch toasts) stay visible.
+status_msg_ttl_secs = 5
+# How long an auto-spawned session has to become Idle before the queued
+# prompt is abandoned.
+pending_dispatch_timeout_secs = 60
+# Grid cell dimensions (rows, columns of terminal cells per card).
+cell_height = 8
+cell_width = 42
+
+[metrics]
+# Minimum assistant turns before a session is eligible for context-growth
+# scoring.
+min_growth_turns = 20
+# Anomaly threshold: peak delta >= this many times the median absolute delta.
+growth_threshold = 6.0
+# How many rows of each finding to retain after sorting.
+top_interruptions = 10
+top_growth_findings = 10
+top_peak_context_findings = 10
+```
+
+Only the sections/fields you want to override need to be present — omit
+everything else to inherit defaults.
+
 ### Hot reload (development)
 
 ```bash

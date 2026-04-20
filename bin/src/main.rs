@@ -1,6 +1,6 @@
 use cc_hub_lib::{
-    app, clipboard, conversation, focus, gh, live_view, metrics, models, platform, scanner, send,
-    spawn, tmux_pane, ui, usage, watcher,
+    app, clipboard, config, conversation, focus, gh, live_view, metrics, models, platform,
+    scanner, send, spawn, title, tmux_pane, ui, usage, watcher,
 };
 
 use app::{App, Tab, View};
@@ -27,11 +27,120 @@ use log::LevelFilter;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use simplelog::{Config as LogConfig, WriteLogger};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+/// Spawn a background `cc-hub-new -p` per session that has a first user
+/// message but no cached title yet. `inflight` guards against duplicate
+/// kickoffs (and intentionally retains failed sids so a missing shell
+/// command doesn't trigger a subprocess every scan). `active` is the
+/// narrower set of sids whose subprocess is actually running right now,
+/// and drives the UI spinner.
+fn queue_missing_titles(
+    sessions: &mut [models::SessionInfo],
+    inflight: &Arc<Mutex<HashSet<String>>>,
+    active: &Arc<Mutex<HashSet<String>>>,
+    gate: &Arc<tokio::sync::Semaphore>,
+) {
+    for session in sessions.iter() {
+        if session.title.is_some() {
+            continue;
+        }
+        let Some(first_msg) = session.summary.clone() else {
+            continue;
+        };
+        let sid = session.session_id.clone();
+        {
+            let mut lock = inflight.lock().unwrap_or_else(|e| e.into_inner());
+            if !lock.insert(sid.clone()) {
+                continue; // already being titled
+            }
+        }
+        let inflight = Arc::clone(inflight);
+        let active = Arc::clone(active);
+        let gate = Arc::clone(gate);
+        tokio::spawn(async move {
+            // Hold the permit across the blocking subprocess call so only
+            // `TITLE_CONCURRENCY` children ever exist at once. The permit
+            // drops at task end, freeing a slot for the next queued title.
+            let _permit = gate.acquire_owned().await.ok();
+
+            // Mark active only around the real work — the UI spinner is
+            // driven by this narrower set, so a pending task still gated
+            // on the semaphore doesn't flash ✎ on its card.
+            active
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(sid.clone());
+
+            let title_result = tokio::task::spawn_blocking({
+                let msg = first_msg.clone();
+                move || title::generate_title_blocking(&msg)
+            })
+            .await
+            .ok()
+            .flatten();
+
+            active
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&sid);
+
+            // Leaving a failed sid in `inflight` blocks retry for this
+            // process's lifetime — the intended behavior when the user's
+            // shell is missing `cc-hub-new` entirely, so we don't spawn
+            // a failing subprocess every scan tick. An app restart clears
+            // the set and retries naturally.
+            let Some(t) = title_result else {
+                log::warn!(
+                    "title: generation failed for {}, blocking retries this session",
+                    models::short_sid(&sid)
+                );
+                return;
+            };
+
+            let sid_for_persist = sid.clone();
+            let t_for_persist = t.clone();
+            let persist = tokio::task::spawn_blocking(move || {
+                title::persist_title(&sid_for_persist, &t_for_persist)
+            })
+            .await;
+            match persist {
+                Ok(Ok(())) => log::info!(
+                    "title: sid={} → {:?}",
+                    models::short_sid(&sid),
+                    t
+                ),
+                Ok(Err(e)) => log::warn!("title: persist failed for {}: {}", sid, e),
+                Err(e) => log::warn!("title: persist task panicked for {}: {}", sid, e),
+            }
+
+            // On success we drop the sid so the set doesn't grow unboundedly
+            // across many sessions; subsequent scans see the cached title
+            // and skip re-queueing anyway.
+            inflight
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&sid);
+        });
+    }
+
+    // Second pass: stamp titling on every session whose sid is currently
+    // running (not just queued). Read the active set *after* insertion
+    // races above so UI sees the same instant the subprocess starts. The
+    // "queued but gated" window where a permit is still pending shows up
+    // as no indicator — that's brief and indistinguishable from "about to
+    // start" anyway.
+    let set = active.lock().unwrap_or_else(|e| e.into_inner());
+    for session in sessions.iter_mut() {
+        session.titling = set.contains(&session.session_id);
+    }
+}
 
 enum ScanMsg {
     SessionList(Vec<models::SessionInfo>),
@@ -39,6 +148,10 @@ enum ScanMsg {
     StateDebug(models::SessionInfo, conversation::StateExplanation),
     Usage(usage::UsageInfo),
     Metrics(metrics::MetricsAnalysis),
+    MetricsProgress {
+        scanned: usize,
+        total: usize,
+    },
     GhCreateDone {
         name: String,
         result: Result<String, String>,
@@ -70,6 +183,35 @@ fn init_logging() -> PathBuf {
     log_path
 }
 
+fn restore_terminal<W: io::Write>(
+    out: &mut W,
+    bracketed_paste: bool,
+    kb_enhanced: bool,
+) -> io::Result<()> {
+    let _ = crossterm::execute!(out, DisableMouseCapture);
+    if bracketed_paste {
+        let _ = crossterm::execute!(out, DisableBracketedPaste);
+    }
+    if kb_enhanced {
+        let _ = crossterm::execute!(out, PopKeyboardEnhancementFlags);
+    }
+    terminal::disable_raw_mode()?;
+    crossterm::execute!(out, LeaveAlternateScreen)?;
+    Ok(())
+}
+
+/// Best-effort terminal restore if anything panics (including inside tokio
+/// tasks). Without this, a panic mid-run leaves the terminal in raw mode +
+/// alt screen with no cursor — user has to blindly type `reset` to recover.
+fn install_panic_hook() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let mut out = io::stdout();
+        let _ = restore_terminal(&mut out, true, true);
+        prev(info);
+    }));
+}
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
     if std::env::args().any(|a| a == "--no-tui") {
@@ -81,6 +223,7 @@ async fn main() -> io::Result<()> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
     crossterm::execute!(stdout, EnterAlternateScreen)?;
+    install_panic_hook();
     // Best-effort: kitty-protocol disambiguation makes Ctrl+Shift+V report
     // the SHIFT modifier (plain xterm folds it into Ctrl+V). Silently
     // ignored by terminals that don't implement the protocol.
@@ -100,15 +243,12 @@ async fn main() -> io::Result<()> {
 
     let result = run(&mut terminal).await;
 
-    let _ = crossterm::execute!(terminal.backend_mut(), DisableMouseCapture);
-    if bracketed_paste {
-        let _ = crossterm::execute!(terminal.backend_mut(), DisableBracketedPaste);
-    }
-    if kb_enhanced {
-        let _ = crossterm::execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
-    }
-    terminal::disable_raw_mode()?;
-    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    // Ask any still-running title subprocesses to kill themselves so the
+    // tokio runtime's shutdown doesn't wait up to ~45s on a hung `claude
+    // -p`. Blocking tasks can't be cancelled, but they poll this flag.
+    title::request_shutdown();
+
+    restore_terminal(terminal.backend_mut(), bracketed_paste, kb_enhanced)?;
     terminal.show_cursor()?;
 
     eprintln!("Logs: {}", log_path.display());
@@ -136,6 +276,13 @@ fn run_no_tui() -> io::Result<()> {
 async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
     let mut app = App::new();
 
+    let inflight_titles: Arc<Mutex<HashSet<String>>> =
+        Arc::new(Mutex::new(HashSet::new()));
+    let active_titles: Arc<Mutex<HashSet<String>>> =
+        Arc::new(Mutex::new(HashSet::new()));
+    let title_gate: Arc<tokio::sync::Semaphore> =
+        Arc::new(tokio::sync::Semaphore::new(config::get().title.concurrency));
+
     let (scan_tx, mut scan_rx) = mpsc::channel::<ScanMsg>(16);
     let (detail_tx, mut detail_rx) = mpsc::channel::<String>(4);
     let (state_debug_tx, mut state_debug_rx) = mpsc::channel::<String>(4);
@@ -143,7 +290,8 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
     let usage_tx = scan_tx.clone();
     let scan_tx_main = scan_tx.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        let mut interval =
+            tokio::time::interval(config::get().scan.usage_refresh_interval());
         loop {
             interval.tick().await;
             if let Some(u) = tokio::task::spawn_blocking(usage::fetch_usage)
@@ -163,7 +311,8 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
     watcher::spawn_fs_watcher(fs_tx);
 
     tokio::spawn(async move {
-        let mut fallback = tokio::time::interval(Duration::from_secs(2));
+        let mut fallback =
+            tokio::time::interval(config::get().scan.fs_fallback_interval());
         fallback.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut latest_sessions: Vec<models::SessionInfo> = Vec::new();
 
@@ -216,7 +365,23 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
     let spawn_metrics = || {
         let tx = scan_tx_main.clone();
         tokio::spawn(async move {
-            if let Ok(m) = tokio::task::spawn_blocking(metrics::analyze).await {
+            let progress_tx = tx.clone();
+            let fut = tokio::task::spawn_blocking(move || {
+                // Throttle progress updates: the scanner rips through
+                // several hundred files per second on warm cache, so report
+                // at most every ~20 files (plus the 0 and N boundaries) to
+                // keep the 16-slot channel from ever filling.
+                let mut last_sent: usize = 0;
+                metrics::analyze_with_progress(|scanned, total| {
+                    let at_edge = scanned == 0 || scanned == total;
+                    if at_edge || scanned.saturating_sub(last_sent) >= 20 {
+                        last_sent = scanned;
+                        let _ = progress_tx
+                            .try_send(ScanMsg::MetricsProgress { scanned, total });
+                    }
+                })
+            });
+            if let Ok(m) = fut.await {
                 let _ = tx.send(ScanMsg::Metrics(m)).await;
             }
         });
@@ -719,7 +884,15 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
         // Drain channel messages
         while let Ok(msg) = scan_rx.try_recv() {
             match msg {
-                ScanMsg::SessionList(sessions) => app.update_sessions(sessions),
+                ScanMsg::SessionList(mut sessions) => {
+                    queue_missing_titles(
+                        &mut sessions,
+                        &inflight_titles,
+                        &active_titles,
+                        &title_gate,
+                    );
+                    app.update_sessions(sessions);
+                }
                 ScanMsg::Detail(detail) => app.update_detail(detail),
                 ScanMsg::StateDebug(info, exp) => {
                     let lines = ui::build_state_debug_content(&info, &exp);
@@ -731,6 +904,9 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                 }
                 ScanMsg::Metrics(m) => {
                     app.update_metrics(m);
+                }
+                ScanMsg::MetricsProgress { scanned, total } => {
+                    app.update_metrics_progress(scanned, total);
                 }
                 ScanMsg::GhCreateDone { name, result } => {
                     if let Some(picker) = app.folder_picker.as_mut() {
