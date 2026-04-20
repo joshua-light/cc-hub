@@ -1,11 +1,18 @@
 //! Embed a tmux session as a live, interactive pane inside cc-hub.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use log::{info, warn};
+use log::{debug, info, warn};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+/// psmux opens its attach handshake by querying the client's cursor
+/// position and blocks until it gets an answer. Real tmux sends the same
+/// query but doesn't gate the stream on the reply, so auto-answering from
+/// the reader thread is a no-op on Unix and the unblock that Windows needs.
+const DSR_QUERY: &[u8] = b"\x1b[6n";
+const DSR_REPLY: &[u8] = b"\x1b[1;1R";
 
 pub struct TmuxPaneView {
     pub session_name: String,
@@ -14,7 +21,8 @@ pub struct TmuxPaneView {
     pub cols: u16,
     viewport_origin: (u16, u16),
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    // Shared so the reader thread can auto-reply to psmux's DSR query.
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     exited: Arc<AtomicBool>,
     owns_session: bool,
@@ -36,11 +44,15 @@ impl TmuxPaneView {
             })
             .map_err(|e| std::io::Error::other(format!("openpty: {}", e)))?;
 
-        let mut cmd = CommandBuilder::new("tmux");
-        cmd.arg("attach");
-        cmd.arg("-t");
-        cmd.arg(session_name);
-        // Inherit the user's TERM so tmux picks sane capabilities.
+        let argv = crate::platform::mux::attach_argv(session_name);
+        let (bin, args) = argv
+            .split_first()
+            .ok_or_else(|| std::io::Error::other("empty attach argv from mux"))?;
+        let mut cmd = CommandBuilder::new(bin);
+        for a in args {
+            cmd.arg(a);
+        }
+        // Inherit the user's TERM so the multiplexer picks sane capabilities.
         if let Ok(term) = std::env::var("TERM") {
             cmd.env("TERM", term);
         } else {
@@ -66,7 +78,8 @@ impl TmuxPaneView {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
         let exited = Arc::new(AtomicBool::new(false));
 
-        // Portable-pty readers are sync, so dedicate a blocking thread.
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(writer));
+        let reader_writer = Arc::clone(&writer);
         {
             let parser = Arc::clone(&parser);
             let exited = Arc::clone(&exited);
@@ -80,6 +93,16 @@ impl TmuxPaneView {
                             break;
                         }
                         Ok(n) => {
+                            if buf[..n].windows(DSR_QUERY.len()).any(|w| w == DSR_QUERY) {
+                                if let Ok(mut w) = reader_writer.lock() {
+                                    if let Err(e) = w.write_all(DSR_REPLY) {
+                                        warn!("tmux_pane: DSR reply write failed: {}", e);
+                                    } else {
+                                        let _ = w.flush();
+                                        debug!("tmux_pane: answered DSR query");
+                                    }
+                                }
+                            }
                             if let Ok(mut p) = parser.lock() {
                                 p.process(&buf[..n]);
                             }
@@ -181,10 +204,11 @@ impl TmuxPaneView {
             b |= 16;
         }
         let terminator = if release { 'm' } else { 'M' };
-        if let Err(e) = write!(self.writer, "\x1b[<{};{};{}{}", b, x + 1, y + 1, terminator) {
+        let Ok(mut w) = self.writer.lock() else { return };
+        if let Err(e) = write!(w, "\x1b[<{};{};{}{}", b, x + 1, y + 1, terminator) {
             warn!("tmux_pane: mouse write failed: {}", e);
         } else {
-            let _ = self.writer.flush();
+            let _ = w.flush();
         }
     }
 
@@ -193,10 +217,11 @@ impl TmuxPaneView {
         if bytes.is_empty() {
             return;
         }
-        if let Err(e) = self.writer.write_all(&bytes) {
+        let Ok(mut w) = self.writer.lock() else { return };
+        if let Err(e) = w.write_all(&bytes) {
             warn!("tmux_pane: write failed: {}", e);
         } else {
-            let _ = self.writer.flush();
+            let _ = w.flush();
         }
     }
 

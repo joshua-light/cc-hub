@@ -15,6 +15,7 @@
 //! - [`paths`]: XDG-aware cache/config paths so we don't bake `/tmp` or
 //!   `~/.config/hypr` into unrelated code.
 
+pub mod mux;
 pub mod paths;
 pub mod process;
 pub mod terminal;

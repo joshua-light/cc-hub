@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "cc-hub"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "cc-hub-lib",
  "chrono",
@@ -166,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "cc-hub-lib"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "chrono",
  "crossterm",
@@ -184,6 +184,7 @@ dependencies = [
  "tokio",
  "tui-term",
  "vt100",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

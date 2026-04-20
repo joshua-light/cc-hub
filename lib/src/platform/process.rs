@@ -124,6 +124,90 @@ mod imp {
     }
 }
 
+#[cfg(target_os = "windows")]
+mod imp {
+    use super::ProcessInfo;
+    use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE, STILL_ACTIVE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    pub struct Process;
+
+    /// Iterate every live PROCESSENTRY32W and apply `f`, stopping early when
+    /// `f` returns `Some`. Returns the first match. This is the only shape
+    /// toolhelp exposes — there's no "lookup by pid" syscall.
+    fn with_entries<T>(mut f: impl FnMut(&PROCESSENTRY32W) -> Option<T>) -> Option<T> {
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap == 0 as HANDLE || snap as isize == -1 {
+                return None;
+            }
+            let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut ok = Process32FirstW(snap, &mut entry);
+            let mut out = None;
+            while ok != FALSE {
+                if let Some(v) = f(&entry) {
+                    out = Some(v);
+                    break;
+                }
+                ok = Process32NextW(snap, &mut entry);
+            }
+            CloseHandle(snap);
+            out
+        }
+    }
+
+    fn exe_name(entry: &PROCESSENTRY32W) -> String {
+        let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+        String::from_utf16_lossy(&entry.szExeFile[..len])
+    }
+
+    impl ProcessInfo for Process {
+        fn parent_pid(pid: u32) -> Option<u32> {
+            with_entries(|e| (e.th32ProcessID == pid).then_some(e.th32ParentProcessID))
+        }
+
+        /// Basename of the executable (e.g. `claude.exe`). Matches what Linux
+        /// `/proc/<pid>/comm` returns *minus* the truncation — Windows gives the
+        /// full filename.
+        fn name(pid: u32) -> String {
+            with_entries(|e| (e.th32ProcessID == pid).then(|| exe_name(e))).unwrap_or_default()
+        }
+
+        /// Windows has no POSIX session-id concept. `collect_pid_chain` only
+        /// consults this as a fallback when the main ppid walk dead-ends,
+        /// which doesn't happen on Windows (processes reparent to whoever
+        /// started them, not to init).
+        fn session_id(_pid: u32) -> Option<u32> {
+            None
+        }
+
+        fn is_claude(pid: u32) -> bool {
+            let n = <Self as ProcessInfo>::name(pid).to_ascii_lowercase();
+            n == "claude.exe" || n == "claude"
+        }
+
+        fn is_alive(pid: u32) -> bool {
+            unsafe {
+                let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+                if h == 0 as HANDLE {
+                    return false;
+                }
+                let mut code: u32 = 0;
+                let ok = GetExitCodeProcess(h, &mut code) != FALSE;
+                CloseHandle(h);
+                ok && code == STILL_ACTIVE as u32
+            }
+        }
+    }
+}
+
 pub use imp::Process;
 
 use log::debug;

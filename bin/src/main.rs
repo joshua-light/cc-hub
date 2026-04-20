@@ -406,7 +406,7 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                     (View::Grid, KeyCode::Char('n')) if on_sessions => {
                         if let Some(sess) = app.selected_session_info().cloned() {
                             let status = match spawn::spawn_claude_session(&sess.cwd) {
-                                Ok(name) => format!("started ccyo [{}]", name),
+                                Ok(name) => format!("started cc-hub-new [{}]", name),
                                 Err(e) => format!("spawn failed: {}", e),
                             };
                             app.set_status(status);
@@ -447,7 +447,7 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                         app.close_folder_picker();
                         if let Some(cwd) = cwd {
                             let status = match spawn::spawn_claude_session(&cwd) {
-                                Ok(name) => format!("started ccyo [{}]", name),
+                                Ok(name) => format!("started cc-hub-new [{}]", name),
                                 Err(e) => format!("spawn failed: {}", e),
                             };
                             app.set_status(status);
@@ -461,7 +461,7 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                         app.close_folder_picker();
                         if let Some(cwd) = cwd {
                             let status = match spawn::spawn_claude_session(&cwd) {
-                                Ok(name) => format!("started ccyo [{}]", name),
+                                Ok(name) => format!("started cc-hub-new [{}]", name),
                                 Err(e) => format!("spawn failed: {}", e),
                             };
                             app.set_status(status);
