@@ -1,6 +1,6 @@
 use crate::app::{App, Tab, View, STATUS_MSG_TTL, TABS};
 use crate::conversation::{StateExplanation, Verdict};
-use crate::metrics::{MetricsAnalysis, ModelStats, SessionSummary};
+use crate::metrics::{MetricsAnalysis, ModelStats, SessionSummary, ToolStats};
 use crate::models::{short_sid, SessionDetail, SessionInfo, SessionState};
 use crate::usage::UsageInfo;
 use chrono::Duration as ChronoDuration;
@@ -1732,6 +1732,110 @@ fn build_metrics_content(m: &MetricsAnalysis) -> Vec<Line<'static>> {
     }
     lines.push(Line::raw(""));
 
+    lines.push(section_header("Tool usage"));
+    let mut tools: Vec<(&String, &ToolStats)> = m.by_tool.iter().collect();
+    tools.sort_by_key(|t| std::cmp::Reverse(t.1.count));
+    let total_tool_calls: u64 = tools.iter().map(|(_, s)| s.count).sum();
+    let max_tool_count = tools.first().map(|(_, s)| s.count).unwrap_or(0).max(1);
+    if tools.is_empty() {
+        lines.push(Line::from(Span::styled("  (no tool calls recorded)", dim)));
+    } else {
+        for (name, s) in tools.iter().take(TOOLS_DISPLAY_LIMIT) {
+            let bar_w = ((s.count as f64 / max_tool_count as f64) * 24.0).round() as usize;
+            let pct = if total_tool_calls > 0 {
+                s.count as f64 / total_tool_calls as f64 * 100.0
+            } else {
+                0.0
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {:<22}", truncate_str(name, 22)), label),
+                Span::styled("━".repeat(bar_w), Style::default().fg(tool_color(name))),
+                Span::raw(" "),
+                Span::styled(format!("{:>6} calls", s.count), val),
+                Span::styled(format!("  {:>4.1}%", pct), dim),
+                Span::styled(format!("  {} sess", s.sessions), dim),
+            ]));
+        }
+        if tools.len() > TOOLS_DISPLAY_LIMIT {
+            lines.push(Line::from(Span::styled(
+                format!("  … {} more tools", tools.len() - TOOLS_DISPLAY_LIMIT),
+                dim,
+            )));
+        }
+    }
+    lines.push(Line::raw(""));
+
+    lines.push(section_header("Interruptions (Esc'd mid-tool-call)"));
+    let i = &m.interruptions;
+    if i.total_interrupted_turns == 0 {
+        lines.push(Line::from(Span::styled("  (none detected)", dim)));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("  Wasted ", label),
+            Span::styled(fmt_cost(i.total_wasted_cost), val.fg(Color::Rgb(220, 140, 140))),
+            Span::styled("    Turns ", label),
+            Span::styled(format!("{}", i.total_interrupted_turns), val),
+            Span::styled("    Sessions ", label),
+            Span::styled(format!("{}", i.sessions_affected), val),
+        ]));
+        for entry in i.by_session.iter().take(SESSION_LIST_LIMIT) {
+            let sid = short_sid(&entry.session_id).to_string();
+            lines.push(Line::from(vec![
+                Span::styled(format!("    {:<10}", sid), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{:>8}", fmt_cost(entry.wasted_cost)), val.fg(Color::Rgb(220, 140, 140))),
+                Span::styled(format!("  {:>3} orphan", entry.orphan_count), dim),
+                Span::raw("  "),
+                Span::styled(
+                    format!("{:<18}", truncate_str(&entry.last_tool_name, 18)),
+                    Style::default().fg(Color::Rgb(180, 180, 200)),
+                ),
+                Span::styled(
+                    format!("{:<24}", truncate_str(&entry.project, 24)),
+                    Style::default().fg(Color::Rgb(180, 180, 200)),
+                ),
+            ]));
+        }
+    }
+    lines.push(Line::raw(""));
+
+    lines.push(section_header("Context-growth anomalies"));
+    let g = &m.context_growth;
+    lines.push(Line::from(vec![
+        Span::styled("  Scored ", label),
+        Span::styled(format!("{}", g.sessions_scored), val),
+        Span::styled("    Anomalous ", label),
+        Span::styled(format!("{}", g.findings.len()), val),
+        Span::styled("    Cost in anomalies ", label),
+        Span::styled(fmt_cost(g.anomalous_cost), val.fg(Color::Rgb(220, 180, 130))),
+    ]));
+    if g.findings.is_empty() {
+        lines.push(Line::from(Span::styled("  (no runaway sessions)", dim)));
+    } else {
+        for f in g.findings.iter().take(SESSION_LIST_LIMIT) {
+            let sid = short_sid(&f.session_id).to_string();
+            lines.push(Line::from(vec![
+                Span::styled(format!("    {:<10}", sid), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{:>5.1}x", f.score), val.fg(Color::Rgb(220, 180, 130))),
+                Span::styled(format!("  {:>8}", fmt_cost(f.total_cost)), val.fg(Color::Green)),
+                Span::styled(
+                    format!(
+                        "  +{:>8} @ turn {}/{}",
+                        format_tokens(f.peak_delta_tokens),
+                        f.peak_turn_index,
+                        f.assistant_turns
+                    ),
+                    dim,
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    format!("{:<24}", truncate_str(&f.project, 24)),
+                    Style::default().fg(Color::Rgb(180, 180, 200)),
+                ),
+            ]));
+        }
+    }
+    lines.push(Line::raw(""));
+
     lines.push(section_header("Top sessions"));
     lines.push(Line::from(Span::styled(
         format!(
@@ -1745,6 +1849,29 @@ fn build_metrics_content(m: &MetricsAnalysis) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+const TOOLS_DISPLAY_LIMIT: usize = 15;
+const SESSION_LIST_LIMIT: usize = 6;
+
+fn tool_color(name: &str) -> Color {
+    // Stable hash → palette so the same tool keeps the same color.
+    let mut h: u32 = 0x811c_9dc5;
+    for b in name.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    let palette: [Color; 8] = [
+        Color::Rgb(120, 200, 240),
+        Color::Rgb(240, 180, 120),
+        Color::Rgb(160, 220, 160),
+        Color::Rgb(220, 160, 200),
+        Color::Rgb(200, 180, 240),
+        Color::Rgb(240, 220, 140),
+        Color::Rgb(140, 220, 220),
+        Color::Rgb(220, 160, 140),
+    ];
+    palette[(h as usize) % palette.len()]
 }
 
 fn format_session_row(s: &SessionSummary, dim: Style, val: Style) -> Line<'static> {

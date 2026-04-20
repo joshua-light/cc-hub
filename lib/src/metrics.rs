@@ -14,7 +14,7 @@ use crate::conversation::parse_timestamp_ms;
 use crate::platform::paths;
 use chrono::{Local, NaiveDate, TimeZone};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -133,6 +133,47 @@ pub struct DayStats {
     pub cost: f64,
 }
 
+#[derive(Default, Clone, Debug)]
+pub struct ToolStats {
+    pub count: u64,
+    pub sessions: usize,
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct SessionInterruption {
+    pub session_id: String,
+    pub project: String,
+    pub orphan_count: usize,
+    pub wasted_cost: f64,
+    pub last_tool_name: String,
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct InterruptionAnalysis {
+    pub total_interrupted_turns: usize,
+    pub total_wasted_cost: f64,
+    pub sessions_affected: usize,
+    pub by_session: Vec<SessionInterruption>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ContextGrowthFinding {
+    pub session_id: String,
+    pub project: String,
+    pub score: f64,
+    pub total_cost: f64,
+    pub peak_delta_tokens: u64,
+    pub peak_turn_index: usize,
+    pub assistant_turns: usize,
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct ContextGrowthAnalysis {
+    pub sessions_scored: usize,
+    pub anomalous_cost: f64,
+    pub findings: Vec<ContextGrowthFinding>,
+}
+
 #[derive(Clone, Debug)]
 pub struct MetricsAnalysis {
     pub total_cost: f64,
@@ -145,6 +186,9 @@ pub struct MetricsAnalysis {
     pub by_day: BTreeMap<NaiveDate, DayStats>,
     pub top_sessions: Vec<SessionSummary>,
     pub top_projects: Vec<(String, ProjectStats)>,
+    pub by_tool: BTreeMap<String, ToolStats>,
+    pub interruptions: InterruptionAnalysis,
+    pub context_growth: ContextGrowthAnalysis,
 }
 
 /// One canonical assistant API call after dedup.
@@ -153,6 +197,8 @@ struct AssistantCall {
     model: String,
     tokens: Tokens,
     timestamp_ms: u64,
+    /// (tool_name, tool_use_id) for every tool_use block in this message.
+    tool_uses: Vec<(String, String)>,
 }
 
 struct ParsedSession {
@@ -161,6 +207,8 @@ struct ParsedSession {
     is_subagent: bool,
     end_time_ms: u64,
     calls: Vec<AssistantCall>,
+    /// All tool_use_ids that received a tool_result (from user messages).
+    tool_result_ids: HashSet<String>,
 }
 
 fn parse_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSession> {
@@ -175,6 +223,11 @@ fn parse_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSession> {
     let mut by_req: HashMap<String, AssistantCall> = HashMap::new();
     // message.id → canonical requestId for cross-requestId merge.
     let mut msg_id_to_req: HashMap<String, String> = HashMap::new();
+    // tool_use_ids that we've already attached to a call — avoids duplicates
+    // when the same content block reappears across requestId-redundant lines.
+    let mut seen_tool_use_ids: HashSet<String> = HashSet::new();
+    // Every tool_use_id that received a tool_result from a user message.
+    let mut tool_result_ids: HashSet<String> = HashSet::new();
 
     for line in reader.lines() {
         let line = match line {
@@ -201,7 +254,27 @@ fn parse_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSession> {
             }
         }
 
-        if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+        let entry_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        // User messages: harvest tool_result IDs so we can detect orphans.
+        if entry_type == "user" {
+            if let Some(content) = v
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+            {
+                for block in content {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
+                        if let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str()) {
+                            tool_result_ids.insert(id.to_string());
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        if entry_type != "assistant" {
             continue;
         }
 
@@ -270,6 +343,24 @@ fn parse_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSession> {
                 entry.timestamp_ms = ts;
             }
         }
+
+        // Tool uses live in message.content[] as blocks with type=tool_use.
+        if let Some(content) = inner.and_then(|m| m.get("content")).and_then(|c| c.as_array()) {
+            for block in content {
+                if block.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
+                    continue;
+                }
+                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                if name.is_empty() {
+                    continue;
+                }
+                let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                if !id.is_empty() && !seen_tool_use_ids.insert(id.to_string()) {
+                    continue;
+                }
+                entry.tool_uses.push((name.to_string(), id.to_string()));
+            }
+        }
     }
 
     let calls: Vec<AssistantCall> = by_req
@@ -287,6 +378,7 @@ fn parse_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSession> {
         is_subagent,
         end_time_ms,
         calls,
+        tool_result_ids,
     })
 }
 
@@ -354,11 +446,18 @@ pub fn analyze() -> MetricsAnalysis {
     let mut by_project: HashMap<String, ProjectStats> = HashMap::new();
     let mut by_day: BTreeMap<NaiveDate, DayStats> = BTreeMap::new();
     let mut top_sessions: Vec<SessionSummary> = Vec::new();
+    let mut by_tool: BTreeMap<String, ToolStats> = BTreeMap::new();
+    let mut interruptions = InterruptionAnalysis::default();
+    let mut growth = ContextGrowthAnalysis::default();
 
     for s in &mut sessions {
         let mut session_tokens = Tokens::default();
         let mut session_cost = 0.0;
         let mut top_model: HashMap<String, u64> = HashMap::new();
+        let mut session_tools: HashSet<&str> = HashSet::new();
+        let mut session_orphans = 0usize;
+        let mut session_wasted = 0.0f64;
+        let mut session_last_orphan_tool = String::new();
 
         for call in &s.calls {
             let p = pricing_for(&call.model);
@@ -390,6 +489,76 @@ pub fn analyze() -> MetricsAnalysis {
             }
 
             *top_model.entry(model_key).or_insert(0) += call.tokens.total();
+
+            let mut call_orphans = 0usize;
+            let mut call_last_orphan: &str = "";
+            for (name, id) in &call.tool_uses {
+                let entry = by_tool.entry(name.clone()).or_default();
+                entry.count += 1;
+                session_tools.insert(name.as_str());
+                if !id.is_empty() && !s.tool_result_ids.contains(id) {
+                    call_orphans += 1;
+                    call_last_orphan = name.as_str();
+                }
+            }
+            if call_orphans > 0 {
+                session_orphans += call_orphans;
+                // Charge the whole call cost once — Claude paid for the API
+                // response even though the tool call was Esc'd.
+                session_wasted += c;
+                if !call_last_orphan.is_empty() {
+                    session_last_orphan_tool.clear();
+                    session_last_orphan_tool.push_str(call_last_orphan);
+                }
+            }
+        }
+
+        for tool in &session_tools {
+            if let Some(stats) = by_tool.get_mut(*tool) {
+                stats.sessions += 1;
+            }
+        }
+
+        // Context-growth scoring — short sessions skip the sort entirely.
+        let mut series_calls: Vec<&AssistantCall> = s
+            .calls
+            .iter()
+            .filter(|c| c.timestamp_ms > 0)
+            .collect();
+        if series_calls.len() >= MIN_GROWTH_TURNS {
+            series_calls.sort_by_key(|c| c.timestamp_ms);
+            let series: Vec<u64> = series_calls
+                .iter()
+                .map(|c| c.tokens.input + c.tokens.cache_read + c.tokens.cache_creation)
+                .collect();
+            growth.sessions_scored += 1;
+            if let Some((score, peak_delta, peak_idx)) = score_growth(&series) {
+                if score >= GROWTH_THRESHOLD && peak_delta > 0 {
+                    growth.findings.push(ContextGrowthFinding {
+                        session_id: s.session_id.clone(),
+                        project: s.project.clone(),
+                        score,
+                        total_cost: session_cost,
+                        peak_delta_tokens: peak_delta,
+                        peak_turn_index: peak_idx,
+                        assistant_turns: series.len(),
+                    });
+                    growth.anomalous_cost += session_cost;
+                }
+            }
+        }
+
+        if session_orphans > 0 {
+            interruptions.total_interrupted_turns += session_orphans;
+            interruptions.total_wasted_cost += session_wasted;
+            interruptions.sessions_affected += 1;
+            interruptions.by_session.push(SessionInterruption {
+                session_id: s.session_id.clone(),
+                project: s.project.clone(),
+                orphan_count: session_orphans,
+                wasted_cost: session_wasted,
+                last_tool_name: session_last_orphan_tool,
+            });
         }
 
         if session_cost > 0.0 {
@@ -416,6 +585,18 @@ pub fn analyze() -> MetricsAnalysis {
             total_tokens.add(&session_tokens);
         }
     }
+
+    interruptions
+        .by_session
+        .sort_by(|a, b| b.wasted_cost.partial_cmp(&a.wasted_cost).unwrap_or(std::cmp::Ordering::Equal));
+    interruptions.by_session.truncate(TOP_INTERRUPTIONS);
+
+    growth.findings.sort_by(|a, b| {
+        let ka = a.score * a.total_cost;
+        let kb = b.score * b.total_cost;
+        kb.partial_cmp(&ka).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    growth.findings.truncate(TOP_GROWTH_FINDINGS);
 
     // Bump per-model session counts after the per-call loop.
     for s in &top_sessions {
@@ -461,5 +642,53 @@ pub fn analyze() -> MetricsAnalysis {
         by_day,
         top_sessions: top_n,
         top_projects,
+        by_tool,
+        interruptions,
+        context_growth: growth,
     }
+}
+
+/// Minimum assistant turns before context-growth scoring is meaningful.
+const MIN_GROWTH_TURNS: usize = 20;
+/// Anomaly threshold: peak delta >= this many times the median absolute delta.
+const GROWTH_THRESHOLD: f64 = 6.0;
+/// How many interruption / growth findings to retain after sorting.
+const TOP_INTERRUPTIONS: usize = 10;
+const TOP_GROWTH_FINDINGS: usize = 10;
+
+/// Score a per-turn context-size series via `max(delta) / median(|delta|)`.
+///
+/// Returns `Some((score, peak_delta_tokens, peak_turn_index))` when there is
+/// a positive peak, otherwise `None`. The ratio is unitless and
+/// self-calibrating: a well-behaved series scores near 1, while a single
+/// dramatic spike drives it well above the threshold.
+fn score_growth(series: &[u64]) -> Option<(f64, u64, usize)> {
+    if series.len() < 2 {
+        return None;
+    }
+    let mut peak: i64 = i64::MIN;
+    let mut peak_idx: usize = 0;
+    let mut abs_sorted: Vec<u64> = Vec::with_capacity(series.len() - 1);
+    for i in 1..series.len() {
+        let d = series[i] as i64 - series[i - 1] as i64;
+        if d > peak {
+            peak = d;
+            peak_idx = i;
+        }
+        abs_sorted.push(d.unsigned_abs());
+    }
+    if peak <= 0 {
+        return None;
+    }
+    abs_sorted.sort_unstable();
+    let n = abs_sorted.len();
+    let median_abs: f64 = if n % 2 == 1 {
+        abs_sorted[n / 2] as f64
+    } else {
+        (abs_sorted[n / 2 - 1] as f64 + abs_sorted[n / 2] as f64) / 2.0
+    };
+    // Floor a near-zero median at 1 — a single jump on an otherwise flat
+    // session is itself the anomaly we want to surface.
+    let denom = median_abs.max(1.0);
+    Some((peak as f64 / denom, peak as u64, peak_idx))
 }
