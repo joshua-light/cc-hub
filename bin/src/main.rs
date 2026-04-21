@@ -519,18 +519,6 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                         app.metrics = None;
                         spawn_metrics();
                     }
-                    (View::Grid, KeyCode::Enter) if on_sessions => {
-                        if let Some(session) = app.selected_session_info().cloned() {
-                            if let Some(path) = session.jsonl_path.clone() {
-                                let lv = live_view::LiveView::new(path);
-                                app.enter_live_tail(lv);
-                            } else {
-                                // No JSONL file, fall back to info popup
-                                let _ = detail_tx.send(session.session_id.clone()).await;
-                                app.enter_popup();
-                            }
-                        }
-                    }
                     // 'i' for info popup (old Enter behavior)
                     (View::Grid, KeyCode::Char('i')) if on_sessions => {
                         if let Some(id) = app.selected_session_id() {
@@ -558,7 +546,7 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                         let state = if app.show_inactive { "shown" } else { "hidden" };
                         app.set_status(format!("inactive sessions {}", state));
                     }
-                    (View::Grid, KeyCode::Char('f')) if on_sessions => {
+                    (View::Grid, KeyCode::Char('f') | KeyCode::Enter) if on_sessions => {
                         if let Some(session) = app.selected_session_info().cloned() {
                             if session.state == models::SessionState::Inactive {
                                 let status = match spawn::spawn_claude_session(

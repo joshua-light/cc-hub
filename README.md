@@ -180,9 +180,8 @@ differ:
 |---|---|
 | `Tab` / `BackTab` | Cycle tabs (Sessions / Metrics) |
 | `h j k l` / arrows | Navigate the grid |
-| `Enter` | Live-tail the selected session's JSONL |
 | `i` | Session info popup |
-| `f` | Attach: embedded pane if the session is in a mux, else focus its terminal window. For an inactive session, spawn a new tmux session running `cc-hub-new --resume <id>` |
+| `Enter` / `f` | Attach: embedded pane if the session is in a mux, else focus its terminal window. For an inactive session, spawn a new tmux session running `cc-hub-new --resume <id>` |
 | `H` | Toggle visibility of inactive sessions (hidden by default; window is 3 days) |
 | `o` | Open an embedded shell pane in the selected session's cwd |
 | `n` | Spawn a new `cc-hub-new` session in the selected session's cwd |
