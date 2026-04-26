@@ -6,7 +6,8 @@
 //! inside an embedded pane land in the host clipboard too.
 
 use std::io;
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 /// Shell pipeline that reads text on stdin and writes it to the host
 /// clipboard. Exposed for tmux `copy-command` wiring.
@@ -21,4 +22,22 @@ const PASTE_SHELL: &str =
 pub fn paste() -> io::Result<String> {
     let out = Command::new("sh").arg("-c").arg(PASTE_SHELL).output()?;
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Write `text` to the host clipboard via the same fallback chain used by
+/// tmux. Silently no-ops if no backend is installed (the chain in
+/// [`COPY_SHELL`] short-circuits to success after each `2>/dev/null`).
+pub fn copy(text: &str) -> io::Result<()> {
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(COPY_SHELL)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(text.as_bytes())?;
+    }
+    let _ = child.wait()?;
+    Ok(())
 }

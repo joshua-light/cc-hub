@@ -161,6 +161,38 @@ enum ScanMsg {
     Projects(projects_scan::ProjectsSnapshot),
 }
 
+/// Spawn the OS-default opener for `path` and detach immediately. URLs work
+/// the same as files because `xdg-open` / `open` / `cmd start` all dispatch
+/// by scheme. Output is dropped — we don't surface stderr because most
+/// failures here mean "no DE installed", which the status bar already
+/// reports via the `Err` path of [`std::process::Command::spawn`].
+fn open_path_detached(path: &str) -> io::Result<()> {
+    use std::process::{Command, Stdio};
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = Command::new("open");
+        c.arg(path);
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = Command::new("cmd");
+        c.args(["/c", "start", "", path]);
+        c
+    };
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let mut cmd = {
+        let mut c = Command::new("xdg-open");
+        c.arg(path);
+        c
+    };
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(())
+}
+
 /// Size for a popup tmux pane: terminal minus a margin, with floor. The
 /// renderer re-resizes on first draw, so a rough starting size is fine.
 fn popup_pane_size(terminal: &Terminal<CrosstermBackend<io::Stdout>>) -> (u16, u16) {
@@ -525,6 +557,41 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                     }
                     (View::Grid, KeyCode::Char('K')) if on_projects => {
                         app.projects_task_prev();
+                    }
+                    (View::Grid, KeyCode::Char('r')) if on_projects => {
+                        if !app.enter_projects_result() {
+                            app.set_status("no task selected".into());
+                        }
+                    }
+                    (View::ProjectsResult, KeyCode::Esc | KeyCode::Char('r') | KeyCode::Char('q')) => {
+                        app.close_projects_result();
+                    }
+                    (View::ProjectsResult, KeyCode::Down | KeyCode::Char('j')) => {
+                        app.result_artifact_next();
+                    }
+                    (View::ProjectsResult, KeyCode::Up | KeyCode::Char('k')) => {
+                        app.result_artifact_prev();
+                    }
+                    (View::ProjectsResult, KeyCode::Char('c')) => {
+                        match app.selected_result_artifact().map(|a| a.path.clone()) {
+                            None => app.set_status("no artifact to copy".into()),
+                            Some(path) => match clipboard::copy(&path) {
+                                Ok(()) => app.set_status(format!("copied: {}", path)),
+                                Err(e) => app.set_status(format!("copy failed: {}", e)),
+                            },
+                        }
+                    }
+                    (View::ProjectsResult, KeyCode::Char('o')) => {
+                        match app.selected_result_artifact().map(|a| a.path.clone()) {
+                            None => app.set_status("no artifact to open".into()),
+                            Some(path) => {
+                                let result = open_path_detached(&path);
+                                match result {
+                                    Ok(()) => app.set_status(format!("opening {}", path)),
+                                    Err(e) => app.set_status(format!("open failed: {}", e)),
+                                }
+                            }
+                        }
                     }
                     (View::Grid, KeyCode::Char('N')) if on_projects => {
                         app.enter_folder_picker_for_projects();

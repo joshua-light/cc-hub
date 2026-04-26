@@ -57,6 +57,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             render_folder_picker(frame, frame.area(), app);
             render_gh_create_input(frame, frame.area(), app);
         }
+        View::ProjectsResult => render_projects_result(frame, frame.area(), app),
         View::Grid => {}
     }
 }
@@ -979,6 +980,165 @@ fn render_popup(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(content, inner);
 }
 
+/// "Result" popup for the selected Projects task: status + age + truncated
+/// prompt at the top, the orchestrator's `summary` next, then the artifact
+/// list with a `j/k` cursor. The currently-selected artifact is what `c`
+/// copies and `o` opens.
+fn render_projects_result(frame: &mut Frame, area: Rect, app: &App) {
+    let popup_area = centered_rect(area, 0.85);
+    frame.render_widget(Clear, popup_area);
+
+    let Some(t) = app.selected_project_task() else {
+        frame.render_widget(popup_block(" Result — no task selected "), popup_area);
+        return;
+    };
+
+    let (status_label, status_color) = match t.status {
+        crate::orchestrator::TaskStatus::Running => ("running", Color::LightYellow),
+        crate::orchestrator::TaskStatus::Done => ("done", Color::LightGreen),
+        crate::orchestrator::TaskStatus::Failed => ("failed", Color::LightRed),
+    };
+    let title = format!(
+        " Result · {} ",
+        crate::orchestrator::short_task_id(&t.task_id)
+    );
+    let block = popup_block(Span::styled(
+        title,
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+    ));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let now_secs = now_ms() / 1000;
+    let age = format_age(now_secs.saturating_sub(t.updated_at as u64));
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("[{}]", status_label),
+            Style::default().fg(status_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(age, Style::default().fg(Color::Rgb(160, 160, 180))),
+        Span::raw("  "),
+        Span::styled(
+            format!("({} artifact{})", t.artifacts.len(), if t.artifacts.len() == 1 { "" } else { "s" }),
+            Style::default().fg(Color::Rgb(150, 130, 200)),
+        ),
+    ]));
+    lines.push(Line::raw(""));
+
+    // Prompt — first ~3 lines, ellipsised.
+    lines.push(Line::from(Span::styled(
+        "Prompt",
+        Style::default().fg(Color::Rgb(120, 160, 220)).add_modifier(Modifier::BOLD),
+    )));
+    let prompt_lines: Vec<&str> = t.prompt.lines().take(3).collect();
+    if prompt_lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (empty)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for line in &prompt_lines {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", line),
+                Style::default().fg(Color::Gray),
+            )));
+        }
+        if t.prompt.lines().count() > 3 {
+            lines.push(Line::from(Span::styled(
+                "  …",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+    lines.push(Line::raw(""));
+
+    // Summary section.
+    lines.push(Line::from(Span::styled(
+        "Summary",
+        Style::default().fg(Color::Rgb(120, 160, 220)).add_modifier(Modifier::BOLD),
+    )));
+    match t.summary.as_deref() {
+        None => lines.push(Line::from(Span::styled(
+            "  (no summary yet)",
+            Style::default().fg(Color::DarkGray),
+        ))),
+        Some(s) => {
+            for line in s.lines() {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", line),
+                    Style::default().fg(Color::Gray),
+                )));
+            }
+        }
+    }
+    lines.push(Line::raw(""));
+
+    // Artifacts section.
+    lines.push(Line::from(Span::styled(
+        "Artifacts",
+        Style::default().fg(Color::Rgb(120, 160, 220)).add_modifier(Modifier::BOLD),
+    )));
+    if t.artifacts.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (none)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for (idx, a) in t.artifacts.iter().enumerate() {
+            let selected = idx == app.result_artifact_sel;
+            let arrow = if selected { "▌ " } else { "  " };
+            let basename = std::path::Path::new(&a.path)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| a.path.clone());
+            let caption = a.caption.as_deref().unwrap_or("");
+            let row_style = if selected {
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            let added = format_age(now_secs.saturating_sub(a.added_at as u64));
+            lines.push(Line::from(vec![
+                Span::styled(arrow, Style::default().fg(Color::LightCyan)),
+                Span::styled(a.kind.clone(), Style::default().fg(Color::LightMagenta)),
+                Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+                Span::styled(basename, row_style),
+                Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+                Span::styled(caption.to_string(), Style::default().fg(Color::Rgb(180, 180, 200))),
+                Span::raw("    "),
+                Span::styled(
+                    format!("added {} ago", added),
+                    Style::default().fg(Color::Rgb(110, 110, 130)),
+                ),
+            ]));
+            lines.push(Line::from(Span::styled(
+                format!("      {}", a.path),
+                Style::default().fg(Color::Rgb(90, 90, 110)),
+            )));
+        }
+    }
+
+    // Footer hint pinned to last row.
+    let hint = " esc/r:close   c:copy path of selected artifact   o:open in xdg-open ";
+    if inner.height >= 1 {
+        let body_h = inner.height.saturating_sub(1);
+        let body_area = Rect::new(inner.x, inner.y, inner.width, body_h);
+        let footer_area = Rect::new(inner.x, inner.y + body_h, inner.width, 1);
+        let body = Paragraph::new(lines).wrap(Wrap { trim: false });
+        frame.render_widget(body, body_area);
+        let footer = Paragraph::new(Line::from(Span::styled(
+            hint,
+            Style::default().fg(Color::DarkGray),
+        )));
+        frame.render_widget(footer, footer_area);
+    } else {
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    }
+}
+
 fn render_state_debug(frame: &mut Frame, area: Rect, app: &App) {
     let popup_area = centered_rect(area, 0.9);
     frame.render_widget(Clear, popup_area);
@@ -1676,7 +1836,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         let keybinds: &str = match app.view {
             View::Grid => match app.current_tab {
-                Tab::Projects => "tab:next  j/k:project  J/K:task  enter:focus orch  n:new task  N:new in…  x:delete  q:quit",
+                Tab::Projects => "tab:next  j/k:project  J/K:task  enter:focus orch  n:new task  N:new in…  r:result  x:delete  q:quit",
                 Tab::Sessions => "tab:next  h/j/k/l:nav  n:new  N:new in…  i:info  D:why?  enter/f:focus/resume  o:shell  x:close  H:inactive  q:quit",
                 Tab::Metrics => "tab:next  j/k:select  enter:view transcript  r:refresh  q:quit",
             },
@@ -1688,6 +1848,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             View::TmuxPane => "forwarding keys to tmux · F1: detach & close",
             View::FolderPicker => "j/k:move  enter:descend  bksp:parent  space:pick  .:pick cwd  c/C:gh new (pub/priv)  esc:cancel",
             View::GhCreateInput => "type name  tab:toggle public/private  enter:create  esc:cancel",
+            View::ProjectsResult => "j/k:artifact  c:copy path  o:xdg-open  esc/r:close",
         };
         spans.push(Span::styled(
             format!(" {} ", keybinds),
@@ -2013,6 +2174,7 @@ fn render_project_tasks(frame: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(vec![
             Span::styled(arrow, arrow_style),
             Span::styled(format!("[{}]", status_label), Style::default().fg(status_color)),
+            Span::styled(format_artifact_badge(t.artifacts.len()), Style::default().fg(Color::Rgb(150, 130, 200))),
             Span::raw(" "),
             Span::styled(prompt_preview, prompt_style),
         ]));
@@ -2053,6 +2215,16 @@ fn first_line_preview(text: &str, max: usize) -> String {
         }
         out.push('…');
         out
+    }
+}
+
+/// Compact " 󰉂 N" artifact-count badge for the task header. Empty string
+/// when N is 0 so the row collapses cleanly.
+fn format_artifact_badge(count: usize) -> String {
+    if count == 0 {
+        String::new()
+    } else {
+        format!(" 󰉂 {}", count)
     }
 }
 
@@ -2576,6 +2748,23 @@ fn model_color(model: &str) -> Color {
         Color::Rgb(160, 220, 180)
     } else {
         Color::Rgb(180, 180, 180)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_artifact_badge;
+
+    #[test]
+    fn artifact_badge_zero_collapses() {
+        assert_eq!(format_artifact_badge(0), "");
+    }
+
+    #[test]
+    fn artifact_badge_nonzero_includes_count() {
+        let s = format_artifact_badge(3);
+        assert!(s.contains('3'), "expected count in badge, got {:?}", s);
+        assert!(s.starts_with(' '), "badge should lead with a separator space, got {:?}", s);
     }
 }
 
