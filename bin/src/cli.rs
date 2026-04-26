@@ -21,7 +21,7 @@
 //! to spawn one and when to merge is the orchestrator's job.
 
 use cc_hub_lib::orchestrator::{
-    self, MergeOutcome, MergeRecord, TaskState, TaskStatus, Worker,
+    self, Artifact, MergeOutcome, MergeRecord, TaskState, TaskStatus, Worker,
 };
 use cc_hub_lib::scanner;
 use cc_hub_lib::{models, send, spawn};
@@ -86,6 +86,10 @@ struct Flags {
     project_id: Option<String>,
     status: Option<String>,
     note: Option<String>,
+    summary: Option<String>,
+    path: Option<String>,
+    kind: Option<String>,
+    caption: Option<String>,
     wait_secs: Option<u64>,
     dry_run: bool,
 }
@@ -117,6 +121,18 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
             }
             "--note" => {
                 f.note = Some(next_value(args, &mut i, "--note")?);
+            }
+            "--summary" => {
+                f.summary = Some(next_value(args, &mut i, "--summary")?);
+            }
+            "--path" => {
+                f.path = Some(next_value(args, &mut i, "--path")?);
+            }
+            "--kind" => {
+                f.kind = Some(next_value(args, &mut i, "--kind")?);
+            }
+            "--caption" => {
+                f.caption = Some(next_value(args, &mut i, "--caption")?);
             }
             "--wait-secs" => {
                 let v = next_value(args, &mut i, "--wait-secs")?;
@@ -436,8 +452,9 @@ fn task_subcommand(args: &[String]) -> Result<(), CliError> {
     match verb.as_str() {
         "report" => task_report(rest),
         "create" => task_create(rest),
+        "artifact" => task_artifact_subcommand(rest),
         other => Err(CliError::Usage(format!(
-            "unknown task verb: {} (try `report` or `create`)",
+            "unknown task verb: {} (try `report`, `create`, or `artifact`)",
             other
         ))),
     }
@@ -468,6 +485,9 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         if let Some(note) = f.note.clone() {
             s.note = Some(note);
         }
+        if let Some(summary) = f.summary.clone() {
+            s.summary = Some(summary);
+        }
     })
     .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
 
@@ -477,10 +497,154 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         "project_id": state.project_id,
         "status": state.status,
         "note": state.note,
+        "summary": state.summary,
         "updated_at": state.updated_at,
     }));
     Ok(())
 }
+
+// ─── task artifact ───────────────────────────────────────────────────────
+
+fn task_artifact_subcommand(args: &[String]) -> Result<(), CliError> {
+    let (verb, rest) = args.split_first().ok_or_else(|| {
+        CliError::Usage("task artifact <verb>: missing verb (try `add` or `list`)".into())
+    })?;
+    match verb.as_str() {
+        "add" => task_artifact_add(rest),
+        "list" => task_artifact_list(rest),
+        other => Err(CliError::Usage(format!(
+            "unknown task artifact verb: {} (try `add` or `list`)",
+            other
+        ))),
+    }
+}
+
+fn looks_like_url(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
+}
+
+fn task_artifact_add(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+    let raw_path = f
+        .path
+        .clone()
+        .ok_or_else(|| CliError::Usage("--path is required".into()))?;
+
+    // Confirm the task exists before doing any filesystem work, so we don't
+    // copy files into a directory that points at a nonexistent task.
+    let _ = orchestrator::read_task_state(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
+
+    let (kind, stored_path, basename_for_note) = if looks_like_url(&raw_path) {
+        let kind = f.kind.clone().unwrap_or_else(|| "url".into());
+        // Last URL segment is the closest thing to a "basename" for note text.
+        let basename = raw_path
+            .rsplit_once('/')
+            .map(|(_, tail)| tail.to_string())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| raw_path.clone());
+        (kind, raw_path.clone(), basename)
+    } else {
+        let kind = f.kind.clone().unwrap_or_else(|| "file".into());
+        let src = std::fs::canonicalize(&raw_path).map_err(|e| {
+            CliError::Other(format!(
+                "resolve source path {:?}: {} (does the file exist?)",
+                raw_path, e
+            ))
+        })?;
+        let meta = std::fs::metadata(&src)
+            .map_err(|e| CliError::Other(format!("stat {}: {}", src.display(), e)))?;
+        if meta.is_dir() {
+            return Err(CliError::Other(format!(
+                "{} is a directory; only single files are supported",
+                src.display()
+            )));
+        }
+        let basename = src
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .ok_or_else(|| {
+                CliError::Other(format!("{} has no file name", src.display()))
+            })?;
+
+        let dest_dir = orchestrator::task_state_dir(&project_id, &task_id)
+            .ok_or_else(|| CliError::Other("no home dir".into()))?
+            .join("artifacts");
+        std::fs::create_dir_all(&dest_dir).map_err(|e| {
+            CliError::Other(format!("create {}: {}", dest_dir.display(), e))
+        })?;
+
+        let ts = orchestrator::now_unix_secs();
+        let dest = dest_dir.join(format!("{}-{}", ts, basename));
+        std::fs::copy(&src, &dest).map_err(|e| {
+            CliError::Other(format!(
+                "copy {} -> {}: {}",
+                src.display(),
+                dest.display(),
+                e
+            ))
+        })?;
+        (kind, dest.to_string_lossy().into_owned(), basename)
+    };
+
+    let artifact = Artifact {
+        kind: kind.clone(),
+        path: stored_path.clone(),
+        original: raw_path.clone(),
+        caption: f.caption.clone(),
+        added_at: orchestrator::now_unix_secs(),
+    };
+    let note = format!("artifact added: {} {}", kind, basename_for_note);
+    let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
+        s.artifacts.push(artifact.clone());
+        s.note = Some(note);
+    })
+    .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
+
+    let added = state.artifacts.last().expect("just pushed");
+    print_json(&serde_json::json!({
+        "ok": true,
+        "task_id": state.task_id,
+        "project_id": state.project_id,
+        "artifact": {
+            "kind": added.kind,
+            "path": added.path,
+            "original": added.original,
+            "caption": added.caption,
+            "added_at": added.added_at,
+        },
+        "count": state.artifacts.len(),
+    }));
+    Ok(())
+}
+
+fn task_artifact_list(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+
+    let state = orchestrator::read_task_state(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
+
+    let arr: Vec<serde_json::Value> = state
+        .artifacts
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "kind": a.kind,
+                "path": a.path,
+                "original": a.original,
+                "caption": a.caption,
+                "added_at": a.added_at,
+            })
+        })
+        .collect();
+    print_json(&serde_json::Value::Array(arr));
+    Ok(())
+}
+
 
 /// `cc-hub task create --prompt "..." [--project-id ID] [--name NAME]`
 ///

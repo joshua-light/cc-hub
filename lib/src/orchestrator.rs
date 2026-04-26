@@ -139,6 +139,23 @@ pub struct MergeRecord {
     pub outcome: MergeOutcome,
 }
 
+/// A piece of evidence the orchestrator (or a worker) attached to a task —
+/// screenshot, log, build output, URL, etc. Stored alongside the task state
+/// so it survives worktree cleanup. `kind` is free-form by design; the CLI
+/// suggests common values but doesn't constrain them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Artifact {
+    pub kind: String,
+    /// Absolute path to the copied-into-state file, OR the original URL when
+    /// `kind == "url"` (or any URL-shaped path).
+    pub path: String,
+    /// User-supplied path/url, preserved so consumers can show where the
+    /// artifact originated even after cc-hub has copied it into its store.
+    pub original: String,
+    pub caption: Option<String>,
+    pub added_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskState {
     pub task_id: String,
@@ -164,10 +181,19 @@ pub struct TaskState {
     /// Projects view so the user can skim a project at a glance.
     #[serde(default)]
     pub note: Option<String>,
+    /// Multi-line proof-of-work summary written by the orchestrator on
+    /// completion. Distinct from `note`, which is the latest one-line
+    /// status. `serde(default)` so older state.json files still load.
+    #[serde(default)]
+    pub summary: Option<String>,
     #[serde(default)]
     pub workers: Vec<Worker>,
     #[serde(default)]
     pub merges: Vec<MergeRecord>,
+    /// Proof-of-work artifacts attached over the task's lifetime. Append
+    /// only via the CLI; `serde(default)` for back-compat.
+    #[serde(default)]
+    pub artifacts: Vec<Artifact>,
 }
 
 impl TaskState {
@@ -184,8 +210,10 @@ impl TaskState {
             created_at: now,
             updated_at: now,
             note: None,
+            summary: None,
             workers: Vec::new(),
             merges: Vec::new(),
+            artifacts: Vec::new(),
         }
     }
 
@@ -602,6 +630,80 @@ mod tests {
         let body = serde_json::to_string(&s).unwrap();
         let back: TaskState = serde_json::from_str(&body).unwrap();
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn artifact_round_trips_through_serde() {
+        let a = Artifact {
+            kind: "screenshot".into(),
+            path: "/abs/path/123-foo.png".into(),
+            original: "./foo.png".into(),
+            caption: Some("login screen after fix".into()),
+            added_at: 1_700_000_000,
+        };
+        let body = serde_json::to_string(&a).unwrap();
+        let back: Artifact = serde_json::from_str(&body).unwrap();
+        assert_eq!(back, a);
+
+        // No-caption variant — Option<String>::None must serialise+deserialise
+        // without surprising the rest of the schema.
+        let b = Artifact {
+            kind: "url".into(),
+            path: "https://example.com/build/42".into(),
+            original: "https://example.com/build/42".into(),
+            caption: None,
+            added_at: 1_700_000_001,
+        };
+        let body = serde_json::to_string(&b).unwrap();
+        let back: Artifact = serde_json::from_str(&body).unwrap();
+        assert_eq!(back, b);
+    }
+
+    #[test]
+    fn task_state_with_artifacts_and_summary_round_trips() {
+        let mut s = TaskState::new(
+            "myproj".into(),
+            PathBuf::from("/tmp/myproj"),
+            "do the thing".into(),
+        );
+        s.summary = Some("shipped feature X.\n\nverified Y, Z.".into());
+        s.artifacts.push(Artifact {
+            kind: "screenshot".into(),
+            path: "/store/123-shot.png".into(),
+            original: "shot.png".into(),
+            caption: Some("after".into()),
+            added_at: 7,
+        });
+        s.artifacts.push(Artifact {
+            kind: "url".into(),
+            path: "https://ci.example/run/9".into(),
+            original: "https://ci.example/run/9".into(),
+            caption: None,
+            added_at: 8,
+        });
+
+        let body = serde_json::to_string(&s).unwrap();
+        let back: TaskState = serde_json::from_str(&body).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn task_state_back_compat_when_artifacts_and_summary_missing() {
+        // Mirrors a state.json written by an older cc-hub: no `summary`
+        // key, no `artifacts` key. Must still parse, with both fields
+        // defaulting empty.
+        let raw = r#"{
+            "task_id": "t-1",
+            "project_id": "p",
+            "project_root": "/tmp/p",
+            "status": "running",
+            "prompt": "hi",
+            "created_at": 1,
+            "updated_at": 2
+        }"#;
+        let s: TaskState = serde_json::from_str(raw).unwrap();
+        assert_eq!(s.summary, None);
+        assert!(s.artifacts.is_empty());
     }
 
     #[test]
