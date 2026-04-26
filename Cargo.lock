@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "cc-hub"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "cc-hub-lib",
  "chrono",
@@ -160,13 +160,14 @@ dependencies = [
  "hot-lib-reloader",
  "log",
  "ratatui",
+ "serde_json",
  "simplelog",
  "tokio",
 ]
 
 [[package]]
 name = "cc-hub-lib"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "chrono",
  "crossterm",
@@ -181,6 +182,7 @@ dependencies = [
  "serde",
  "serde_json",
  "simplelog",
+ "tempfile",
  "tokio",
  "toml",
  "tui-term",

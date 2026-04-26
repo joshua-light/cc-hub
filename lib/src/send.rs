@@ -27,6 +27,13 @@ pub fn send_prompt(session: &str, text: &str) -> io::Result<()> {
     mux::send_prompt(session, text)
 }
 
+/// Best-effort check that `session`'s pane is showing claude's input
+/// prompt and is ready to accept a paste. See [`mux::pane_ready_for_input`]
+/// for the rationale.
+pub fn pane_ready_for_input(session: &str) -> bool {
+    mux::pane_ready_for_input(session)
+}
+
 /// PIDs of clients attached to `session_name` — the processes that ran
 /// `attach`. Their ancestor chain reaches the terminal window, which is
 /// how focus/close locate the window hosting a detached agent.

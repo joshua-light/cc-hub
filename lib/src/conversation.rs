@@ -359,17 +359,27 @@ pub fn is_currently_thinking(entries: &[Value]) -> bool {
         .unwrap_or(false)
 }
 
-/// Return the name of the most recent unresolved assistant `tool_use` — the
-/// tool the agent is currently executing, or the blocking tool it's waiting
-/// on user input for. Returns None if every `tool_use` has a matching
-/// `tool_result`, or if the last meaningful assistant turn had no tool_use.
+/// The most recent unresolved assistant `tool_use`: the tool the agent is
+/// currently executing (Processing) or the blocking tool it's waiting on
+/// user input for (WaitingForInput).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CurrentTool {
+    pub name: String,
+    /// Short, tool-specific input snippet (Bash command, file basename, grep
+    /// pattern, …). None when the tool's input has no useful one-liner.
+    pub hint: Option<String>,
+}
+
+/// Return the most recent unresolved assistant `tool_use`. Returns None if
+/// every `tool_use` has a matching `tool_result`, or if the last meaningful
+/// assistant turn had no tool_use.
 ///
 /// We scan the whole window rather than just the last assistant entry so
 /// parallel tool calls (multiple tool_use blocks across several assistant
 /// entries with results trickling in) resolve to the outstanding one, not
 /// an already-completed sibling.
-pub fn extract_current_tool(entries: &[Value]) -> Option<String> {
-    let mut unresolved: Vec<(String, String)> = Vec::new();
+pub fn extract_current_tool(entries: &[Value]) -> Option<CurrentTool> {
+    let mut unresolved: Vec<(String, String, Option<String>)> = Vec::new();
     let mut results: HashSet<String> = HashSet::new();
 
     for entry in entries {
@@ -388,7 +398,8 @@ pub fn extract_current_tool(entries: &[Value]) -> Option<String> {
                 let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
                 if !id.is_empty() && !name.is_empty() {
-                    unresolved.push((id.to_string(), name.to_string()));
+                    let hint = format_tool_hint(name, block.get("input"));
+                    unresolved.push((id.to_string(), name.to_string(), hint));
                 }
             } else if t == "user" && bt == "tool_result" {
                 if let Some(id) = block.get("tool_use_id").and_then(|v| v.as_str()) {
@@ -401,8 +412,68 @@ pub fn extract_current_tool(entries: &[Value]) -> Option<String> {
     unresolved
         .into_iter()
         .rev()
-        .find(|(id, _)| !results.contains(id))
-        .map(|(_, name)| name)
+        .find(|(id, _, _)| !results.contains(id))
+        .map(|(_, name, hint)| CurrentTool { name, hint })
+}
+
+/// One-line input snippet per tool kind. Returns None when the tool's input
+/// has no obvious user-facing summary, so the cell renders just the tool name.
+fn format_tool_hint(name: &str, input: Option<&Value>) -> Option<String> {
+    let input = input?;
+    // Strip `mcp__<server>__` prefixes so `mcp__claude_ai_Notion__notion-search`
+    // dispatches by its leaf (`notion-search`).
+    let leaf = name.rsplit("__").next().unwrap_or(name);
+    let raw = match leaf {
+        "Bash" => input.get("command").and_then(|v| v.as_str()).map(str::to_string),
+        "Edit" | "Read" | "Write" | "NotebookEdit" => input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(|p| {
+                Path::new(p)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(p)
+                    .to_string()
+            }),
+        "Grep" | "Glob" => input
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        "Task" => input
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        "WebFetch" => input.get("url").and_then(|v| v.as_str()).map(str::to_string),
+        "WebSearch" => input
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        "TodoWrite" => input
+            .get("todos")
+            .and_then(|v| v.as_array())
+            .map(|a| format!("{} todos", a.len())),
+        _ => None,
+    }?;
+    let cleaned = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.is_empty() { None } else { Some(cleaned) }
+}
+
+/// Sum of input + cache_read + cache_creation tokens from the *most recent*
+/// assistant message — i.e. the size of the prompt that gets re-sent on the
+/// next turn, which is the live context-window utilisation.
+pub fn extract_context_tokens(entries: &[Value]) -> Option<u64> {
+    entries
+        .iter()
+        .rev()
+        .find(|e| e.get("type").and_then(|t| t.as_str()) == Some("assistant"))
+        .and_then(|e| {
+            let usage = e.get("message").and_then(|m| m.get("usage"))?;
+            let f = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+            let total = f("input_tokens")
+                + f("cache_read_input_tokens")
+                + f("cache_creation_input_tokens");
+            if total == 0 { None } else { Some(total) }
+        })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1207,7 +1278,8 @@ mod tests {
                     "content": [{"type": "tool_result", "tool_use_id": "t1"}]}
             }),
         ];
-        assert_eq!(extract_current_tool(&entries).as_deref(), Some("Edit"));
+        let got = extract_current_tool(&entries).unwrap();
+        assert_eq!(got.name, "Edit");
     }
 
     #[test]
@@ -1225,6 +1297,63 @@ mod tests {
             }),
         ];
         assert_eq!(extract_current_tool(&entries), None);
+    }
+
+    #[test]
+    fn extract_current_tool_includes_bash_command_hint() {
+        let entries = vec![serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "stop_reason": "tool_use",
+                "content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                    "input": {"command": "cargo build --release"}}]}
+        })];
+        let got = extract_current_tool(&entries).unwrap();
+        assert_eq!(got.name, "Bash");
+        assert_eq!(got.hint.as_deref(), Some("cargo build --release"));
+    }
+
+    #[test]
+    fn extract_current_tool_edit_hint_is_basename() {
+        let entries = vec![serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "stop_reason": "tool_use",
+                "content": [{"type": "tool_use", "id": "t1", "name": "Edit",
+                    "input": {"file_path": "/home/u/proj/src/main.rs"}}]}
+        })];
+        let got = extract_current_tool(&entries).unwrap();
+        assert_eq!(got.hint.as_deref(), Some("main.rs"));
+    }
+
+    #[test]
+    fn extract_current_tool_unknown_tool_has_no_hint() {
+        let entries = vec![serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "stop_reason": "tool_use",
+                "content": [{"type": "tool_use", "id": "t1", "name": "MysteryTool",
+                    "input": {"foo": "bar"}}]}
+        })];
+        let got = extract_current_tool(&entries).unwrap();
+        assert_eq!(got.hint, None);
+    }
+
+    #[test]
+    fn extract_context_tokens_sums_input_and_cache() {
+        let entries = vec![serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "usage": {
+                "input_tokens": 1000,
+                "cache_read_input_tokens": 50000,
+                "cache_creation_input_tokens": 4000,
+                "output_tokens": 200
+            }}
+        })];
+        assert_eq!(extract_context_tokens(&entries), Some(55000));
+    }
+
+    #[test]
+    fn extract_context_tokens_none_when_no_assistant_entry() {
+        let entries = vec![serde_json::json!({"type": "user", "message": {"role": "user"}})];
+        assert_eq!(extract_context_tokens(&entries), None);
     }
 
     #[test]
@@ -1283,7 +1412,8 @@ mod tests {
                     "content": [{"type": "tool_use", "id": "new", "name": "Grep", "input": {}}]}
             }),
         ];
-        assert_eq!(extract_current_tool(&entries).as_deref(), Some("Grep"));
+        let got = extract_current_tool(&entries).unwrap();
+        assert_eq!(got.name, "Grep");
     }
 }
 

@@ -39,6 +39,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     render_title_bar(frame, chunks[0], app);
     render_tab_strip(frame, chunks[1], app);
     match app.current_tab {
+        Tab::Projects => render_projects_body(frame, chunks[2], app),
         Tab::Sessions => render_grid(frame, chunks[2], app),
         Tab::Metrics => render_metrics_body(frame, chunks[2], app),
     }
@@ -244,18 +245,32 @@ fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
     let popup = centered_fixed(area, 80, 9);
     frame.render_widget(Clear, popup);
 
-    let target = app.dispatch_target();
-    let target_label = target
-        .map(|(pid, name, tmux)| format!(" → {} (PID {}) [{}] ", name, pid, tmux))
-        .unwrap_or_else(|| " → no idle agent — will spawn a new one ".to_string());
-    let title_color = if target.is_some() {
-        Color::Green
+    let project_mode = app.prompt_input_for_project();
+    let (title, target_label, title_color) = if project_mode {
+        let cwd = app
+            .projects_pending_cwd
+            .clone()
+            .unwrap_or_else(|| "?".into());
+        (
+            " New project task ",
+            format!(" → orchestrator in {} ", cwd),
+            Color::Cyan,
+        )
     } else {
-        Color::Yellow
+        let target = app.dispatch_target();
+        let label = target
+            .map(|(pid, name, tmux)| format!(" → {} (PID {}) [{}] ", name, pid, tmux))
+            .unwrap_or_else(|| " → no idle agent — will spawn a new one ".to_string());
+        let color = if target.is_some() {
+            Color::Green
+        } else {
+            Color::Yellow
+        };
+        (" Dispatch prompt ", label, color)
     };
 
     let block = popup_block(Span::styled(
-        " Dispatch prompt ",
+        title,
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
@@ -344,21 +359,40 @@ fn render_tmux_pane(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(pending) = &app.pending_close else {
-        return;
-    };
+    // The same view handles two confirmations: closing a session and
+    // deleting a project task. Whichever pending struct is set wins; we
+    // tweak the title and confirm-action label so the user knows which
+    // operation they're agreeing to.
+    let (title, display, action_label, action_color) =
+        if let Some(pending) = &app.pending_task_delete {
+            (
+                " Delete task? ",
+                pending.display.clone(),
+                "delete",
+                Color::Red,
+            )
+        } else if let Some(pending) = &app.pending_close {
+            (
+                " Close terminal? ",
+                pending.display.clone(),
+                "close",
+                Color::Red,
+            )
+        } else {
+            return;
+        };
 
-    let popup = centered_fixed(area, 64, 7);
+    let popup = centered_fixed(area, 72, 7);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
-        .border_style(Style::default().fg(Color::Red))
+        .border_style(Style::default().fg(action_color))
         .title(Span::styled(
-            " Close terminal? ",
+            title,
             Style::default()
-                .fg(Color::Red)
+                .fg(action_color)
                 .add_modifier(Modifier::BOLD),
         ));
 
@@ -370,15 +404,15 @@ fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(vec![
             Span::raw("  "),
             Span::styled(
-                pending.display.clone(),
+                display,
                 Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::raw(""),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled("[y]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            Span::styled(" close   ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[y]", Style::default().fg(action_color).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {}   ", action_label), Style::default().fg(Color::DarkGray)),
             Span::styled("[n/esc]", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
             Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
         ]),
@@ -556,6 +590,10 @@ fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let scroll = app.grid_scroll;
     let now = now_ms();
+    // Build the tmux→role index once per frame; per-card lookup was
+    // O(projects × tasks × workers) and dominated re-render cost on hosts
+    // with many tasks.
+    let roles_by_tmux = app.projects.roles_by_tmux();
 
     for (gi, group) in app.groups.iter().enumerate() {
         let g_y = group_offsets[gi];
@@ -618,12 +656,23 @@ fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
 
             let is_selected = gi == app.sel_group && si == app.sel_in_group;
             let cell_area = Rect::new(x, cy, w, cell_height());
-            render_card(frame, cell_area, session, is_selected, now);
+            let role = session
+                .tmux_session
+                .as_deref()
+                .and_then(|t| roles_by_tmux.get(t));
+            render_card(frame, cell_area, session, role, is_selected, now);
         }
     }
 }
 
-fn render_card(frame: &mut Frame, area: Rect, session: &SessionInfo, selected: bool, now: u64) {
+fn render_card(
+    frame: &mut Frame,
+    area: Rect,
+    session: &SessionInfo,
+    role: Option<&crate::projects_scan::SessionRole>,
+    selected: bool,
+    now: u64,
+) {
     let (indicator, ind_color) = state_indicator(&session.state);
 
     let border_color = if selected {
@@ -642,6 +691,31 @@ fn render_card(frame: &mut Frame, area: Rect, session: &SessionInfo, selected: b
         BorderType::Rounded
     };
 
+    // Role badge — prepended into the title so a glance tells the user
+    // whether a card is an orchestrator or a worker, and which task it's
+    // attached to. Workers also get their worktree name (or "RO" for
+    // read-only). None for ordinary sessions.
+    let role_prefix = match role {
+        Some(crate::projects_scan::SessionRole::Orchestrator { task_id, .. }) => {
+            Some(format!("★ orch[{}] ", crate::orchestrator::short_task_id(task_id)))
+        }
+        Some(crate::projects_scan::SessionRole::Worker {
+            task_id,
+            worktree,
+            readonly,
+            ..
+        }) => {
+            let suffix = if *readonly {
+                "RO".to_string()
+            } else {
+                worktree.clone().unwrap_or_else(|| "wt".into())
+            };
+            Some(format!("↳ wkr[{}/{}] ", crate::orchestrator::short_task_id(task_id), suffix))
+        }
+        None => None,
+    };
+    let prefix = role_prefix.as_deref().unwrap_or("");
+
     // Border title is the primary skim surface — prepending the Haiku-
     // generated 2-3 word title when available lets users scan what each
     // session is about without having to read the (truncated, often mid-
@@ -650,12 +724,12 @@ fn render_card(frame: &mut Frame, area: Rect, session: &SessionInfo, selected: b
     // pending title from one that's never going to arrive.
     let title = match session.title.as_deref() {
         Some(t) if !t.is_empty() => {
-            format!("{} {} — {}", indicator, session.project_name, t)
+            format!("{}{} {} — {}", prefix, indicator, session.project_name, t)
         }
         _ if session.titling => {
-            format!("{} {} — ✎ …", indicator, session.project_name)
+            format!("{}{} {} — ✎ …", prefix, indicator, session.project_name)
         }
-        _ => format!("{} {}", indicator, session.project_name),
+        _ => format!("{}{} {}", prefix, indicator, session.project_name),
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -709,26 +783,26 @@ fn render_card(frame: &mut Frame, area: Rect, session: &SessionInfo, selected: b
         Span::styled(duration_display, Style::default().fg(Color::DarkGray)),
     ]));
 
-    // Last-activity elapsed time (left) + in-flight activity (right).
-    // Tool wins over thinking when both are present — a running tool is
-    // always more actionable context than recent reasoning.
+    // Elapsed (left) + context-window utilisation (right). Tool is rendered
+    // on its own row below to give the hint enough room.
     let elapsed_raw = session.last_activity.map(|ts| format_elapsed(now, ts));
-    let (activity_label, activity_color): (Option<String>, Color) =
-        if let Some(tool) = session.current_tool.as_deref() {
-            (
-                Some(format!("󰖷 {}", short_tool(tool))),
-                state_color(&session.state),
-            )
-        } else if session.is_thinking && session.state == SessionState::Processing {
-            (Some("󰛨 Thinking".to_string()), Color::Rgb(170, 140, 210))
+    let ctx_label: Option<(String, Color)> = session.context_tokens.map(|ctx| {
+        let window = context_window_size(session.model.as_deref().unwrap_or(""));
+        let pct = ((ctx as f64 / window as f64) * 100.0).min(999.0);
+        let color = if pct >= 90.0 {
+            Color::Rgb(220, 120, 120)
+        } else if pct >= 70.0 {
+            Color::Rgb(220, 200, 120)
         } else {
-            (None, Color::DarkGray)
+            Color::DarkGray
         };
+        (format!("󰍛 {:.0}% ({})", pct, format_tokens(ctx)), color)
+    });
 
     let elapsed_cols = elapsed_raw.as_ref().map(|s| 2 + 1 + s.len()).unwrap_or(0);
-    let activity_cols = activity_label
+    let ctx_cols = ctx_label
         .as_ref()
-        .map(|s| s.chars().count() + 1)
+        .map(|(s, _)| s.chars().count() + 1)
         .unwrap_or(0);
 
     let mut state_spans: Vec<Span> = Vec::new();
@@ -738,22 +812,42 @@ fn render_card(frame: &mut Frame, area: Rect, session: &SessionInfo, selected: b
             Style::default().fg(Color::DarkGray),
         ));
     }
-    if let Some(label) = &activity_label {
+    if let Some((label, color)) = &ctx_label {
         let padding = inner_w
             .saturating_sub(elapsed_cols)
-            .saturating_sub(activity_cols);
+            .saturating_sub(ctx_cols);
         state_spans.push(Span::raw(" ".repeat(padding)));
-        state_spans.push(Span::styled(
-            label.clone(),
-            Style::default().fg(activity_color),
-        ));
+        state_spans.push(Span::styled(label.clone(), Style::default().fg(*color)));
     }
 
     lines.push(Line::from(state_spans));
 
-    lines.push(Line::raw(""));
+    // In-flight tool (with input hint) on its own row so long Bash commands /
+    // file paths have the full card width to breathe. Tool wins over thinking
+    // when both are present — a running tool is always more actionable than
+    // recent reasoning.
+    let activity: Option<(String, Color)> = if let Some(tool) = session.current_tool.as_ref() {
+        Some((format_tool_label(tool, inner_w), state_color(&session.state)))
+    } else if session.is_thinking && session.state == SessionState::Processing {
+        Some(("󰛨 Thinking".to_string(), Color::Rgb(170, 140, 210)))
+    } else {
+        None
+    };
+    if let Some((label, color)) = activity {
+        lines.push(Line::from(vec![Span::styled(
+            label,
+            Style::default().fg(color),
+        )]));
+    }
 
-    let display_msg = session.last_user_message.as_ref().or(session.summary.as_ref());
+    // The Haiku title in the border already summarises the session — repeating
+    // the (often truncated mid-sentence) last user message below it is noise.
+    // Only render the message body when no title is available to skim against.
+    let display_msg = if session.title.as_deref().is_some_and(|t| !t.is_empty()) {
+        None
+    } else {
+        session.last_user_message.as_ref().or(session.summary.as_ref())
+    };
     if let Some(msg) = display_msg {
         let max_w = inner_w.saturating_sub(3); // account for icon prefix
         let chars: Vec<char> = msg.chars().collect();
@@ -1582,6 +1676,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         let keybinds: &str = match app.view {
             View::Grid => match app.current_tab {
+                Tab::Projects => "tab:next  j/k:project  J/K:task  enter:focus orch  n:new task  N:new in…  x:delete  q:quit",
                 Tab::Sessions => "tab:next  h/j/k/l:nav  n:new  N:new in…  i:info  D:why?  enter/f:focus/resume  o:shell  x:close  H:inactive  q:quit",
                 Tab::Metrics => "tab:next  j/k:select  enter:view transcript  r:refresh  q:quit",
             },
@@ -1597,6 +1692,23 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(
             format!(" {} ", keybinds),
             Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    // Pending dispatch indicator — visible when a freshly-spawned session
+    // has a queued prompt that hasn't fired yet. Without this the user has
+    // no way to tell that "session sitting there empty" actually has a
+    // dispatch in flight, or that it's about to time out.
+    if let Some(target) = app.pending_dispatch_target() {
+        let age = app
+            .pending_dispatch_age()
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        spans.push(Span::styled(
+            format!(" ↻ dispatch waiting [{}] {}s ", target, age),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ));
     }
 
@@ -1641,6 +1753,49 @@ fn short_tool(tool: &str) -> String {
     let mut s: String = chars.into_iter().take(17).collect();
     s.push('…');
     s
+}
+
+/// Render the in-flight tool as `󰖷 Bash: cargo build` when a hint is
+/// available, or just `󰖷 Bash` otherwise. The hint is truncated so the
+/// whole label fits on the activity line of a card `inner_w` columns wide,
+/// alongside the `󰔟 …s` elapsed time on the left.
+fn format_tool_label(tool: &crate::conversation::CurrentTool, inner_w: usize) -> String {
+    let name = short_tool(&tool.name);
+    let Some(hint) = tool.hint.as_deref().filter(|h| !h.is_empty()) else {
+        return format!("󰖷 {}", name);
+    };
+    // Reserve: icon (2) + space (1) + name + ": " (2) + min elapsed gutter (8).
+    let prefix_cols = 2 + 1 + name.chars().count() + 2;
+    let budget = inner_w.saturating_sub(prefix_cols).saturating_sub(8);
+    let hint_short = truncate_chars(hint, budget.max(6));
+    format!("󰖷 {}: {}", name, hint_short)
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.to_string();
+    }
+    if max <= 1 {
+        return "…".to_string();
+    }
+    let mut out: String = chars.into_iter().take(max - 1).collect();
+    out.push('…');
+    out
+}
+
+/// Effective context-window size in tokens. The JSONL `model` field is the
+/// bare id (`claude-opus-4-7`) and never carries the `[1m]` / `-1m` suffix
+/// even when a session is running on the 1M-context variant, so we infer:
+/// Opus 4.7+ defaults to 1M; explicit `[1m]` / `-1m` markers force 1M; all
+/// other models fall back to the standard 200k window.
+fn context_window_size(model: &str) -> u64 {
+    let m = model.to_ascii_lowercase();
+    if m.contains("[1m]") || m.contains("-1m") || m.contains("opus-4-7") {
+        1_000_000
+    } else {
+        200_000
+    }
 }
 
 fn format_time(timestamp_ms: u64) -> String {
@@ -1705,6 +1860,211 @@ fn fmt_cost(c: f64) -> String {
         format!("${:.1}", c)
     } else {
         format!("${:.2}", c)
+    }
+}
+
+fn render_projects_body(frame: &mut Frame, area: Rect, app: &App) {
+    let snap = &app.projects;
+
+    if snap.projects.is_empty() {
+        let empty = Paragraph::new(Line::from(vec![
+            Span::styled(
+                "No projects registered yet. ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                "Press N to pick a folder and start a task.",
+                Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+            ),
+        ]))
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL).title(" Projects "));
+        frame.render_widget(empty, area);
+        return;
+    }
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(35), Constraint::Min(0)])
+        .split(area);
+
+    render_projects_list(frame, columns[0], app);
+    render_project_tasks(frame, columns[1], app);
+}
+
+fn render_projects_list(frame: &mut Frame, area: Rect, app: &App) {
+    let snap = &app.projects;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .title(Span::styled(
+            " Projects ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(snap.projects.len());
+    for (idx, p) in snap.projects.iter().enumerate() {
+        let active = snap.active_task_count(&p.id);
+        let total = snap.tasks.get(&p.id).map(|v| v.len()).unwrap_or(0);
+        let selected = idx == app.projects_sel;
+
+        let arrow = if selected { "▌ " } else { "  " };
+        let name_style = if selected {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let badge = match active {
+            0 => format!("({})", total),
+            n => format!("({} active / {} total)", n, total),
+        };
+        let badge_style = if active > 0 {
+            Style::default().fg(Color::LightGreen)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(arrow, Style::default().fg(Color::LightCyan)),
+            Span::styled(p.name.clone(), name_style),
+            Span::raw(" "),
+            Span::styled(badge, badge_style),
+        ]));
+
+        let root_str = p.root.display().to_string();
+        let root_str = if root_str.len() > inner.width.saturating_sub(4) as usize {
+            format!(
+                "    …{}",
+                &root_str[root_str
+                    .len()
+                    .saturating_sub((inner.width as usize).saturating_sub(5))..]
+            )
+        } else {
+            format!("    {}", root_str)
+        };
+        lines.push(Line::from(Span::styled(
+            root_str,
+            Style::default().fg(Color::Rgb(90, 90, 110)),
+        )));
+    }
+
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(para, inner);
+}
+
+fn render_project_tasks(frame: &mut Frame, area: Rect, app: &App) {
+    let title = match app.selected_project() {
+        Some(p) => format!(" Tasks · {} ", p.name),
+        None => " Tasks ".to_string(),
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .title(Span::styled(
+            title,
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(p) = app.selected_project() else {
+        return;
+    };
+    let Some(tasks) = app.projects.tasks.get(&p.id) else {
+        return;
+    };
+    if tasks.is_empty() {
+        let hint = Paragraph::new(Line::from(Span::styled(
+            "No tasks yet. Press N to start one.",
+            Style::default().fg(Color::DarkGray),
+        )))
+        .alignment(Alignment::Center);
+        frame.render_widget(hint, inner);
+        return;
+    }
+
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(tasks.len() * 3);
+    let now_secs = now_ms() / 1000;
+    for (idx, t) in tasks.iter().enumerate() {
+        let selected = idx == app.projects_task_sel;
+
+        // Status badge — colour reflects state at a glance.
+        let (status_label, status_color) = match t.status {
+            crate::orchestrator::TaskStatus::Running => ("running", Color::LightYellow),
+            crate::orchestrator::TaskStatus::Done => ("done", Color::LightGreen),
+            crate::orchestrator::TaskStatus::Failed => ("failed", Color::LightRed),
+        };
+
+        let arrow = if selected { "▌ " } else { "  " };
+        let arrow_style = Style::default().fg(Color::LightCyan);
+
+        let prompt_preview = first_line_preview(&t.prompt, 80);
+        let prompt_style = if selected {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(arrow, arrow_style),
+            Span::styled(format!("[{}]", status_label), Style::default().fg(status_color)),
+            Span::raw(" "),
+            Span::styled(prompt_preview, prompt_style),
+        ]));
+
+        // Note + timing on the second row, indented.
+        let mut detail: Vec<Span<'static>> = vec![Span::raw("    ")];
+        if let Some(note) = t.note.as_deref() {
+            let note_text = first_line_preview(note, 100);
+            detail.push(Span::styled(
+                note_text,
+                Style::default().fg(Color::Rgb(180, 180, 200)),
+            ));
+            detail.push(Span::raw("  "));
+        }
+        let age = format_age(now_secs.saturating_sub(t.updated_at as u64));
+        let workers = t.workers.len();
+        let merges = t.merges.len();
+        detail.push(Span::styled(
+            format!("· {} · {}w {}m", age, workers, merges),
+            Style::default().fg(Color::Rgb(110, 110, 130)),
+        ));
+        lines.push(Line::from(detail));
+        lines.push(Line::from(Span::raw("")));
+    }
+
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(para, inner);
+}
+
+fn first_line_preview(text: &str, max: usize) -> String {
+    let first = text.lines().next().unwrap_or("");
+    if first.chars().count() <= max {
+        first.to_string()
+    } else {
+        let mut out = String::new();
+        for ch in first.chars().take(max - 1) {
+            out.push(ch);
+        }
+        out.push('…');
+        out
+    }
+}
+
+fn format_age(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s ago", secs)
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
     }
 }
 

@@ -79,15 +79,19 @@ pub struct SessionInfo {
     /// means the session is not running under tmux (focus falls back to
     /// walking the pid's own ancestor chain to find a window).
     pub tmux_session: Option<String>,
-    /// Name of the most recent unresolved assistant `tool_use` — the tool
-    /// the agent is currently running (Processing) or the blocking tool it's
-    /// waiting on user input for (WaitingForInput). None if no tool is in
-    /// flight.
-    pub current_tool: Option<String>,
+    /// The most recent unresolved assistant `tool_use` — the tool the agent
+    /// is currently running (Processing) or the blocking tool it's waiting on
+    /// user input for (WaitingForInput). None if no tool is in flight.
+    pub current_tool: Option<crate::conversation::CurrentTool>,
     /// True when the most recent assistant content block is a `thinking`
     /// block (no follow-up tool_use/text has been written yet). Only
     /// meaningful while the session is `Processing`.
     pub is_thinking: bool,
+    /// Live context-window utilisation in tokens — the size of the prompt
+    /// re-sent on the next turn (input + cache_read + cache_creation from
+    /// the most recent assistant message). None if no assistant message has
+    /// reported usage yet.
+    pub context_tokens: Option<u64>,
 }
 
 impl SessionInfo {

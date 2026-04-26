@@ -5,6 +5,7 @@ use crate::folder_picker::FolderPicker;
 use crate::live_view::LiveView;
 use crate::metrics::{MetricsAnalysis, SelectableSession};
 use crate::models::{ProjectGroup, SessionDetail, SessionInfo, SessionState};
+use crate::projects_scan::ProjectsSnapshot;
 use crate::tmux_pane::TmuxPaneView;
 use crate::usage::UsageInfo;
 use ratatui::text::Line;
@@ -41,6 +42,7 @@ pub struct GhCreateInput {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Tab {
+    Projects,
     Sessions,
     Metrics,
 }
@@ -48,6 +50,7 @@ pub enum Tab {
 impl Tab {
     pub fn label(&self) -> &'static str {
         match self {
+            Tab::Projects => "Projects",
             Tab::Sessions => "Sessions",
             Tab::Metrics => "Metrics",
         }
@@ -55,18 +58,32 @@ impl Tab {
 
     pub fn cycle(&self) -> Self {
         match self {
+            Tab::Projects => Tab::Sessions,
             Tab::Sessions => Tab::Metrics,
-            Tab::Metrics => Tab::Sessions,
+            Tab::Metrics => Tab::Projects,
         }
     }
 }
 
-pub const TABS: &[Tab] = &[Tab::Sessions, Tab::Metrics];
+pub const TABS: &[Tab] = &[Tab::Projects, Tab::Sessions, Tab::Metrics];
 
 #[derive(Clone, Debug)]
 pub struct PendingClose {
     pub pid: u32,
     pub display: String,
+}
+
+/// Pending project-task deletion. Shown via the same `ConfirmClose` view
+/// as session close, distinguished by [`App::pending_task_delete`] being
+/// `Some` (vs. [`App::pending_close`]).
+#[derive(Clone, Debug)]
+pub struct PendingTaskDelete {
+    pub project_id: String,
+    pub task_id: String,
+    pub display: String,
+    /// tmux name of the orchestrator, captured at delete-prompt time so a
+    /// concurrent state rewrite can't change what we kill.
+    pub orchestrator_tmux: Option<String>,
 }
 
 /// A prompt queued for a freshly-spawned tmux session that isn't yet Idle.
@@ -102,6 +119,7 @@ pub struct App {
     pub acks: Acks,
     pub status_msg: Option<(String, Instant)>,
     pub pending_close: Option<PendingClose>,
+    pub pending_task_delete: Option<PendingTaskDelete>,
     pub state_debug: Option<(SessionInfo, StateExplanation)>,
     pub state_debug_lines: Vec<Line<'static>>,
     pub state_debug_scroll: u16,
@@ -122,6 +140,20 @@ pub struct App {
     pub metrics_progress: Option<(usize, usize)>,
     pub pending_dispatch: Option<PendingDispatch>,
     pub show_inactive: bool,
+    pub projects: ProjectsSnapshot,
+    /// Cursor in the Projects tab. `0..projects.len()` selects a project;
+    /// task selection within the project lives in [`Self::projects_task_sel`].
+    pub projects_sel: usize,
+    pub projects_task_sel: usize,
+    /// True while the folder picker / prompt input flow is creating a
+    /// new project task (vs. spawning a regular session). Used to route
+    /// the picker's space-pick and prompt-input's enter to the project
+    /// flow instead of [`spawn::spawn_claude_session`].
+    pub creating_project_task: bool,
+    /// cwd captured when the picker chose a folder in Projects mode. Held
+    /// until the user submits the task prompt; consumed in
+    /// [`Self::submit_project_task`].
+    pub projects_pending_cwd: Option<String>,
     /// Latest scan snapshot; drives [`rebuild_groups`].
     last_sessions: Vec<SessionInfo>,
     /// Session ids seen on the previous scan tick. `None` means the first
@@ -147,6 +179,7 @@ impl App {
             acks: Acks::new(),
             status_msg: None,
             pending_close: None,
+            pending_task_delete: None,
             state_debug: None,
             state_debug_lines: Vec::new(),
             state_debug_scroll: 0,
@@ -165,6 +198,11 @@ impl App {
             metrics_progress: None,
             pending_dispatch: None,
             show_inactive: false,
+            projects: ProjectsSnapshot::empty(),
+            projects_sel: 0,
+            projects_task_sel: 0,
+            creating_project_task: false,
+            projects_pending_cwd: None,
             last_sessions: Vec::new(),
             known_session_ids: None,
         }
@@ -181,6 +219,92 @@ impl App {
 
     pub fn cycle_tab(&mut self) {
         self.set_tab(self.current_tab.cycle());
+    }
+
+    pub fn update_projects(&mut self, snap: ProjectsSnapshot) {
+        // Preserve cursor when possible: keep the same project_id selected
+        // across rescans even if the order shifted.
+        let prev_pid = self
+            .projects
+            .projects
+            .get(self.projects_sel)
+            .map(|p| p.id.clone());
+        self.projects = snap;
+        if let Some(pid) = prev_pid {
+            if let Some(idx) = self.projects.projects.iter().position(|p| p.id == pid) {
+                self.projects_sel = idx;
+            }
+        }
+        self.clamp_projects_cursor();
+    }
+
+    fn clamp_projects_cursor(&mut self) {
+        let n = self.projects.projects.len();
+        if n == 0 {
+            self.projects_sel = 0;
+            self.projects_task_sel = 0;
+            return;
+        }
+        if self.projects_sel >= n {
+            self.projects_sel = n - 1;
+        }
+        let task_count = self
+            .projects
+            .projects
+            .get(self.projects_sel)
+            .and_then(|p| self.projects.tasks.get(&p.id))
+            .map(|v| v.len())
+            .unwrap_or(0);
+        if task_count == 0 {
+            self.projects_task_sel = 0;
+        } else if self.projects_task_sel >= task_count {
+            self.projects_task_sel = task_count - 1;
+        }
+    }
+
+    pub fn projects_move_down(&mut self) {
+        if self.projects.projects.is_empty() {
+            return;
+        }
+        self.projects_sel =
+            (self.projects_sel + 1).min(self.projects.projects.len() - 1);
+        self.projects_task_sel = 0;
+    }
+
+    pub fn projects_move_up(&mut self) {
+        self.projects_sel = self.projects_sel.saturating_sub(1);
+        self.projects_task_sel = 0;
+    }
+
+    pub fn projects_task_next(&mut self) {
+        let task_count = self
+            .projects
+            .projects
+            .get(self.projects_sel)
+            .and_then(|p| self.projects.tasks.get(&p.id))
+            .map(|v| v.len())
+            .unwrap_or(0);
+        if task_count == 0 {
+            return;
+        }
+        self.projects_task_sel =
+            (self.projects_task_sel + 1).min(task_count - 1);
+    }
+
+    pub fn projects_task_prev(&mut self) {
+        self.projects_task_sel = self.projects_task_sel.saturating_sub(1);
+    }
+
+    pub fn selected_project(&self) -> Option<&crate::orchestrator::Project> {
+        self.projects.projects.get(self.projects_sel)
+    }
+
+    pub fn selected_project_task(&self) -> Option<&crate::orchestrator::TaskState> {
+        let p = self.selected_project()?;
+        self.projects
+            .tasks
+            .get(&p.id)
+            .and_then(|v| v.get(self.projects_task_sel))
     }
 
     pub fn update_metrics(&mut self, m: MetricsAnalysis) {
@@ -255,6 +379,45 @@ impl App {
         self.view = View::FolderPicker;
     }
 
+    /// Open the folder picker rooted at the most useful starting point for
+    /// project creation: the selected project's root if any, else $HOME.
+    /// Sets [`Self::creating_project_task`] so picker-pick routes through
+    /// the orchestrator flow.
+    pub fn enter_folder_picker_for_projects(&mut self) {
+        let start = self
+            .selected_project()
+            .map(|p| p.root.clone())
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        self.folder_picker = Some(FolderPicker::new(start));
+        self.creating_project_task = true;
+        self.view = View::FolderPicker;
+    }
+
+    /// Picker chose `cwd` while in projects-creation mode. Stash the cwd
+    /// and switch to a multi-line prompt input; the actual orchestrator
+    /// spawn happens in [`Self::submit_project_task`].
+    pub fn enter_project_task_prompt(&mut self, cwd: String) {
+        self.folder_picker = None;
+        self.projects_pending_cwd = Some(cwd);
+        self.prompt_buffer.clear();
+        self.dispatch_target = None;
+        self.view = View::PromptInput;
+    }
+
+    /// Shortcut for "new task on the currently-selected project" — same
+    /// as [`Self::enter_project_task_prompt`] but skips the folder picker
+    /// by reusing the selected project's stored root. Returns false (and
+    /// no-ops) if no project is selected.
+    pub fn enter_project_task_prompt_for_selected(&mut self) -> bool {
+        let Some(project) = self.selected_project().cloned() else {
+            return false;
+        };
+        let cwd = project.root.display().to_string();
+        self.enter_project_task_prompt(cwd);
+        true
+    }
+
     /// Best-guess cwd to spawn a new agent in: the selected session's cwd, or
     /// the user's home directory.
     pub fn default_spawn_cwd(&self) -> Option<String> {
@@ -266,6 +429,7 @@ impl App {
     pub fn close_folder_picker(&mut self) {
         self.folder_picker = None;
         self.gh_create_input = None;
+        self.creating_project_task = false;
         self.view = View::Grid;
     }
 
@@ -323,7 +487,25 @@ impl App {
     pub fn close_prompt_input(&mut self) {
         self.prompt_buffer.clear();
         self.dispatch_target = None;
+        self.projects_pending_cwd = None;
+        self.creating_project_task = false;
         self.view = View::Grid;
+    }
+
+    /// True when the prompt input should be routed through the orchestrator
+    /// project-task flow instead of the regular session-dispatch flow.
+    pub fn prompt_input_for_project(&self) -> bool {
+        self.projects_pending_cwd.is_some()
+    }
+
+    /// Consumes the pending cwd, clears prompt input, returns the
+    /// `(cwd, prompt)` pair. Returns `None` if either is missing.
+    pub fn submit_project_task(&mut self) -> Option<(String, String)> {
+        let cwd = self.projects_pending_cwd.take()?;
+        self.creating_project_task = false;
+        self.view = View::Grid;
+        let prompt = std::mem::take(&mut self.prompt_buffer);
+        Some((cwd, prompt))
     }
 
     pub fn submit_prompt_input(&mut self) -> String {
@@ -355,18 +537,54 @@ impl App {
         let Some(pd) = self.pending_dispatch.take() else {
             return DispatchAction::Wait;
         };
-        let ready = self.groups.iter().flat_map(|g| &g.sessions).any(|s| {
+        // Layered readiness, in order of preference:
+        //   1. scanner says Idle AND pane shows claude's empty input row.
+        //      Tightest gate — guarantees the next paste lands in the
+        //      right place. Preferred when both signals agree.
+        //   2. scanner says Idle AND we've waited long enough for cold
+        //      boot (>5s). Fallback for the case where the pane-ready
+        //      check stays false because claude is rendering something
+        //      we don't recognise (different glyph, different theme).
+        //      Without this, a single cosmetic mismatch loses the prompt
+        //      to the timeout and the user sees a "session that just
+        //      sits there empty" — the real-world failure mode that
+        //      motivated this comment.
+        let scanner_idle = self.groups.iter().flat_map(|g| &g.sessions).any(|s| {
             s.tmux_session.as_deref() == Some(pd.tmux.as_str())
                 && s.state == SessionState::Idle
         });
-        if ready {
-            return DispatchAction::Send { tmux: pd.tmux, prompt: pd.prompt };
+        if scanner_idle {
+            let pane_ready = crate::send::pane_ready_for_input(&pd.tmux);
+            let aged_in = pd.queued_at.elapsed() >= Duration::from_secs(5);
+            if pane_ready || aged_in {
+                if !pane_ready {
+                    log::info!(
+                        "dispatch: pane_ready=false but {}s elapsed — sending anyway (target=[{}])",
+                        pd.queued_at.elapsed().as_secs(),
+                        pd.tmux
+                    );
+                }
+                return DispatchAction::Send { tmux: pd.tmux, prompt: pd.prompt };
+            }
         }
         if pd.queued_at.elapsed() > config::get().ui.pending_dispatch_timeout() {
             return DispatchAction::Timeout { tmux: pd.tmux };
         }
         self.pending_dispatch = Some(pd);
         DispatchAction::Wait
+    }
+
+    /// Time the current pending dispatch has been waiting. None when no
+    /// dispatch is queued. Used by the status bar so the user can tell
+    /// at a glance that an orchestrator/dispatch is still booting rather
+    /// than wondering why nothing is happening.
+    pub fn pending_dispatch_age(&self) -> Option<Duration> {
+        self.pending_dispatch.as_ref().map(|pd| pd.queued_at.elapsed())
+    }
+
+    /// Tmux session name of the current pending dispatch, if any.
+    pub fn pending_dispatch_target(&self) -> Option<&str> {
+        self.pending_dispatch.as_ref().map(|pd| pd.tmux.as_str())
     }
 
     fn compute_dispatch_target(
@@ -403,12 +621,44 @@ impl App {
 
     pub fn cancel_confirm_close(&mut self) {
         self.pending_close = None;
+        self.pending_task_delete = None;
         self.view = View::Grid;
     }
 
     pub fn take_pending_close(&mut self) -> Option<PendingClose> {
         self.view = View::Grid;
         self.pending_close.take()
+    }
+
+    /// Stage a project-task deletion behind the same ConfirmClose flow used
+    /// for sessions. Resolves `orchestrator_tmux` synchronously so the kill
+    /// step doesn't have to re-load state.json.
+    pub fn enter_confirm_task_delete(&mut self) {
+        let Some(p) = self.selected_project().cloned() else { return };
+        let Some(task) = self.selected_project_task().cloned() else { return };
+        let status_label = match task.status {
+            crate::orchestrator::TaskStatus::Running => "running",
+            crate::orchestrator::TaskStatus::Done => "done",
+            crate::orchestrator::TaskStatus::Failed => "failed",
+        };
+        let display = format!(
+            "{} — {} (task {})",
+            p.name,
+            status_label,
+            crate::orchestrator::short_task_id(&task.task_id),
+        );
+        self.pending_task_delete = Some(PendingTaskDelete {
+            project_id: p.id.clone(),
+            task_id: task.task_id.clone(),
+            display,
+            orchestrator_tmux: task.orchestrator_tmux.clone(),
+        });
+        self.view = View::ConfirmClose;
+    }
+
+    pub fn take_pending_task_delete(&mut self) -> Option<PendingTaskDelete> {
+        self.view = View::Grid;
+        self.pending_task_delete.take()
     }
 
     pub fn set_status(&mut self, msg: String) {
@@ -786,3 +1036,4 @@ impl App {
         log::info!("=== end state dump ===");
     }
 }
+

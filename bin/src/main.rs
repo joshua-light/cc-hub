@@ -1,9 +1,11 @@
 use cc_hub_lib::{
     app, clipboard, config, conversation, focus, gh, live_view, metrics, models, platform,
-    scanner, send, spawn, title, tmux_pane, ui, usage, watcher,
+    projects_scan, scanner, send, spawn, title, tmux_pane, ui, usage, watcher,
 };
 
 use app::{App, Tab, View};
+
+mod cli;
 
 #[cfg(feature = "hot-reload")]
 #[hot_lib_reloader::hot_module(dylib = "cc_hub_lib", lib_dir = "target/debug")]
@@ -156,6 +158,7 @@ enum ScanMsg {
         name: String,
         result: Result<String, String>,
     },
+    Projects(projects_scan::ProjectsSnapshot),
 }
 
 /// Size for a popup tmux pane: terminal minus a margin, with floor. The
@@ -214,7 +217,11 @@ fn install_panic_hook() {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    if std::env::args().any(|a| a == "--no-tui") {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = cli::dispatch(&argv) {
+        std::process::exit(code);
+    }
+    if argv.iter().any(|a| a == "--no-tui") {
         return run_no_tui();
     }
 
@@ -324,6 +331,10 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                         .unwrap_or_default();
                     latest_sessions = sessions.clone();
                     let _ = scan_tx.send(ScanMsg::SessionList(sessions)).await;
+                    let snap = tokio::task::spawn_blocking(projects_scan::scan)
+                        .await
+                        .unwrap_or_else(|_| projects_scan::ProjectsSnapshot::empty());
+                    let _ = scan_tx.send(ScanMsg::Projects(snap)).await;
                 }
                 Some(()) = fs_rx.recv() => {
                     // Drain coalesced signals — one scan per burst is enough.
@@ -333,6 +344,10 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                         .unwrap_or_default();
                     latest_sessions = sessions.clone();
                     let _ = scan_tx.send(ScanMsg::SessionList(sessions)).await;
+                    let snap = tokio::task::spawn_blocking(projects_scan::scan)
+                        .await
+                        .unwrap_or_else(|_| projects_scan::ProjectsSnapshot::empty());
+                    let _ = scan_tx.send(ScanMsg::Projects(snap)).await;
                 }
                 Some(session_id) = detail_rx.recv() => {
                     let sessions = latest_sessions.clone();
@@ -449,6 +464,7 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                 }
                 let on_sessions = app.view == View::Grid && app.current_tab == Tab::Sessions;
                 let on_metrics = app.view == View::Grid && app.current_tab == Tab::Metrics;
+                let on_projects = app.view == View::Grid && app.current_tab == Tab::Projects;
 
                 match (&app.view, key.code) {
                     // Quit
@@ -497,6 +513,59 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                         } else {
                             app.metrics_sel_prev();
                         }
+                    }
+                    (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_projects => {
+                        app.projects_move_down();
+                    }
+                    (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_projects => {
+                        app.projects_move_up();
+                    }
+                    (View::Grid, KeyCode::Char('J')) if on_projects => {
+                        app.projects_task_next();
+                    }
+                    (View::Grid, KeyCode::Char('K')) if on_projects => {
+                        app.projects_task_prev();
+                    }
+                    (View::Grid, KeyCode::Char('N')) if on_projects => {
+                        app.enter_folder_picker_for_projects();
+                    }
+                    (View::Grid, KeyCode::Char('n')) if on_projects => {
+                        // Shortcut: new task on the currently-selected project,
+                        // skipping the folder picker. `N` keeps the longer
+                        // pick-a-folder flow for registering an unfamiliar
+                        // directory.
+                        if !app.enter_project_task_prompt_for_selected() {
+                            app.set_status(
+                                "no project selected — press N to pick a folder".into(),
+                            );
+                        }
+                    }
+                    (View::Grid, KeyCode::Enter) if on_projects => {
+                        // Open the orchestrator's tmux session embedded in the
+                        // TUI — same mechanism the Sessions view uses for `f`
+                        // / Enter on a live session.
+                        if let Some(task) = app.selected_project_task().cloned() {
+                            match task.orchestrator_tmux.as_deref() {
+                                None => {
+                                    app.set_status(
+                                        "task has no orchestrator tmux session yet".into(),
+                                    );
+                                }
+                                Some(tmux_name) => {
+                                    let (cols, rows) = popup_pane_size(terminal);
+                                    match tmux_pane::TmuxPaneView::spawn(tmux_name, rows, cols) {
+                                        Ok(pane) => app.enter_tmux_pane(pane),
+                                        Err(e) => app.set_status(format!(
+                                            "open orchestrator failed: {}",
+                                            e
+                                        )),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    (View::Grid, KeyCode::Char('x')) if on_projects => {
+                        app.enter_confirm_task_delete();
                     }
                     (View::Grid, KeyCode::Enter) if on_metrics => {
                         if let Some(row) = app.selected_metrics_session().cloned() {
@@ -634,7 +703,41 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                         app.enter_confirm_close();
                     }
                     (View::ConfirmClose, KeyCode::Char('y') | KeyCode::Char('Y')) => {
-                        if let Some(pending) = app.take_pending_close() {
+                        if let Some(pending) = app.take_pending_task_delete() {
+                            // Best-effort kill of the orchestrator tmux —
+                            // workers stay alive (their parent task is
+                            // gone, but the running claude is independent).
+                            let kill_result = pending
+                                .orchestrator_tmux
+                                .as_deref()
+                                .map(|name| send::kill_tmux_session(name));
+                            // Remove the on-disk state so the Projects view
+                            // refreshes the entry away on next scan.
+                            let task_dir = cc_hub_lib::orchestrator::task_state_dir(
+                                &pending.project_id,
+                                &pending.task_id,
+                            );
+                            let removal = task_dir
+                                .as_ref()
+                                .map(|d| std::fs::remove_dir_all(d));
+                            let kill_msg = match kill_result {
+                                Some(Ok(())) => "orchestrator killed",
+                                Some(Err(_)) => "orchestrator kill failed",
+                                None => "no orchestrator to kill",
+                            };
+                            let removal_msg = match removal {
+                                Some(Ok(())) => "state removed",
+                                Some(Err(e)) => {
+                                    log::warn!("task delete: rm state.json: {}", e);
+                                    "state removal failed"
+                                }
+                                None => "no state path",
+                            };
+                            app.set_status(format!(
+                                "deleted {} ({}, {})",
+                                pending.display, kill_msg, removal_msg
+                            ));
+                        } else if let Some(pending) = app.take_pending_close() {
                             let ok = focus::close_window(pending.pid);
                             let msg = if ok {
                                 format!("closed {}", pending.display)
@@ -696,13 +799,20 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                                 .get(p.selection)
                                 .map(|name| p.current_dir.join(name).display().to_string())
                         });
-                        app.close_folder_picker();
+                        let projects_mode = app.creating_project_task;
                         if let Some(cwd) = cwd {
-                            let status = match spawn::spawn_claude_session(&cwd, None) {
-                                Ok(name) => format!("started cc-hub-new [{}]", name),
-                                Err(e) => format!("spawn failed: {}", e),
-                            };
-                            app.set_status(status);
+                            if projects_mode {
+                                app.enter_project_task_prompt(cwd);
+                            } else {
+                                app.close_folder_picker();
+                                let status = match spawn::spawn_claude_session(&cwd, None) {
+                                    Ok(name) => format!("started cc-hub-new [{}]", name),
+                                    Err(e) => format!("spawn failed: {}", e),
+                                };
+                                app.set_status(status);
+                            }
+                        } else {
+                            app.close_folder_picker();
                         }
                     }
                     (View::FolderPicker, KeyCode::Char('.')) => {
@@ -710,13 +820,20 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                             .folder_picker
                             .as_ref()
                             .map(|p| p.current_dir.display().to_string());
-                        app.close_folder_picker();
+                        let projects_mode = app.creating_project_task;
                         if let Some(cwd) = cwd {
-                            let status = match spawn::spawn_claude_session(&cwd, None) {
-                                Ok(name) => format!("started cc-hub-new [{}]", name),
-                                Err(e) => format!("spawn failed: {}", e),
-                            };
-                            app.set_status(status);
+                            if projects_mode {
+                                app.enter_project_task_prompt(cwd);
+                            } else {
+                                app.close_folder_picker();
+                                let status = match spawn::spawn_claude_session(&cwd, None) {
+                                    Ok(name) => format!("started cc-hub-new [{}]", name),
+                                    Err(e) => format!("spawn failed: {}", e),
+                                };
+                                app.set_status(status);
+                            }
+                        } else {
+                            app.close_folder_picker();
                         }
                     }
                     (View::FolderPicker, KeyCode::Char('c')) => {
@@ -789,12 +906,56 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                         app.prompt_buffer.push(c);
                     }
                     (View::PromptInput, KeyCode::Enter) => {
-                        let target = app.dispatch_target().cloned();
                         if app.prompt_buffer.trim().is_empty() {
                             app.close_prompt_input();
                             app.set_status("empty prompt — dispatch cancelled".into());
                             continue;
                         }
+
+                        // Projects-tab flow: create task, spawn orchestrator,
+                        // queue the orchestrator prompt for dispatch when Idle.
+                        if app.prompt_input_for_project() {
+                            let Some((cwd, prompt)) = app.submit_project_task() else {
+                                app.set_status("project task: missing cwd".into());
+                                continue;
+                            };
+                            let project_root = std::path::Path::new(&cwd);
+                            let project_name = project_root
+                                .file_name()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| cwd.clone());
+                            match cc_hub_lib::orchestrator::spawn_orchestrator_for_new_task(
+                                project_root,
+                                &project_name,
+                                prompt,
+                            ) {
+                                Ok((state, tmux_name, orch_prompt)) => {
+                                    if app.has_pending_dispatch() {
+                                        app.set_status(format!(
+                                            "task created [{}] but a dispatch is already queued — orchestrator may be slow to start",
+                                            state.task_id
+                                        ));
+                                    } else {
+                                        app.queue_pending_dispatch(tmux_name.clone(), orch_prompt);
+                                    }
+                                    log::info!(
+                                        "project task: created {} in {}, orchestrator [{}]",
+                                        state.task_id, cwd, tmux_name
+                                    );
+                                    app.set_status(format!(
+                                        "task created [{}], orchestrator [{}] starting…",
+                                        state.task_id, tmux_name
+                                    ));
+                                }
+                                Err(e) => {
+                                    log::warn!("project task: spawn failed: {}", e);
+                                    app.set_status(format!("project task failed: {}", e));
+                                }
+                            }
+                            continue;
+                        }
+
+                        let target = app.dispatch_target().cloned();
                         let prompt = app.submit_prompt_input();
 
                         if let Some((pid, name, tmux)) = target {
@@ -895,6 +1056,9 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                 }
                 ScanMsg::MetricsProgress { scanned, total } => {
                     app.update_metrics_progress(scanned, total);
+                }
+                ScanMsg::Projects(snap) => {
+                    app.update_projects(snap);
                 }
                 ScanMsg::GhCreateDone { name, result } => {
                     if let Some(picker) = app.folder_picker.as_mut() {

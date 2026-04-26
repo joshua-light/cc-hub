@@ -28,25 +28,26 @@ pub fn spawn_claude_session(cwd: &str, resume_id: Option<&str>) -> io::Result<St
         Some(sid) => format!("{} --resume {}", base, sid),
         None => base.to_string(),
     };
-    ensure_home_trusted(cwd)?;
+    ensure_path_trusted(cwd)?;
     mux::spawn_detached(&name, cwd, Some(&cmd))?;
     Ok(name)
 }
 
-/// Flip `hasTrustDialogAccepted` to `true` in `~/.claude.json` when spawning
-/// into `$HOME`. Without this, claude blocks on a "trust this folder?" prompt
-/// the user never sees — the detached pane just hangs and no session
-/// metadata file is ever written, so nothing surfaces in the hub. Scoped to
-/// `$HOME` only because folder-picker-selected dev dirs are usually already
-/// trusted by past manual runs; $HOME is the one most people never start
-/// claude from directly.
-fn ensure_home_trusted(cwd: &str) -> io::Result<()> {
+/// Flip `hasTrustDialogAccepted` to `true` in `~/.claude.json` for `cwd`.
+/// Without this, claude blocks on a "trust this folder?" prompt the user
+/// never sees in a detached pane — the agent hangs, no session metadata is
+/// written, nothing surfaces in the hub.
+///
+/// Originally scoped to `$HOME` only (where users rarely start claude
+/// manually). Generalised to any path because the orchestrator layer spawns
+/// into fresh worktrees under `.cc-hub-wt/<task>-<name>` that are never
+/// pre-trusted, and into ad-hoc dirs (tempdirs, new-project scaffolds).
+/// The op is idempotent — paths already marked trusted return early.
+fn ensure_path_trusted(cwd: &str) -> io::Result<()> {
     let Some(home) = dirs::home_dir() else {
         return Ok(());
     };
-    if Path::new(cwd) != home.as_path() {
-        return Ok(());
-    }
+    let canon = std::fs::canonicalize(cwd).unwrap_or_else(|_| Path::new(cwd).to_path_buf());
     let config_path = home.join(".claude.json");
     let data = match std::fs::read_to_string(&config_path) {
         Ok(s) => s,
@@ -63,9 +64,9 @@ fn ensure_home_trusted(cwd: &str) -> io::Result<()> {
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
         .ok_or_else(|| io::Error::other("~/.claude.json projects is not an object"))?;
-    let home_key = home.to_string_lossy().into_owned();
+    let path_key = canon.to_string_lossy().into_owned();
     let project = projects
-        .entry(home_key)
+        .entry(path_key)
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
         .ok_or_else(|| io::Error::other("~/.claude.json project entry is not an object"))?;
@@ -89,7 +90,10 @@ fn ensure_home_trusted(cwd: &str) -> io::Result<()> {
         f.sync_all()?;
     }
     std::fs::rename(&tmp, &config_path)?;
-    log::info!("marked $HOME trusted in ~/.claude.json before spawning claude");
+    log::info!(
+        "marked {} trusted in ~/.claude.json before spawning claude",
+        canon.display()
+    );
     Ok(())
 }
 

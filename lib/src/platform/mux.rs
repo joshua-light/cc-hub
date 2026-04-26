@@ -68,10 +68,30 @@ fn spawn_detached_impl(name: &str, cwd: &str, initial_cmd: Option<&str>) -> io::
     Ok(())
 }
 
-/// Type `text` into the session, then submit with Enter.
+/// Inject `text` as a paste, then submit with Enter.
+///
+/// Uses [`paste_buffer`] (bracketed-paste-marked) rather than `send-keys -l`
+/// so claude treats the payload as a paste — atomic from its perspective —
+/// rather than a stream of typed keys. This matters in two ways:
+///
+/// 1. Multi-line prompts. With `-l`, each embedded newline is a literal
+///    Enter to claude's input box; the first newline submits the partial
+///    prompt and the rest goes to the next turn.
+/// 2. Cold-session race. On a freshly-spawned session the Enter that
+///    follows `-l` sometimes arrives before claude has finished setting up
+///    its input handling, leaving the text typed but unsubmitted. The
+///    bracketed-paste close marker (`\x1b[201~`) is a real signal claude
+///    waits for before re-enabling its keystroke handler; pairing it with
+///    a short pause before Enter eliminates the race observed in the
+///    multi-worker orchestrator smoke test.
 pub fn send_prompt(session: &str, text: &str) -> io::Result<()> {
     info!("send: session={} text_len={}", session, text.len());
-    run(&["send-keys", "-t", session, "-l", text], "send-keys literal")?;
+    paste_buffer(session, text)?;
+    // tmux's load-buffer/paste-buffer/send-keys subprocesses each fork+exec
+    // independently; the close marker may still be inflight to the pane
+    // when send-keys Enter starts. 80ms is well below human-perceptible and
+    // 5x what we observed as the race window in practice.
+    std::thread::sleep(std::time::Duration::from_millis(80));
     run(&["send-keys", "-t", session, "Enter"], "send-keys Enter")
 }
 
@@ -142,14 +162,27 @@ pub fn kill_session(session: &str) -> io::Result<()> {
 /// unreliable for the embedded-tmux case, where failure mode is "each
 /// newline arrives as Enter and submits the partial line."
 pub fn paste_buffer(session: &str, text: &str) -> io::Result<()> {
-    const BUF_NAME: &str = "cchub-paste";
+    // Per-call buffer name: tmux buffers are server-wide, so a fixed name
+    // would race when two callers (e.g. concurrent `cc-hub spawn-worker`
+    // invocations from a TUI dispatcher and a CLI subcommand) interleave
+    // load-buffer/paste-buffer/-d cycles. PID + nanos is unique within one
+    // host's tmux server lifetime.
+    let buf_name = format!(
+        "cchub-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+
     let mut payload = Vec::with_capacity(text.len() + 12);
     payload.extend_from_slice(b"\x1b[200~");
     payload.extend_from_slice(text.as_bytes());
     payload.extend_from_slice(b"\x1b[201~");
 
     let mut child = Command::new(MUX_BIN)
-        .args(["load-buffer", "-b", BUF_NAME, "-"])
+        .args(["load-buffer", "-b", &buf_name, "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -168,9 +201,9 @@ pub fn paste_buffer(session: &str, text: &str) -> io::Result<()> {
     }
     // `-r` suppresses tmux's LF→CR translation; without it every embedded
     // newline arrives at the app as Enter. `-d` deletes the buffer after
-    // use.
+    // use so we don't leak per-call buffers in `tmux list-buffers`.
     run(
-        &["paste-buffer", "-b", BUF_NAME, "-r", "-d", "-t", session],
+        &["paste-buffer", "-b", &buf_name, "-r", "-d", "-t", session],
         "paste-buffer",
     )
 }
@@ -192,6 +225,119 @@ pub fn configure_clipboard() {
         "set-option copy-command",
     ) {
         warn!("configure_clipboard: {}", e);
+    }
+}
+
+/// Capture the current visible content of `session`'s active pane.
+/// Returns empty string on failure (mux down, session gone, etc.).
+pub fn capture_pane(session: &str) -> String {
+    let Ok(out) = Command::new(MUX_BIN)
+        .args(["capture-pane", "-t", session, "-p"])
+        .output()
+    else {
+        return String::new();
+    };
+    if !out.status.success() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// True when `session`'s pane shows claude's input prompt — meaning claude
+/// is fully booted and ready to accept paste / Enter. Distinguishes a
+/// "freshly spawned, JSONL not yet written" session (which the scanner
+/// reports as Idle the instant it appears) from one that's actually ready
+/// to receive input. Without this gate, `send_prompt` races the cold-start
+/// of a worker session and the paste never lands.
+///
+/// claude renders `❯` at the start of an otherwise empty row to mark the
+/// input box. The row sits between two `─` rule lines, with the status
+/// footer (model / cost / context / hints) below it — meaning it's
+/// typically 4-8 visible rows above the bottom plus several blank scrollback
+/// rows after that. Cheaper to scan the whole pane than to count rows from
+/// the bottom; the welcome banner uses different glyphs (`▐`, `▜`) so a
+/// false positive there is unlikely.
+pub fn pane_ready_for_input(session: &str) -> bool {
+    pane_content_shows_empty_input(&capture_pane(session))
+}
+
+/// Pure inspector — pulled out so it's unit-testable against captured
+/// fixtures. See [`pane_ready_for_input`].
+pub fn pane_content_shows_empty_input(pane: &str) -> bool {
+    if pane.is_empty() {
+        return false;
+    }
+    pane.lines().any(|l| {
+        let trimmed = l.trim();
+        // An empty input row is exactly the `❯` glyph (after trimming the
+        // single trailing space claude pads it with). A non-empty input
+        // row would have user-typed text after the glyph — not what we
+        // want to declare "ready" for paste.
+        trimmed == "❯"
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pane_content_shows_empty_input;
+
+    /// Real `tmux capture-pane -p` output from a freshly-spawned
+    /// `cc-hub-new` session, captured during the e2e debugging session.
+    /// The input row is `❯ ` — the only `❯` in the pane.
+    const COLD_READY_PANE: &str = concat!(
+        "╭─── Claude Code v2.1.119 ─────────────────────────────────────────────────────╮\n",
+        "│                                                    │ Tips for getting        │\n",
+        "│                Welcome back j-light!               │ started                 │\n",
+        "│                       ▐▛███▜▌                      │                         │\n",
+        "│                 /tmp/cchub-e2e-E4I                 │                         │\n",
+        "╰──────────────────────────────────────────────────────────────────────────────╯\n",
+        "\n",
+        "────────────────────────────────────────────────────────────────────────────────\n",
+        "❯ \n",
+        "────────────────────────────────────────────────────────────────────────────────\n",
+        "  ◆ Opus 4.7 (1M context) │ cchub-e2e-E4I │ ⎇ main │ $0.00 │ ⏱ 0s\n",
+        "  ctx ╌╌╌╌╌╌╌╌╌╌ 0% │ 5h 4pm ━━╌╌╌╌╌╌╌╌ 21% │ wk mon 8am ━╌╌╌╌╌╌╌╌╌ 9%\n",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
+        "\n\n\n\n\n\n",
+    );
+
+    /// Same shape, but the user has typed text into the input box.
+    /// Should NOT be flagged ready — sending now would clobber the typed
+    /// text or interleave with it.
+    const TYPED_INTO_INPUT_PANE: &str = concat!(
+        "────────────────────────────────────────────────────────────────────────────────\n",
+        "❯ help me with the migration\n",
+        "────────────────────────────────────────────────────────────────────────────────\n",
+        "  ◆ Opus 4.7 (1M context) │ proj │ ⎇ main │ $0.00 │ ⏱ 5s\n",
+    );
+
+    /// Mid-startup, before claude has rendered the input row at all —
+    /// just the welcome banner. Common for the first ~1s after spawn.
+    const PRE_INPUT_BANNER_PANE: &str = concat!(
+        "╭─── Claude Code v2.1.119 ─────────────────────────────────────────────────────╮\n",
+        "│                Welcome back j-light!               │\n",
+        "│                       ▐▛███▜▌                      │\n",
+        "╰──────────────────────────────────────────────────────────────────────────────╯\n",
+    );
+
+    #[test]
+    fn cold_ready_pane_is_ready() {
+        assert!(pane_content_shows_empty_input(COLD_READY_PANE));
+    }
+
+    #[test]
+    fn typed_input_is_not_ready() {
+        assert!(!pane_content_shows_empty_input(TYPED_INTO_INPUT_PANE));
+    }
+
+    #[test]
+    fn pre_input_banner_is_not_ready() {
+        assert!(!pane_content_shows_empty_input(PRE_INPUT_BANNER_PANE));
+    }
+
+    #[test]
+    fn empty_pane_is_not_ready() {
+        assert!(!pane_content_shows_empty_input(""));
     }
 }
 

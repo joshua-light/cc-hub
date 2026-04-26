@@ -13,6 +13,21 @@ transcript. From the grid you can:
 - focus the real terminal window of a detached session (Unix only), and
 - browse per-session metrics and Anthropic API usage.
 
+A separate **Projects** tab adds a higher-level layer: register a directory
+as a project, file a free-form *task* against it, and cc-hub spawns an
+*orchestrator* Claude session that decomposes the task and dispatches
+*worker* sessions (read-only research workers, or worktree-isolated edit
+workers) via four new CLI primitives:
+
+- `cc-hub spawn-worker --task ID [--worktree NAME | --readonly] [--prompt P]`
+- `cc-hub merge-worktree --task ID --worktree NAME`
+- `cc-hub task report --task ID [--status S] [--note N]`
+- `cc-hub task create --prompt "…"` / `cc-hub orchestrate start --task ID`
+
+Project state lives at `~/.cc-hub/projects.toml` and
+`~/.cc-hub/projects/<id>/tasks/<id>/state.json`; worktrees are placed under
+`<project-root>/.cc-hub-wt/` (add this to `.gitignore`).
+
 ## Requirements
 
 | | Linux / macOS | Windows |
@@ -174,11 +189,15 @@ differ:
 | Claude process detection | Linux: `comm == claude`; macOS: path contains `/claude/versions/` | exe name `claude.exe` |
 | POSIX session-id ancestor fallback | yes | n/a (Windows processes don't have one) |
 
-## Keybindings (grid view)
+## Keybindings
+
+`Tab` / `BackTab` cycles the three top-level tabs: **Projects → Sessions →
+Metrics**.
+
+### Sessions tab (grid view)
 
 | Key | Action |
 |---|---|
-| `Tab` / `BackTab` | Cycle tabs (Sessions / Metrics) |
 | `h j k l` / arrows | Navigate the grid |
 | `i` | Session info popup |
 | `Enter` / `f` | Attach: embedded pane if the session is in a mux, else focus its terminal window. For an inactive session, spawn a new tmux session running `cc-hub-new --resume <id>` |
@@ -193,6 +212,17 @@ differ:
 | `m` | Jump to Metrics tab |
 | `q` | Quit |
 | `F1` (in embedded pane) | Close the pane, return to grid |
+
+### Projects tab
+
+| Key | Action |
+|---|---|
+| `j` / `k` | Select project |
+| `J` / `K` | Select task within the current project |
+| `Enter` | Focus the orchestrator session for the selected task |
+| `n` | New task in the current project (prompt input) |
+| `N` | Folder picker → register a project, then prompt for a task |
+| `x` | Delete the selected task (kills its orchestrator, removes state) |
 
 ## Known limitations
 

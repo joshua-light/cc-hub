@@ -164,7 +164,7 @@ impl Default for UiConfig {
         Self {
             status_msg_ttl_secs: 5,
             pending_dispatch_timeout_secs: 60,
-            cell_height: 8,
+            cell_height: 7,
             cell_width: 42,
         }
     }

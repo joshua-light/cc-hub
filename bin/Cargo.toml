@@ -9,6 +9,7 @@ hot-reload = ["dep:hot-lib-reloader", "cc-hub-lib/hot-reload"]
 
 [dependencies]
 cc-hub-lib = { path = "../lib" }
+serde_json = "1"
 ratatui.workspace = true
 crossterm.workspace = true
 tokio.workspace = true
