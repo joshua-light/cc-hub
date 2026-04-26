@@ -391,9 +391,36 @@ The cc-hub binary is at `{bin}`. Always invoke it by absolute path; it is not ne
    `{bin} task report --task {task_id} --status running --note \"<one line>\"`
    These notes surface in the user's Projects view. Keep them terse — milestones, not play-by-play.
 
-6. **Finish.** When the user's task is complete:
-   `{bin} task report --task {task_id} --status done --note \"<summary>\"`
+6. **Finish.** When the user's task is complete, gather proof of work (see next section) and then:
+   `{bin} task report --task {task_id} --status done --note \"<one line>\" --summary \"<multi-line briefing>\"`
    On unrecoverable failure: `--status failed --note \"<why>\"`.
+
+# Proof of work
+
+Done without proof is not done. Before you mark a task done, gather concrete evidence that the change works and attach it to the task — the user reads this to verify the outcome without re-running everything you did.
+
+Two primitives:
+- `{bin} task artifact add --task {task_id} --path PATH [--kind KIND] [--caption TEXT]` — attach a file (copied into cc-hub's store, survives worktree cleanup) or a URL (stored as-is). `KIND` is free-form; common values: `screenshot`, `video`, `log`, `build`, `test`, `diff`, `file`, `url`. URL-shaped paths default to `kind=url`.
+- `{bin} task artifact list --task {task_id}` — review what's already attached.
+
+What counts as proof, by change type:
+- **Web / UI** — screenshot of the rendered feature. For regression fixes, attach before *and* after.
+- **CLI / library / backend** — terminal recording (asciinema if available), or capture the relevant command output to a file and attach it with `--kind log`.
+- **Tests / CI / build** — the build log file, or a URL to the CI run with `--kind url`.
+- **Refactors (no behavioural change)** — a `diff` artifact summarising the change plus a `log` artifact showing build + tests still pass.
+- **Bug fixes** — a `log` showing the repro failing before and passing after the fix, OR a regression test added in the same change (mention its path in the summary).
+
+On the final `task report --status done` call, pass a multi-line `--summary` covering:
+1. what was done (one paragraph),
+2. what you verified (point at the artifacts),
+3. key files changed (a few — not exhaustive),
+4. what was deliberately out of scope.
+
+The summary is the one-screen briefing the user reads to understand the task's outcome. Use a heredoc so newlines survive the shell:
+`{bin} task report --task {task_id} --status done --note \"<one line>\" --summary \"$(cat <<'EOF'
+<multi-line summary>
+EOF
+)\"`
 
 # Rules
 
@@ -784,6 +811,23 @@ mod tests {
         assert!(
             p.contains("tmux capture-pane"),
             "missing capture-pane monitor guidance"
+        );
+
+        // Proof-of-work guidance — done isn't done without evidence.
+        assert!(
+            p.contains("Proof of work"),
+            "missing proof-of-work section header"
+        );
+        assert!(
+            p.contains(&format!(
+                "{} task artifact add --task {}",
+                bin_s, state.task_id
+            )),
+            "missing artifact-add primitive in proof-of-work section"
+        );
+        assert!(
+            p.contains("--summary"),
+            "missing --summary guidance for final report"
         );
     }
 }
