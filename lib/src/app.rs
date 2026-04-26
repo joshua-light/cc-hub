@@ -28,6 +28,7 @@ pub enum View {
     TmuxPane,
     FolderPicker,
     GhCreateInput,
+    ProjectsResult,
 }
 
 /// Overlay on top of [`View::FolderPicker`] that prompts for a new GitHub
@@ -159,6 +160,9 @@ pub struct App {
     /// Session ids seen on the previous scan tick. `None` means the first
     /// scan hasn't happened yet — used to skip cursor-jump on initial load.
     known_session_ids: Option<HashSet<String>>,
+    /// Cursor inside the Projects "Result" popup, indexing into the
+    /// selected task's `artifacts` vec. Reset on popup open.
+    pub result_artifact_sel: usize,
 }
 
 impl App {
@@ -205,6 +209,7 @@ impl App {
             projects_pending_cwd: None,
             last_sessions: Vec::new(),
             known_session_ids: None,
+            result_artifact_sel: 0,
         }
     }
 
@@ -1034,6 +1039,46 @@ impl App {
             }
         }
         log::info!("=== end state dump ===");
+    }
+
+    /// Open the Projects "Result" popup for the currently-selected task.
+    /// Returns false when no task is selected, so the caller can surface a
+    /// status-bar hint instead of opening an empty popup.
+    pub fn enter_projects_result(&mut self) -> bool {
+        if self.selected_project_task().is_none() {
+            return false;
+        }
+        self.result_artifact_sel = 0;
+        self.view = View::ProjectsResult;
+        true
+    }
+
+    pub fn close_projects_result(&mut self) {
+        self.view = View::Grid;
+        self.result_artifact_sel = 0;
+    }
+
+    pub fn result_artifact_next(&mut self) {
+        let n = self
+            .selected_project_task()
+            .map(|t| t.artifacts.len())
+            .unwrap_or(0);
+        if n == 0 {
+            self.result_artifact_sel = 0;
+            return;
+        }
+        self.result_artifact_sel = (self.result_artifact_sel + 1).min(n - 1);
+    }
+
+    pub fn result_artifact_prev(&mut self) {
+        self.result_artifact_sel = self.result_artifact_sel.saturating_sub(1);
+    }
+
+    /// The artifact under the popup cursor, if any. Used by the `c` and `o`
+    /// keybinds to know what path to act on.
+    pub fn selected_result_artifact(&self) -> Option<&crate::orchestrator::Artifact> {
+        let t = self.selected_project_task()?;
+        t.artifacts.get(self.result_artifact_sel)
     }
 }
 
