@@ -1836,8 +1836,8 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         let keybinds: &str = match app.view {
             View::Grid => match app.current_tab {
-                Tab::Projects => "tab:next  j/k:project  J/K:task  enter:focus orch  n:new task  N:new in…  r:result  x:delete  q:quit",
-                Tab::Sessions => "tab:next  h/j/k/l:nav  n:new  N:new in…  i:info  D:why?  enter/f:focus/resume  o:shell  x:close  H:inactive  q:quit",
+                Tab::Projects => "tab:next  j/k:project  J/K:task  enter:focus orch  n:new task  N:register project  r:result  x:delete  q:quit",
+                Tab::Sessions => "tab:next  h/j/k/l:nav  n:new  N:new in…  i:info  D:why?  enter/f:focus/resume  o:shell  x:close  H:inactive  W:workers  q:quit",
                 Tab::Metrics => "tab:next  j/k:select  enter:view transcript  r:refresh  q:quit",
             },
             View::Popup => "j/k:scroll  esc:close  q:close",
@@ -2147,7 +2147,8 @@ fn render_project_tasks(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(tasks.len() * 3);
+    let sessions_by_tmux = app.sessions_by_tmux();
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(tasks.len() * 6);
     let now_secs = now_ms() / 1000;
     for (idx, t) in tasks.iter().enumerate() {
         let selected = idx == app.projects_task_sel;
@@ -2197,11 +2198,179 @@ fn render_project_tasks(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::Rgb(110, 110, 130)),
         ));
         lines.push(Line::from(detail));
+
+        // ── Agent block ────────────────────────────────────────────────
+        // Look up live SessionInfo for the orchestrator and each worker
+        // by tmux name. Sessions whose process has died (Inactive) or
+        // whose tmux is gone show as "(gone)" so the user can tell a
+        // dead worker from a still-running one.
+        let orch_sess = t
+            .orchestrator_tmux
+            .as_deref()
+            .and_then(|n| sessions_by_tmux.get(n).copied());
+        let worker_sess: Vec<Option<&SessionInfo>> = t
+            .workers
+            .iter()
+            .map(|w| sessions_by_tmux.get(w.tmux_name.as_str()).copied())
+            .collect();
+
+        // Aggregate counters across orchestrator + workers.
+        let mut total_ctx: u64 = 0;
+        let mut alive: u32 = 0;
+        let mut processing: u32 = 0;
+        let mut waiting: u32 = 0;
+        let mut idle_count: u32 = 0;
+        for s in std::iter::once(orch_sess).chain(worker_sess.iter().copied()).flatten() {
+            if s.state != SessionState::Inactive {
+                alive += 1;
+            }
+            match s.state {
+                SessionState::Processing => processing += 1,
+                SessionState::WaitingForInput => waiting += 1,
+                SessionState::Idle => idle_count += 1,
+                SessionState::Inactive => {}
+            }
+            if let Some(c) = s.context_tokens {
+                total_ctx = total_ctx.saturating_add(c);
+            }
+        }
+
+        let total_workers = t.workers.len();
+        let summary_spans = vec![
+            Span::raw("    "),
+            Span::styled(
+                format!("agents: {} alive ", alive),
+                Style::default().fg(Color::Rgb(160, 200, 230)),
+            ),
+            Span::styled(
+                format!(
+                    "({}▶ {}● {}○)",
+                    processing, waiting, idle_count
+                ),
+                Style::default().fg(Color::Rgb(120, 120, 145)),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!(
+                    "merges: {}/{}",
+                    merges, total_workers
+                ),
+                Style::default().fg(Color::Rgb(160, 200, 230)),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("ctx Σ {}", format_tokens(total_ctx)),
+                Style::default().fg(Color::Rgb(120, 180, 220)),
+            ),
+        ];
+        lines.push(Line::from(summary_spans));
+
+        if let Some(line) = render_agent_line("orch", None, orch_sess) {
+            lines.push(line);
+        } else if t.orchestrator_tmux.is_some() {
+            lines.push(Line::from(vec![
+                Span::raw("      "),
+                Span::styled("orch  ", Style::default().fg(Color::Rgb(160, 160, 180))),
+                Span::styled(
+                    "(no live session)",
+                    Style::default().fg(Color::Rgb(140, 90, 90)),
+                ),
+            ]));
+        }
+        for (w, sess) in t.workers.iter().zip(worker_sess.iter()) {
+            let mut label = match w.worktree.as_deref() {
+                Some(name) => format!("w[{}]", name),
+                None if w.readonly => "w[ro]".to_string(),
+                None => "w[?]".to_string(),
+            };
+            if label.chars().count() > 14 {
+                label = truncate_chars(&label, 14);
+            }
+            let merged = t.merges.iter().any(|m| {
+                w.worktree
+                    .as_deref()
+                    .is_some_and(|wn| m.worktree == wn)
+                    && matches!(m.outcome, crate::orchestrator::MergeOutcome::Ok)
+            });
+            let suffix = if merged { Some(" merged") } else { None };
+            if let Some(line) = render_agent_line(&label, suffix, *sess) {
+                lines.push(line);
+            } else {
+                lines.push(Line::from(vec![
+                    Span::raw("      "),
+                    Span::styled(
+                        format!("{:<6}", label),
+                        Style::default().fg(Color::Rgb(160, 160, 180)),
+                    ),
+                    Span::styled(
+                        "(no live session)",
+                        Style::default().fg(Color::Rgb(140, 90, 90)),
+                    ),
+                ]));
+            }
+        }
+
         lines.push(Line::from(Span::raw("")));
     }
 
     let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
+}
+
+/// One indented line per live agent: `  label  [state] · 25k ctx · 󰖷 Tool`.
+/// Returns None when there's no SessionInfo to render — caller decides
+/// whether to print a "(no live session)" placeholder.
+fn render_agent_line(
+    label: &str,
+    suffix: Option<&str>,
+    sess: Option<&SessionInfo>,
+) -> Option<Line<'static>> {
+    let s = sess?;
+    let (state_label, state_col) = match s.state {
+        SessionState::Processing => ("processing", Color::LightGreen),
+        SessionState::WaitingForInput => ("waiting", Color::LightYellow),
+        SessionState::Idle => ("idle", Color::Rgb(140, 140, 160)),
+        SessionState::Inactive => ("inactive", Color::Rgb(110, 90, 90)),
+    };
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
+    spans.push(Span::raw("      "));
+    spans.push(Span::styled(
+        format!("{:<6}", label),
+        Style::default().fg(Color::Rgb(170, 170, 195)),
+    ));
+    spans.push(Span::styled(
+        format!("[{}]", state_label),
+        Style::default().fg(state_col),
+    ));
+    if let Some(ctx) = s.context_tokens {
+        spans.push(Span::styled(
+            format!("  {} ctx", format_tokens(ctx)),
+            Style::default().fg(Color::Rgb(120, 180, 220)),
+        ));
+    }
+    if let Some(tool) = s.current_tool.as_ref() {
+        let name = short_tool(&tool.name);
+        let label_text = match tool.hint.as_deref().filter(|h| !h.is_empty()) {
+            Some(hint) => format!("  󰖷 {}: {}", name, truncate_chars(hint, 30)),
+            None => format!("  󰖷 {}", name),
+        };
+        spans.push(Span::styled(
+            label_text,
+            Style::default().fg(Color::Rgb(180, 200, 160)),
+        ));
+    } else if s.is_thinking {
+        spans.push(Span::styled(
+            "  󰟶 thinking",
+            Style::default().fg(Color::Rgb(180, 180, 200)),
+        ));
+    }
+    if let Some(suf) = suffix {
+        spans.push(Span::styled(
+            suf.to_string(),
+            Style::default().fg(Color::LightGreen),
+        ));
+    }
+    Some(Line::from(spans))
 }
 
 fn first_line_preview(text: &str, max: usize) -> String {
