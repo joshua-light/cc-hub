@@ -478,6 +478,10 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         }
     };
 
+    let prev_status = orchestrator::read_task_state(&project_id, &task_id)
+        .ok()
+        .map(|s| s.status);
+
     let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
         if let Some(st) = status {
             s.status = st;
@@ -491,6 +495,12 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
     })
     .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
 
+    let became_terminal = matches!(state.status, TaskStatus::Done | TaskStatus::Failed)
+        && prev_status.as_ref() != Some(&state.status);
+    if became_terminal {
+        cleanup_task_sessions(&state);
+    }
+
     print_json(&serde_json::json!({
         "ok": true,
         "task_id": state.task_id,
@@ -501,6 +511,57 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         "updated_at": state.updated_at,
     }));
     Ok(())
+}
+
+/// Close every tmux session associated with a finished task: workers
+/// immediately, orchestrator after a short delay. The orchestrator is
+/// almost always the calling process here (a Claude session running this
+/// CLI via Bash), so killing its tmux synchronously would terminate this
+/// process before its JSON output is captured. The detached `sh -c` keeps
+/// the kill alive past our exit.
+fn cleanup_task_sessions(state: &TaskState) {
+    for w in &state.workers {
+        if let Err(e) = send::kill_tmux_session(&w.tmux_name) {
+            log::warn!(
+                "task {}: kill worker tmux [{}] failed: {}",
+                state.task_id, w.tmux_name, e
+            );
+        }
+    }
+    if let Some(orch) = state.orchestrator_tmux.as_deref() {
+        // Sanitise: tmux session names can contain '.' / '_' / '-' but the
+        // generator (`spawn_claude_session`) only ever produces those plus
+        // alphanumerics, so a defensive shell-escape isn't worth a dep.
+        let safe_name: String = orch
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            .collect();
+        if safe_name != orch {
+            log::warn!(
+                "task {}: orchestrator tmux name [{}] has unexpected chars; not scheduling kill",
+                state.task_id, orch
+            );
+            return;
+        }
+        let cmd = format!("sleep 2; tmux kill-session -t {} 2>/dev/null", safe_name);
+        match std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_) => log::info!(
+                "task {}: scheduled orchestrator tmux [{}] kill in 2s",
+                state.task_id, orch
+            ),
+            Err(e) => log::warn!(
+                "task {}: schedule orchestrator kill failed: {}",
+                state.task_id, e
+            ),
+        }
+    }
 }
 
 // ─── task artifact ───────────────────────────────────────────────────────
@@ -644,7 +705,6 @@ fn task_artifact_list(args: &[String]) -> Result<(), CliError> {
     print_json(&serde_json::Value::Array(arr));
     Ok(())
 }
-
 
 /// `cc-hub task create --prompt "..." [--project-id ID] [--name NAME]`
 ///
