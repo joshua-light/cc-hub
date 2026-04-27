@@ -248,7 +248,29 @@ fn render_gh_create_input(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
-    let popup = centered_fixed(area, 80, 9);
+    let mut input_line = app.prompt_buffer.clone();
+    input_line.push('▎');
+
+    let desired_w = 80u16.min(area.width);
+    let wrap_width = desired_w.saturating_sub(4) as usize;
+    let prompt_lines: u16 = if wrap_width == 0 {
+        1
+    } else {
+        let total: usize = input_line
+            .split('\n')
+            .map(|seg| {
+                let w = seg.chars().count();
+                ((w + wrap_width - 1) / wrap_width).max(1)
+            })
+            .sum();
+        total.try_into().unwrap_or(u16::MAX)
+    };
+    let desired_h = 5u16
+        .saturating_add(prompt_lines)
+        .max(9)
+        .min(area.height);
+
+    let popup = centered_fixed(area, desired_w, desired_h);
     frame.render_widget(Clear, popup);
 
     let project_mode = app.prompt_input_for_project();
@@ -292,9 +314,6 @@ fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
     if inner.height == 0 || inner.width == 0 {
         return;
     }
-
-    let mut input_line = app.prompt_buffer.clone();
-    input_line.push('▎');
 
     let lines = vec![
         Line::raw(""),
