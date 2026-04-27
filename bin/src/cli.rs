@@ -90,6 +90,7 @@ struct Flags {
     path: Option<String>,
     kind: Option<String>,
     caption: Option<String>,
+    lead: bool,
     wait_secs: Option<u64>,
     dry_run: bool,
 }
@@ -133,6 +134,10 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
             }
             "--caption" => {
                 f.caption = Some(next_value(args, &mut i, "--caption")?);
+            }
+            "--lead" => {
+                f.lead = true;
+                i += 1;
             }
             "--wait-secs" => {
                 let v = next_value(args, &mut i, "--wait-secs")?;
@@ -465,14 +470,15 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
 
-    let status = match f.status.as_deref() {
+    let raw_status = match f.status.as_deref() {
         None => None,
         Some("running") => Some(TaskStatus::Running),
+        Some("review") => Some(TaskStatus::Review),
         Some("done") => Some(TaskStatus::Done),
         Some("failed") => Some(TaskStatus::Failed),
         Some(other) => {
             return Err(CliError::Usage(format!(
-                "--status must be running|done|failed (got {})",
+                "--status must be running|review|done|failed (got {})",
                 other
             )));
         }
@@ -482,8 +488,21 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         .ok()
         .map(|s| s.status);
 
+    // An orchestrator's `--status done` means "I'm finished" — it does NOT
+    // mean the work is approved. Route that into Review so a human (or
+    // future agentic reviewer) signs off via the TUI's `Space` keybind.
+    // The exception: if the task is already in Review, an explicit `done`
+    // is the approval path (used by `approve_review_task`'s subprocess
+    // fallback, if any) — let it through. `failed` always lands as Failed.
+    let effective_status = match (raw_status.clone(), prev_status.as_ref()) {
+        (Some(TaskStatus::Done), prev) if prev != Some(&TaskStatus::Review) => {
+            Some(TaskStatus::Review)
+        }
+        (other, _) => other,
+    };
+
     let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
-        if let Some(st) = status {
+        if let Some(st) = effective_status.clone() {
             s.status = st;
         }
         if let Some(note) = f.note.clone() {
@@ -495,10 +514,14 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
     })
     .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
 
+    // Cleanup runs only when the task actually leaves the active flow:
+    // - Failed (immediate)
+    // - Done (only via Review → Done; fresh `done` reports go to Review and
+    //   keep the orchestrator alive in case the human wants follow-up).
     let became_terminal = matches!(state.status, TaskStatus::Done | TaskStatus::Failed)
         && prev_status.as_ref() != Some(&state.status);
     if became_terminal {
-        cleanup_task_sessions(&state);
+        orchestrator::cleanup_task_sessions(&state);
     }
 
     print_json(&serde_json::json!({
@@ -511,98 +534,6 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         "updated_at": state.updated_at,
     }));
     Ok(())
-}
-
-/// Close every tmux session associated with a finished task: workers
-/// immediately, orchestrator after a short delay. The orchestrator is
-/// almost always the calling process here (a Claude session running this
-/// CLI via Bash), so killing its tmux synchronously would terminate this
-/// process before its JSON output is captured. The detached `sh -c` keeps
-/// the kill alive past our exit.
-fn cleanup_task_sessions(state: &TaskState) {
-    // Snapshot the orchestrator's pane to disk before scheduling its kill,
-    // so the Projects view (`f` on a completed task) can reopen the agent's
-    // terminal post-mortem.
-    if let Some(orch) = state.orchestrator_tmux.as_deref() {
-        capture_orchestrator_log(state, orch);
-    }
-    for w in &state.workers {
-        if let Err(e) = send::kill_tmux_session(&w.tmux_name) {
-            log::warn!(
-                "task {}: kill worker tmux [{}] failed: {}",
-                state.task_id, w.tmux_name, e
-            );
-        }
-    }
-    if let Some(orch) = state.orchestrator_tmux.as_deref() {
-        // Sanitise: tmux session names can contain '.' / '_' / '-' but the
-        // generator (`spawn_claude_session`) only ever produces those plus
-        // alphanumerics, so a defensive shell-escape isn't worth a dep.
-        let safe_name: String = orch
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-            .collect();
-        if safe_name != orch {
-            log::warn!(
-                "task {}: orchestrator tmux name [{}] has unexpected chars; not scheduling kill",
-                state.task_id, orch
-            );
-            return;
-        }
-        let cmd = format!("sleep 2; tmux kill-session -t {} 2>/dev/null", safe_name);
-        match std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&cmd)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(_) => log::info!(
-                "task {}: scheduled orchestrator tmux [{}] kill in 2s",
-                state.task_id, orch
-            ),
-            Err(e) => log::warn!(
-                "task {}: schedule orchestrator kill failed: {}",
-                state.task_id, e
-            ),
-        }
-    }
-}
-
-fn capture_orchestrator_log(state: &TaskState, orch: &str) {
-    let Some(path) = orchestrator::task_orchestrator_log_path(&state.project_id, &state.task_id)
-    else {
-        return;
-    };
-    let Some(dir) = path.parent() else { return };
-    if let Err(e) = std::fs::create_dir_all(dir) {
-        log::warn!(
-            "task {}: orchestrator.log mkdir failed: {}",
-            state.task_id, e
-        );
-        return;
-    }
-    let body = send::capture_tmux_pane_full(orch);
-    if body.is_empty() {
-        log::warn!(
-            "task {}: orchestrator capture-pane returned empty for [{}]",
-            state.task_id, orch
-        );
-        return;
-    }
-    if let Err(e) = std::fs::write(&path, body) {
-        log::warn!(
-            "task {}: write orchestrator.log failed: {}",
-            state.task_id, e
-        );
-    } else {
-        log::info!(
-            "task {}: wrote orchestrator log to {}",
-            state.task_id,
-            path.display()
-        );
-    }
 }
 
 // ─── task artifact ───────────────────────────────────────────────────────
@@ -698,14 +629,21 @@ fn task_artifact_add(args: &[String]) -> Result<(), CliError> {
         caption: f.caption.clone(),
         added_at: orchestrator::now_unix_secs(),
     };
-    let note = format!("artifact added: {} {}", kind, basename_for_note);
+    let lead_note_suffix = if f.lead { " (lead)" } else { "" };
+    let note = format!("artifact added: {} {}{}", kind, basename_for_note, lead_note_suffix);
+    let mark_lead = f.lead;
     let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
         s.artifacts.push(artifact.clone());
+        if mark_lead {
+            s.lead_artifact = Some(s.artifacts.len() - 1);
+        }
         s.note = Some(note);
     })
     .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
 
+    let added_idx = state.artifacts.len() - 1;
     let added = state.artifacts.last().expect("just pushed");
+    let is_lead = state.lead_artifact == Some(added_idx);
     print_json(&serde_json::json!({
         "ok": true,
         "task_id": state.task_id,
@@ -716,8 +654,10 @@ fn task_artifact_add(args: &[String]) -> Result<(), CliError> {
             "original": added.original,
             "caption": added.caption,
             "added_at": added.added_at,
+            "lead": is_lead,
         },
         "count": state.artifacts.len(),
+        "lead_index": state.lead_artifact,
     }));
     Ok(())
 }
@@ -730,16 +670,19 @@ fn task_artifact_list(args: &[String]) -> Result<(), CliError> {
     let state = orchestrator::read_task_state(&project_id, &task_id)
         .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
 
+    let lead_idx = state.lead_artifact;
     let arr: Vec<serde_json::Value> = state
         .artifacts
         .iter()
-        .map(|a| {
+        .enumerate()
+        .map(|(i, a)| {
             serde_json::json!({
                 "kind": a.kind,
                 "path": a.path,
                 "original": a.original,
                 "caption": a.caption,
                 "added_at": a.added_at,
+                "lead": lead_idx == Some(i),
             })
         })
         .collect();

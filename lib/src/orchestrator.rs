@@ -116,6 +116,12 @@ pub fn now_unix_secs() -> i64 {
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
     Running,
+    /// Orchestrator finished its work and is waiting on a human (or future
+    /// agentic reviewer) to sign off. `Done` is reached only via explicit
+    /// approval. New `done` task-state files written by older orchestrators
+    /// land directly in `Done` for back-compat — only newly-completed tasks
+    /// get parked here.
+    Review,
     Done,
     Failed,
 }
@@ -203,6 +209,13 @@ pub struct TaskState {
     /// only via the CLI; `serde(default)` for back-compat.
     #[serde(default)]
     pub artifacts: Vec<Artifact>,
+    /// Index into `artifacts` of the single "lead" artifact — the strongest
+    /// piece of proof, surfaced first when the user reviews the task. The
+    /// agent designates it via `task artifact add --lead`. `None` until set;
+    /// re-passing `--lead` moves the designation. `serde(default)` for
+    /// back-compat with state files written before this field existed.
+    #[serde(default)]
+    pub lead_artifact: Option<usize>,
 }
 
 impl TaskState {
@@ -224,6 +237,7 @@ impl TaskState {
             workers: Vec::new(),
             merges: Vec::new(),
             artifacts: Vec::new(),
+            lead_artifact: None,
         }
     }
 
@@ -290,6 +304,98 @@ pub fn set_task_title(
     update_task_state(project_id, task_id, |s| {
         s.title = Some(title.to_string());
     })
+}
+
+/// Tear down every tmux session associated with a finished task: workers
+/// immediately, orchestrator after a short delay. The orchestrator is
+/// almost always the calling process when this runs from the CLI (a Claude
+/// session running this CLI via Bash), so killing its tmux synchronously
+/// would terminate the caller before its JSON output is captured. The
+/// detached `sh -c` keeps the kill alive past our exit.
+///
+/// Called from two places: the CLI (`task report` when status flips to a
+/// terminal state) and the TUI (when a human approves a Review task). Both
+/// need the same behaviour, so it lives in lib.
+pub fn cleanup_task_sessions(state: &TaskState) {
+    if let Some(orch) = state.orchestrator_tmux.as_deref() {
+        capture_orchestrator_log(state, orch);
+    }
+    for w in &state.workers {
+        if let Err(e) = crate::send::kill_tmux_session(&w.tmux_name) {
+            log::warn!(
+                "task {}: kill worker tmux [{}] failed: {}",
+                state.task_id, w.tmux_name, e
+            );
+        }
+    }
+    if let Some(orch) = state.orchestrator_tmux.as_deref() {
+        // tmux session names from `spawn_claude_session` are alphanumeric +
+        // `-`/`_`/`.`. Anything else is suspicious — skip rather than risk
+        // shell injection in the detached killer.
+        let safe_name: String = orch
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            .collect();
+        if safe_name != orch {
+            log::warn!(
+                "task {}: orchestrator tmux name [{}] has unexpected chars; not scheduling kill",
+                state.task_id, orch
+            );
+            return;
+        }
+        let cmd = format!("sleep 2; tmux kill-session -t {} 2>/dev/null", safe_name);
+        match std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_) => log::info!(
+                "task {}: scheduled orchestrator tmux [{}] kill in 2s",
+                state.task_id, orch
+            ),
+            Err(e) => log::warn!(
+                "task {}: schedule orchestrator kill failed: {}",
+                state.task_id, e
+            ),
+        }
+    }
+}
+
+fn capture_orchestrator_log(state: &TaskState, orch: &str) {
+    let Some(path) = task_orchestrator_log_path(&state.project_id, &state.task_id) else {
+        return;
+    };
+    let Some(dir) = path.parent() else { return };
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        log::warn!(
+            "task {}: orchestrator.log mkdir failed: {}",
+            state.task_id, e
+        );
+        return;
+    }
+    let body = crate::send::capture_tmux_pane_full(orch);
+    if body.is_empty() {
+        log::warn!(
+            "task {}: orchestrator capture-pane returned empty for [{}]",
+            state.task_id, orch
+        );
+        return;
+    }
+    if let Err(e) = std::fs::write(&path, body) {
+        log::warn!(
+            "task {}: write orchestrator.log failed: {}",
+            state.task_id, e
+        );
+    } else {
+        log::info!(
+            "task {}: wrote orchestrator log to {}",
+            state.task_id,
+            path.display()
+        );
+    }
 }
 
 /// One registered project. Stored in `~/.cc-hub/projects.toml`.
@@ -417,31 +523,30 @@ The cc-hub binary is at `{bin}`. Always invoke it by absolute path; it is not ne
 6. **Finish.** When the user's task is complete, gather proof of work (see next section) and then:
    `{bin} task report --task {task_id} --status done --note \"<one line>\" --summary \"<multi-line briefing>\"`
    On unrecoverable failure: `--status failed --note \"<why>\"`.
+   `done` lands the task in **Review** — the human (or a future agentic reviewer) signs off via the Projects UI before it transitions to actually Done. Your tmux session stays alive through Review so the user can ask follow-up questions; it's torn down on approval.
 
 # Proof of work
 
-Done without proof is not done. Before you mark a task done, gather concrete evidence that the change works and attach it to the task — the user reads this to verify the outcome without re-running everything you did.
+Done without proof is not done. The user reviews finished tasks via **progressive disclosure**: they read a one-line proof + a single lead artifact first, scan supporting evidence next, and reach for the multi-line summary only if they want to dig deeper. Shape your final report to match — lead with the proof, not the briefing.
 
-Two primitives:
-- `{bin} task artifact add --task {task_id} --path PATH [--kind KIND] [--caption TEXT]` — attach a file (copied into cc-hub's store, survives worktree cleanup) or a URL (stored as-is). `KIND` is free-form; common values: `screenshot`, `video`, `log`, `build`, `test`, `diff`, `file`, `url`. URL-shaped paths default to `kind=url`.
-- `{bin} task artifact list --task {task_id}` — review what's already attached.
+Three primitives:
+- `{bin} task artifact add --task {task_id} --path PATH [--kind KIND] [--caption TEXT] [--lead]` — attach a file (copied into cc-hub's store, survives worktree cleanup) or a URL (stored as-is). `KIND` is free-form; common values: `screenshot`, `video`, `log`, `build`, `test`, `diff`, `file`, `url`. URL-shaped paths default to `kind=url`. Pass `--lead` on exactly one artifact — the strongest single piece of proof. Re-passing `--lead` on a later add moves the designation to the new artifact, so add the lead whenever you're sure which one it is.
+- `{bin} task artifact list --task {task_id}` — review what's already attached, including which one is the current lead.
 
-What counts as proof, by change type:
-- **Web / UI** — screenshot of the rendered feature. For regression fixes, attach before *and* after.
-- **CLI / library / backend** — terminal recording (asciinema if available), or capture the relevant command output to a file and attach it with `--kind log`.
-- **Tests / CI / build** — the build log file, or a URL to the CI run with `--kind url`.
-- **Refactors (no behavioural change)** — a `diff` artifact summarising the change plus a `log` artifact showing build + tests still pass.
-- **Bug fixes** — a `log` showing the repro failing before and passing after the fix, OR a regression test added in the same change (mention its path in the summary).
+What counts as proof, and which to lead, by change type:
+- **Web / UI** — screenshot or short screen recording of the rendered feature. Lead with the screenshot/recording. For regression fixes, attach before *and* after; lead the after.
+- **CLI / library / backend** — terminal recording (asciinema if available) or captured command output (`--kind log`). Lead the recording, or the log if no recording is feasible.
+- **Tests / CI / build** — the build log file, or a URL to the CI run (`--kind url`). Lead the green run.
+- **Refactors (no behavioural change)** — a `diff` artifact summarising the change plus a `log` showing build + tests still pass. Lead the log (it's the \"still works\" proof).
+- **Bug fixes** — a log showing the repro failing before and passing after the fix, OR a regression test added in the same change (mention its path in the summary). Lead the after-log, or the new test file.
 
-On the final `task report --status done` call, pass a multi-line `--summary` covering:
-1. what was done (one paragraph),
-2. what you verified (point at the artifacts),
-3. key files changed (a few — not exhaustive),
-4. what was deliberately out of scope.
+On the final `task report --status done` call:
+- `--note \"<headline proof>\"` — one line, present tense, declares the outcome and points at the lead. Examples: \"login redirects to /home; see screenshot\", \"import streams 2 GB CSV at 50 MB/s; see asciinema\". **Not** \"completed login flow\", \"task done\", or any status-update phrasing — the note is the proof.
+- `--summary` — **optional appendix**, kept short. Cover only what the note + lead can't: key files changed (a few — not exhaustive) and what was deliberately out of scope. Don't restate the work — the user already read the note. Skip `--summary` entirely if there's nothing the lead artifact and note don't already convey.
 
-The summary is the one-screen briefing the user reads to understand the task's outcome. Use a heredoc so newlines survive the shell:
-`{bin} task report --task {task_id} --status done --note \"<one line>\" --summary \"$(cat <<'EOF'
-<multi-line summary>
+Use a heredoc so summary newlines survive the shell:
+`{bin} task report --task {task_id} --status done --note \"<headline proof>\" --summary \"$(cat <<'EOF'
+<short appendix — files changed, out-of-scope>
 EOF
 )\"`
 
@@ -731,6 +836,7 @@ mod tests {
             caption: None,
             added_at: 8,
         });
+        s.lead_artifact = Some(0);
 
         let body = serde_json::to_string(&s).unwrap();
         let back: TaskState = serde_json::from_str(&body).unwrap();
@@ -754,6 +860,7 @@ mod tests {
         let s: TaskState = serde_json::from_str(raw).unwrap();
         assert_eq!(s.summary, None);
         assert!(s.artifacts.is_empty());
+        assert_eq!(s.lead_artifact, None);
         // `title` is also serde(default) for back-compat with state.json
         // written before the Haiku task-title feature landed.
         assert_eq!(s.title, None);
@@ -893,6 +1000,16 @@ mod tests {
         assert!(
             p.contains("--summary"),
             "missing --summary guidance for final report"
+        );
+        // Progressive-disclosure framing — the note is the proof, not a
+        // status update; exactly one artifact must be flagged --lead.
+        assert!(
+            p.contains("--lead"),
+            "missing --lead guidance in proof-of-work section"
+        );
+        assert!(
+            p.contains("headline proof"),
+            "missing headline-proof framing for --note"
         );
     }
 }

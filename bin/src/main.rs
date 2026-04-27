@@ -658,17 +658,33 @@ async fn run(
                             app.metrics_sel_prev();
                         }
                     }
+                    // Kanban: j/k moves the row cursor within the focused
+                    // column; h/l switches column; H/L (or [/]) cycles project chips.
                     (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_projects => {
-                        app.projects_move_down();
-                    }
-                    (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_projects => {
-                        app.projects_move_up();
-                    }
-                    (View::Grid, KeyCode::Char('J')) if on_projects => {
                         app.projects_task_next();
                     }
-                    (View::Grid, KeyCode::Char('K')) if on_projects => {
+                    (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_projects => {
                         app.projects_task_prev();
+                    }
+                    (View::Grid, KeyCode::Right | KeyCode::Char('l')) if on_projects => {
+                        app.projects_col_right();
+                    }
+                    (View::Grid, KeyCode::Left | KeyCode::Char('h')) if on_projects => {
+                        app.projects_col_left();
+                    }
+                    (View::Grid, KeyCode::Char(']') | KeyCode::Char('L')) if on_projects => {
+                        app.projects_move_down();
+                    }
+                    (View::Grid, KeyCode::Char('[') | KeyCode::Char('H')) if on_projects => {
+                        app.projects_move_up();
+                    }
+                    (View::Grid, KeyCode::Char(' ')) if on_projects => {
+                        // Approve a Review task → flip to Done. Status bar
+                        // shows the result; the kanban refilters on next
+                        // paint via the in-memory snapshot update.
+                        if !app.approve_review_task() {
+                            app.set_status("nothing to approve (focus a Review task)".into());
+                        }
                     }
                     (View::Grid, KeyCode::Char('r')) if on_projects => {
                         if !app.enter_projects_result() {
@@ -715,16 +731,15 @@ async fn run(
                         }
                     }
                     (View::Grid, KeyCode::Char('N')) if on_projects => {
-                        app.enter_folder_picker_for_projects();
+                        // Register a project (folder picker), no task spawn.
+                        // Use `n` to start a task on an existing project.
+                        app.enter_folder_picker_for_register_only();
                     }
                     (View::Grid, KeyCode::Char('n')) if on_projects => {
-                        // Shortcut: new task on the currently-selected project,
-                        // skipping the folder picker. `N` keeps the longer
-                        // pick-a-folder flow for registering an unfamiliar
-                        // directory.
+                        // Start a new task on the currently-selected project.
                         if !app.enter_project_task_prompt_for_selected() {
                             app.set_status(
-                                "no project selected — press N to pick a folder".into(),
+                                "no project selected — press N to register one".into(),
                             );
                         }
                     }
@@ -842,6 +857,11 @@ async fn run(
                         app.toggle_show_inactive();
                         let state = if app.show_inactive { "shown" } else { "hidden" };
                         app.set_status(format!("inactive sessions {}", state));
+                    }
+                    (View::Grid, KeyCode::Char('W')) if on_sessions => {
+                        app.toggle_show_orch_workers();
+                        let state = if app.show_orch_workers { "shown" } else { "hidden" };
+                        app.set_status(format!("orchestrator/worker sessions {}", state));
                     }
                     (View::Grid, KeyCode::Char('f') | KeyCode::Enter) if on_sessions => {
                         if let Some(session) = app.selected_session_info().cloned() {
@@ -1028,8 +1048,15 @@ async fn run(
                                 .map(|name| p.current_dir.join(name).display().to_string())
                         });
                         let projects_mode = app.creating_project_task;
+                        let register_mode = app.registering_project_only;
                         if let Some(cwd) = cwd {
-                            if projects_mode {
+                            if register_mode {
+                                let status = match app.register_picked_project(&cwd) {
+                                    Ok(name) => format!("registered project: {}", name),
+                                    Err(e) => format!("register failed: {}", e),
+                                };
+                                app.set_status(status);
+                            } else if projects_mode {
                                 app.enter_project_task_prompt(cwd);
                             } else {
                                 app.close_folder_picker();
@@ -1049,8 +1076,15 @@ async fn run(
                             .as_ref()
                             .map(|p| p.current_dir.display().to_string());
                         let projects_mode = app.creating_project_task;
+                        let register_mode = app.registering_project_only;
                         if let Some(cwd) = cwd {
-                            if projects_mode {
+                            if register_mode {
+                                let status = match app.register_picked_project(&cwd) {
+                                    Ok(name) => format!("registered project: {}", name),
+                                    Err(e) => format!("register failed: {}", e),
+                                };
+                                app.set_status(status);
+                            } else if projects_mode {
                                 app.enter_project_task_prompt(cwd);
                             } else {
                                 app.close_folder_picker();
