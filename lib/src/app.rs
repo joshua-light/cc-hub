@@ -29,6 +29,7 @@ pub enum View {
     FolderPicker,
     GhCreateInput,
     ProjectsResult,
+    Backlog,
 }
 
 /// Overlay on top of [`View::FolderPicker`] that prompts for a new GitHub
@@ -159,6 +160,11 @@ pub struct App {
     /// the picker's space-pick and prompt-input's enter to the project
     /// flow instead of [`spawn::spawn_claude_session`].
     pub creating_project_task: bool,
+    /// Cursor inside the Backlog popup, indexing into the selected
+    /// project's backlog tasks. Reset on popup open. Backlog tasks live
+    /// off the kanban (which starts at Planning) so this popup is the
+    /// only way to see and start them.
+    pub backlog_sel: usize,
     /// True while the folder picker is in "register a project, no task"
     /// mode (the `N` shortcut from the Projects view). Picking a folder
     /// just runs [`crate::orchestrator::ensure_project_registered`] and
@@ -240,6 +246,7 @@ impl App {
             projects_sel: 0,
             projects_task_sel: 0,
             projects_col: 0,
+            backlog_sel: 0,
             creating_project_task: false,
             registering_project_only: false,
             projects_pending_cwd: None,
@@ -427,6 +434,50 @@ impl App {
 
     pub fn kanban_column_len(&self, col: usize) -> usize {
         self.kanban_column_tasks(col).len()
+    }
+
+    /// Backlog tasks for the currently-selected project, in scan order
+    /// (newest first, same as the underlying `tasks` Vec). Backlog tasks
+    /// don't appear in the kanban; the Backlog popup (`View::Backlog`) is
+    /// where they're listed and started.
+    pub fn backlog_tasks(&self) -> Vec<&crate::orchestrator::TaskState> {
+        let Some(p) = self.selected_project() else {
+            return Vec::new();
+        };
+        let Some(tasks) = self.projects.tasks.get(&p.id) else {
+            return Vec::new();
+        };
+        use crate::orchestrator::TaskStatus;
+        tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Backlog)
+            .collect()
+    }
+
+    pub fn open_backlog(&mut self) {
+        self.backlog_sel = 0;
+        self.view = View::Backlog;
+    }
+
+    pub fn close_backlog(&mut self) {
+        self.view = View::Grid;
+    }
+
+    pub fn backlog_up(&mut self) {
+        if self.backlog_sel > 0 {
+            self.backlog_sel -= 1;
+        }
+    }
+
+    pub fn backlog_down(&mut self) {
+        let n = self.backlog_tasks().len();
+        if n > 0 && self.backlog_sel + 1 < n {
+            self.backlog_sel += 1;
+        }
+    }
+
+    pub fn selected_backlog_task(&self) -> Option<&crate::orchestrator::TaskState> {
+        self.backlog_tasks().get(self.backlog_sel).copied()
     }
 
     pub fn selected_project_task(&self) -> Option<&crate::orchestrator::TaskState> {

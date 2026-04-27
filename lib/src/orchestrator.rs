@@ -150,6 +150,15 @@ pub enum MergeOutcome {
         task_id: String,
         paths: Vec<String>,
     },
+    /// Pre-flight refused: the working tree on the target branch has
+    /// uncommitted edits in files the feature branch also modified, so
+    /// the merge would either fail with "would be overwritten" or — worse
+    /// — be auto-stashed and produce conflict markers on pop. We detect
+    /// this up front and decline to touch the tree. `overlap` lists the
+    /// repo-relative paths the user must commit, stash, or revert before
+    /// retrying. Distinct from `Conflict`, which means git started the
+    /// merge and hit content conflicts during it.
+    BlockedByDirtyTree { overlap: Vec<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -550,8 +559,19 @@ The cc-hub binary is at `{bin}`. Always invoke it by absolute path; it is not ne
 
 1. **Plan.** Break the task into sub-tasks. Note which can run in parallel (read-only, or edits to disjoint files) and which must run serially.
 
+1b. **Declare intent.** Before spawning any *worktree* workers (read-only workers don't reserve), declare your best-guess file set so other orchestrators can coordinate:
+   `{bin} reservations declare --task {task_id} --phase intended --paths <files>`
+   Use directory prefixes like `lib/src/` if uncertain — you can widen later with `--add-paths`. Then read the project's reservation table:
+   `{bin} reservations list --project {project_id}`
+   Reconcile based on what you see (stale entries are filtered out by `list` automatically; treat as cleared):
+   - **Another task is `active` on overlapping paths** — yield. Don't block idle: front-load read-only research subtasks (those need no reservation) and re-poll every minute or so. This \"research while waiting\" pattern is the whole point of declaring early — keep yourself useful while the other task finishes.
+   - **Another `intended` task overlaps your paths** — FIFO on `created_at`. If they declared first, yield (same research-while-waiting pattern). If you did, proceed.
+
 2. **Dispatch workers.** Two modes:
    - `{bin} spawn-worker --task {task_id} --readonly --prompt \"…\"` — read/research tasks. No edits, no worktree, runs in the project root. Many can run at once.
+   - **Before each worktree spawn, upgrade your reservation to `active`:**
+     `{bin} reservations upgrade --task {task_id} --to active --worker-paths <files>`
+     If upgrade fails, another orchestrator beat you to those files in the critical section — reconcile (re-read `{bin} reservations list --project {project_id}`) and retry once the conflict clears.
    - `{bin} spawn-worker --task {task_id} --worktree NAME --prompt \"…\"` — editing tasks. cc-hub creates a fresh worktree at `.cc-hub-wt/{task_id}-NAME` on a new branch off the project's main branch. Two worktree workers can run in parallel **only** if they edit disjoint sets of files; otherwise serialize them.
    Each spawn-worker emits one JSON line on stdout — capture the `tmux` field if you need to interact with that worker later.
 
@@ -562,7 +582,14 @@ The cc-hub binary is at `{bin}`. Always invoke it by absolute path; it is not ne
 
 4. **Merge edits.** When a worktree worker finishes:
    `{bin} merge-worktree --task {task_id} --worktree NAME`
-   On success, the branch is in the project's main branch and the worktree dir stays for inspection. On conflict, the JSON output describes what failed; either resolve manually with git in the worktree, or spawn a follow-up worker to resolve it.
+   On success, the branch is in the project's main branch and the worktree dir stays for inspection. Four failure modes, each with its own recipe:
+   - **Content conflict** (`ok=false`, no `blocked_by_dirty_tree`): git started the merge and hit overlapping committed history. Resolve manually in the worktree, or spawn a follow-up worker. Do NOT use `git stash` to dodge it.
+   - **Blocked by dirty tree** (`ok=false`, `blocked_by_dirty_tree=true`, `overlap=[…]`): the user has uncommitted edits on the target branch in files the worker also touched. The merge was refused before touching the tree — nothing to clean up. Surface this verbatim via `task report --note \"merge blocked: <files>; commit/stash/revert and rerun merge-worktree\"` and stop. Do NOT auto-stash, do NOT touch the user's working tree, do NOT report status=done. The worker's branch is intact; the user merges once they clean those paths.
+   - **Blocked by active orchestrator** (`ok=false`, `blocked_by_active_orchestrator=true`, `task_id=<other>`): another orchestrator currently holds an active reservation on overlapping files. Wait for them to release (their `task done`/`failed` clears their reservations), then rerun `merge-worktree`. Don't try to win the race by force — the other task is mid-edit and your merge would land on shifting ground.
+   - **Hard error** (CLI exits with a non-JSON error): treat as recoverable; retry once, then report failed.
+   After a successful merge, run the project's build/test (e.g. `cargo build`, `pnpm test`) before reporting status=done — a green merge that breaks compilation is still a failure. Then free the reservation so other tasks can proceed:
+   `{bin} reservations release --task {task_id} --worker-id <tmux>`
+   (At task done/failed, all of this task's reservations are released automatically — but releasing per-worker as soon as a merge lands shortens the window other orchestrators wait.)
 
 5. **Report progress** after each meaningful step (worker spawned, worker finished, merge attempted, plan changed):
    `{bin} task report --task {task_id} --status running --note \"<one line>\"`
@@ -806,39 +833,92 @@ pub fn create_worktree(
     )))
 }
 
-/// Repo-relative paths that differ between `main_branch..feature_branch`
-/// (i.e. the files this merge would touch). Empty if git fails — callers
-/// treat that as "no overlap to check" rather than a hard error so a
-/// transient git hiccup never blocks merges that would otherwise succeed.
+/// Files modified-but-uncommitted in the working tree, from `git status
+/// --porcelain -z`. Repo-relative paths, sorted, deduped. Used by the
+/// merge pre-flight to detect whether an in-flight merge would clobber
+/// the user's local edits.
+pub fn dirty_paths(project_root: &Path) -> io::Result<Vec<String>> {
+    let out = run_git(project_root, &["status", "--porcelain", "-z"])?;
+    if !out.status_ok {
+        return Err(io::Error::other(format!(
+            "git status failed: {}",
+            out.stderr.trim()
+        )));
+    }
+    // -z output: NUL-terminated entries, each starting with two status
+    // chars + space, then the path. Renames / copies emit an additional
+    // NUL-separated source path with no leading status code; we keep both
+    // sides so an overlap on either blocks the merge.
+    let mut paths = Vec::new();
+    let mut iter = out.stdout.split('\0').filter(|s| !s.is_empty()).peekable();
+    while let Some(entry) = iter.next() {
+        if entry.len() < 3 {
+            continue;
+        }
+        let code = entry.as_bytes()[0];
+        let path = entry[3..].to_string();
+        paths.push(path);
+        if matches!(code, b'R' | b'C') {
+            if let Some(src) = iter.next() {
+                paths.push(src.to_string());
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+/// Files changed by `feature_branch` relative to `main_branch`, from
+/// `git diff <main>...<feature> --name-only -z` (three-dot — the merge
+/// base, matching what git would actually pull in).
 pub fn branch_changed_paths(
     project_root: &Path,
     main_branch: &str,
     feature_branch: &str,
-) -> Vec<String> {
+) -> io::Result<Vec<String>> {
     let range = format!("{}...{}", main_branch, feature_branch);
-    let out = match run_git(project_root, &["diff", "--name-only", &range]) {
-        Ok(o) if o.status_ok => o,
-        _ => return Vec::new(),
-    };
-    out.stdout
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .map(|l| l.to_string())
-        .collect()
+    let out = run_git(project_root, &["diff", "--name-only", "-z", &range])?;
+    if !out.status_ok {
+        return Err(io::Error::other(format!(
+            "git diff {} failed: {}",
+            range,
+            out.stderr.trim()
+        )));
+    }
+    Ok(out
+        .stdout
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
-/// Merge `<branch>` into `<main>` from the project root.
+/// Merge `<branch>` into `<main>` from the project root. Performs two
+/// pre-flight checks before any tree mutation:
 ///
-/// Preflight: consult the project's reservations file. If another task
-/// holds an `active` reservation overlapping the branch's changed paths,
-/// return [`MergeOutcome::BlockedByActiveOrchestrator`] without touching the
-/// working tree. `current_task_id` is excluded so a task never blocks on
-/// itself.
+/// 1. Consults the project's reservations file. If another task holds an
+///    `active` reservation overlapping the branch's changed paths, returns
+///    [`MergeOutcome::BlockedByActiveOrchestrator`]. `current_task_id` is
+///    excluded so a task never blocks on itself. Reservations are
+///    advisory — if the side file is unreadable we degrade silently
+///    rather than blocking a merge that would otherwise succeed.
 ///
-/// Returns [`MergeOutcome::Conflict`] (with git's stderr/stdout joined) on a
-/// non-zero exit from git so the caller can persist the failure and surface
-/// it to the orchestrator without crashing the CLI.
+/// 2. If any uncommitted working-tree change overlaps a file the feature
+///    branch also modified, returns [`MergeOutcome::BlockedByDirtyTree`].
+///    `overlap` lists the repo-relative paths the user must commit,
+///    stash, or revert before retrying.
+///
+/// Returns [`MergeOutcome::Conflict`] for the classical content-conflict
+/// case where git started the merge and hit overlapping edits in
+/// committed history.
+///
+/// Why we don't auto-stash anymore: an earlier version stashed before
+/// merge and popped after, but a popping conflict left raw conflict
+/// markers in source files, broke the build, and shifted resolution onto
+/// the user without warning. Refusing up front is safer; the user's
+/// recipe is one git command (`git stash`, `git commit`, or
+/// `git checkout --`) followed by re-running `merge-worktree`.
 pub fn merge_branch(
     project_root: &Path,
     main_branch: &str,
@@ -846,10 +926,12 @@ pub fn merge_branch(
     project_id: &str,
     current_task_id: &str,
 ) -> io::Result<(MergeOutcome, String, String)> {
-    // Preflight 1: cross-orchestrator reservation check. Done first so we
-    // never mutate the working tree (`git checkout main`) for a merge that
-    // can't proceed.
-    let changed = branch_changed_paths(project_root, main_branch, feature_branch);
+    // Compute branch's changed-paths once for both preflight checks.
+    let changed = branch_changed_paths(project_root, main_branch, feature_branch)?;
+
+    // Preflight 1: cross-orchestrator reservation check. Done before we
+    // mutate the working tree (`git checkout main`) so a merge that
+    // can't proceed leaves no trace.
     if !changed.is_empty() {
         match crate::reservations::overlapping_active(
             project_id,
@@ -877,6 +959,25 @@ pub fn merge_branch(
                 );
             }
         }
+    }
+
+    // Preflight 2: refuse if dirty tree overlaps the branch's file set.
+    // BTreeSet so the overlap list is stable for tests.
+    let dirty: std::collections::BTreeSet<String> =
+        dirty_paths(project_root)?.into_iter().collect();
+    if !dirty.is_empty() {
+        let branch_files: std::collections::BTreeSet<String> =
+            changed.iter().cloned().collect();
+        let overlap: Vec<String> = dirty.intersection(&branch_files).cloned().collect();
+        if !overlap.is_empty() {
+            return Ok((
+                MergeOutcome::BlockedByDirtyTree { overlap },
+                String::new(),
+                String::new(),
+            ));
+        }
+        // Dirty in non-overlapping files only — git carries those changes
+        // through the checkout and merge cleanly. No stash needed.
     }
 
     let checkout = run_git(project_root, &["checkout", main_branch])?;
@@ -1197,6 +1298,26 @@ mod tests {
         assert!(
             p.contains("headline proof"),
             "missing headline-proof framing for --note"
+        );
+
+        // Reservations lifecycle — declare/upgrade/list/release must all be
+        // referenced so the orchestrator coordinates with peers per the
+        // soft-reservations design.
+        for verb in ["declare", "upgrade", "list", "release"] {
+            assert!(
+                p.contains(&format!("reservations {}", verb)),
+                "missing `reservations {}` reference in prompt",
+                verb
+            );
+        }
+        assert!(
+            p.contains("research while waiting"),
+            "missing 'research while waiting' framing — orchestrator should \
+             front-load read-only subtasks while yielded, not block idle"
+        );
+        assert!(
+            p.contains("blocked_by_active_orchestrator"),
+            "missing fourth merge-failure recipe (blocked by active orchestrator)"
         );
     }
 }

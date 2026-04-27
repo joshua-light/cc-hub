@@ -810,12 +810,30 @@ async fn run(
                     (View::Grid, KeyCode::Char('x')) if on_projects => {
                         app.enter_confirm_task_delete();
                     }
-                    (View::Grid, KeyCode::Char('s')) if on_projects => {
+                    (View::Grid, KeyCode::Char('b')) if on_projects => {
+                        app.open_backlog();
+                    }
+                    (View::Backlog, KeyCode::Esc | KeyCode::Char('q')) => {
+                        app.close_backlog();
+                    }
+                    (View::Backlog, KeyCode::Down | KeyCode::Char('j')) => {
+                        app.backlog_down();
+                    }
+                    (View::Backlog, KeyCode::Up | KeyCode::Char('k')) => {
+                        app.backlog_up();
+                    }
+                    (View::Backlog, KeyCode::Char('s') | KeyCode::Enter)
+                    | (View::Grid, KeyCode::Char('s')) if on_projects || matches!(app.view, View::Backlog) => {
                         let Some(p) = app.selected_project().cloned() else {
                             app.set_status("no project selected".into());
                             continue;
                         };
-                        let Some(task) = app.selected_project_task().cloned() else {
+                        let task_opt = if matches!(app.view, View::Backlog) {
+                            app.selected_backlog_task().cloned()
+                        } else {
+                            app.selected_project_task().cloned()
+                        };
+                        let Some(task) = task_opt else {
                             app.set_status("no task selected".into());
                             continue;
                         };
@@ -844,6 +862,9 @@ async fn run(
                                     "task started [{}], orchestrator [{}] starting…",
                                     state.task_id, tmux_name
                                 ));
+                                if matches!(app.view, View::Backlog) {
+                                    app.close_backlog();
+                                }
                             }
                             Err(e) => {
                                 log::warn!("project task: start backlog failed: {}", e);
