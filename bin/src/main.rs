@@ -631,6 +631,46 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                             }
                         }
                     }
+                    (View::Grid, KeyCode::Char('f')) if on_projects => {
+                        if let Some(task) = app.selected_project_task().cloned() {
+                            let live_tmux = task
+                                .orchestrator_tmux
+                                .as_deref()
+                                .filter(|n| send::tmux_session_exists(n));
+                            if let Some(tmux_name) = live_tmux {
+                                let (cols, rows) = popup_pane_size(terminal);
+                                match tmux_pane::TmuxPaneView::spawn(tmux_name, rows, cols) {
+                                    Ok(pane) => app.enter_tmux_pane(pane),
+                                    Err(e) => app.set_status(format!(
+                                        "open orchestrator failed: {}",
+                                        e
+                                    )),
+                                }
+                            } else if let Some(log_path) = cc_hub_lib::orchestrator::task_orchestrator_log_path(
+                                &task.project_id,
+                                &task.task_id,
+                            )
+                            .filter(|p| p.exists())
+                            {
+                                let (cols, rows) = popup_pane_size(terminal);
+                                match spawn::spawn_log_viewer_tmux_session(&log_path) {
+                                    Ok(name) => match tmux_pane::TmuxPaneView::spawn_owned(&name, rows, cols) {
+                                        Ok(pane) => app.enter_tmux_pane(pane),
+                                        Err(e) => app.set_status(format!(
+                                            "log viewer attach failed: {}",
+                                            e
+                                        )),
+                                    },
+                                    Err(e) => app.set_status(format!(
+                                        "log viewer spawn failed: {}",
+                                        e
+                                    )),
+                                }
+                            } else {
+                                app.set_status("no orchestrator log available".into());
+                            }
+                        }
+                    }
                     (View::Grid, KeyCode::Char('x')) if on_projects => {
                         app.enter_confirm_task_delete();
                     }

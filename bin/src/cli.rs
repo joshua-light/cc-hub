@@ -520,6 +520,12 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
 /// process before its JSON output is captured. The detached `sh -c` keeps
 /// the kill alive past our exit.
 fn cleanup_task_sessions(state: &TaskState) {
+    // Snapshot the orchestrator's pane to disk before scheduling its kill,
+    // so the Projects view (`f` on a completed task) can reopen the agent's
+    // terminal post-mortem.
+    if let Some(orch) = state.orchestrator_tmux.as_deref() {
+        capture_orchestrator_log(state, orch);
+    }
     for w in &state.workers {
         if let Err(e) = send::kill_tmux_session(&w.tmux_name) {
             log::warn!(
@@ -561,6 +567,41 @@ fn cleanup_task_sessions(state: &TaskState) {
                 state.task_id, e
             ),
         }
+    }
+}
+
+fn capture_orchestrator_log(state: &TaskState, orch: &str) {
+    let Some(path) = orchestrator::task_orchestrator_log_path(&state.project_id, &state.task_id)
+    else {
+        return;
+    };
+    let Some(dir) = path.parent() else { return };
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        log::warn!(
+            "task {}: orchestrator.log mkdir failed: {}",
+            state.task_id, e
+        );
+        return;
+    }
+    let body = send::capture_tmux_pane_full(orch);
+    if body.is_empty() {
+        log::warn!(
+            "task {}: orchestrator capture-pane returned empty for [{}]",
+            state.task_id, orch
+        );
+        return;
+    }
+    if let Err(e) = std::fs::write(&path, body) {
+        log::warn!(
+            "task {}: write orchestrator.log failed: {}",
+            state.task_id, e
+        );
+    } else {
+        log::info!(
+            "task {}: wrote orchestrator log to {}",
+            state.task_id,
+            path.display()
+        );
     }
 }
 
