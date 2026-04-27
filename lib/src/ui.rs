@@ -1099,7 +1099,7 @@ fn evidence_card_header(a: &Artifact, selected: bool) -> Line<'static> {
     Line::from(spans)
 }
 
-fn render_text_card_body(frame: &mut Frame, area: Rect, a: &Artifact) {
+fn render_text_card_body(frame: &mut Frame, area: Rect, a: &Artifact, max_bytes: usize) {
     if area.height == 0 {
         return;
     }
@@ -1111,7 +1111,7 @@ fn render_text_card_body(frame: &mut Frame, area: Rect, a: &Artifact) {
         .map(|s| s.to_ascii_lowercase())
         .unwrap_or_default();
     let is_diff = kind_lower == "diff" || ext_lower == "diff" || ext_lower == "patch";
-    let lines: Vec<Line<'static>> = match read_text_excerpt(path, 8 * 1024) {
+    let lines: Vec<Line<'static>> = match read_text_excerpt(path, max_bytes) {
         None => match std::fs::metadata(path) {
             Ok(_) => vec![Line::from(Span::styled(
                 "  (binary file — open externally with `o`)",
@@ -1358,10 +1358,24 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     let body_area = Rect::new(inner.x, inner.y, inner.width, body_h);
     let footer_area = Rect::new(inner.x, inner.y + body_h, inner.width, 1);
 
+    // When the user has hit `e`, the selected card swells to fill most of
+    // the visible body area; non-selected cards keep their default heights so
+    // the surrounding context (header, summary, neighbours) stays in view.
+    let expanded_body_h: u16 = if app.result_artifact_expanded {
+        body_h.saturating_sub(6).min(40)
+    } else {
+        0
+    };
     let mut card_meta: Vec<(usize, CardKind, u16)> = Vec::new(); // (idx, kind, body_h)
     for (idx, a) in t.artifacts.iter().enumerate() {
         let kind = classify_artifact(a);
-        card_meta.push((idx, kind, card_body_height(kind)));
+        let default_h = card_body_height(kind);
+        let h = if app.result_artifact_expanded && idx == app.result_artifact_sel {
+            expanded_body_h.max(default_h)
+        } else {
+            default_h
+        };
+        card_meta.push((idx, kind, h));
     }
 
     let mut canvas_card_tops: Vec<u16> = Vec::with_capacity(card_meta.len());
@@ -1483,14 +1497,18 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
                     frame.render_stateful_widget(widget, body_rect, state);
                 }
             }
-            CardKind::Text => render_text_card_body(frame, body_rect, a),
+            CardKind::Text => {
+                let expanded = app.result_artifact_expanded && idx == app.result_artifact_sel;
+                let max_bytes = if expanded { 64 * 1024 } else { 8 * 1024 };
+                render_text_card_body(frame, body_rect, a, max_bytes);
+            }
             CardKind::Video => render_video_card_body(frame, body_rect, a),
             CardKind::Url => render_url_card_body(frame, body_rect, a),
             CardKind::Fallback => render_fallback_card_body(frame, body_rect, a),
         }
     }
 
-    let hint = " esc/r:close   j/k:artifact   PgUp/PgDn:scroll   c:copy path   o:xdg-open ";
+    let hint = " esc/r:close   j/k:artifact   e:expand   PgUp/PgDn:scroll   c:copy path   o:xdg-open ";
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             hint,
@@ -2209,7 +2227,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             View::TmuxPane => "forwarding keys to tmux · F1: detach & close",
             View::FolderPicker => "j/k:move  enter:descend  bksp:parent  space:pick  .:pick cwd  c/C:gh new (pub/priv)  esc:cancel",
             View::GhCreateInput => "type name  tab:toggle public/private  enter:create  esc:cancel",
-            View::ProjectsResult => "j/k:artifact  PgUp/PgDn:scroll  c:copy path  o:xdg-open  esc/r:close",
+            View::ProjectsResult => "j/k:artifact  e:expand  PgUp/PgDn:scroll  c:copy path  o:xdg-open  esc/r:close",
         };
         spans.push(Span::styled(
             format!(" {} ", keybinds),

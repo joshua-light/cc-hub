@@ -167,6 +167,10 @@ pub struct App {
     /// popup body. Adjusted by the renderer to keep the selected card
     /// visible, and by `PgUp`/`PgDn` for free scrolling. Reset on open.
     pub result_scroll: u16,
+    /// When true, the currently-selected evidence card renders with an
+    /// enlarged body so the user can see more of its content inline. The
+    /// flag follows the j/k cursor — it is not tied to a specific artifact.
+    pub result_artifact_expanded: bool,
     /// Terminal-graphics picker, initialised once after entering the alt
     /// screen. `None` when running headless / `--no-tui` / inside tests so
     /// the renderer can fall back to a placeholder rather than crash.
@@ -227,6 +231,7 @@ impl App {
             known_session_ids: None,
             result_artifact_sel: 0,
             result_scroll: 0,
+            result_artifact_expanded: false,
             image_picker: None,
             artifact_images: HashMap::new(),
             artifact_image_failed: HashSet::new(),
@@ -1080,6 +1085,7 @@ impl App {
         }
         self.result_artifact_sel = 0;
         self.result_scroll = 0;
+        self.result_artifact_expanded = false;
         self.view = View::ProjectsResult;
         true
     }
@@ -1088,6 +1094,14 @@ impl App {
         self.view = View::Grid;
         self.result_artifact_sel = 0;
         self.result_scroll = 0;
+        self.result_artifact_expanded = false;
+    }
+
+    pub fn toggle_result_artifact_expanded(&mut self) {
+        if self.selected_result_artifact().is_none() {
+            return;
+        }
+        self.result_artifact_expanded = !self.result_artifact_expanded;
     }
 
     pub fn result_artifact_next(&mut self) {
