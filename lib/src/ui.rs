@@ -61,6 +61,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             render_gh_create_input(frame, frame.area(), app);
         }
         View::ProjectsResult => render_projects_result(frame, frame.area(), app),
+        View::Backlog => render_backlog(frame, frame.area(), app),
         View::Grid => {}
     }
 }
@@ -319,6 +320,70 @@ fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
         ]),
     ];
 
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
+    let popup = centered_fixed(area, 90, 22);
+    frame.render_widget(Clear, popup);
+
+    let project_name = app
+        .selected_project()
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "no project".to_string());
+    let title_text = format!(" Backlog · {} ", project_name);
+    let block = popup_block(Span::styled(
+        title_text,
+        Style::default()
+            .fg(Color::Rgb(120, 140, 200))
+            .add_modifier(Modifier::BOLD),
+    ))
+    .title_bottom(Span::styled(
+        " j/k navigate · s/enter start · esc/q close ",
+        Style::default().fg(Color::DarkGray),
+    ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let tasks = app.backlog_tasks();
+    if tasks.is_empty() {
+        let empty = Paragraph::new(Line::from(Span::styled(
+            "No backlog tasks for this project.",
+            Style::default().fg(Color::DarkGray),
+        )))
+        .alignment(Alignment::Center);
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let max_w = inner.width.saturating_sub(4) as usize;
+    let mut lines: Vec<Line> = Vec::with_capacity(tasks.len() * 3);
+    for (i, t) in tasks.iter().enumerate() {
+        let selected = i == app.backlog_sel;
+        let arrow = if selected { "▌ " } else { "  " };
+        let title_text = match t.title.as_deref().filter(|s| !s.is_empty()) {
+            Some(name) => name.to_string(),
+            None => first_line_preview(&t.prompt, max_w),
+        };
+        let title_style = if selected {
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(arrow, Style::default().fg(Color::Rgb(120, 140, 200))),
+            Span::styled(title_text, title_style),
+        ]));
+        let id_short = crate::orchestrator::short_task_id(&t.task_id);
+        let preview = first_line_preview(&t.prompt, max_w.saturating_sub(id_short.len() + 6));
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(id_short, Style::default().fg(Color::DarkGray)),
+            Span::styled("  ", Style::default()),
+            Span::styled(preview, Style::default().fg(Color::Rgb(110, 110, 130))),
+        ]));
+        lines.push(Line::from(""));
+    }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
@@ -2224,7 +2289,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         let keybinds: &str = match app.view {
             View::Grid => match app.current_tab {
-                Tab::Projects => "tab:next  j/k:project  J/K:task  enter:focus orch  f:agent terminal  n:new task  N:register project  r:result  x:delete  q:quit",
+                Tab::Projects => "tab:next  j/k:project  J/K:task  enter:focus orch  f:agent terminal  n:new task  N:register project  b:backlog  r:result  x:delete  q:quit",
                 Tab::Sessions => "tab:next  h/j/k/l:nav  n:new  N:new in…  i:info  D:why?  enter/f:focus/resume  o:shell  x:close  H:inactive  W:workers  q:quit",
                 Tab::Metrics => "tab:next  j/k:select  enter:view transcript  r:refresh  q:quit",
             },
@@ -2237,6 +2302,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             View::FolderPicker => "j/k:move  enter:descend  bksp:parent  space:pick  .:pick cwd  c/C:gh new (pub/priv)  esc:cancel",
             View::GhCreateInput => "type name  tab:toggle public/private  enter:create  esc:cancel",
             View::ProjectsResult => "j/k:artifact  e:expand  PgUp/PgDn:scroll  c:copy path  o:xdg-open  esc/r:close",
+            View::Backlog => "j/k:select  s/enter:start  esc/q:close",
         };
         spans.push(Span::styled(
             format!(" {} ", keybinds),
@@ -2432,71 +2498,633 @@ fn render_projects_body(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(35), Constraint::Min(0)])
+    // Top: project chip strip (1 line) + spacer (1 line). Below: 3-column kanban.
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
         .split(area);
 
-    render_projects_list(frame, columns[0], app);
-    render_project_tasks(frame, columns[1], app);
+    render_project_chip_strip(frame, rows[0], app);
+    render_kanban_board(frame, rows[1], app);
 }
 
-fn render_projects_list(frame: &mut Frame, area: Rect, app: &App) {
+/// Horizontal strip of project "chips". Selected chip is bold/inverse with
+/// per-column counts (R·D·F). Cycled with `[` / `]`.
+fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
+    if area.height == 0 {
+        return;
+    }
+    // Background band so the strip reads as a header even on dark themes.
+    let band = Style::default().bg(Color::Rgb(20, 20, 28));
+    frame.render_widget(Paragraph::new("").style(band), area);
+
+    let chip_row = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 1,
+    };
+    let path_row = if area.height >= 2 {
+        Some(Rect {
+            x: area.x,
+            y: area.y + 1,
+            width: area.width,
+            height: 1,
+        })
+    } else {
+        None
+    };
+
     let snap = &app.projects;
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(snap.projects.len() * 4 + 2);
+    spans.push(Span::styled(
+        "  󰉋 ",
+        Style::default().fg(Color::Rgb(150, 150, 170)).bg(Color::Rgb(20, 20, 28)),
+    ));
+    for (idx, p) in snap.projects.iter().enumerate() {
+        let tasks = snap.tasks.get(&p.id);
+        let mut planning = 0usize;
+        let mut running = 0usize;
+        let mut review = 0usize;
+        let mut done = 0usize;
+        let mut failed = 0usize;
+        if let Some(v) = tasks {
+            for t in v {
+                match t.status {
+                    crate::orchestrator::TaskStatus::Running => {
+                        if t.workers.is_empty() {
+                            planning += 1;
+                        } else {
+                            running += 1;
+                        }
+                    }
+                    crate::orchestrator::TaskStatus::Review => review += 1,
+                    crate::orchestrator::TaskStatus::Done => done += 1,
+                    crate::orchestrator::TaskStatus::Failed => failed += 1,
+                    // Backlog tasks haven't started — they don't appear
+                    // on the kanban (which starts at Planning) nor in the
+                    // chip-strip running totals. Counted-but-not-shown
+                    // would mislead; the project chip already conveys
+                    // "no active work" via colour when planning+running=0.
+                    crate::orchestrator::TaskStatus::Backlog => {}
+                }
+            }
+        }
+        let selected = idx == app.projects_sel;
+        let label = format!(" {} ", p.name);
+        // Compact P·R·Rv·D·F counts. Review squeezed in with `Rv` so the
+        // chip fits typical project names without wrapping.
+        let counts = format!(" {}·{}·{}·{}·{} ", planning, running, review, done, failed);
+        let (chip_fg, chip_bg) = if selected {
+            (Color::Black, Color::Rgb(190, 200, 230))
+        } else if planning + running > 0 {
+            (Color::Rgb(220, 220, 235), Color::Rgb(40, 50, 70))
+        } else {
+            (Color::Rgb(150, 150, 165), Color::Rgb(30, 30, 40))
+        };
+        let counts_bg = if selected {
+            Color::Rgb(140, 150, 180)
+        } else {
+            Color::Rgb(20, 25, 35)
+        };
+        let counts_fg = if selected {
+            Color::Black
+        } else if planning + running + review > 0 {
+            Color::Rgb(160, 220, 180)
+        } else {
+            Color::Rgb(120, 120, 140)
+        };
+        spans.push(Span::styled(
+            label,
+            Style::default()
+                .fg(chip_fg)
+                .bg(chip_bg)
+                .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
+        ));
+        spans.push(Span::styled(counts, Style::default().fg(counts_fg).bg(counts_bg)));
+        spans.push(Span::styled(" ", band));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(band), chip_row);
+
+    if let (Some(row), Some(p)) = (path_row, app.selected_project()) {
+        let root = p.root.display().to_string();
+        let max = (row.width as usize).saturating_sub(4);
+        let root = if root.chars().count() > max {
+            let cut = root.chars().count().saturating_sub(max - 1);
+            format!("    …{}", root.chars().skip(cut).collect::<String>())
+        } else {
+            format!("    {}", root)
+        };
+        let line = Line::from(Span::styled(
+            root,
+            Style::default()
+                .fg(Color::Rgb(110, 110, 130))
+                .bg(Color::Rgb(20, 20, 28)),
+        ));
+        frame.render_widget(Paragraph::new(line).style(band), row);
+    }
+}
+
+fn render_kanban_board(frame: &mut Frame, area: Rect, app: &App) {
+    if area.height < 3 || area.width < 30 {
+        return;
+    }
+    // Five columns: Planning · Running · Review · Done · Failed.
+    // Running takes the most space (it's where active rich cards live);
+    // Done is medium; Planning, Review, and Failed are sidebars — they
+    // hold transient or low-volume tasks. Ratio totals to 9.
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Ratio(1, 9), // Planning
+            Constraint::Ratio(3, 9), // Running
+            Constraint::Ratio(2, 9), // Review
+            Constraint::Ratio(2, 9), // Done
+            Constraint::Ratio(1, 9), // Failed
+        ])
+        .split(area);
+
+    let sessions_by_tmux = app.sessions_by_tmux();
+    let now_secs = now_ms() / 1000;
+
+    for col_idx in 0..5 {
+        render_kanban_column(
+            frame,
+            cols[col_idx],
+            app,
+            col_idx,
+            &sessions_by_tmux,
+            now_secs,
+        );
+    }
+}
+
+fn kanban_column_meta(col: usize) -> (&'static str, &'static str, Color) {
+    // (label, status icon, accent color). Indices match `kanban_column_tasks`.
+    match col {
+        0 => ("Planning", "󰟶", Color::Rgb(170, 140, 210)),
+        1 => ("Running", "󰑮", Color::LightYellow),
+        2 => ("Review", "󱋲", Color::LightCyan),
+        3 => ("Done", "󰸞", Color::LightGreen),
+        _ => ("Failed", "󰅚", Color::LightRed),
+    }
+}
+
+fn render_kanban_column(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    col_idx: usize,
+    sessions_by_tmux: &std::collections::HashMap<&str, &SessionInfo>,
+    now_secs: u64,
+) {
+    let (label, icon, accent) = kanban_column_meta(col_idx);
+    let tasks = app.kanban_column_tasks(col_idx);
+    let count = tasks.len();
+    let col_focused = app.projects_col == col_idx;
+
+    // Column border. Focused column gets the accent color + Double border so
+    // it stands out without changing the layout.
+    let (border_type, border_style, title_style) = if col_focused {
+        (
+            BorderType::Double,
+            Style::default().fg(accent),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        (
+            BorderType::Rounded,
+            Style::default().fg(Color::Rgb(60, 60, 80)),
+            Style::default().fg(Color::Rgb(150, 150, 170)),
+        )
+    };
+    let title = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(format!("{} ", icon), Style::default().fg(accent)),
+        Span::styled(label.to_string(), title_style),
+        Span::styled(
+            format!(" ({}) ", count),
+            Style::default().fg(Color::Rgb(140, 140, 165)),
+        ),
+    ]);
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .title(Span::styled(
-            " Projects ",
-            Style::default().add_modifier(Modifier::BOLD),
-        ));
+        .border_type(border_type)
+        .border_style(border_style)
+        .title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(snap.projects.len());
-    for (idx, p) in snap.projects.iter().enumerate() {
-        let active = snap.active_task_count(&p.id);
-        let total = snap.tasks.get(&p.id).map(|v| v.len()).unwrap_or(0);
-        let selected = idx == app.projects_sel;
+    if tasks.is_empty() {
+        let hint = Paragraph::new(Line::from(Span::styled(
+            "— empty —",
+            Style::default().fg(Color::Rgb(70, 70, 90)),
+        )))
+        .alignment(Alignment::Center);
+        frame.render_widget(hint, inner);
+        return;
+    }
 
-        let arrow = if selected { "▌ " } else { "  " };
-        let name_style = if selected {
+    // Planning + Running show tall rich cards (orchestrator is alive,
+    // there's live state to display); Review/Done/Failed get compact
+    // 3-line cards since they're terminal states from the UI's POV.
+    let card_height: u16 = if col_idx <= 1 { 8 } else { 4 };
+    let gap: u16 = 1;
+    let max_cards = ((inner.height as u32 + gap as u32) / (card_height as u32 + gap as u32)) as usize;
+
+    // Anchor the cursor: keep the selected card visible by scrolling.
+    let sel = if col_focused { app.projects_task_sel.min(count - 1) } else { 0 };
+    let scroll_top = if max_cards == 0 || sel < max_cards {
+        0
+    } else {
+        sel + 1 - max_cards
+    };
+
+    let mut y = inner.y;
+    for (rel, t) in tasks.iter().enumerate().skip(scroll_top).take(max_cards) {
+        let card_area = Rect {
+            x: inner.x,
+            y,
+            width: inner.width,
+            height: card_height,
+        };
+        let selected = col_focused && rel == sel;
+        if col_idx <= 1 {
+            render_task_card_active(frame, card_area, t, selected, col_idx, sessions_by_tmux, now_secs);
+        } else {
+            render_task_card_collapsed(frame, card_area, t, selected, col_idx, now_secs);
+        }
+        y = y.saturating_add(card_height + gap);
+        if y >= inner.y + inner.height {
+            break;
+        }
+    }
+}
+
+/// Aggregate live agent counters for a task across orchestrator + workers.
+struct AgentSummary {
+    alive: u32,
+    processing: u32,
+    waiting: u32,
+    idle: u32,
+    inactive: u32,
+    total: u32,
+    total_ctx: u64,
+    max_ctx: u64,
+    /// Worst utilization across alive agents (0..=100).
+    max_ctx_pct: u8,
+    current_tool: Option<(String, Option<String>)>,
+    is_thinking: bool,
+}
+
+fn collect_agent_summary(
+    t: &crate::orchestrator::TaskState,
+    sessions_by_tmux: &std::collections::HashMap<&str, &SessionInfo>,
+) -> AgentSummary {
+    let orch = t
+        .orchestrator_tmux
+        .as_deref()
+        .and_then(|n| sessions_by_tmux.get(n).copied());
+    let workers: Vec<Option<&SessionInfo>> = t
+        .workers
+        .iter()
+        .map(|w| sessions_by_tmux.get(w.tmux_name.as_str()).copied())
+        .collect();
+
+    let mut sum = AgentSummary {
+        alive: 0,
+        processing: 0,
+        waiting: 0,
+        idle: 0,
+        inactive: 0,
+        total: 0,
+        total_ctx: 0,
+        max_ctx: 0,
+        max_ctx_pct: 0,
+        current_tool: None,
+        is_thinking: false,
+    };
+
+    let mut tool_priority = 0u8; // prefer Processing > WaitingForInput tools
+    for s in std::iter::once(orch).chain(workers.iter().copied()).flatten() {
+        sum.total += 1;
+        match s.state {
+            SessionState::Processing => {
+                sum.processing += 1;
+                sum.alive += 1;
+            }
+            SessionState::WaitingForInput => {
+                sum.waiting += 1;
+                sum.alive += 1;
+            }
+            SessionState::Idle => {
+                sum.idle += 1;
+                sum.alive += 1;
+            }
+            SessionState::Inactive => {
+                sum.inactive += 1;
+            }
+        }
+        if let Some(c) = s.context_tokens {
+            sum.total_ctx = sum.total_ctx.saturating_add(c);
+            if c > sum.max_ctx {
+                sum.max_ctx = c;
+            }
+            let cap = context_window_size(s.model.as_deref().unwrap_or("")).max(1) as u64;
+            let pct = ((c.saturating_mul(100)) / cap).min(100) as u8;
+            if pct > sum.max_ctx_pct {
+                sum.max_ctx_pct = pct;
+            }
+        }
+        let pri = match s.state {
+            SessionState::Processing => 3,
+            SessionState::WaitingForInput => 2,
+            SessionState::Idle => 1,
+            SessionState::Inactive => 0,
+        };
+        if pri > tool_priority {
+            if let Some(tool) = &s.current_tool {
+                sum.current_tool = Some((tool.name.clone(), tool.hint.clone()));
+                tool_priority = pri;
+            } else if s.is_thinking {
+                sum.is_thinking = true;
+                tool_priority = pri;
+            }
+        }
+    }
+    sum
+}
+
+/// Compact dot strip showing per-agent state. Up to ~12 dots; overflow
+/// shows `+N`. Color: green=processing, yellow=waiting, gray=idle, dim=inactive.
+fn agent_dot_strip(sum: &AgentSummary) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let total = sum.total as usize;
+    if total == 0 {
+        return spans;
+    }
+    let max_dots = 12usize;
+    let shown = total.min(max_dots);
+    // We want a stable ordering: processing → waiting → idle → inactive.
+    let mut buckets = [
+        (sum.processing, Color::LightGreen, "▶"),
+        (sum.waiting, Color::LightYellow, "●"),
+        (sum.idle, Color::Rgb(140, 140, 160), "○"),
+        (sum.inactive, Color::Rgb(80, 80, 95), "·"),
+    ];
+    let mut left = shown;
+    for (count, color, glyph) in buckets.iter_mut() {
+        let take = (*count as usize).min(left);
+        for _ in 0..take {
+            spans.push(Span::styled((*glyph).to_string(), Style::default().fg(*color)));
+        }
+        left -= take;
+        if left == 0 {
+            break;
+        }
+    }
+    if total > max_dots {
+        spans.push(Span::styled(
+            format!(" +{}", total - max_dots),
+            Style::default().fg(Color::Rgb(140, 140, 160)),
+        ));
+    }
+    spans
+}
+
+fn worker_was_merged(w: &crate::orchestrator::Worker, t: &crate::orchestrator::TaskState) -> bool {
+    t.merges.iter().any(|m| {
+        w.worktree
+            .as_deref()
+            .is_some_and(|wn| m.worktree == wn)
+            && matches!(m.outcome, crate::orchestrator::MergeOutcome::Ok)
+    })
+}
+
+/// Merge progress glyph: `▰` per merged worker, `▱` per pending. Caps at
+/// 8 segments, with a numeric tail for overflow.
+fn merge_progress_spans(t: &crate::orchestrator::TaskState) -> Vec<Span<'static>> {
+    let total = t.workers.len();
+    if total == 0 {
+        return vec![Span::styled(
+            "merges —".to_string(),
+            Style::default().fg(Color::Rgb(110, 110, 130)),
+        )];
+    }
+    let merged = t.workers.iter().filter(|w| worker_was_merged(w, t)).count();
+    let cap = 8usize;
+    let shown = total.min(cap);
+    let merged_shown = (merged.min(total) * shown + total / 2) / total;
+    let mut spans = Vec::with_capacity(shown + 2);
+    spans.push(Span::styled(
+        "merges ",
+        Style::default().fg(Color::Rgb(150, 150, 170)),
+    ));
+    for i in 0..shown {
+        if i < merged_shown {
+            spans.push(Span::styled("▰", Style::default().fg(Color::LightGreen)));
+        } else {
+            spans.push(Span::styled("▱", Style::default().fg(Color::Rgb(90, 90, 110))));
+        }
+    }
+    spans.push(Span::styled(
+        format!(" {}/{}", merged, total),
+        Style::default().fg(Color::Rgb(150, 150, 170)),
+    ));
+    spans
+}
+
+/// Color ramp for context utilization: green → yellow → orange → red.
+fn ctx_color(pct: u8) -> Color {
+    if pct >= 90 {
+        Color::Rgb(220, 120, 120)
+    } else if pct >= 70 {
+        Color::Rgb(220, 200, 120)
+    } else if pct >= 40 {
+        Color::Rgb(180, 200, 140)
+    } else {
+        Color::Rgb(120, 180, 200)
+    }
+}
+
+/// Build a unicode bar of `width` columns filled to `pct` (0..=100). Uses
+/// 1/8-block glyphs so even a short width has visual gradation.
+fn ctx_bar(pct: u8, width: usize) -> Vec<Span<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let pct = pct.min(100) as usize;
+    let total_eighths = (pct * width * 8 + 50) / 100; // round to nearest eighth
+    let full = total_eighths / 8;
+    let rem = total_eighths % 8;
+    let partial_glyph = match rem {
+        1 => Some("▏"),
+        2 => Some("▎"),
+        3 => Some("▍"),
+        4 => Some("▌"),
+        5 => Some("▋"),
+        6 => Some("▊"),
+        7 => Some("▉"),
+        _ => None,
+    };
+    let color = ctx_color(pct as u8);
+    let mut s = String::new();
+    for _ in 0..full {
+        s.push('█');
+    }
+    if let Some(g) = partial_glyph {
+        s.push_str(g);
+    }
+    let drawn = full + if partial_glyph.is_some() { 1 } else { 0 };
+    let mut out = Vec::with_capacity(2);
+    out.push(Span::styled(s, Style::default().fg(color)));
+    if drawn < width {
+        let pad: String = std::iter::repeat('░').take(width - drawn).collect();
+        out.push(Span::styled(pad, Style::default().fg(Color::Rgb(50, 50, 65))));
+    }
+    out
+}
+
+/// Sessions-style rich card for a Running task. Mirrors the layout of the
+/// Sessions grid card: bordered, multi-row, with status emoji, agent dots,
+/// merge glyph, ctx bar, and live tool/thinking line.
+fn render_task_card_active(
+    frame: &mut Frame,
+    area: Rect,
+    t: &crate::orchestrator::TaskState,
+    selected: bool,
+    col_idx: usize,
+    sessions_by_tmux: &std::collections::HashMap<&str, &SessionInfo>,
+    now_secs: u64,
+) {
+    let sum = collect_agent_summary(t, sessions_by_tmux);
+
+    // Planning vs Running share the rich layout but differ in accent +
+    // title icon so the column matches the card visually.
+    let (accent, title_icon) = if col_idx == 0 {
+        (Color::Rgb(170, 140, 210), "󰟶")
+    } else {
+        (Color::LightYellow, "󰑮")
+    };
+    let (border_type, border_color) = if selected {
+        (BorderType::Double, Color::White)
+    } else if sum.waiting > 0 {
+        (BorderType::Rounded, Color::Rgb(220, 200, 120))
+    } else {
+        (BorderType::Rounded, Color::Rgb(80, 90, 110))
+    };
+
+    let title_id = crate::orchestrator::short_task_id(&t.task_id);
+    let prompt_preview = first_line_preview(&t.prompt, area.width.saturating_sub(14) as usize);
+    let title = Line::from(vec![
+        Span::styled(format!(" {} ", title_icon), Style::default().fg(accent)),
+        Span::styled(
+            format!("[{}] ", title_id),
+            Style::default().fg(Color::Rgb(150, 170, 200)),
+        ),
+        Span::styled(
+            prompt_preview,
             Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        let badge = match active {
-            0 => format!("({})", total),
-            n => format!("({} active / {} total)", n, total),
-        };
-        let badge_style = if active > 0 {
-            Style::default().fg(Color::LightGreen)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(arrow, Style::default().fg(Color::LightCyan)),
-            Span::styled(p.name.clone(), name_style),
-            Span::raw(" "),
-            Span::styled(badge, badge_style),
-        ]));
+                .fg(if selected { Color::White } else { Color::Gray })
+                .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
+        ),
+        Span::raw(" "),
+    ]);
 
-        let root_str = p.root.display().to_string();
-        let root_str = if root_str.len() > inner.width.saturating_sub(4) as usize {
-            format!(
-                "    …{}",
-                &root_str[root_str
-                    .len()
-                    .saturating_sub((inner.width as usize).saturating_sub(5))..]
-            )
-        } else {
-            format!("    {}", root_str)
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(border_type)
+        .border_style(Style::default().fg(border_color))
+        .title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height == 0 || inner.width < 4 {
+        return;
+    }
+
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(inner.height as usize);
+
+    // Row 1: note (orchestrator status) or first line of summary fallback.
+    let note_text = t
+        .note
+        .as_deref()
+        .map(|n| first_line_preview(n, inner.width.saturating_sub(4) as usize))
+        .unwrap_or_else(|| {
+            let s = t.summary.as_deref().unwrap_or("");
+            first_line_preview(s, inner.width.saturating_sub(4) as usize)
+        });
+    if !note_text.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("󰍡 ", Style::default().fg(Color::Rgb(150, 170, 200))),
+            Span::styled(note_text, Style::default().fg(Color::Rgb(190, 190, 210))),
+        ]));
+    } else {
+        lines.push(Line::from(Span::raw("")));
+    }
+
+    // Row 2: agent dot strip + merge glyph.
+    let mut row2: Vec<Span<'static>> = Vec::new();
+    row2.push(Span::styled(
+        "agents ",
+        Style::default().fg(Color::Rgb(150, 150, 170)),
+    ));
+    row2.extend(agent_dot_strip(&sum));
+    row2.push(Span::raw("   "));
+    row2.extend(merge_progress_spans(t));
+    lines.push(Line::from(row2));
+
+    // Row 3: age · artifacts · ctx bar (right-aligned-ish).
+    let age = format_age(now_secs.saturating_sub(t.updated_at as u64));
+    let arts = t.artifacts.len();
+    let mut row3: Vec<Span<'static>> = vec![
+        Span::styled("󰔟 ", Style::default().fg(Color::Rgb(150, 150, 170))),
+        Span::styled(age, Style::default().fg(Color::Rgb(180, 180, 200))),
+    ];
+    if arts > 0 {
+        row3.push(Span::styled(
+            format!("   󰉂 {}", arts),
+            Style::default().fg(Color::Rgb(180, 160, 220)),
+        ));
+    }
+    let left_w: usize = row3.iter().map(|s| s.content.chars().count()).sum();
+    let pct = sum.max_ctx_pct;
+    let ctx_label = format!("  󰍛 {}% ", pct);
+    let bar_label_w = ctx_label.chars().count();
+    let bar_w = (inner.width as usize)
+        .saturating_sub(left_w + bar_label_w)
+        .min(20);
+    if bar_w >= 4 {
+        row3.push(Span::styled(
+            ctx_label,
+            Style::default().fg(ctx_color(pct)),
+        ));
+        row3.extend(ctx_bar(pct, bar_w));
+    } else {
+        row3.push(Span::styled(
+            format!("  󰍛 {}%", pct),
+            Style::default().fg(ctx_color(pct)),
+        ));
+    }
+    lines.push(Line::from(row3));
+
+    // Row 4: live tool / thinking line — only if we have one.
+    if let Some((tool, hint)) = &sum.current_tool {
+        let name = short_tool(tool);
+        let max = inner.width.saturating_sub(4) as usize;
+        let txt = match hint.as_deref().filter(|h| !h.is_empty()) {
+            Some(h) => format!("󰖷 {}: {}", name, truncate_chars(h, max.saturating_sub(name.len() + 4))),
+            None => format!("󰖷 {}", name),
         };
         lines.push(Line::from(Span::styled(
-            root_str,
-            Style::default().fg(Color::Rgb(90, 90, 110)),
+            txt,
+            Style::default().fg(Color::Rgb(180, 200, 160)),
+        )));
+    } else if sum.is_thinking {
+        lines.push(Line::from(Span::styled(
+            "󰟶 thinking",
+            Style::default().fg(Color::Rgb(170, 140, 210)),
         )));
     }
 
@@ -2504,323 +3132,115 @@ fn render_projects_list(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(para, inner);
 }
 
-fn render_project_tasks(frame: &mut Frame, area: Rect, app: &App) {
-    let title = match app.selected_project() {
-        Some(p) => format!(" Tasks · {} ", p.name),
-        None => " Tasks ".to_string(),
+/// Compact 3-line card for Done/Failed tasks. Dim border, single-line
+/// prompt, footer with age + summary preview + artifact/merge counts.
+/// `col_idx` is 1 (Done) or 2 (Failed) — controls accent color.
+fn render_task_card_collapsed(
+    frame: &mut Frame,
+    area: Rect,
+    t: &crate::orchestrator::TaskState,
+    selected: bool,
+    col_idx: usize,
+    now_secs: u64,
+) {
+    // Review (2) gets a cyan accent, Done (3) green, Failed (4) red. The
+    // dim-text color is used for the prompt preview when not selected.
+    let (accent, dim_text, icon) = match col_idx {
+        2 => (
+            Color::LightCyan,
+            Color::Rgb(140, 175, 185),
+            "󱋲",
+        ),
+        4 => (
+            Color::LightRed,
+            Color::Rgb(180, 130, 130),
+            "󰅚",
+        ),
+        _ => (
+            Color::LightGreen,
+            Color::Rgb(140, 160, 145),
+            "󰸞",
+        ),
     };
+    // Review cards: brighter border so they stand out — they need user
+    // attention. Done/Failed cards stay dim.
+    let (border_type, border_color) = if selected {
+        (BorderType::Double, Color::White)
+    } else if col_idx == 2 {
+        (BorderType::Rounded, Color::Rgb(110, 170, 180))
+    } else {
+        (BorderType::Rounded, Color::Rgb(55, 60, 70))
+    };
+
+    let title_id = crate::orchestrator::short_task_id(&t.task_id);
+    let prompt_preview = first_line_preview(&t.prompt, area.width.saturating_sub(14) as usize);
+    let title = Line::from(vec![
+        Span::styled(format!(" {} ", icon), Style::default().fg(accent)),
+        Span::styled(
+            format!("[{}] ", title_id),
+            Style::default().fg(Color::Rgb(120, 130, 150)),
+        ),
+        Span::styled(
+            prompt_preview,
+            Style::default()
+                .fg(if selected { Color::White } else { dim_text })
+                .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
+        ),
+        Span::raw(" "),
+    ]);
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .title(Span::styled(
-            title,
-            Style::default().add_modifier(Modifier::BOLD),
-        ));
+        .border_type(border_type)
+        .border_style(Style::default().fg(border_color))
+        .title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let Some(p) = app.selected_project() else {
-        return;
-    };
-    let Some(tasks) = app.projects.tasks.get(&p.id) else {
-        return;
-    };
-    if tasks.is_empty() {
-        let hint = Paragraph::new(Line::from(Span::styled(
-            "No tasks yet. Press N to start one.",
-            Style::default().fg(Color::DarkGray),
-        )))
-        .alignment(Alignment::Center);
-        frame.render_widget(hint, inner);
+    if inner.height == 0 || inner.width < 4 {
         return;
     }
 
-    let sessions_by_tmux = app.sessions_by_tmux();
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(tasks.len() * 6);
-    let now_secs = now_ms() / 1000;
-    for (idx, t) in tasks.iter().enumerate() {
-        let selected = idx == app.projects_task_sel;
+    let summary_text = t
+        .summary
+        .as_deref()
+        .or(t.note.as_deref())
+        .map(|s| first_line_preview(s, inner.width.saturating_sub(4) as usize))
+        .unwrap_or_default();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if !summary_text.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("󰍡 ", Style::default().fg(Color::Rgb(110, 120, 135))),
+            Span::styled(summary_text, Style::default().fg(Color::Rgb(160, 165, 175))),
+        ]));
+    }
 
-        // Status badge — colour reflects state at a glance.
-        let (status_label, status_color) = match t.status {
-            crate::orchestrator::TaskStatus::Running => ("running", Color::LightYellow),
-            crate::orchestrator::TaskStatus::Review => ("review", Color::LightCyan),
-            crate::orchestrator::TaskStatus::Done => ("done", Color::LightGreen),
-            crate::orchestrator::TaskStatus::Failed => ("failed", Color::LightRed),
-            crate::orchestrator::TaskStatus::Backlog => ("backlog", Color::Rgb(120, 140, 200)),
-        };
-
-        let arrow = if selected { "▌ " } else { "  " };
-        let arrow_style = Style::default().fg(Color::LightCyan);
-
-        // Prefer the Haiku-generated short title for the header, falling
-        // back to the prompt's first line when titling hasn't finished
-        // (or never will). Mirrors how SessionInfo::title overrides the
-        // session card header.
-        let header_text = match t.title.as_deref() {
-            Some(s) if !s.is_empty() => s.to_string(),
-            _ => first_line_preview(&t.prompt, 80),
-        };
-        let prompt_style = if selected {
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-
-        let titling_now = t.title.is_none() && app.projects.titling.contains(&t.task_id);
-        let mut header_row = vec![
-            Span::styled(arrow, arrow_style),
-            Span::styled(format!("[{}]", status_label), Style::default().fg(status_color)),
-            Span::styled(format_artifact_badge(t.artifacts.len()), Style::default().fg(Color::Rgb(150, 130, 200))),
-            Span::raw(" "),
-            Span::styled(header_text, prompt_style),
-        ];
-        if titling_now {
-            // Same `✎` glyph the session card uses while a title is in
-            // flight — keeps the visual language consistent across views.
-            header_row.push(Span::styled(
-                "  ✎",
-                Style::default().fg(Color::Rgb(150, 150, 180)),
-            ));
-        }
-        lines.push(Line::from(header_row));
-
-        // Note + timing on the second row, indented.
-        let mut detail: Vec<Span<'static>> = vec![Span::raw("    ")];
-        if let Some(note) = t.note.as_deref() {
-            let note_text = first_line_preview(note, 100);
-            detail.push(Span::styled(
-                note_text,
-                Style::default().fg(Color::Rgb(180, 180, 200)),
-            ));
-            detail.push(Span::raw("  "));
-        }
-        let age = format_age(now_secs.saturating_sub(t.updated_at as u64));
-        let workers = t.workers.len();
-        let merges = t.merges.len();
-        detail.push(Span::styled(
-            format!("· {} · {}w {}m", age, workers, merges),
-            Style::default().fg(Color::Rgb(110, 110, 130)),
+    let age = format_age(now_secs.saturating_sub(t.updated_at as u64));
+    let arts = t.artifacts.len();
+    let merged = t.workers.iter().filter(|w| worker_was_merged(w, t)).count();
+    let total_w = t.workers.len();
+    let mut footer: Vec<Span<'static>> = vec![
+        Span::styled("󰔟 ", Style::default().fg(Color::Rgb(110, 120, 135))),
+        Span::styled(age, Style::default().fg(Color::Rgb(140, 145, 160))),
+    ];
+    if total_w > 0 {
+        footer.push(Span::raw("   "));
+        footer.push(Span::styled(
+            format!("merges {}/{}", merged, total_w),
+            Style::default().fg(Color::Rgb(140, 145, 160)),
         ));
-        lines.push(Line::from(detail));
-
-        if selected && t.status == crate::orchestrator::TaskStatus::Backlog {
-            lines.push(Line::from(Span::styled(
-                "    press s to start",
-                Style::default().fg(Color::Rgb(110, 110, 130)),
-            )));
-        }
-
-        // ── Agent block ────────────────────────────────────────────────
-        // Look up live SessionInfo for the orchestrator and each worker
-        // by tmux name. Sessions whose process has died (Inactive) or
-        // whose tmux is gone show as "(gone)" so the user can tell a
-        // dead worker from a still-running one.
-        let orch_sess = t
-            .orchestrator_tmux
-            .as_deref()
-            .and_then(|n| sessions_by_tmux.get(n).copied());
-        let worker_sess: Vec<Option<&SessionInfo>> = t
-            .workers
-            .iter()
-            .map(|w| sessions_by_tmux.get(w.tmux_name.as_str()).copied())
-            .collect();
-
-        // Aggregate counters across orchestrator + workers.
-        let mut total_ctx: u64 = 0;
-        let mut alive: u32 = 0;
-        let mut processing: u32 = 0;
-        let mut waiting: u32 = 0;
-        let mut idle_count: u32 = 0;
-        for s in std::iter::once(orch_sess).chain(worker_sess.iter().copied()).flatten() {
-            if s.state != SessionState::Inactive {
-                alive += 1;
-            }
-            match s.state {
-                SessionState::Processing => processing += 1,
-                SessionState::WaitingForInput => waiting += 1,
-                SessionState::Idle => idle_count += 1,
-                SessionState::Inactive => {}
-            }
-            if let Some(c) = s.context_tokens {
-                total_ctx = total_ctx.saturating_add(c);
-            }
-        }
-
-        // Orchestrator-level progress: tool calls (auto, parsed from the
-        // orchestrator's JSONL transcript) and the orchestrator-maintained
-        // todo checklist (opt-in via `cc-hub task todos …`). Both sit beside
-        // ctx Σ on this row so a glance at the card answers "is this thing
-        // moving forward, and against what plan?".
-        let tool_count = t
-            .orchestrator_session_id
-            .as_deref()
-            .and_then(|sid| {
-                let cwd = t.project_root.to_string_lossy();
-                crate::scanner::find_jsonl(&cwd, sid)
-            })
-            .map(|p| crate::conversation::count_tool_uses(&p))
-            .unwrap_or(0);
-        let todo_total = t.todos.len();
-        let todo_done = t.todos.iter().filter(|td| td.done).count();
-
-        let total_workers = t.workers.len();
-        let mut summary_spans = vec![
-            Span::raw("    "),
-            Span::styled(
-                format!("agents: {} alive ", alive),
-                Style::default().fg(Color::Rgb(160, 200, 230)),
-            ),
-            Span::styled(
-                format!(
-                    "({}▶ {}● {}○)",
-                    processing, waiting, idle_count
-                ),
-                Style::default().fg(Color::Rgb(120, 120, 145)),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format!(
-                    "merges: {}/{}",
-                    merges, total_workers
-                ),
-                Style::default().fg(Color::Rgb(160, 200, 230)),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format!("ctx Σ {}", format_tokens(total_ctx)),
-                Style::default().fg(Color::Rgb(120, 180, 220)),
-            ),
-        ];
-        if tool_count > 0 {
-            summary_spans.push(Span::raw("  "));
-            summary_spans.push(Span::styled(
-                format!("󰖷 {}", tool_count),
-                Style::default().fg(Color::Rgb(180, 200, 160)),
-            ));
-        }
-        if todo_total > 0 {
-            summary_spans.push(Span::raw("  "));
-            let todo_color = if todo_done == todo_total {
-                Color::LightGreen
-            } else {
-                Color::Rgb(200, 180, 120)
-            };
-            summary_spans.push(Span::styled(
-                format!("✓ {}/{}", todo_done, todo_total),
-                Style::default().fg(todo_color),
-            ));
-        }
-        lines.push(Line::from(summary_spans));
-
-        if let Some(line) = render_agent_line("orch", None, orch_sess) {
-            lines.push(line);
-        } else if t.orchestrator_tmux.is_some() {
-            lines.push(Line::from(vec![
-                Span::raw("      "),
-                Span::styled("orch  ", Style::default().fg(Color::Rgb(160, 160, 180))),
-                Span::styled(
-                    "(no live session)",
-                    Style::default().fg(Color::Rgb(140, 90, 90)),
-                ),
-            ]));
-        }
-        for (w, sess) in t.workers.iter().zip(worker_sess.iter()) {
-            let mut label = match w.worktree.as_deref() {
-                Some(name) => format!("w[{}]", name),
-                None if w.readonly => "w[ro]".to_string(),
-                None => "w[?]".to_string(),
-            };
-            if label.chars().count() > 14 {
-                label = truncate_chars(&label, 14);
-            }
-            let merged = t.merges.iter().any(|m| {
-                w.worktree
-                    .as_deref()
-                    .is_some_and(|wn| m.worktree == wn)
-                    && matches!(m.outcome, crate::orchestrator::MergeOutcome::Ok)
-            });
-            let suffix = if merged { Some(" merged") } else { None };
-            if let Some(line) = render_agent_line(&label, suffix, *sess) {
-                lines.push(line);
-            } else {
-                lines.push(Line::from(vec![
-                    Span::raw("      "),
-                    Span::styled(
-                        format!("{:<6}", label),
-                        Style::default().fg(Color::Rgb(160, 160, 180)),
-                    ),
-                    Span::styled(
-                        "(no live session)",
-                        Style::default().fg(Color::Rgb(140, 90, 90)),
-                    ),
-                ]));
-            }
-        }
-
-        lines.push(Line::from(Span::raw("")));
     }
+    if arts > 0 {
+        footer.push(Span::raw("   "));
+        footer.push(Span::styled(
+            format!("󰉂 {}", arts),
+            Style::default().fg(Color::Rgb(160, 145, 195)),
+        ));
+    }
+    lines.push(Line::from(footer));
 
     let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
-}
-
-/// One indented line per live agent: `  label  [state] · 25k ctx · 󰖷 Tool`.
-/// Returns None when there's no SessionInfo to render — caller decides
-/// whether to print a "(no live session)" placeholder.
-fn render_agent_line(
-    label: &str,
-    suffix: Option<&str>,
-    sess: Option<&SessionInfo>,
-) -> Option<Line<'static>> {
-    let s = sess?;
-    let (state_label, state_col) = match s.state {
-        SessionState::Processing => ("processing", Color::LightGreen),
-        SessionState::WaitingForInput => ("waiting", Color::LightYellow),
-        SessionState::Idle => ("idle", Color::Rgb(140, 140, 160)),
-        SessionState::Inactive => ("inactive", Color::Rgb(110, 90, 90)),
-    };
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
-    spans.push(Span::raw("      "));
-    spans.push(Span::styled(
-        format!("{:<6}", label),
-        Style::default().fg(Color::Rgb(170, 170, 195)),
-    ));
-    spans.push(Span::styled(
-        format!("[{}]", state_label),
-        Style::default().fg(state_col),
-    ));
-    if let Some(ctx) = s.context_tokens {
-        spans.push(Span::styled(
-            format!("  {} ctx", format_tokens(ctx)),
-            Style::default().fg(Color::Rgb(120, 180, 220)),
-        ));
-    }
-    if let Some(tool) = s.current_tool.as_ref() {
-        let name = short_tool(&tool.name);
-        let label_text = match tool.hint.as_deref().filter(|h| !h.is_empty()) {
-            Some(hint) => format!("  󰖷 {}: {}", name, truncate_chars(hint, 30)),
-            None => format!("  󰖷 {}", name),
-        };
-        spans.push(Span::styled(
-            label_text,
-            Style::default().fg(Color::Rgb(180, 200, 160)),
-        ));
-    } else if s.is_thinking {
-        spans.push(Span::styled(
-            "  󰟶 thinking",
-            Style::default().fg(Color::Rgb(180, 180, 200)),
-        ));
-    }
-    if let Some(suf) = suffix {
-        spans.push(Span::styled(
-            suf.to_string(),
-            Style::default().fg(Color::LightGreen),
-        ));
-    }
-    Some(Line::from(spans))
 }
 
 fn first_line_preview(text: &str, max: usize) -> String {
@@ -2834,16 +3254,6 @@ fn first_line_preview(text: &str, max: usize) -> String {
         }
         out.push('…');
         out
-    }
-}
-
-/// Compact " 󰉂 N" artifact-count badge for the task header. Empty string
-/// when N is 0 so the row collapses cleanly.
-fn format_artifact_badge(count: usize) -> String {
-    if count == 0 {
-        String::new()
-    } else {
-        format!(" 󰉂 {}", count)
     }
 }
 
@@ -3367,23 +3777,6 @@ fn model_color(model: &str) -> Color {
         Color::Rgb(160, 220, 180)
     } else {
         Color::Rgb(180, 180, 180)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::format_artifact_badge;
-
-    #[test]
-    fn artifact_badge_zero_collapses() {
-        assert_eq!(format_artifact_badge(0), "");
-    }
-
-    #[test]
-    fn artifact_badge_nonzero_includes_count() {
-        let s = format_artifact_badge(3);
-        assert!(s.contains('3'), "expected count in badge, got {:?}", s);
-        assert!(s.starts_with(' '), "badge should lead with a separator space, got {:?}", s);
     }
 }
 

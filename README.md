@@ -215,11 +215,21 @@ Metrics**.
 
 ### Projects tab
 
+The Projects tab is laid out as a horizontal strip of project chips above a
+five-column kanban: **Planning · Running · Review · Done · Failed**. Backlog
+tasks live off the kanban — open the Backlog popup with `b` to view and
+start them.
+
 | Key | Action |
 |---|---|
-| `j` / `k` | Select project |
-| `J` / `K` | Select task within the current project |
+| `H` / `L` (or `[` / `]`) | Cycle the focused project chip |
+| `h` / `l` (or arrows) | Switch kanban column |
+| `j` / `k` (or arrows) | Move the cursor within the focused column |
 | `Enter` | Focus the orchestrator session for the selected task |
+| `f` | Embed the orchestrator's tmux pane in the TUI |
+| `Space` | Approve the focused Review task → Done |
+| `r` | Open the Result popup (artifacts + summary) for the focused task |
+| `b` | Open the Backlog popup (`s`/`Enter` starts the selected backlog task) |
 | `n` | New task in the current project (prompt input) |
 | `N` | Folder picker → register a project, then prompt for a task |
 | `x` | Delete the selected task (kills its orchestrator, removes state) |

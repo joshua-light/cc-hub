@@ -363,16 +363,21 @@ fn merge_worktree(args: &[String]) -> Result<(), CliError> {
         orchestrator::merge_branch(&project_root, &main, &branch)
             .map_err(|e| CliError::Other(format!("merge: {}", e)))?;
 
-    let record = MergeRecord {
-        worktree: worktree_name.clone(),
-        at: orchestrator::now_unix_secs(),
-        outcome: outcome.clone(),
-    };
-    let _ = orchestrator::update_task_state(&project_id, &task_id, |s| {
-        s.merges.push(record);
-    });
+    // Don't persist a MergeRecord for the pre-flight refusal — the merge
+    // never started, so recording it as "attempted" would mislead the
+    // Projects view. Conflict/Ok still get recorded as before.
+    if !matches!(outcome, MergeOutcome::BlockedByDirtyTree { .. }) {
+        let record = MergeRecord {
+            worktree: worktree_name.clone(),
+            at: orchestrator::now_unix_secs(),
+            outcome: outcome.clone(),
+        };
+        let _ = orchestrator::update_task_state(&project_id, &task_id, |s| {
+            s.merges.push(record);
+        });
+    }
 
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "ok": matches!(outcome, MergeOutcome::Ok),
         "worktree": worktree_name,
         "branch": branch,
@@ -380,14 +385,27 @@ fn merge_worktree(args: &[String]) -> Result<(), CliError> {
         "stdout": stdout,
         "stderr": stderr,
     });
+    if let MergeOutcome::BlockedByDirtyTree { overlap } = &outcome {
+        payload["blocked_by_dirty_tree"] = serde_json::json!(true);
+        payload["overlap"] = serde_json::json!(overlap);
+        payload["recipe"] = serde_json::json!(
+            "Commit, stash, or revert the listed paths on the target branch, then re-run `cc-hub merge-worktree`."
+        );
+    }
     print_json(&payload);
 
-    if matches!(outcome, MergeOutcome::Conflict { .. }) {
-        return Err(CliError::Other(
+    match outcome {
+        MergeOutcome::Ok => Ok(()),
+        MergeOutcome::Conflict { .. } => Err(CliError::Other(
             "merge produced conflicts; resolve in the worktree or main".into(),
-        ));
+        )),
+        MergeOutcome::BlockedByDirtyTree { overlap } => Err(CliError::Other(format!(
+            "merge blocked: working tree on `{}` has uncommitted edits in {} file(s) the branch also modified ({}); commit/stash/revert and retry",
+            main,
+            overlap.len(),
+            overlap.join(", ")
+        ))),
     }
-    Ok(())
 }
 
 // ─── orchestrate ─────────────────────────────────────────────────────────
