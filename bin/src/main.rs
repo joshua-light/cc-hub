@@ -144,6 +144,96 @@ fn queue_missing_titles(
     }
 }
 
+/// Mirror of [`queue_missing_titles`] for project tasks: kick off a Haiku
+/// titler per task whose `prompt` is set but `title` is still `None`, and
+/// stamp `snap.titling` with the in-flight task ids so the UI can render a
+/// spinner. Shares the session title concurrency semaphore — both come from
+/// the same Haiku subprocess pool, so a second gate would only let twice as
+/// many `cc-hub-new -p` children run concurrently for no real win.
+fn queue_missing_task_titles(
+    snap: &mut projects_scan::ProjectsSnapshot,
+    inflight: &Arc<Mutex<HashSet<String>>>,
+    active: &Arc<Mutex<HashSet<String>>>,
+    gate: &Arc<tokio::sync::Semaphore>,
+) {
+    for tasks in snap.tasks.values() {
+        for t in tasks {
+            if t.title.is_some() {
+                continue;
+            }
+            if t.prompt.trim().is_empty() {
+                continue;
+            }
+            let task_id = t.task_id.clone();
+            let project_id = t.project_id.clone();
+            let prompt = t.prompt.clone();
+            {
+                let mut lock = inflight.lock().unwrap_or_else(|e| e.into_inner());
+                if !lock.insert(task_id.clone()) {
+                    continue; // already being titled
+                }
+            }
+            let inflight = Arc::clone(inflight);
+            let active = Arc::clone(active);
+            let gate = Arc::clone(gate);
+            tokio::spawn(async move {
+                let _permit = gate.acquire_owned().await.ok();
+
+                active
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(task_id.clone());
+
+                let title_result = tokio::task::spawn_blocking({
+                    let p = prompt.clone();
+                    move || title::generate_title_blocking(&p)
+                })
+                .await
+                .ok()
+                .flatten();
+
+                active
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&task_id);
+
+                let Some(t) = title_result else {
+                    log::warn!(
+                        "title: task generation failed for {}, blocking retries this session",
+                        task_id
+                    );
+                    return;
+                };
+
+                let project_id_for_persist = project_id.clone();
+                let task_id_for_persist = task_id.clone();
+                let title_for_persist = t.clone();
+                let persist = tokio::task::spawn_blocking(move || {
+                    cc_hub_lib::orchestrator::set_task_title(
+                        &project_id_for_persist,
+                        &task_id_for_persist,
+                        &title_for_persist,
+                    )
+                })
+                .await;
+                match persist {
+                    Ok(Ok(_)) => log::info!("title: task={} → {:?}", task_id, t),
+                    Ok(Err(e)) => log::warn!("title: persist task title failed for {}: {}", task_id, e),
+                    Err(e) => log::warn!("title: persist task title task panicked for {}: {}", task_id, e),
+                }
+
+                inflight
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&task_id);
+            });
+        }
+    }
+
+    let set = active.lock().unwrap_or_else(|e| e.into_inner());
+    snap.titling = set.clone();
+}
+
 enum ScanMsg {
     SessionList(Vec<models::SessionInfo>),
     Detail(models::SessionDetail),
@@ -334,6 +424,15 @@ async fn run(
         Arc::new(Mutex::new(HashSet::new()));
     let title_gate: Arc<tokio::sync::Semaphore> =
         Arc::new(tokio::sync::Semaphore::new(config::get().title.concurrency));
+    // Task titles share the session title's Haiku subprocess pool — both
+    // hit the same `cc-hub-new -p` resource, so doubling the concurrency
+    // would buy nothing. Inflight + active sets are scoped per-domain so a
+    // session and a task with the same id (impossible in practice, but
+    // cheap to keep separate) can't collide.
+    let inflight_task_titles: Arc<Mutex<HashSet<String>>> =
+        Arc::new(Mutex::new(HashSet::new()));
+    let active_task_titles: Arc<Mutex<HashSet<String>>> =
+        Arc::new(Mutex::new(HashSet::new()));
 
     let (scan_tx, mut scan_rx) = mpsc::channel::<ScanMsg>(16);
     let (detail_tx, mut detail_rx) = mpsc::channel::<String>(4);
@@ -1183,7 +1282,13 @@ async fn run(
                 ScanMsg::MetricsProgress { scanned, total } => {
                     app.update_metrics_progress(scanned, total);
                 }
-                ScanMsg::Projects(snap) => {
+                ScanMsg::Projects(mut snap) => {
+                    queue_missing_task_titles(
+                        &mut snap,
+                        &inflight_task_titles,
+                        &active_task_titles,
+                        &title_gate,
+                    );
                     app.update_projects(snap);
                 }
                 ScanMsg::GhCreateDone { name, result } => {

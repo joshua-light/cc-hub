@@ -190,6 +190,11 @@ pub struct TaskState {
     /// status. `serde(default)` so older state.json files still load.
     #[serde(default)]
     pub summary: Option<String>,
+    /// 2-3 word Haiku-generated title for the task, derived from the user
+    /// prompt. Mirrors `SessionInfo::title`. Persisted; `None` until the
+    /// background titler finishes (or if it fails).
+    #[serde(default)]
+    pub title: Option<String>,
     #[serde(default)]
     pub workers: Vec<Worker>,
     #[serde(default)]
@@ -215,6 +220,7 @@ impl TaskState {
             updated_at: now,
             note: None,
             summary: None,
+            title: None,
             workers: Vec::new(),
             merges: Vec::new(),
             artifacts: Vec::new(),
@@ -271,6 +277,19 @@ where
     state.touch();
     write_task_state(&state)?;
     Ok(state)
+}
+
+/// Persist a Haiku-generated short title onto a task's state file. Reuses
+/// the per-task atomic-write store rather than a side cache file so the
+/// title travels with the rest of the task state.
+pub fn set_task_title(
+    project_id: &str,
+    task_id: &str,
+    title: &str,
+) -> io::Result<TaskState> {
+    update_task_state(project_id, task_id, |s| {
+        s.title = Some(title.to_string());
+    })
 }
 
 /// One registered project. Stored in `~/.cc-hub/projects.toml`.
@@ -735,6 +754,48 @@ mod tests {
         let s: TaskState = serde_json::from_str(raw).unwrap();
         assert_eq!(s.summary, None);
         assert!(s.artifacts.is_empty());
+        // `title` is also serde(default) for back-compat with state.json
+        // written before the Haiku task-title feature landed.
+        assert_eq!(s.title, None);
+    }
+
+    #[test]
+    fn set_task_title_persists_through_round_trip() {
+        // `set_task_title` writes through `cc_hub_home()` which is a
+        // thin wrapper around `dirs::home_dir()` (i.e. `$HOME`). Point it
+        // at a tempdir so the test never touches the real user state.
+        let home = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        // Seed a state.json without a title set — the typical post-creation
+        // shape before the background titler has run.
+        let project_id = "round-trip-proj".to_string();
+        let task_id_set;
+        {
+            let initial = TaskState::new(
+                project_id.clone(),
+                PathBuf::from("/tmp/proj"),
+                "build the thing".into(),
+            );
+            task_id_set = initial.task_id.clone();
+            write_task_state(&initial).expect("write seed state");
+        }
+
+        let result = set_task_title(&project_id, &task_id_set, "build thing")
+            .expect("set_task_title");
+        assert_eq!(result.title.as_deref(), Some("build thing"));
+
+        let loaded = read_task_state(&project_id, &task_id_set)
+            .expect("read state back from disk");
+        assert_eq!(loaded.title.as_deref(), Some("build thing"));
+        assert!(loaded.updated_at >= loaded.created_at, "touch() should bump updated_at");
+
+        // Restore HOME to keep other tests in the process oblivious.
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     #[test]

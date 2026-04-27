@@ -11,7 +11,7 @@
 //! the failure mode that matters here, not redundant IO.
 
 use crate::orchestrator::{self, Project, TaskState, TaskStatus};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 
 /// Where a tmux session sits in the orchestrator hierarchy. Computed by
@@ -36,6 +36,10 @@ pub struct ProjectsSnapshot {
     /// Tasks for each project_id, sorted newest-first by `updated_at` so
     /// the UI shows the most recently active task at the top.
     pub tasks: HashMap<String, Vec<TaskState>>,
+    /// Task ids whose Haiku titler is in flight right now. Populated in
+    /// the main loop before the snapshot is handed to the App so the UI
+    /// can render a spinner without locking a shared mutex per frame.
+    pub titling: HashSet<String>,
 }
 
 impl ProjectsSnapshot {
@@ -43,6 +47,7 @@ impl ProjectsSnapshot {
         Self {
             projects: Vec::new(),
             tasks: HashMap::new(),
+            titling: HashSet::new(),
         }
     }
 
@@ -98,7 +103,11 @@ pub fn scan() -> ProjectsSnapshot {
         tasks.insert(p.id.clone(), list);
     }
 
-    ProjectsSnapshot { projects, tasks }
+    ProjectsSnapshot {
+        projects,
+        tasks,
+        titling: HashSet::new(),
+    }
 }
 
 fn load_tasks_for(project_id: &str) -> Vec<TaskState> {

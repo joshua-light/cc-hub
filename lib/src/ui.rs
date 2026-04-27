@@ -1265,10 +1265,17 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
         crate::orchestrator::TaskStatus::Done => ("done", Color::LightGreen),
         crate::orchestrator::TaskStatus::Failed => ("failed", Color::LightRed),
     };
-    let title = format!(
-        " Result · {} ",
-        crate::orchestrator::short_task_id(&t.task_id)
-    );
+    let title = match t.title.as_deref().filter(|s| !s.is_empty()) {
+        Some(name) => format!(
+            " Result · {} — {} ",
+            crate::orchestrator::short_task_id(&t.task_id),
+            name,
+        ),
+        None => format!(
+            " Result · {} ",
+            crate::orchestrator::short_task_id(&t.task_id)
+        ),
+    };
     let block = popup_block(Span::styled(
         title,
         Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
@@ -2524,7 +2531,14 @@ fn render_project_tasks(frame: &mut Frame, area: Rect, app: &App) {
         let arrow = if selected { "▌ " } else { "  " };
         let arrow_style = Style::default().fg(Color::LightCyan);
 
-        let prompt_preview = first_line_preview(&t.prompt, 80);
+        // Prefer the Haiku-generated short title for the header, falling
+        // back to the prompt's first line when titling hasn't finished
+        // (or never will). Mirrors how SessionInfo::title overrides the
+        // session card header.
+        let header_text = match t.title.as_deref() {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => first_line_preview(&t.prompt, 80),
+        };
         let prompt_style = if selected {
             Style::default()
                 .fg(Color::White)
@@ -2533,13 +2547,23 @@ fn render_project_tasks(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::Gray)
         };
 
-        lines.push(Line::from(vec![
+        let titling_now = t.title.is_none() && app.projects.titling.contains(&t.task_id);
+        let mut header_row = vec![
             Span::styled(arrow, arrow_style),
             Span::styled(format!("[{}]", status_label), Style::default().fg(status_color)),
             Span::styled(format_artifact_badge(t.artifacts.len()), Style::default().fg(Color::Rgb(150, 130, 200))),
             Span::raw(" "),
-            Span::styled(prompt_preview, prompt_style),
-        ]));
+            Span::styled(header_text, prompt_style),
+        ];
+        if titling_now {
+            // Same `✎` glyph the session card uses while a title is in
+            // flight — keeps the visual language consistent across views.
+            header_row.push(Span::styled(
+                "  ✎",
+                Style::default().fg(Color::Rgb(150, 150, 180)),
+            ));
+        }
+        lines.push(Line::from(header_row));
 
         // Note + timing on the second row, indented.
         let mut detail: Vec<Span<'static>> = vec![Span::raw("    ")];
@@ -3370,6 +3394,7 @@ mod result_popup_tests {
         let snap = ProjectsSnapshot {
             projects: vec![project],
             tasks,
+            titling: std::collections::HashSet::new(),
         };
         app.update_projects(snap);
         assert!(app.enter_projects_result(), "popup should open");
