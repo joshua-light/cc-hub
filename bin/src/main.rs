@@ -795,6 +795,47 @@ async fn run(
                     (View::Grid, KeyCode::Char('x')) if on_projects => {
                         app.enter_confirm_task_delete();
                     }
+                    (View::Grid, KeyCode::Char('s')) if on_projects => {
+                        let Some(p) = app.selected_project().cloned() else {
+                            app.set_status("no project selected".into());
+                            continue;
+                        };
+                        let Some(task) = app.selected_project_task().cloned() else {
+                            app.set_status("no task selected".into());
+                            continue;
+                        };
+                        if task.status != cc_hub_lib::orchestrator::TaskStatus::Backlog {
+                            app.set_status(format!(
+                                "task is not in backlog (status = {:?})",
+                                task.status
+                            ));
+                            continue;
+                        }
+                        match cc_hub_lib::orchestrator::start_backlog_task(&p.id, &task.task_id) {
+                            Ok((state, tmux_name, orch_prompt)) => {
+                                if app.has_pending_dispatch() {
+                                    app.set_status(format!(
+                                        "task started [{}] but a dispatch is already queued — orchestrator may be slow to start",
+                                        state.task_id
+                                    ));
+                                } else {
+                                    app.queue_pending_dispatch(tmux_name.clone(), orch_prompt);
+                                }
+                                log::info!(
+                                    "project task: started backlog {} orchestrator [{}]",
+                                    state.task_id, tmux_name
+                                );
+                                app.set_status(format!(
+                                    "task started [{}], orchestrator [{}] starting…",
+                                    state.task_id, tmux_name
+                                ));
+                            }
+                            Err(e) => {
+                                log::warn!("project task: start backlog failed: {}", e);
+                                app.set_status(format!("start backlog failed: {}", e));
+                            }
+                        }
+                    }
                     (View::Grid, KeyCode::Enter) if on_metrics => {
                         if let Some(row) = app.selected_metrics_session().cloned() {
                             let lv = live_view::LiveView::review(

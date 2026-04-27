@@ -1264,7 +1264,7 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
         crate::orchestrator::TaskStatus::Running => ("running", Color::LightYellow),
         crate::orchestrator::TaskStatus::Done => ("done", Color::LightGreen),
         crate::orchestrator::TaskStatus::Failed => ("failed", Color::LightRed),
-        crate::orchestrator::TaskStatus::Backlog => ("backlog", Color::LightBlue),
+        crate::orchestrator::TaskStatus::Backlog => ("backlog", Color::Rgb(120, 140, 200)),
     };
     let title = match t.title.as_deref().filter(|s| !s.is_empty()) {
         Some(name) => format!(
@@ -2545,7 +2545,7 @@ fn render_project_tasks(frame: &mut Frame, area: Rect, app: &App) {
             crate::orchestrator::TaskStatus::Running => ("running", Color::LightYellow),
             crate::orchestrator::TaskStatus::Done => ("done", Color::LightGreen),
             crate::orchestrator::TaskStatus::Failed => ("failed", Color::LightRed),
-            crate::orchestrator::TaskStatus::Backlog => ("backlog", Color::LightBlue),
+            crate::orchestrator::TaskStatus::Backlog => ("backlog", Color::Rgb(120, 140, 200)),
         };
 
         let arrow = if selected { "▌ " } else { "  " };
@@ -2603,6 +2603,13 @@ fn render_project_tasks(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::Rgb(110, 110, 130)),
         ));
         lines.push(Line::from(detail));
+
+        if selected && t.status == crate::orchestrator::TaskStatus::Backlog {
+            lines.push(Line::from(Span::styled(
+                "    press s to start",
+                Style::default().fg(Color::Rgb(110, 110, 130)),
+            )));
+        }
 
         // ── Agent block ────────────────────────────────────────────────
         // Look up live SessionInfo for the orchestrator and each worker

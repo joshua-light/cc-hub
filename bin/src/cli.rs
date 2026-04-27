@@ -92,6 +92,7 @@ struct Flags {
     caption: Option<String>,
     wait_secs: Option<u64>,
     dry_run: bool,
+    backlog: bool,
 }
 
 fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
@@ -143,6 +144,10 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
             }
             "--dry-run" => {
                 f.dry_run = true;
+                i += 1;
+            }
+            "--backlog" => {
+                f.backlog = true;
                 i += 1;
             }
             other => {
@@ -452,12 +457,51 @@ fn task_subcommand(args: &[String]) -> Result<(), CliError> {
     match verb.as_str() {
         "report" => task_report(rest),
         "create" => task_create(rest),
+        "start" => task_start(rest),
         "artifact" => task_artifact_subcommand(rest),
         other => Err(CliError::Usage(format!(
-            "unknown task verb: {} (try `report`, `create`, or `artifact`)",
+            "unknown task verb: {} (try `report`, `create`, `start`, or `artifact`)",
             other
         ))),
     }
+}
+
+/// `cc-hub task start --task ID [--project-id ID] [--wait-secs N]`
+///
+/// Flip a Backlog task to Running and spawn its orchestrator. Mirrors
+/// `orchestrate start` but goes through `start_backlog_task` so it errors
+/// cleanly if the task isn't in Backlog.
+fn task_start(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+
+    let (_state, tmux_name, prompt) =
+        orchestrator::start_backlog_task(&project_id, &task_id)
+            .map_err(|e| CliError::Other(format!("start backlog task: {}", e)))?;
+
+    let wait = f.wait_secs.unwrap_or(DEFAULT_PROMPT_WAIT_SECS);
+    let prompt_status = match wait_until_idle_and_send(
+        &tmux_name,
+        &prompt,
+        Duration::from_secs(wait),
+    ) {
+        Ok(()) => "sent",
+        Err(e) => {
+            log::warn!("task start: dispatch failed: {}", e);
+            eprintln!("warning: prompt dispatch failed ({}), session is up", e);
+            "deferred"
+        }
+    };
+
+    print_json(&serde_json::json!({
+        "ok": true,
+        "tmux": tmux_name,
+        "prompt_status": prompt_status,
+        "task_id": task_id,
+        "project_id": project_id,
+    }));
+    Ok(())
 }
 
 fn task_report(args: &[String]) -> Result<(), CliError> {
@@ -470,9 +514,10 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         Some("running") => Some(TaskStatus::Running),
         Some("done") => Some(TaskStatus::Done),
         Some("failed") => Some(TaskStatus::Failed),
+        Some("backlog") => Some(TaskStatus::Backlog),
         Some(other) => {
             return Err(CliError::Usage(format!(
-                "--status must be running|done|failed (got {})",
+                "--status must be running|done|failed|backlog (got {})",
                 other
             )));
         }
@@ -760,6 +805,10 @@ fn task_create(args: &[String]) -> Result<(), CliError> {
             "--prompt" => f.prompt = Some(next_value(args, &mut i, "--prompt")?),
             "--project-id" => f.project_id = Some(next_value(args, &mut i, "--project-id")?),
             "--name" => name = Some(next_value(args, &mut i, "--name")?),
+            "--backlog" => {
+                f.backlog = true;
+                i += 1;
+            }
             other => return Err(CliError::Usage(format!("unknown flag: {}", other))),
         }
     }
@@ -782,7 +831,11 @@ fn task_create(args: &[String]) -> Result<(), CliError> {
     orchestrator::ensure_project_registered(&cwd, &project_name)
         .map_err(|e| CliError::Other(format!("register project: {}", e)))?;
 
-    let state = TaskState::new(project_id.clone(), cwd, prompt);
+    let state = if f.backlog {
+        TaskState::new_backlog(project_id.clone(), cwd, prompt)
+    } else {
+        TaskState::new(project_id.clone(), cwd, prompt)
+    };
     orchestrator::write_task_state(&state)
         .map_err(|e| CliError::Other(format!("write state: {}", e)))?;
 
@@ -790,6 +843,7 @@ fn task_create(args: &[String]) -> Result<(), CliError> {
         "ok": true,
         "task_id": state.task_id,
         "project_id": project_id,
+        "status": state.status,
     }));
     Ok(())
 }
