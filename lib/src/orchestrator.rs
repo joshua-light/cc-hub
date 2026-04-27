@@ -160,6 +160,15 @@ pub struct Artifact {
     pub added_at: i64,
 }
 
+/// One entry in the orchestrator's optional plan checklist. Surfaced on the
+/// active task card as `done/total ✓`. Free-form text — no Markdown rendering
+/// in the UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoItem {
+    pub text: String,
+    pub done: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskState {
     pub task_id: String,
@@ -198,6 +207,11 @@ pub struct TaskState {
     /// only via the CLI; `serde(default)` for back-compat.
     #[serde(default)]
     pub artifacts: Vec<Artifact>,
+    /// Optional orchestrator-maintained checklist. Empty for tasks where the
+    /// orchestrator never opted in. `serde(default)` so older state.json
+    /// files still load.
+    #[serde(default)]
+    pub todos: Vec<TodoItem>,
 }
 
 impl TaskState {
@@ -218,6 +232,7 @@ impl TaskState {
             workers: Vec::new(),
             merges: Vec::new(),
             artifacts: Vec::new(),
+            todos: Vec::new(),
         }
     }
 
@@ -395,7 +410,20 @@ The cc-hub binary is at `{bin}`. Always invoke it by absolute path; it is not ne
    `{bin} task report --task {task_id} --status running --note \"<one line>\"`
    These notes surface in the user's Projects view. Keep them terse — milestones, not play-by-play.
 
-6. **Finish.** When the user's task is complete, gather proof of work (see next section) and then:
+6. **Track a checklist** (optional but strongly recommended for any task with 3+ logical steps). The active task card shows `done/total ✓` so the user can see progress against a plan, not just a heartbeat. Set the list once with a heredoc (one item per line, blank lines skipped); mark items as you finish them by 0-based index:
+   `{bin} task todos set --task {task_id} --items \"$(cat <<'EOF'
+plan worktree split
+spawn worker A
+spawn worker B
+merge & verify
+EOF
+)\"`
+   `{bin} task todos check --task {task_id} --index 1` — mark item done.
+   `{bin} task todos uncheck --task {task_id} --index 1` — undo.
+   `{bin} task todos clear --task {task_id}` — empty the list.
+   Don't pre-list every micro-step; aim for a checklist the user could read in one breath.
+
+7. **Finish.** When the user's task is complete, gather proof of work (see next section) and then:
    `{bin} task report --task {task_id} --status done --note \"<one line>\" --summary \"<multi-line briefing>\"`
    On unrecoverable failure: `--status failed --note \"<why>\"`.
 

@@ -68,6 +68,49 @@ pub fn read_jsonl_all(path: &Path) -> Vec<Value> {
     parse_jsonl_values(BufReader::new(file))
 }
 
+/// Count assistant `tool_use` blocks across an entire JSONL transcript.
+///
+/// Streams line-by-line and parses each line independently — never holds the
+/// whole file in memory, so it stays cheap on long-running orchestrator
+/// transcripts. Returns 0 if the file is missing or unreadable.
+pub fn count_tool_uses(path: &Path) -> usize {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return 0,
+    };
+    let reader = BufReader::new(file);
+    let mut count = 0usize;
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let val: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if val.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(arr) = val
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        else {
+            continue;
+        };
+        for block in arr {
+            if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
 pub fn read_jsonl_tail(path: &Path, max_bytes: u64) -> Vec<Value> {
     let mut file = match File::open(path) {
         Ok(f) => f,
