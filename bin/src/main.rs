@@ -29,23 +29,37 @@ use log::LevelFilter;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use simplelog::{Config as LogConfig, WriteLogger};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
+/// How long to suppress re-titling a session/task after a successful run.
+/// Long enough to outlast any in-flight `projects_scan::scan` snapshot
+/// captured before the title hit disk, so the same id doesn't get titled
+/// twice when the snap is drained after the persist.
+const TITLE_SUCCESS_COOLDOWN: Duration = Duration::from_secs(30);
+/// How long to suppress re-titling after a failed run. Long enough to
+/// avoid re-spawning a failing subprocess every scan tick, short enough
+/// that a transient fault clears within a few minutes.
+const TITLE_FAILURE_COOLDOWN: Duration = Duration::from_secs(300);
+/// Initial deadline written when a titler is dispatched. Tightened to one
+/// of the two cooldowns above when the spawned task finishes; this just
+/// ensures concurrent scans see the id as "in flight" until then.
+const TITLE_INFLIGHT_SENTINEL: Duration = Duration::from_secs(3600);
+
 /// Spawn a background `cc-hub-new -p` per session that has a first user
-/// message but no cached title yet. `inflight` guards against duplicate
-/// kickoffs (and intentionally retains failed sids so a missing shell
-/// command doesn't trigger a subprocess every scan). `active` is the
-/// narrower set of sids whose subprocess is actually running right now,
-/// and drives the UI spinner.
+/// message but no cached title yet. `inflight` is a deadline map: each sid
+/// is suppressed from re-kickoff until its `Instant` passes, so the
+/// titler's persist + the next scan can settle without racing. `active` is
+/// the narrower set of sids whose subprocess is actually running right
+/// now, and drives the UI spinner.
 fn queue_missing_titles(
     sessions: &mut [models::SessionInfo],
-    inflight: &Arc<Mutex<HashSet<String>>>,
+    inflight: &Arc<Mutex<HashMap<String, Instant>>>,
     active: &Arc<Mutex<HashSet<String>>>,
     gate: &Arc<tokio::sync::Semaphore>,
 ) {
@@ -59,9 +73,14 @@ fn queue_missing_titles(
         let sid = session.session_id.clone();
         {
             let mut lock = inflight.lock().unwrap_or_else(|e| e.into_inner());
-            if !lock.insert(sid.clone()) {
-                continue; // already being titled
+            if let Some(&deadline) = lock.get(&sid) {
+                if deadline > Instant::now() {
+                    continue;
+                }
             }
+            // Sentinel deadline while in flight; the spawned task tightens
+            // this to a success/failure cooldown when it finishes.
+            lock.insert(sid.clone(), Instant::now() + TITLE_INFLIGHT_SENTINEL);
         }
         let inflight = Arc::clone(inflight);
         let active = Arc::clone(active);
@@ -93,16 +112,15 @@ fn queue_missing_titles(
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&sid);
 
-            // Leaving a failed sid in `inflight` blocks retry for this
-            // process's lifetime — the intended behavior when the user's
-            // shell is missing `cc-hub-new` entirely, so we don't spawn
-            // a failing subprocess every scan tick. An app restart clears
-            // the set and retries naturally.
             let Some(t) = title_result else {
                 log::warn!(
-                    "title: generation failed for {}, blocking retries this session",
+                    "title: generation failed for {}, retrying after cooldown",
                     models::short_sid(&sid)
                 );
+                inflight
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(sid.clone(), Instant::now() + TITLE_FAILURE_COOLDOWN);
                 return;
             };
 
@@ -122,13 +140,13 @@ fn queue_missing_titles(
                 Err(e) => log::warn!("title: persist task panicked for {}: {}", sid, e),
             }
 
-            // On success we drop the sid so the set doesn't grow unboundedly
-            // across many sessions; subsequent scans see the cached title
-            // and skip re-queueing anyway.
+            // Success cooldown outlasts any in-flight scan that captured
+            // the pre-persist `title: None` snapshot, so the next drain
+            // observes the cooldown and skips re-titling.
             inflight
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .remove(&sid);
+                .insert(sid.clone(), Instant::now() + TITLE_SUCCESS_COOLDOWN);
         });
     }
 
@@ -152,7 +170,7 @@ fn queue_missing_titles(
 /// many `cc-hub-new -p` children run concurrently for no real win.
 fn queue_missing_task_titles(
     snap: &mut projects_scan::ProjectsSnapshot,
-    inflight: &Arc<Mutex<HashSet<String>>>,
+    inflight: &Arc<Mutex<HashMap<String, Instant>>>,
     active: &Arc<Mutex<HashSet<String>>>,
     gate: &Arc<tokio::sync::Semaphore>,
 ) {
@@ -169,9 +187,12 @@ fn queue_missing_task_titles(
             let prompt = t.prompt.clone();
             {
                 let mut lock = inflight.lock().unwrap_or_else(|e| e.into_inner());
-                if !lock.insert(task_id.clone()) {
-                    continue; // already being titled
+                if let Some(&deadline) = lock.get(&task_id) {
+                    if deadline > Instant::now() {
+                        continue;
+                    }
                 }
+                lock.insert(task_id.clone(), Instant::now() + TITLE_INFLIGHT_SENTINEL);
             }
             let inflight = Arc::clone(inflight);
             let active = Arc::clone(active);
@@ -199,9 +220,13 @@ fn queue_missing_task_titles(
 
                 let Some(t) = title_result else {
                     log::warn!(
-                        "title: task generation failed for {}, blocking retries this session",
+                        "title: task generation failed for {}, retrying after cooldown",
                         task_id
                     );
+                    inflight
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(task_id.clone(), Instant::now() + TITLE_FAILURE_COOLDOWN);
                     return;
                 };
 
@@ -225,7 +250,7 @@ fn queue_missing_task_titles(
                 inflight
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .remove(&task_id);
+                    .insert(task_id.clone(), Instant::now() + TITLE_SUCCESS_COOLDOWN);
             });
         }
     }
@@ -385,6 +410,10 @@ async fn main() -> io::Result<()> {
     // tokio runtime's shutdown doesn't wait up to ~45s on a hung `claude
     // -p`. Blocking tasks can't be cancelled, but they poll this flag.
     title::request_shutdown();
+    // Best-effort: flush the log backend so any warn lines emitted just
+    // before exit make it to disk even if a panic-while-logging holds the
+    // backend's mutex.
+    log::logger().flush();
 
     restore_terminal(terminal.backend_mut(), bracketed_paste, kb_enhanced)?;
     terminal.show_cursor()?;
@@ -418,8 +447,8 @@ async fn run(
     let mut app = App::new();
     app.image_picker = Some(image_picker);
 
-    let inflight_titles: Arc<Mutex<HashSet<String>>> =
-        Arc::new(Mutex::new(HashSet::new()));
+    let inflight_titles: Arc<Mutex<HashMap<String, Instant>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let active_titles: Arc<Mutex<HashSet<String>>> =
         Arc::new(Mutex::new(HashSet::new()));
     let title_gate: Arc<tokio::sync::Semaphore> =
@@ -429,8 +458,8 @@ async fn run(
     // would buy nothing. Inflight + active sets are scoped per-domain so a
     // session and a task with the same id (impossible in practice, but
     // cheap to keep separate) can't collide.
-    let inflight_task_titles: Arc<Mutex<HashSet<String>>> =
-        Arc::new(Mutex::new(HashSet::new()));
+    let inflight_task_titles: Arc<Mutex<HashMap<String, Instant>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let active_task_titles: Arc<Mutex<HashSet<String>>> =
         Arc::new(Mutex::new(HashSet::new()));
 
