@@ -21,6 +21,7 @@ serde_json = "1"
 toml = "0.8"
 dirs = "6"
 libc = "0.2"
+fs2 = "0.4"
 notify = "8"
 notify-debouncer-mini = "0.6"
 tui-term = { version = "0.3", features = ["unstable"] }

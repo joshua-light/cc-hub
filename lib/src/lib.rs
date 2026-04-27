@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod models;
 pub mod orchestrator;
 pub mod platform;
+pub mod reservations;
 pub mod projects_scan;
 pub mod scanner;
 pub mod send;

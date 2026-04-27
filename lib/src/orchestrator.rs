@@ -141,6 +141,15 @@ pub struct Worker {
 pub enum MergeOutcome {
     Ok,
     Conflict { detail: String },
+    /// Preflight refused: another orchestrator's task holds an `active`
+    /// reservation overlapping this branch's changed paths. The blocking
+    /// task id and the overlapping path set are surfaced so the caller can
+    /// either wait or escalate. No working-tree mutation happens for this
+    /// outcome.
+    BlockedByActiveOrchestrator {
+        task_id: String,
+        paths: Vec<String>,
+    },
     /// Pre-flight refused: the working tree on the target branch has
     /// uncommitted edits in files the feature branch also modified, so
     /// the merge would either fail with "would be overwritten" or — worse
@@ -885,14 +894,24 @@ pub fn branch_changed_paths(
         .collect())
 }
 
-/// Merge `<branch>` into `<main>` from the project root. Performs a
-/// pre-flight check: if any uncommitted working-tree change overlaps a
-/// file the feature branch also modified, returns
-/// [`MergeOutcome::BlockedByDirtyTree`] **without touching the tree** —
-/// the caller (and the human reading the JSON) gets exact paths to
-/// resolve. Returns [`MergeOutcome::Conflict`] for the classical
-/// content-conflict case where git started the merge and hit overlapping
-/// edits in committed history.
+/// Merge `<branch>` into `<main>` from the project root. Performs two
+/// pre-flight checks before any tree mutation:
+///
+/// 1. Consults the project's reservations file. If another task holds an
+///    `active` reservation overlapping the branch's changed paths, returns
+///    [`MergeOutcome::BlockedByActiveOrchestrator`]. `current_task_id` is
+///    excluded so a task never blocks on itself. Reservations are
+///    advisory — if the side file is unreadable we degrade silently
+///    rather than blocking a merge that would otherwise succeed.
+///
+/// 2. If any uncommitted working-tree change overlaps a file the feature
+///    branch also modified, returns [`MergeOutcome::BlockedByDirtyTree`].
+///    `overlap` lists the repo-relative paths the user must commit,
+///    stash, or revert before retrying.
+///
+/// Returns [`MergeOutcome::Conflict`] for the classical content-conflict
+/// case where git started the merge and hit overlapping edits in
+/// committed history.
 ///
 /// Why we don't auto-stash anymore: an earlier version stashed before
 /// merge and popped after, but a popping conflict left raw conflict
@@ -904,16 +923,51 @@ pub fn merge_branch(
     project_root: &Path,
     main_branch: &str,
     feature_branch: &str,
+    project_id: &str,
+    current_task_id: &str,
 ) -> io::Result<(MergeOutcome, String, String)> {
-    // Pre-flight: refuse if dirty tree overlaps the branch's file set.
+    // Compute branch's changed-paths once for both preflight checks.
+    let changed = branch_changed_paths(project_root, main_branch, feature_branch)?;
+
+    // Preflight 1: cross-orchestrator reservation check. Done before we
+    // mutate the working tree (`git checkout main`) so a merge that
+    // can't proceed leaves no trace.
+    if !changed.is_empty() {
+        match crate::reservations::overlapping_active(
+            project_id,
+            current_task_id,
+            &changed,
+        ) {
+            Ok(blockers) => {
+                if let Some((blocking_task, paths)) = blockers.into_iter().next() {
+                    return Ok((
+                        MergeOutcome::BlockedByActiveOrchestrator {
+                            task_id: blocking_task,
+                            paths,
+                        },
+                        String::new(),
+                        String::new(),
+                    ));
+                }
+            }
+            Err(e) => {
+                // Reservations are advisory — degrade to current behaviour
+                // rather than blocking a merge on an unreadable side file.
+                log::warn!(
+                    "merge_branch: reservations check failed (degrading to no-check): {}",
+                    e
+                );
+            }
+        }
+    }
+
+    // Preflight 2: refuse if dirty tree overlaps the branch's file set.
     // BTreeSet so the overlap list is stable for tests.
     let dirty: std::collections::BTreeSet<String> =
         dirty_paths(project_root)?.into_iter().collect();
     if !dirty.is_empty() {
         let branch_files: std::collections::BTreeSet<String> =
-            branch_changed_paths(project_root, main_branch, feature_branch)?
-                .into_iter()
-                .collect();
+            changed.iter().cloned().collect();
         let overlap: Vec<String> = dirty.intersection(&branch_files).cloned().collect();
         if !overlap.is_empty() {
             return Ok((

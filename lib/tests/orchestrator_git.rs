@@ -109,7 +109,7 @@ fn merge_branch_clean_succeeds() {
 
     let branch = orchestrator::worktree_branch("t-3", "edit");
     let (outcome, _stdout, _stderr) =
-        orchestrator::merge_branch(root, "main", &branch).unwrap();
+        orchestrator::merge_branch(root, "main", &branch, "test-proj", "t-3").unwrap();
     assert!(matches!(outcome, MergeOutcome::Ok), "expected Ok, got {:?}", outcome);
     assert!(root.join("new.txt").exists(), "merged file should be in main");
 }
@@ -135,7 +135,7 @@ fn merge_branch_conflict_returns_conflict_outcome() {
 
     let branch = orchestrator::worktree_branch("t-4", "fork");
     let (outcome, _stdout, _stderr) =
-        orchestrator::merge_branch(root, "main", &branch).unwrap();
+        orchestrator::merge_branch(root, "main", &branch, "test-proj", "t-4").unwrap();
     match outcome {
         MergeOutcome::Conflict { detail } => {
             assert!(!detail.is_empty(), "conflict detail should be populated");
@@ -164,7 +164,8 @@ fn merge_branch_blocks_when_dirty_overlap() {
     fs::write(root.join("new.txt"), "uncommitted on main\n").unwrap();
 
     let branch = orchestrator::worktree_branch("t-5", "overlap");
-    let (outcome, _, _) = orchestrator::merge_branch(root, "main", &branch).unwrap();
+    let (outcome, _, _) =
+        orchestrator::merge_branch(root, "main", &branch, "test-proj", "t-5").unwrap();
     match outcome {
         MergeOutcome::BlockedByDirtyTree { overlap } => {
             assert_eq!(overlap, vec!["new.txt".to_string()]);
@@ -203,7 +204,8 @@ fn merge_branch_proceeds_when_dirty_non_overlap() {
     fs::write(root.join("untouched.txt"), "uncommitted change\n").unwrap();
 
     let branch = orchestrator::worktree_branch("t-6", "disjoint");
-    let (outcome, _, _) = orchestrator::merge_branch(root, "main", &branch).unwrap();
+    let (outcome, _, _) =
+        orchestrator::merge_branch(root, "main", &branch, "test-proj", "t-6").unwrap();
     assert!(matches!(outcome, MergeOutcome::Ok), "expected Ok, got {:?}", outcome);
 
     // Branch's file is now in main
