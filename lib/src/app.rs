@@ -141,16 +141,29 @@ pub struct App {
     pub metrics_progress: Option<(usize, usize)>,
     pub pending_dispatch: Option<PendingDispatch>,
     pub show_inactive: bool,
+    /// When false, the Sessions view hides any session whose tmux name is
+    /// claimed by an orchestrator or worker in the current projects
+    /// snapshot. Toggled with `W` so the user can drop into the raw view
+    /// when something looks off.
+    pub show_orch_workers: bool,
     pub projects: ProjectsSnapshot,
     /// Cursor in the Projects tab. `0..projects.len()` selects a project;
     /// task selection within the project lives in [`Self::projects_task_sel`].
     pub projects_sel: usize,
     pub projects_task_sel: usize,
+    /// Kanban column cursor: 0=Running, 1=Done, 2=Failed. Drives which
+    /// column [`Self::projects_task_sel`] indexes into.
+    pub projects_col: usize,
     /// True while the folder picker / prompt input flow is creating a
     /// new project task (vs. spawning a regular session). Used to route
     /// the picker's space-pick and prompt-input's enter to the project
     /// flow instead of [`spawn::spawn_claude_session`].
     pub creating_project_task: bool,
+    /// True while the folder picker is in "register a project, no task"
+    /// mode (the `N` shortcut from the Projects view). Picking a folder
+    /// just runs [`crate::orchestrator::ensure_project_registered`] and
+    /// closes the picker — no orchestrator is spawned.
+    pub registering_project_only: bool,
     /// cwd captured when the picker chose a folder in Projects mode. Held
     /// until the user submits the task prompt; consumed in
     /// [`Self::submit_project_task`].
@@ -222,10 +235,13 @@ impl App {
             metrics_progress: None,
             pending_dispatch: None,
             show_inactive: false,
+            show_orch_workers: false,
             projects: ProjectsSnapshot::empty(),
             projects_sel: 0,
             projects_task_sel: 0,
+            projects_col: 0,
             creating_project_task: false,
+            registering_project_only: false,
             projects_pending_cwd: None,
             last_sessions: Vec::new(),
             known_session_ids: None,
@@ -240,6 +256,11 @@ impl App {
 
     pub fn toggle_show_inactive(&mut self) {
         self.show_inactive = !self.show_inactive;
+        self.rebuild_groups();
+    }
+
+    pub fn toggle_show_orch_workers(&mut self) {
+        self.show_orch_workers = !self.show_orch_workers;
         self.rebuild_groups();
     }
 
@@ -259,39 +280,71 @@ impl App {
             .projects
             .get(self.projects_sel)
             .map(|p| p.id.clone());
+        let first_load = self.projects.projects.is_empty();
         self.projects = snap;
         if let Some(pid) = prev_pid {
             if let Some(idx) = self.projects.projects.iter().position(|p| p.id == pid) {
                 self.projects_sel = idx;
             }
         }
-        self.clamp_projects_cursor();
+        // Jump-if-empty only on the very first load — once the user is in the
+        // tab, an empty focused column means they explicitly navigated there
+        // (or a task drained out of it), and silently overriding their
+        // selection on every rescan is the bug we're avoiding.
+        if first_load {
+            self.clamp_projects_cursor_jump_if_empty();
+        } else {
+            self.clamp_projects_cursor();
+        }
+        // Newly-discovered orchestrator/worker tmux names need to disappear
+        // from the Sessions view immediately; without this the hide flag
+        // would only take effect on the next session scan.
+        self.rebuild_groups();
     }
 
     fn clamp_projects_cursor(&mut self) {
+        self.clamp_projects_cursor_inner(false);
+    }
+
+    /// Like [`Self::clamp_projects_cursor`] but, if the focused column ends up
+    /// empty, jumps to the first non-empty column. Use at user-driven entry
+    /// points (project switch, approve_review) — not on every rescan, since
+    /// that would override an explicit column selection on the next tick.
+    fn clamp_projects_cursor_jump_if_empty(&mut self) {
+        self.clamp_projects_cursor_inner(true);
+    }
+
+    fn clamp_projects_cursor_inner(&mut self, jump_if_empty: bool) {
         let n = self.projects.projects.len();
         if n == 0 {
             self.projects_sel = 0;
             self.projects_task_sel = 0;
+            self.projects_col = 0;
             return;
         }
         if self.projects_sel >= n {
             self.projects_sel = n - 1;
         }
-        let task_count = self
-            .projects
-            .projects
-            .get(self.projects_sel)
-            .and_then(|p| self.projects.tasks.get(&p.id))
-            .map(|v| v.len())
-            .unwrap_or(0);
-        if task_count == 0 {
+        if self.projects_col > 4 {
+            self.projects_col = 4;
+        }
+        if jump_if_empty && self.kanban_column_len(self.projects_col) == 0 {
+            for col in 0..5 {
+                if self.kanban_column_len(col) > 0 {
+                    self.projects_col = col;
+                    break;
+                }
+            }
+        }
+        let col_count = self.kanban_column_len(self.projects_col);
+        if col_count == 0 {
             self.projects_task_sel = 0;
-        } else if self.projects_task_sel >= task_count {
-            self.projects_task_sel = task_count - 1;
+        } else if self.projects_task_sel >= col_count {
+            self.projects_task_sel = col_count - 1;
         }
     }
 
+    /// Cycle through projects (top chip strip).
     pub fn projects_move_down(&mut self) {
         if self.projects.projects.is_empty() {
             return;
@@ -306,37 +359,133 @@ impl App {
         self.projects_task_sel = 0;
     }
 
+    /// Move cursor down within the current kanban column.
     pub fn projects_task_next(&mut self) {
-        let task_count = self
-            .projects
-            .projects
-            .get(self.projects_sel)
-            .and_then(|p| self.projects.tasks.get(&p.id))
-            .map(|v| v.len())
-            .unwrap_or(0);
-        if task_count == 0 {
+        let col_count = self.kanban_column_len(self.projects_col);
+        if col_count == 0 {
             return;
         }
         self.projects_task_sel =
-            (self.projects_task_sel + 1).min(task_count - 1);
+            (self.projects_task_sel + 1).min(col_count - 1);
     }
 
     pub fn projects_task_prev(&mut self) {
         self.projects_task_sel = self.projects_task_sel.saturating_sub(1);
     }
 
+    /// Move kanban cursor one column right (Planning → Running → Review
+    /// → Done → Failed). Clamps the row cursor to the new column's length.
+    pub fn projects_col_right(&mut self) {
+        if self.projects_col < 4 {
+            self.projects_col += 1;
+            self.projects_task_sel = 0;
+        }
+    }
+
+    pub fn projects_col_left(&mut self) {
+        if self.projects_col > 0 {
+            self.projects_col -= 1;
+            self.projects_task_sel = 0;
+        }
+    }
+
     pub fn selected_project(&self) -> Option<&crate::orchestrator::Project> {
         self.projects.projects.get(self.projects_sel)
     }
 
-    pub fn selected_project_task(&self) -> Option<&crate::orchestrator::TaskState> {
-        let p = self.selected_project()?;
-        self.projects
-            .tasks
-            .get(&p.id)
-            .and_then(|v| v.get(self.projects_task_sel))
+    /// Tasks in the currently-selected project that match the given
+    /// kanban column. Columns are derived from `TaskStatus` + worker
+    /// presence: a Running task with no workers is in "Planning"
+    /// (orchestrator is still decomposing); Running + workers is true
+    /// Running; Review/Done/Failed map straight from status.
+    ///
+    /// Indices: 0=Planning, 1=Running, 2=Review, 3=Done, 4=Failed.
+    /// Order matches the underlying `tasks` Vec (already sorted
+    /// newest-first by the orchestrator).
+    pub fn kanban_column_tasks(
+        &self,
+        col: usize,
+    ) -> Vec<&crate::orchestrator::TaskState> {
+        let Some(p) = self.selected_project() else {
+            return Vec::new();
+        };
+        let Some(tasks) = self.projects.tasks.get(&p.id) else {
+            return Vec::new();
+        };
+        use crate::orchestrator::TaskStatus;
+        tasks
+            .iter()
+            .filter(|t| match col {
+                0 => t.status == TaskStatus::Running && t.workers.is_empty(),
+                1 => t.status == TaskStatus::Running && !t.workers.is_empty(),
+                2 => t.status == TaskStatus::Review,
+                3 => t.status == TaskStatus::Done,
+                _ => t.status == TaskStatus::Failed,
+            })
+            .collect()
     }
 
+    pub fn kanban_column_len(&self, col: usize) -> usize {
+        self.kanban_column_tasks(col).len()
+    }
+
+    pub fn selected_project_task(&self) -> Option<&crate::orchestrator::TaskState> {
+        let col = self.kanban_column_tasks(self.projects_col);
+        col.get(self.projects_task_sel).copied()
+    }
+
+    /// Approve the focused Review task: persist `status = Done` and reflect
+    /// the change in the in-memory snapshot so the UI updates without
+    /// waiting for the next scan tick. No-op if the focused task isn't in
+    /// Review (the keybind is gated on the Review column anyway, this is
+    /// belt-and-braces for safety).
+    pub fn approve_review_task(&mut self) -> bool {
+        use crate::orchestrator::TaskStatus;
+        let Some(t) = self.selected_project_task() else { return false };
+        if t.status != TaskStatus::Review {
+            return false;
+        }
+        let project_id = t.project_id.clone();
+        let task_id = t.task_id.clone();
+
+        let updated = match crate::orchestrator::update_task_state(&project_id, &task_id, |s| {
+            s.status = TaskStatus::Done;
+            s.updated_at = crate::orchestrator::now_unix_secs();
+        }) {
+            Ok(s) => s,
+            Err(e) => {
+                self.set_status(format!("approve failed: {}", e));
+                return false;
+            }
+        };
+
+        // Mirror in the in-memory snapshot so the UI updates without
+        // waiting for the next scan tick.
+        if let Some(tasks) = self.projects.tasks.get_mut(&project_id) {
+            if let Some(t) = tasks.iter_mut().find(|t| t.task_id == task_id) {
+                t.status = TaskStatus::Done;
+                t.updated_at = updated.updated_at;
+            }
+        }
+
+        // Now that the human has approved, tear down the orchestrator and
+        // worker tmux sessions — same cleanup the CLI runs when a task
+        // becomes Failed. Snapshot the orchestrator pane to a log file
+        // first so `f` (focus orchestrator terminal) keeps working
+        // post-cleanup.
+        crate::orchestrator::cleanup_task_sessions(&updated);
+
+        // Cursor was on the Review task we just promoted; clamp will pick
+        // the next item in Review (or jump to a non-empty column).
+        self.clamp_projects_cursor_jump_if_empty();
+        self.set_status(format!("approved {}", crate::orchestrator::short_task_id(&task_id)));
+        true
+    }
+
+    /// `tmux_session_name → SessionInfo` over the latest scan. Built fresh
+    /// per call so it always reflects [`Self::last_sessions`]. Used by the
+    /// Projects view to enrich task cards with live agent state (context
+    /// tokens, current tool, idle/processing/waiting).
     pub fn sessions_by_tmux(&self) -> HashMap<&str, &SessionInfo> {
         let mut out = HashMap::new();
         for s in &self.last_sessions {
@@ -434,6 +583,37 @@ impl App {
         self.view = View::FolderPicker;
     }
 
+    /// Open the folder picker in "register a project, no task" mode. The
+    /// space/. picks register the chosen folder via
+    /// [`Self::register_picked_project`] and exit the picker — no
+    /// orchestrator is spawned.
+    pub fn enter_folder_picker_for_register_only(&mut self) {
+        let start = self
+            .selected_project()
+            .map(|p| p.root.clone())
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        self.folder_picker = Some(FolderPicker::new(start));
+        self.registering_project_only = true;
+        self.view = View::FolderPicker;
+    }
+
+    /// Register `cwd` as a project (no task spawned) and close the picker.
+    /// Returns the registered project name on success so callers can
+    /// surface it in a status message.
+    pub fn register_picked_project(&mut self, cwd: &str) -> Result<String, String> {
+        let path = PathBuf::from(cwd);
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| cwd.to_string());
+        let result = crate::orchestrator::ensure_project_registered(&path, &name)
+            .map(|_| name)
+            .map_err(|e| e.to_string());
+        self.close_folder_picker();
+        result
+    }
+
     /// Picker chose `cwd` while in projects-creation mode. Stash the cwd
     /// and switch to a multi-line prompt input; the actual orchestrator
     /// spawn happens in [`Self::submit_project_task`].
@@ -470,6 +650,7 @@ impl App {
         self.folder_picker = None;
         self.gh_create_input = None;
         self.creating_project_task = false;
+        self.registering_project_only = false;
         self.view = View::Grid;
     }
 
@@ -589,7 +770,11 @@ impl App {
         //      to the timeout and the user sees a "session that just
         //      sits there empty" — the real-world failure mode that
         //      motivated this comment.
-        let scanner_idle = self.groups.iter().flat_map(|g| &g.sessions).any(|s| {
+        // Walk the unfiltered scan set, not `self.groups`: orchestrator
+        // and worker tmux names are hidden from `groups` by the Sessions
+        // view filter, so checking `groups` here would block dispatch
+        // forever for the very sessions we need to dispatch into.
+        let scanner_idle = self.last_sessions.iter().any(|s| {
             s.tmux_session.as_deref() == Some(pd.tmux.as_str())
                 && s.state == SessionState::Idle
         });
@@ -678,6 +863,7 @@ impl App {
         let Some(task) = self.selected_project_task().cloned() else { return };
         let status_label = match task.status {
             crate::orchestrator::TaskStatus::Running => "running",
+            crate::orchestrator::TaskStatus::Review => "review",
             crate::orchestrator::TaskStatus::Done => "done",
             crate::orchestrator::TaskStatus::Failed => "failed",
             crate::orchestrator::TaskStatus::Backlog => "backlog",
@@ -910,11 +1096,24 @@ impl App {
     fn rebuild_groups(&mut self) {
         let prev_id = self.selected_session_id();
         let acks_active = !self.acks.is_empty();
+        let roles = self.projects.roles_by_tmux();
 
         let sessions: Vec<SessionInfo> = self
             .last_sessions
             .iter()
             .filter(|s| self.show_inactive || s.state != SessionState::Inactive)
+            .filter(|s| {
+                // Hide tmux sessions claimed by an orchestrator or worker
+                // unless the user has asked to see them. Sessions without a
+                // tmux name (legacy/manual launches) always show.
+                if self.show_orch_workers {
+                    return true;
+                }
+                match s.tmux_session.as_deref() {
+                    Some(name) => !roles.contains_key(name),
+                    None => true,
+                }
+            })
             .cloned()
             .collect();
 

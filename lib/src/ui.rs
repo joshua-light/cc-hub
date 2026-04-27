@@ -1262,6 +1262,7 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let (status_label, status_color) = match t.status {
         crate::orchestrator::TaskStatus::Running => ("running", Color::LightYellow),
+        crate::orchestrator::TaskStatus::Review => ("review", Color::LightCyan),
         crate::orchestrator::TaskStatus::Done => ("done", Color::LightGreen),
         crate::orchestrator::TaskStatus::Failed => ("failed", Color::LightRed),
         crate::orchestrator::TaskStatus::Backlog => ("backlog", Color::Rgb(120, 140, 200)),
@@ -2543,6 +2544,7 @@ fn render_project_tasks(frame: &mut Frame, area: Rect, app: &App) {
         // Status badge — colour reflects state at a glance.
         let (status_label, status_color) = match t.status {
             crate::orchestrator::TaskStatus::Running => ("running", Color::LightYellow),
+            crate::orchestrator::TaskStatus::Review => ("review", Color::LightCyan),
             crate::orchestrator::TaskStatus::Done => ("done", Color::LightGreen),
             crate::orchestrator::TaskStatus::Failed => ("failed", Color::LightRed),
             crate::orchestrator::TaskStatus::Backlog => ("backlog", Color::Rgb(120, 140, 200)),
