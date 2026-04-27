@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
@@ -94,12 +94,16 @@ pub fn persist_title(sid: &str, title: &str) -> std::io::Result<()> {
 }
 
 /// Cached result of resolving the configured spawn command through the
-/// user's login shell. `None` means resolution failed (no such command /
-/// alias) and no future title attempt should be made this process.
-/// `Some(argv)` is the direct argv to exec, skipping the shell on every
-/// call. Resolution itself still pays one `shell -ic` cost so aliases in
-/// the user's rc file work.
-static RESOLVED_CMD: OnceLock<Option<Vec<String>>> = OnceLock::new();
+/// user's login shell. `Some(argv)` is the direct argv to exec, skipping
+/// the shell on every call; `None` means the last resolve attempt failed
+/// (e.g., transient shell hiccup, missing alias). The cache TTLs out so a
+/// single failure can't permanently disable titling for the process.
+static RESOLVED_CMD: Mutex<Option<ResolveCache>> = Mutex::new(None);
+
+struct ResolveCache {
+    fetched_at: Instant,
+    value: Option<Vec<String>>,
+}
 
 /// Put the child in its own session so it can't touch our controlling
 /// terminal. An interactive zsh left in our session calls `tcsetpgrp` on
@@ -174,43 +178,61 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
 /// Recognizes either a path (from `command -v`) or an alias body (from
 /// `alias <name>`, whose output is roughly `<name>='claude …'` in zsh /
 /// `alias <name>='claude …'` in bash).
-fn resolve_spawn_command() -> Option<&'static [String]> {
-    RESOLVED_CMD
-        .get_or_init(|| {
-            let cmd_name = &config::get().spawn.command;
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-            // `command -v` is POSIX and prints the path for a binary; if it
-            // isn't found we fall through to `alias`, which prints the body
-            // so we can recover an alias expansion. Redirecting stderr to
-            // /dev/null keeps shell chatter out of our stdout parse.
-            let script = format!(
-                "command -v {name} 2>/dev/null; alias {name} 2>/dev/null",
-                name = cmd_name
-            );
-            let mut cmd = Command::new(&shell);
-            cmd.arg("-ic")
-                .arg(&script)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null());
-            let output = run_with_timeout(cmd, config::get().title.resolve_timeout())?;
-            if !output.status.success() {
-                warn!("title: alias resolve exit={}", output.status);
-                return None;
-            }
-            let raw = String::from_utf8_lossy(&output.stdout);
-            let argv = parse_resolution(&raw);
-            match &argv {
-                Some(v) => debug!("title: resolved {} → {:?}", cmd_name, v),
-                None => warn!(
-                    "title: could not resolve {} from shell output: {:?}",
-                    cmd_name,
-                    raw.trim()
-                ),
-            }
-            argv
-        })
-        .as_deref()
+fn resolve_spawn_command() -> Option<Vec<String>> {
+    // Successful resolutions are stable enough to cache for an hour; failures
+    // re-attempt every minute so a transient shell hiccup doesn't disable
+    // titling for the rest of the process.
+    const SUCCESS_TTL: Duration = Duration::from_secs(3600);
+    const FAILURE_TTL: Duration = Duration::from_secs(60);
+
+    let mut guard = RESOLVED_CMD.lock().unwrap_or_else(|e| e.into_inner());
+    let fresh = guard.as_ref().is_some_and(|c| {
+        let ttl = if c.value.is_some() { SUCCESS_TTL } else { FAILURE_TTL };
+        c.fetched_at.elapsed() < ttl
+    });
+    if !fresh {
+        let value = compute_resolve();
+        *guard = Some(ResolveCache {
+            fetched_at: Instant::now(),
+            value,
+        });
+    }
+    guard.as_ref().and_then(|c| c.value.clone())
+}
+
+fn compute_resolve() -> Option<Vec<String>> {
+    let cmd_name = &config::get().spawn.command;
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+    // `command -v` is POSIX and prints the path for a binary; if it isn't
+    // found we fall through to `alias`, which prints the body so we can
+    // recover an alias expansion. Redirecting stderr to /dev/null keeps
+    // shell chatter out of our stdout parse.
+    let script = format!(
+        "command -v {name} 2>/dev/null; alias {name} 2>/dev/null",
+        name = cmd_name
+    );
+    let mut cmd = Command::new(&shell);
+    cmd.arg("-ic")
+        .arg(&script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let output = run_with_timeout(cmd, config::get().title.resolve_timeout())?;
+    if !output.status.success() {
+        warn!("title: alias resolve exit={}", output.status);
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let argv = parse_resolution(&raw);
+    match &argv {
+        Some(v) => debug!("title: resolved {} → {:?}", cmd_name, v),
+        None => warn!(
+            "title: could not resolve {} from shell output: {:?}",
+            cmd_name,
+            raw.trim()
+        ),
+    }
+    argv
 }
 
 /// Parse the output of `command -v <name>; alias <name>`. Prefers a full
