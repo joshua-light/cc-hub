@@ -600,6 +600,9 @@ async fn run(
                             },
                         }
                     }
+                    (View::ProjectsResult, KeyCode::Char('e')) => {
+                        app.toggle_result_artifact_expanded();
+                    }
                     (View::ProjectsResult, KeyCode::Char('o')) => {
                         match app.selected_result_artifact().map(|a| a.path.clone()) {
                             None => app.set_status("no artifact to open".into()),
