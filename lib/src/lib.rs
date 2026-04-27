@@ -21,6 +21,8 @@ pub mod ui;
 pub mod usage;
 pub mod watcher;
 
+pub use ratatui_image;
+
 use ratatui::Frame;
 
 #[no_mangle]

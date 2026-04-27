@@ -3,6 +3,7 @@ use crate::config;
 use crate::conversation::{StateExplanation, Verdict};
 use crate::metrics::{MetricsAnalysis, ModelStats, SessionSummary, ToolStats};
 use crate::models::{short_sid, SessionDetail, SessionInfo, SessionState};
+use crate::orchestrator::Artifact;
 use crate::usage::UsageInfo;
 use chrono::Duration as ChronoDuration;
 use chrono::{DateTime, Local, TimeZone};
@@ -11,6 +12,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
+use ratatui_image::StatefulImage;
+use std::path::Path;
 
 fn cell_height() -> u16 {
     config::get().ui.cell_height.max(1)
@@ -980,15 +983,279 @@ fn render_popup(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(content, inner);
 }
 
+/// What the popup should render for an artifact. Path/kind hints determine
+/// whether we inline an image, an excerpt of a text/log file, or just a card
+/// that links to an external resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CardKind {
+    Image,
+    Video,
+    Text,
+    Url,
+    Fallback,
+}
+
+/// Body height (excluding the 1-line caption header) for a given card kind.
+const CARD_IMAGE_BODY_H: u16 = 10;
+const CARD_TEXT_BODY_H: u16 = 12;
+const CARD_VIDEO_BODY_H: u16 = 2;
+const CARD_URL_BODY_H: u16 = 2;
+const CARD_FALLBACK_BODY_H: u16 = 1;
+
+fn classify_artifact(a: &Artifact) -> CardKind {
+    let kind = a.kind.to_ascii_lowercase();
+    let path = &a.path;
+    if path.starts_with("http://") || path.starts_with("https://") || kind == "url" {
+        return CardKind::Url;
+    }
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match kind.as_str() {
+        "screenshot" | "image" | "photo" => return CardKind::Image,
+        "video" => return CardKind::Video,
+        "log" | "build" | "test" | "diff" | "text" | "output" => return CardKind::Text,
+        _ => {}
+    }
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => CardKind::Image,
+        "mp4" | "mov" | "webm" | "mkv" => CardKind::Video,
+        "log" | "txt" | "md" | "diff" | "patch" | "json" | "yaml" | "yml" => CardKind::Text,
+        _ => CardKind::Fallback,
+    }
+}
+
+fn card_body_height(kind: CardKind) -> u16 {
+    match kind {
+        CardKind::Image => CARD_IMAGE_BODY_H,
+        CardKind::Text => CARD_TEXT_BODY_H,
+        CardKind::Video => CARD_VIDEO_BODY_H,
+        CardKind::Url => CARD_URL_BODY_H,
+        CardKind::Fallback => CARD_FALLBACK_BODY_H,
+    }
+}
+
+/// Reads up to 8 KiB of `path` as lossy UTF-8 and splits into lines. Returns
+/// `None` for binary files (>5 % non-text bytes in the leading 1 KiB) so the
+/// caller can show "(binary file)" rather than dumping garbage at the user.
+fn read_text_excerpt(path: &Path, max_bytes: usize) -> Option<(Vec<String>, usize)> {
+    let bytes = std::fs::read(path).ok()?;
+    let probe_len = bytes.len().min(1024);
+    if probe_len > 0 {
+        let non_text = bytes[..probe_len]
+            .iter()
+            .filter(|&&b| b == 0 || (b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t'))
+            .count();
+        if non_text * 20 > probe_len {
+            return None;
+        }
+    }
+    let take = bytes.len().min(max_bytes);
+    let head = String::from_utf8_lossy(&bytes[..take]).into_owned();
+    let total_lines = bytes.iter().filter(|&&b| b == b'\n').count() + 1;
+    let head_lines: Vec<String> = head.lines().map(|s| s.to_string()).collect();
+    let truncated = total_lines.saturating_sub(head_lines.len());
+    Some((head_lines, truncated))
+}
+
+fn diff_line_style(line: &str) -> Style {
+    if line.starts_with("+++") || line.starts_with("---") || line.starts_with("@@") {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else if line.starts_with('+') {
+        Style::default().fg(Color::LightGreen)
+    } else if line.starts_with('-') {
+        Style::default().fg(Color::LightRed)
+    } else {
+        Style::default().fg(Color::Gray)
+    }
+}
+
+fn evidence_card_header(a: &Artifact, selected: bool) -> Line<'static> {
+    let basename = Path::new(&a.path)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| a.path.clone());
+    let stripe = if selected { "▌ " } else { "  " };
+    let stripe_color = if selected { Color::LightCyan } else { Color::DarkGray };
+    let name_style = if selected {
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let mut spans = vec![
+        Span::styled(stripe, Style::default().fg(stripe_color)),
+        Span::styled(a.kind.clone(), Style::default().fg(Color::LightMagenta)),
+        Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+        Span::styled(basename, name_style),
+    ];
+    if let Some(c) = a.caption.as_deref() {
+        if !c.is_empty() {
+            spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)),);
+            spans.push(Span::styled(c.to_string(), Style::default().fg(Color::Rgb(180, 180, 200))));
+        }
+    }
+    Line::from(spans)
+}
+
+fn render_text_card_body(frame: &mut Frame, area: Rect, a: &Artifact) {
+    if area.height == 0 {
+        return;
+    }
+    let path = Path::new(&a.path);
+    let kind_lower = a.kind.to_ascii_lowercase();
+    let ext_lower = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    let is_diff = kind_lower == "diff" || ext_lower == "diff" || ext_lower == "patch";
+    let lines: Vec<Line<'static>> = match read_text_excerpt(path, 8 * 1024) {
+        None => match std::fs::metadata(path) {
+            Ok(_) => vec![Line::from(Span::styled(
+                "  (binary file — open externally with `o`)",
+                Style::default().fg(Color::DarkGray),
+            ))],
+            Err(_) => vec![Line::from(Span::styled(
+                format!("  (cannot read {})", path.display()),
+                Style::default().fg(Color::Rgb(220, 100, 100)),
+            ))],
+        },
+        Some((mut content, truncated)) => {
+            let body_rows = (area.height as usize).saturating_sub(if truncated > 0 { 1 } else { 0 });
+            if content.len() > body_rows {
+                content.truncate(body_rows);
+            }
+            let mut out: Vec<Line<'static>> = content
+                .into_iter()
+                .map(|s| {
+                    let style = if is_diff {
+                        diff_line_style(&s)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    Line::from(Span::styled(format!("  {}", s), style))
+                })
+                .collect();
+            if truncated > 0 {
+                out.push(Line::from(Span::styled(
+                    format!("  … (truncated, {} more line{})", truncated, if truncated == 1 { "" } else { "s" }),
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                )));
+            }
+            out
+        }
+    };
+    let p = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(p, area);
+}
+
+fn render_video_card_body(frame: &mut Frame, area: Rect, a: &Artifact) {
+    if area.height == 0 {
+        return;
+    }
+    let basename = Path::new(&a.path)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| a.path.clone());
+    let lines = vec![
+        Line::from(Span::styled(
+            "  ▶ press `o` to play in external player",
+            Style::default().fg(Color::LightCyan),
+        )),
+        Line::from(Span::styled(
+            format!("  {}", basename),
+            Style::default().fg(Color::Rgb(160, 160, 180)),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_url_card_body(frame: &mut Frame, area: Rect, a: &Artifact) {
+    if area.height == 0 {
+        return;
+    }
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("  {}", a.path),
+            Style::default().fg(Color::LightBlue).add_modifier(Modifier::UNDERLINED),
+        )),
+        Line::from(Span::styled(
+            "  press `o` to open in browser",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_fallback_card_body(frame: &mut Frame, area: Rect, a: &Artifact) {
+    if area.height == 0 {
+        return;
+    }
+    let basename = Path::new(&a.path)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| a.path.clone());
+    let line = Line::from(Span::styled(
+        format!("  {}", basename),
+        Style::default().fg(Color::Rgb(160, 160, 180)),
+    ));
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn render_image_placeholder(frame: &mut Frame, area: Rect, msg: &str) {
+    if area.height == 0 {
+        return;
+    }
+    let line = Line::from(Span::styled(
+        format!("  {}", msg),
+        Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+    ));
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Decode `path` into the per-app image cache, using the picker's protocol
+/// detection. Returns `true` when the entry is now present (either freshly
+/// decoded or already cached); `false` on decode failure (recorded so we
+/// don't retry on every frame).
+fn ensure_image_decoded(app: &mut App, path: &str) -> bool {
+    if app.artifact_images.contains_key(path) {
+        return true;
+    }
+    if app.artifact_image_failed.contains(path) {
+        return false;
+    }
+    let Some(picker) = app.image_picker.as_ref() else {
+        app.artifact_image_failed.insert(path.to_string());
+        return false;
+    };
+    let img = match image::ImageReader::open(path)
+        .ok()
+        .and_then(|r| r.with_guessed_format().ok())
+        .and_then(|r| r.decode().ok())
+    {
+        Some(i) => i,
+        None => {
+            app.artifact_image_failed.insert(path.to_string());
+            return false;
+        }
+    };
+    let proto = picker.new_resize_protocol(img);
+    app.artifact_images.insert(path.to_string(), proto);
+    true
+}
+
 /// "Result" popup for the selected Projects task: status + age + truncated
-/// prompt at the top, the orchestrator's `summary` next, then the artifact
-/// list with a `j/k` cursor. The currently-selected artifact is what `c`
-/// copies and `o` opens.
-fn render_projects_result(frame: &mut Frame, area: Rect, app: &App) {
+/// prompt at the top, the orchestrator's `summary` next, then per-artifact
+/// "evidence cards" inlining the actual content (image, text excerpt, URL,
+/// or video hint) so the user sees *why* the task succeeded without clicking
+/// out to the filesystem.
+fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     let popup_area = centered_rect(area, 0.85);
     frame.render_widget(Clear, popup_area);
 
-    let Some(t) = app.selected_project_task() else {
+    let Some(t) = app.selected_project_task().cloned() else {
         frame.render_widget(popup_block(" Result — no task selected "), popup_area);
         return;
     };
@@ -1009,11 +1276,16 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 
+    if inner.height == 0 {
+        return;
+    }
+
     let now_secs = now_ms() / 1000;
     let age = format_age(now_secs.saturating_sub(t.updated_at as u64));
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(Line::from(vec![
+    // ── Header: status badge + prompt excerpt ──────────────────────────────
+    let mut header_lines: Vec<Line<'static>> = Vec::new();
+    header_lines.push(Line::from(vec![
         Span::styled(
             format!("[{}]", status_label),
             Style::default().fg(status_color).add_modifier(Modifier::BOLD),
@@ -1026,117 +1298,206 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::Rgb(150, 130, 200)),
         ),
     ]));
-    lines.push(Line::raw(""));
-
-    // Prompt — first ~3 lines, ellipsised.
-    lines.push(Line::from(Span::styled(
+    header_lines.push(Line::raw(""));
+    header_lines.push(Line::from(Span::styled(
         "Prompt",
         Style::default().fg(Color::Rgb(120, 160, 220)).add_modifier(Modifier::BOLD),
     )));
     let prompt_lines: Vec<&str> = t.prompt.lines().take(3).collect();
     if prompt_lines.is_empty() {
-        lines.push(Line::from(Span::styled(
+        header_lines.push(Line::from(Span::styled(
             "  (empty)",
             Style::default().fg(Color::DarkGray),
         )));
     } else {
         for line in &prompt_lines {
-            lines.push(Line::from(Span::styled(
+            header_lines.push(Line::from(Span::styled(
                 format!("  {}", line),
                 Style::default().fg(Color::Gray),
             )));
         }
         if t.prompt.lines().count() > 3 {
-            lines.push(Line::from(Span::styled(
+            header_lines.push(Line::from(Span::styled(
                 "  …",
                 Style::default().fg(Color::DarkGray),
             )));
         }
     }
-    lines.push(Line::raw(""));
+    header_lines.push(Line::raw(""));
 
-    // Summary section.
-    lines.push(Line::from(Span::styled(
+    // ── Summary section ────────────────────────────────────────────────────
+    let mut summary_lines: Vec<Line<'static>> = Vec::new();
+    summary_lines.push(Line::from(Span::styled(
         "Summary",
         Style::default().fg(Color::Rgb(120, 160, 220)).add_modifier(Modifier::BOLD),
     )));
     match t.summary.as_deref() {
-        None => lines.push(Line::from(Span::styled(
+        None => summary_lines.push(Line::from(Span::styled(
             "  (no summary yet)",
             Style::default().fg(Color::DarkGray),
         ))),
         Some(s) => {
             for line in s.lines() {
-                lines.push(Line::from(Span::styled(
+                summary_lines.push(Line::from(Span::styled(
                     format!("  {}", line),
                     Style::default().fg(Color::Gray),
                 )));
             }
         }
     }
-    lines.push(Line::raw(""));
-
-    // Artifacts section.
-    lines.push(Line::from(Span::styled(
-        "Artifacts",
+    summary_lines.push(Line::raw(""));
+    summary_lines.push(Line::from(Span::styled(
+        "Evidence",
         Style::default().fg(Color::Rgb(120, 160, 220)).add_modifier(Modifier::BOLD),
     )));
+
+    // ── Layout & scrolling ────────────────────────────────────────────────
+    let header_h = header_lines.len() as u16;
+    let summary_h = summary_lines.len() as u16;
+    let body_h = inner.height.saturating_sub(1);
+    let body_area = Rect::new(inner.x, inner.y, inner.width, body_h);
+    let footer_area = Rect::new(inner.x, inner.y + body_h, inner.width, 1);
+
+    let mut card_meta: Vec<(usize, CardKind, u16)> = Vec::new(); // (idx, kind, body_h)
+    for (idx, a) in t.artifacts.iter().enumerate() {
+        let kind = classify_artifact(a);
+        card_meta.push((idx, kind, card_body_height(kind)));
+    }
+
+    let mut canvas_card_tops: Vec<u16> = Vec::with_capacity(card_meta.len());
+    let mut next_y = header_h + summary_h;
+    for (_, _, body) in &card_meta {
+        canvas_card_tops.push(next_y);
+        // Card = header(1) + body + spacer(1).
+        next_y = next_y.saturating_add(1 + body + 1);
+    }
     if t.artifacts.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  (none)",
+        next_y = next_y.saturating_add(1); // "(no artifacts)" line
+    }
+    let total_canvas_h = next_y;
+
+    // Auto-scroll so the selected card stays on-screen.
+    if !t.artifacts.is_empty() && body_h > 0 {
+        let sel_idx = app.result_artifact_sel.min(t.artifacts.len() - 1);
+        let sel_top = canvas_card_tops[sel_idx];
+        let sel_h = 1 + card_meta[sel_idx].2 + 1;
+        if sel_top < app.result_scroll {
+            app.result_scroll = sel_top;
+        } else if sel_top + sel_h > app.result_scroll + body_h {
+            app.result_scroll = sel_top + sel_h - body_h;
+        }
+    }
+    let max_scroll = total_canvas_h.saturating_sub(body_h);
+    if app.result_scroll > max_scroll {
+        app.result_scroll = max_scroll;
+    }
+    let scroll = app.result_scroll;
+
+    // Render header + summary as one paragraph with scroll. Image cards are
+    // overlaid on top of placeholder lines we'll write into the lines vec
+    // below, so the Paragraph never tries to "draw" the image area itself.
+    let mut canvas_lines: Vec<Line<'static>> = Vec::with_capacity(total_canvas_h as usize);
+    canvas_lines.extend(header_lines);
+    canvas_lines.extend(summary_lines);
+    if t.artifacts.is_empty() {
+        canvas_lines.push(Line::from(Span::styled(
+            "  (no artifacts attached)",
             Style::default().fg(Color::DarkGray),
         )));
     } else {
         for (idx, a) in t.artifacts.iter().enumerate() {
             let selected = idx == app.result_artifact_sel;
-            let arrow = if selected { "▌ " } else { "  " };
-            let basename = std::path::Path::new(&a.path)
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| a.path.clone());
-            let caption = a.caption.as_deref().unwrap_or("");
-            let row_style = if selected {
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            let added = format_age(now_secs.saturating_sub(a.added_at as u64));
-            lines.push(Line::from(vec![
-                Span::styled(arrow, Style::default().fg(Color::LightCyan)),
-                Span::styled(a.kind.clone(), Style::default().fg(Color::LightMagenta)),
-                Span::styled(" · ", Style::default().fg(Color::DarkGray)),
-                Span::styled(basename, row_style),
-                Span::styled(" · ", Style::default().fg(Color::DarkGray)),
-                Span::styled(caption.to_string(), Style::default().fg(Color::Rgb(180, 180, 200))),
-                Span::raw("    "),
-                Span::styled(
-                    format!("added {} ago", added),
-                    Style::default().fg(Color::Rgb(110, 110, 130)),
-                ),
-            ]));
-            lines.push(Line::from(Span::styled(
-                format!("      {}", a.path),
-                Style::default().fg(Color::Rgb(90, 90, 110)),
-            )));
+            canvas_lines.push(evidence_card_header(a, selected));
+            // Body placeholder: blank lines so the Paragraph's vertical scroll
+            // produces correct y offsets, then card-specific widgets paint on
+            // top in the second pass below.
+            let body = card_meta[idx].2;
+            for _ in 0..body {
+                canvas_lines.push(Line::raw(""));
+            }
+            canvas_lines.push(Line::raw(""));
+        }
+    }
+    let canvas_para = Paragraph::new(canvas_lines).wrap(Wrap { trim: false }).scroll((scroll, 0));
+    frame.render_widget(canvas_para, body_area);
+
+    // Per-card widgets, painted on top of the placeholder rows.
+    for (idx, a) in t.artifacts.iter().enumerate() {
+        let kind = card_meta[idx].1;
+        let body = card_meta[idx].2;
+        let card_top_canvas = canvas_card_tops[idx];
+        let body_top_canvas = card_top_canvas + 1;
+        // Card body in screen coordinates after scroll.
+        let body_screen_top = body_area.y as i32 + body_top_canvas as i32 - scroll as i32;
+        let body_screen_bot = body_screen_top + body as i32;
+        let view_top = body_area.y as i32;
+        let view_bot = (body_area.y + body_h) as i32;
+        // Off-screen entirely → skip.
+        if body_screen_bot <= view_top || body_screen_top >= view_bot {
+            continue;
+        }
+        let visible_top = body_screen_top.max(view_top);
+        let visible_bot = body_screen_bot.min(view_bot);
+        let visible_h = (visible_bot - visible_top).max(0) as u16;
+        if visible_h == 0 {
+            continue;
+        }
+        let body_rect = Rect::new(
+            body_area.x.saturating_add(2),
+            visible_top as u16,
+            body_area.width.saturating_sub(2),
+            visible_h,
+        );
+        match kind {
+            CardKind::Image => {
+                // Kitty/sixel/iterm2 protocols write pixel data tied to a fixed
+                // rect; if we let them paint over a partially-clipped rect the
+                // terminal leaves residue when the popup scrolls. So we only
+                // render the image when the *whole* body is on-screen and the
+                // picker actually exists.
+                let fully_visible =
+                    body_screen_top >= view_top && body_screen_bot <= view_bot;
+                if !fully_visible {
+                    render_image_placeholder(frame, body_rect, "[image hidden — scroll to view]");
+                    continue;
+                }
+                if app.image_picker.is_none() {
+                    render_image_placeholder(
+                        frame,
+                        body_rect,
+                        "[image preview unavailable — terminal doesn't support graphics]",
+                    );
+                    continue;
+                }
+                let path = a.path.clone();
+                if !ensure_image_decoded(app, &path) {
+                    render_image_placeholder(
+                        frame,
+                        body_rect,
+                        "[image preview unavailable — decode failed; press `o` to open]",
+                    );
+                    continue;
+                }
+                if let Some(state) = app.artifact_images.get_mut(&path) {
+                    let widget = StatefulImage::<ratatui_image::protocol::StatefulProtocol>::default();
+                    frame.render_stateful_widget(widget, body_rect, state);
+                }
+            }
+            CardKind::Text => render_text_card_body(frame, body_rect, a),
+            CardKind::Video => render_video_card_body(frame, body_rect, a),
+            CardKind::Url => render_url_card_body(frame, body_rect, a),
+            CardKind::Fallback => render_fallback_card_body(frame, body_rect, a),
         }
     }
 
-    // Footer hint pinned to last row.
-    let hint = " esc/r:close   c:copy path of selected artifact   o:open in xdg-open ";
-    if inner.height >= 1 {
-        let body_h = inner.height.saturating_sub(1);
-        let body_area = Rect::new(inner.x, inner.y, inner.width, body_h);
-        let footer_area = Rect::new(inner.x, inner.y + body_h, inner.width, 1);
-        let body = Paragraph::new(lines).wrap(Wrap { trim: false });
-        frame.render_widget(body, body_area);
-        let footer = Paragraph::new(Line::from(Span::styled(
+    let hint = " esc/r:close   j/k:artifact   PgUp/PgDn:scroll   c:copy path   o:xdg-open ";
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
             hint,
             Style::default().fg(Color::DarkGray),
-        )));
-        frame.render_widget(footer, footer_area);
-    } else {
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-    }
+        ))),
+        footer_area,
+    );
 }
 
 fn render_state_debug(frame: &mut Frame, area: Rect, app: &App) {
@@ -1848,7 +2209,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             View::TmuxPane => "forwarding keys to tmux · F1: detach & close",
             View::FolderPicker => "j/k:move  enter:descend  bksp:parent  space:pick  .:pick cwd  c/C:gh new (pub/priv)  esc:cancel",
             View::GhCreateInput => "type name  tab:toggle public/private  enter:create  esc:cancel",
-            View::ProjectsResult => "j/k:artifact  c:copy path  o:xdg-open  esc/r:close",
+            View::ProjectsResult => "j/k:artifact  PgUp/PgDn:scroll  c:copy path  o:xdg-open  esc/r:close",
         };
         spans.push(Span::styled(
             format!(" {} ", keybinds),
@@ -2934,6 +3295,129 @@ mod tests {
         let s = format_artifact_badge(3);
         assert!(s.contains('3'), "expected count in badge, got {:?}", s);
         assert!(s.starts_with(' '), "badge should lead with a separator space, got {:?}", s);
+    }
+}
+
+#[cfg(test)]
+mod result_popup_tests {
+    use crate::app::App;
+    use crate::orchestrator::{Artifact, Project, TaskState, TaskStatus};
+    use crate::projects_scan::ProjectsSnapshot;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::Terminal;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn buffer_to_string(buf: &Buffer) -> String {
+        let mut out = String::new();
+        for y in 0..buf.area().height {
+            for x in 0..buf.area().width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn evidence_inlines_log_url_and_image_fallback() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log_path = tmp.path().join("build.log");
+        std::fs::write(
+            &log_path,
+            "compiling cc-hub-lib\nfinished release in 12.3s\n",
+        )
+        .unwrap();
+
+        let now = crate::orchestrator::now_unix_secs();
+        let project = Project {
+            id: "p-test".into(),
+            name: "test".into(),
+            root: PathBuf::from("/tmp/test"),
+            created_at: now,
+        };
+        let mut state = TaskState::new(project.id.clone(), project.root.clone(), "test prompt body".into());
+        state.status = TaskStatus::Done;
+        state.summary = Some("WHY this works: build green; popup shows evidence cards.".into());
+        state.artifacts = vec![
+            Artifact {
+                kind: "build".into(),
+                path: log_path.to_string_lossy().into_owned(),
+                original: log_path.to_string_lossy().into_owned(),
+                caption: Some("cargo build --release".into()),
+                added_at: now,
+            },
+            Artifact {
+                kind: "url".into(),
+                path: "https://example.com/ci/build/42".into(),
+                original: "https://example.com/ci/build/42".into(),
+                caption: Some("CI build".into()),
+                added_at: now,
+            },
+            Artifact {
+                kind: "screenshot".into(),
+                path: "/nonexistent/missing-screenshot.png".into(),
+                original: "/nonexistent/missing-screenshot.png".into(),
+                caption: Some("preview".into()),
+                added_at: now,
+            },
+        ];
+
+        let mut app = App::new();
+        let mut tasks = HashMap::new();
+        tasks.insert(project.id.clone(), vec![state]);
+        let snap = ProjectsSnapshot {
+            projects: vec![project],
+            tasks,
+        };
+        app.update_projects(snap);
+        assert!(app.enter_projects_result(), "popup should open");
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| super::render_projects_result(f, f.area(), &mut app))
+            .expect("render");
+
+        let buf = terminal.backend().buffer().clone();
+        let dump = buffer_to_string(&buf);
+
+        std::fs::write("/tmp/cc-hub-popup-snapshot.txt", &dump).expect("snapshot write");
+
+        assert!(dump.contains("Result"), "should render Result title");
+        assert!(
+            dump.contains("WHY this works"),
+            "summary text should be inlined\n{}",
+            dump
+        );
+        assert!(
+            dump.contains("cargo build"),
+            "log card should inline file caption\n{}",
+            dump
+        );
+        assert!(
+            dump.contains("compiling cc-hub-lib"),
+            "log card body should inline file content\n{}",
+            dump
+        );
+        assert!(
+            dump.contains("press"),
+            "url/video card should hint at `o`\n{}",
+            dump
+        );
+        assert!(
+            dump.contains("https://example.com/ci/build/42"),
+            "url card should show URL\n{}",
+            dump
+        );
+        // Image with no decoded data and no picker → falls back to a placeholder
+        // (one of the two messages the renderer emits).
+        assert!(
+            dump.contains("[image preview unavailable") || dump.contains("[image hidden"),
+            "image fallback placeholder should appear\n{}",
+            dump
+        );
     }
 }
 

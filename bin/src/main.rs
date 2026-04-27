@@ -277,10 +277,19 @@ async fn main() -> io::Result<()> {
     // mode tells the host terminal to wrap pastes in markers so crossterm
     // surfaces them as a single `Event::Paste(String)` instead.
     let bracketed_paste = crossterm::execute!(stdout, EnableBracketedPaste).is_ok();
+    // Querying the terminal must happen on the alt screen but before we
+    // hand stdout to ratatui's backend. On terminals that don't reply (or
+    // swallow the probe — e.g. tmux without passthrough), fall back to a
+    // sensible 8x16 cell so image cards still render via halfblocks instead
+    // of crashing. `from_fontsize` is deprecated upstream in favour of
+    // `halfblocks`, but we want the explicit cell size to drive sizing.
+    #[allow(deprecated)]
+    let image_picker = cc_hub_lib::ratatui_image::picker::Picker::from_query_stdio()
+        .unwrap_or_else(|_| cc_hub_lib::ratatui_image::picker::Picker::from_fontsize((8, 16)));
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run(&mut terminal).await;
+    let result = run(&mut terminal, image_picker).await;
 
     // Ask any still-running title subprocesses to kill themselves so the
     // tokio runtime's shutdown doesn't wait up to ~45s on a hung `claude
@@ -312,8 +321,12 @@ fn run_no_tui() -> io::Result<()> {
     Ok(())
 }
 
-async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+async fn run(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    image_picker: cc_hub_lib::ratatui_image::picker::Picker,
+) -> io::Result<()> {
     let mut app = App::new();
+    app.image_picker = Some(image_picker);
 
     let inflight_titles: Arc<Mutex<HashSet<String>>> =
         Arc::new(Mutex::new(HashSet::new()));
@@ -571,6 +584,12 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resul
                     }
                     (View::ProjectsResult, KeyCode::Up | KeyCode::Char('k')) => {
                         app.result_artifact_prev();
+                    }
+                    (View::ProjectsResult, KeyCode::PageDown) => {
+                        app.result_scroll_by(10);
+                    }
+                    (View::ProjectsResult, KeyCode::PageUp) => {
+                        app.result_scroll_by(-10);
                     }
                     (View::ProjectsResult, KeyCode::Char('c')) => {
                         match app.selected_result_artifact().map(|a| a.path.clone()) {

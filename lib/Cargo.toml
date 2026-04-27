@@ -26,6 +26,8 @@ notify-debouncer-mini = "0.6"
 tui-term = { version = "0.3", features = ["unstable"] }
 portable-pty = "0.9"
 vt100 = "0.16"
+ratatui-image = { version = "10", default-features = false, features = ["image-defaults", "crossterm"] }
+image = "0.25"
 
 [dev-dependencies]
 tempfile = "3"

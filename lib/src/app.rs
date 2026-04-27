@@ -163,6 +163,22 @@ pub struct App {
     /// Cursor inside the Projects "Result" popup, indexing into the
     /// selected task's `artifacts` vec. Reset on popup open.
     pub result_artifact_sel: usize,
+    /// Vertical scroll offset (in unwrapped lines) for the Projects "Result"
+    /// popup body. Adjusted by the renderer to keep the selected card
+    /// visible, and by `PgUp`/`PgDn` for free scrolling. Reset on open.
+    pub result_scroll: u16,
+    /// Terminal-graphics picker, initialised once after entering the alt
+    /// screen. `None` when running headless / `--no-tui` / inside tests so
+    /// the renderer can fall back to a placeholder rather than crash.
+    pub image_picker: Option<ratatui_image::picker::Picker>,
+    /// Per-artifact decoded image cache, keyed by `Artifact::path`. Populated
+    /// lazily on first popup render so non-image work doesn't pay decode
+    /// cost; entries persist for the App lifetime since artifact paths are
+    /// content-addressed and don't mutate.
+    pub artifact_images: HashMap<String, ratatui_image::protocol::StatefulProtocol>,
+    /// Paths whose decode failed once — never retry, since decoding the same
+    /// bytes will keep failing and we'd burn CPU on every redraw.
+    pub artifact_image_failed: HashSet<String>,
 }
 
 impl App {
@@ -210,6 +226,10 @@ impl App {
             last_sessions: Vec::new(),
             known_session_ids: None,
             result_artifact_sel: 0,
+            result_scroll: 0,
+            image_picker: None,
+            artifact_images: HashMap::new(),
+            artifact_image_failed: HashSet::new(),
         }
     }
 
@@ -1059,6 +1079,7 @@ impl App {
             return false;
         }
         self.result_artifact_sel = 0;
+        self.result_scroll = 0;
         self.view = View::ProjectsResult;
         true
     }
@@ -1066,6 +1087,7 @@ impl App {
     pub fn close_projects_result(&mut self) {
         self.view = View::Grid;
         self.result_artifact_sel = 0;
+        self.result_scroll = 0;
     }
 
     pub fn result_artifact_next(&mut self) {
@@ -1082,6 +1104,14 @@ impl App {
 
     pub fn result_artifact_prev(&mut self) {
         self.result_artifact_sel = self.result_artifact_sel.saturating_sub(1);
+    }
+
+    /// PgUp/PgDn handler. Negative steps scroll up; the renderer clamps the
+    /// offset against content length so we never scroll past the end.
+    pub fn result_scroll_by(&mut self, delta: i32) {
+        let cur = self.result_scroll as i32;
+        let next = (cur + delta).max(0);
+        self.result_scroll = next.min(u16::MAX as i32) as u16;
     }
 
     /// The artifact under the popup cursor, if any. Used by the `c` and `o`
