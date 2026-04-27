@@ -527,6 +527,62 @@ pub fn ensure_project_registered(root: &Path, name: &str) -> io::Result<String> 
     Ok(id)
 }
 
+/// Remove a registered project from `~/.cc-hub/projects.toml` and delete
+/// its on-disk task state directory (`~/.cc-hub/projects/<id>`). Returns
+/// `Ok(())` if the project was removed (or wasn't present), or an error if
+/// any orchestrator for this project is still alive — the caller surfaces
+/// that to the user so they can clean up tasks first.
+pub fn remove_project(project_id: &str) -> io::Result<()> {
+    let mut file = load_projects();
+    if !file.projects.iter().any(|p| p.id == project_id) {
+        return Ok(());
+    }
+
+    let proj_dir = project_state_dir(project_id);
+    let tasks_dir = proj_dir.as_ref().map(|d| d.join("tasks"));
+    if let Some(tasks_dir) = tasks_dir.as_ref() {
+        if tasks_dir.is_dir() {
+            for entry in fs::read_dir(tasks_dir)? {
+                let entry = entry?;
+                let state_path = entry.path().join("state.json");
+                let raw = match fs::read_to_string(&state_path) {
+                    Ok(s) => s,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(e),
+                };
+                let state: TaskState = match serde_json::from_str(&raw) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                if let Some(orch) = state.orchestrator_tmux.as_deref() {
+                    if crate::send::tmux_session_exists(orch) {
+                        return Err(io::Error::other(format!(
+                            "refusing: orchestrator {} still alive for task {}",
+                            orch, state.task_id
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
+    file.projects.retain(|p| p.id != project_id);
+    save_projects(&file)?;
+    if let Some(dir) = proj_dir.as_ref() {
+        if dir.exists() {
+            if let Err(e) = fs::remove_dir_all(dir) {
+                log::warn!(
+                    "remove_project {}: rm -rf {} failed: {}",
+                    project_id,
+                    dir.display(),
+                    e
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// First user message dispatched to a freshly-spawned orchestrator session.
 ///
 /// This is *the* contract between cc-hub and the orchestrator role: it
@@ -1013,6 +1069,12 @@ pub fn merge_branch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Tests that mutate `$HOME` to redirect `cc_hub_home()` at a tempdir
+    // would otherwise race each other (HOME is process-global). Hold this
+    // mutex for the duration of any such test.
+    static HOME_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn project_id_is_stable_and_sanitised() {
@@ -1140,6 +1202,7 @@ mod tests {
         // `set_task_title` writes through `cc_hub_home()` which is a
         // thin wrapper around `dirs::home_dir()` (i.e. `$HOME`). Point it
         // at a tempdir so the test never touches the real user state.
+        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().expect("tempdir");
         let prev_home = std::env::var_os("HOME");
         std::env::set_var("HOME", home.path());
@@ -1338,6 +1401,51 @@ mod tests {
                 "missing post-merge `{}` step in prompt",
                 skill
             );
+        }
+    }
+
+    #[test]
+    fn remove_project_deletes_registry_entry_and_state_dir() {
+        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let project_root = home.path().join("proj-under-test");
+        fs::create_dir_all(&project_root).expect("mkdir project root");
+        let project_id =
+            ensure_project_registered(&project_root, "proj").expect("register");
+
+        // Seed a task so the project state dir actually exists on disk.
+        let mut state = TaskState::new(
+            project_id.clone(),
+            project_root.clone(),
+            "do thing".into(),
+        );
+        state.orchestrator_tmux = None;
+        write_task_state(&state).expect("write seed task state");
+
+        let proj_dir = project_state_dir(&project_id).expect("project_state_dir");
+        assert!(proj_dir.exists(), "project state dir should exist after seed");
+
+        remove_project(&project_id).expect("remove_project");
+
+        let after = load_projects();
+        assert!(
+            !after.projects.iter().any(|p| p.id == project_id),
+            "project should be gone from registry"
+        );
+        assert!(
+            !proj_dir.exists(),
+            "project state dir should have been removed"
+        );
+
+        // Idempotent: a second call against an already-removed id is Ok.
+        remove_project(&project_id).expect("idempotent remove");
+
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
         }
     }
 }

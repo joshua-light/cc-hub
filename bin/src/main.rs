@@ -810,6 +810,9 @@ async fn run(
                     (View::Grid, KeyCode::Char('x')) if on_projects => {
                         app.enter_confirm_task_delete();
                     }
+                    (View::Grid, KeyCode::Char('X')) if on_projects => {
+                        app.enter_confirm_project_delete();
+                    }
                     (View::Grid, KeyCode::Char('b')) if on_projects => {
                         app.open_backlog();
                     }
@@ -1013,7 +1016,19 @@ async fn run(
                         app.enter_confirm_close();
                     }
                     (View::ConfirmClose, KeyCode::Char('y') | KeyCode::Char('Y')) => {
-                        if let Some(pending) = app.take_pending_task_delete() {
+                        if let Some(pending) = app.take_pending_project_delete() {
+                            let msg = match cc_hub_lib::orchestrator::remove_project(
+                                &pending.project_id,
+                            ) {
+                                Ok(()) => format!("removed {}", pending.display),
+                                Err(e) => format!("remove failed: {}", e),
+                            };
+                            // Selection may dangle past the now-removed project
+                            // until the next scan tick lands; reset to 0 so
+                            // we don't render one bad frame.
+                            app.projects_sel = 0;
+                            app.set_status(msg);
+                        } else if let Some(pending) = app.take_pending_task_delete() {
                             // Best-effort kill of the orchestrator tmux —
                             // workers stay alive (their parent task is
                             // gone, but the running claude is independent).
