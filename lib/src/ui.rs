@@ -2647,8 +2647,25 @@ fn render_project_tasks(frame: &mut Frame, area: Rect, app: &App) {
             }
         }
 
+        // Orchestrator-level progress: tool calls (auto, parsed from the
+        // orchestrator's JSONL transcript) and the orchestrator-maintained
+        // todo checklist (opt-in via `cc-hub task todos …`). Both sit beside
+        // ctx Σ on this row so a glance at the card answers "is this thing
+        // moving forward, and against what plan?".
+        let tool_count = t
+            .orchestrator_session_id
+            .as_deref()
+            .and_then(|sid| {
+                let cwd = t.project_root.to_string_lossy();
+                crate::scanner::find_jsonl(&cwd, sid)
+            })
+            .map(|p| crate::conversation::count_tool_uses(&p))
+            .unwrap_or(0);
+        let todo_total = t.todos.len();
+        let todo_done = t.todos.iter().filter(|td| td.done).count();
+
         let total_workers = t.workers.len();
-        let summary_spans = vec![
+        let mut summary_spans = vec![
             Span::raw("    "),
             Span::styled(
                 format!("agents: {} alive ", alive),
@@ -2675,6 +2692,25 @@ fn render_project_tasks(frame: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::Rgb(120, 180, 220)),
             ),
         ];
+        if tool_count > 0 {
+            summary_spans.push(Span::raw("  "));
+            summary_spans.push(Span::styled(
+                format!("󰖷 {}", tool_count),
+                Style::default().fg(Color::Rgb(180, 200, 160)),
+            ));
+        }
+        if todo_total > 0 {
+            summary_spans.push(Span::raw("  "));
+            let todo_color = if todo_done == todo_total {
+                Color::LightGreen
+            } else {
+                Color::Rgb(200, 180, 120)
+            };
+            summary_spans.push(Span::styled(
+                format!("✓ {}/{}", todo_done, todo_total),
+                Style::default().fg(todo_color),
+            ));
+        }
         lines.push(Line::from(summary_spans));
 
         if let Some(line) = render_agent_line("orch", None, orch_sess) {

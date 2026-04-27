@@ -21,7 +21,7 @@
 //! to spawn one and when to merge is the orchestrator's job.
 
 use cc_hub_lib::orchestrator::{
-    self, Artifact, MergeOutcome, MergeRecord, TaskState, TaskStatus, Worker,
+    self, Artifact, MergeOutcome, MergeRecord, TaskState, TaskStatus, TodoItem, Worker,
 };
 use cc_hub_lib::scanner;
 use cc_hub_lib::{models, send, spawn};
@@ -90,6 +90,8 @@ struct Flags {
     path: Option<String>,
     kind: Option<String>,
     caption: Option<String>,
+    items: Option<String>,
+    index: Option<usize>,
     wait_secs: Option<u64>,
     dry_run: bool,
     backlog: bool,
@@ -134,6 +136,16 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
             }
             "--caption" => {
                 f.caption = Some(next_value(args, &mut i, "--caption")?);
+            }
+            "--items" => {
+                f.items = Some(next_value(args, &mut i, "--items")?);
+            }
+            "--index" => {
+                let v = next_value(args, &mut i, "--index")?;
+                f.index = Some(
+                    v.parse()
+                        .map_err(|e| CliError::Usage(format!("--index: {}", e)))?,
+                );
             }
             "--wait-secs" => {
                 let v = next_value(args, &mut i, "--wait-secs")?;
@@ -459,8 +471,9 @@ fn task_subcommand(args: &[String]) -> Result<(), CliError> {
         "create" => task_create(rest),
         "start" => task_start(rest),
         "artifact" => task_artifact_subcommand(rest),
+        "todos" => task_todos_subcommand(rest),
         other => Err(CliError::Usage(format!(
-            "unknown task verb: {} (try `report`, `create`, `start`, or `artifact`)",
+            "unknown task verb: {} (try `report`, `create`, `start`, `artifact`, or `todos`)",
             other
         ))),
     }
@@ -789,6 +802,109 @@ fn task_artifact_list(args: &[String]) -> Result<(), CliError> {
         })
         .collect();
     print_json(&serde_json::Value::Array(arr));
+    Ok(())
+}
+
+// ─── task todos ──────────────────────────────────────────────────────────
+
+fn task_todos_subcommand(args: &[String]) -> Result<(), CliError> {
+    let (verb, rest) = args.split_first().ok_or_else(|| {
+        CliError::Usage("task todos <verb>: missing verb (try `set`, `check`, `uncheck`, or `clear`)".into())
+    })?;
+    match verb.as_str() {
+        "set" => task_todos_set(rest),
+        "check" => task_todos_mark(rest, true),
+        "uncheck" => task_todos_mark(rest, false),
+        "clear" => task_todos_clear(rest),
+        other => Err(CliError::Usage(format!(
+            "unknown task todos verb: {} (try `set`, `check`, `uncheck`, or `clear`)",
+            other
+        ))),
+    }
+}
+
+fn todos_to_json(todos: &[TodoItem]) -> Vec<serde_json::Value> {
+    todos
+        .iter()
+        .map(|t| serde_json::json!({ "text": t.text, "done": t.done }))
+        .collect()
+}
+
+fn print_todos_result(state: &TaskState) {
+    print_json(&serde_json::json!({
+        "ok": true,
+        "task_id": state.task_id,
+        "project_id": state.project_id,
+        "todos": todos_to_json(&state.todos),
+    }));
+}
+
+fn task_todos_set(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+    let raw = f
+        .items
+        .clone()
+        .ok_or_else(|| CliError::Usage("--items is required (newline-separated todo texts)".into()))?;
+
+    let new_todos: Vec<TodoItem> = raw
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| TodoItem { text: l.to_string(), done: false })
+        .collect();
+
+    let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
+        s.todos = new_todos;
+    })
+    .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
+
+    print_todos_result(&state);
+    Ok(())
+}
+
+fn task_todos_mark(args: &[String], done: bool) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+    let idx = f
+        .index
+        .ok_or_else(|| CliError::Usage("--index is required (0-based)".into()))?;
+
+    let pre = orchestrator::read_task_state(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
+    if idx >= pre.todos.len() {
+        return Err(CliError::Usage(format!(
+            "--index {} out of range (have {} todo{})",
+            idx,
+            pre.todos.len(),
+            if pre.todos.len() == 1 { "" } else { "s" }
+        )));
+    }
+
+    let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
+        if let Some(t) = s.todos.get_mut(idx) {
+            t.done = done;
+        }
+    })
+    .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
+
+    print_todos_result(&state);
+    Ok(())
+}
+
+fn task_todos_clear(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+
+    let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
+        s.todos.clear();
+    })
+    .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
+
+    print_todos_result(&state);
     Ok(())
 }
 
