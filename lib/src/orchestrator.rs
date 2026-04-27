@@ -141,6 +141,15 @@ pub struct Worker {
 pub enum MergeOutcome {
     Ok,
     Conflict { detail: String },
+    /// Preflight refused: another orchestrator's task holds an `active`
+    /// reservation overlapping this branch's changed paths. The blocking
+    /// task id and the overlapping path set are surfaced so the caller can
+    /// either wait or escalate. No working-tree mutation happens for this
+    /// outcome.
+    BlockedByActiveOrchestrator {
+        task_id: String,
+        paths: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -797,15 +806,79 @@ pub fn create_worktree(
     )))
 }
 
-/// Merge `<branch>` into `<main>` from the project root. Returns
-/// [`MergeOutcome::Conflict`] (with git's stderr/stdout joined) on a
-/// non-zero exit so the caller can persist the failure and surface it to
-/// the orchestrator without crashing the CLI.
+/// Repo-relative paths that differ between `main_branch..feature_branch`
+/// (i.e. the files this merge would touch). Empty if git fails — callers
+/// treat that as "no overlap to check" rather than a hard error so a
+/// transient git hiccup never blocks merges that would otherwise succeed.
+pub fn branch_changed_paths(
+    project_root: &Path,
+    main_branch: &str,
+    feature_branch: &str,
+) -> Vec<String> {
+    let range = format!("{}...{}", main_branch, feature_branch);
+    let out = match run_git(project_root, &["diff", "--name-only", &range]) {
+        Ok(o) if o.status_ok => o,
+        _ => return Vec::new(),
+    };
+    out.stdout
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect()
+}
+
+/// Merge `<branch>` into `<main>` from the project root.
+///
+/// Preflight: consult the project's reservations file. If another task
+/// holds an `active` reservation overlapping the branch's changed paths,
+/// return [`MergeOutcome::BlockedByActiveOrchestrator`] without touching the
+/// working tree. `current_task_id` is excluded so a task never blocks on
+/// itself.
+///
+/// Returns [`MergeOutcome::Conflict`] (with git's stderr/stdout joined) on a
+/// non-zero exit from git so the caller can persist the failure and surface
+/// it to the orchestrator without crashing the CLI.
 pub fn merge_branch(
     project_root: &Path,
     main_branch: &str,
     feature_branch: &str,
+    project_id: &str,
+    current_task_id: &str,
 ) -> io::Result<(MergeOutcome, String, String)> {
+    // Preflight 1: cross-orchestrator reservation check. Done first so we
+    // never mutate the working tree (`git checkout main`) for a merge that
+    // can't proceed.
+    let changed = branch_changed_paths(project_root, main_branch, feature_branch);
+    if !changed.is_empty() {
+        match crate::reservations::overlapping_active(
+            project_id,
+            current_task_id,
+            &changed,
+        ) {
+            Ok(blockers) => {
+                if let Some((blocking_task, paths)) = blockers.into_iter().next() {
+                    return Ok((
+                        MergeOutcome::BlockedByActiveOrchestrator {
+                            task_id: blocking_task,
+                            paths,
+                        },
+                        String::new(),
+                        String::new(),
+                    ));
+                }
+            }
+            Err(e) => {
+                // Reservations are advisory — degrade to current behaviour
+                // rather than blocking a merge on an unreadable side file.
+                log::warn!(
+                    "merge_branch: reservations check failed (degrading to no-check): {}",
+                    e
+                );
+            }
+        }
+    }
+
     let checkout = run_git(project_root, &["checkout", main_branch])?;
     if !checkout.status_ok {
         return Err(io::Error::other(format!(

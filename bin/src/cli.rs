@@ -41,6 +41,7 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
         "merge-worktree" => Some(handle(merge_worktree(rest))),
         "task" => Some(handle(task_subcommand(rest))),
         "orchestrate" => Some(handle(orchestrate_subcommand(rest))),
+        "reservations" => Some(handle(reservations_subcommand(rest))),
         _ => None,
     }
 }
@@ -96,6 +97,19 @@ struct Flags {
     wait_secs: Option<u64>,
     dry_run: bool,
     backlog: bool,
+    /// `reservations` verbs. Multi-value flags: each greedily consumes
+    /// subsequent argv entries until the next `--flag` token, mirroring
+    /// `gh issue list --label foo bar`. Only used by the `reservations`
+    /// subcommand; harmless if other commands ignore them.
+    paths: Vec<String>,
+    add_paths: Vec<String>,
+    worker_paths: Vec<String>,
+    until_clear: Vec<String>,
+    worker_id: Option<String>,
+    phase: Option<String>,
+    to: Option<String>,
+    timeout_secs: Option<u64>,
+    include_stale: bool,
 }
 
 fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
@@ -167,12 +181,60 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
                 f.backlog = true;
                 i += 1;
             }
+            "--paths" => {
+                f.paths = consume_multi(args, &mut i);
+            }
+            "--add-paths" => {
+                f.add_paths = consume_multi(args, &mut i);
+            }
+            "--worker-paths" => {
+                f.worker_paths = consume_multi(args, &mut i);
+            }
+            "--until-clear" => {
+                f.until_clear = consume_multi(args, &mut i);
+            }
+            "--worker-id" => {
+                f.worker_id = Some(next_value(args, &mut i, "--worker-id")?);
+            }
+            "--phase" => {
+                f.phase = Some(next_value(args, &mut i, "--phase")?);
+            }
+            "--to" => {
+                f.to = Some(next_value(args, &mut i, "--to")?);
+            }
+            "--timeout" => {
+                let v = next_value(args, &mut i, "--timeout")?;
+                f.timeout_secs = Some(
+                    v.parse()
+                        .map_err(|e| CliError::Usage(format!("--timeout: {}", e)))?,
+                );
+            }
+            "--include-stale" => {
+                f.include_stale = true;
+                i += 1;
+            }
             other => {
                 return Err(CliError::Usage(format!("unknown flag: {}", other)));
             }
         }
     }
     Ok(f)
+}
+
+/// Consume the multi-value tail of a flag like `--paths a b c`. Stops on
+/// the next `--flag` token or end-of-argv. The caller's index lands on the
+/// next flag, just like `next_value`.
+fn consume_multi(args: &[String], i: &mut usize) -> Vec<String> {
+    *i += 1;
+    let mut out = Vec::new();
+    while let Some(arg) = args.get(*i) {
+        if arg.starts_with("--") {
+            break;
+        }
+        out.push(arg.clone());
+        *i += 1;
+    }
+    out
 }
 
 fn next_value(args: &[String], i: &mut usize, name: &str) -> Result<String, CliError> {
@@ -360,19 +422,26 @@ fn merge_worktree(args: &[String]) -> Result<(), CliError> {
     let main = orchestrator::detect_main_branch(&project_root);
 
     let (outcome, stdout, stderr) =
-        orchestrator::merge_branch(&project_root, &main, &branch)
+        orchestrator::merge_branch(&project_root, &main, &branch, &project_id, &task_id)
             .map_err(|e| CliError::Other(format!("merge: {}", e)))?;
 
-    let record = MergeRecord {
-        worktree: worktree_name.clone(),
-        at: orchestrator::now_unix_secs(),
-        outcome: outcome.clone(),
-    };
-    let _ = orchestrator::update_task_state(&project_id, &task_id, |s| {
-        s.merges.push(record);
-    });
+    // Preflight refusals (BlockedByActiveOrchestrator) don't touch the tree
+    // and aren't a "merge attempt" worth recording in the task's merge log —
+    // surface them in the JSON output and let the orchestrator retry once
+    // the conflict clears.
+    let is_blocked = matches!(outcome, MergeOutcome::BlockedByActiveOrchestrator { .. });
+    if !is_blocked {
+        let record = MergeRecord {
+            worktree: worktree_name.clone(),
+            at: orchestrator::now_unix_secs(),
+            outcome: outcome.clone(),
+        };
+        let _ = orchestrator::update_task_state(&project_id, &task_id, |s| {
+            s.merges.push(record);
+        });
+    }
 
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "ok": matches!(outcome, MergeOutcome::Ok),
         "worktree": worktree_name,
         "branch": branch,
@@ -380,14 +449,31 @@ fn merge_worktree(args: &[String]) -> Result<(), CliError> {
         "stdout": stdout,
         "stderr": stderr,
     });
-    print_json(&payload);
-
-    if matches!(outcome, MergeOutcome::Conflict { .. }) {
-        return Err(CliError::Other(
-            "merge produced conflicts; resolve in the worktree or main".into(),
+    if let MergeOutcome::BlockedByActiveOrchestrator { task_id: blocking, paths } = &outcome {
+        payload["blocked_by_active_orchestrator"] = serde_json::Value::Bool(true);
+        payload["blocking_task"] = serde_json::Value::String(blocking.clone());
+        payload["overlap"] = serde_json::Value::Array(
+            paths.iter().cloned().map(serde_json::Value::String).collect(),
+        );
+        payload["recipe"] = serde_json::Value::String(format!(
+            "Wait for task {} to release its active reservation, then re-run cc-hub merge-worktree.",
+            blocking
         ));
     }
-    Ok(())
+    print_json(&payload);
+
+    match &outcome {
+        MergeOutcome::Conflict { .. } => Err(CliError::Other(
+            "merge produced conflicts; resolve in the worktree or main".into(),
+        )),
+        MergeOutcome::BlockedByActiveOrchestrator { task_id: blocking, .. } => Err(
+            CliError::Other(format!(
+                "blocked by active reservation held by task {}",
+                blocking
+            )),
+        ),
+        MergeOutcome::Ok => Ok(()),
+    }
 }
 
 // ─── orchestrate ─────────────────────────────────────────────────────────
@@ -580,6 +666,16 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         && prev_status.as_ref() != Some(&state.status);
     if became_terminal {
         orchestrator::cleanup_task_sessions(&state);
+    }
+
+    // Heartbeat refresh: every `task report` keeps the task's reservations
+    // alive (see reservations::RESERVATION_TTL_SECS). Failures here must
+    // never break task report — log and move on.
+    if let Err(e) = cc_hub_lib::reservations::refresh_heartbeat(&project_id, &task_id) {
+        log::debug!(
+            "task report heartbeat: refresh failed for {}/{}: {}",
+            project_id, task_id, e
+        );
     }
 
     print_json(&serde_json::json!({
@@ -905,5 +1001,264 @@ fn task_create(args: &[String]) -> Result<(), CliError> {
         "status": state.status,
     }));
     Ok(())
+}
+
+// ─── reservations ────────────────────────────────────────────────────────
+
+fn reservations_subcommand(args: &[String]) -> Result<(), CliError> {
+    let (verb, rest) = args.split_first().ok_or_else(|| {
+        CliError::Usage(
+            "reservations <verb>: missing verb (try `declare`, `upgrade`, `downgrade`, `release`, `list`, or `wait`)"
+                .into(),
+        )
+    })?;
+    match verb.as_str() {
+        "declare" => reservations_declare(rest),
+        "upgrade" => reservations_upgrade(rest),
+        "downgrade" => reservations_downgrade(rest),
+        "release" => reservations_release(rest),
+        "list" => reservations_list(rest),
+        "wait" => reservations_wait(rest),
+        other => Err(CliError::Usage(format!(
+            "unknown reservations verb: {} (try `declare`, `upgrade`, `downgrade`, `release`, `list`, or `wait`)",
+            other
+        ))),
+    }
+}
+
+fn owner_session_from_env() -> String {
+    std::env::var("CCHUB_ORCHESTRATOR_SESSION").unwrap_or_default()
+}
+
+fn reservation_to_json(r: &cc_hub_lib::reservations::Reservation) -> serde_json::Value {
+    serde_json::json!({
+        "task_id": r.task_id,
+        "worker_id": r.worker_id,
+        "phase": match r.phase {
+            cc_hub_lib::reservations::Phase::Intended => "intended",
+            cc_hub_lib::reservations::Phase::Active => "active",
+        },
+        "paths": r.paths,
+        "owner_session": r.owner_session,
+        "created_at": r.created_at,
+        "last_heartbeat": r.last_heartbeat,
+    })
+}
+
+fn conflicts_to_json(blockers: &[(String, Vec<String>)]) -> serde_json::Value {
+    serde_json::Value::Array(
+        blockers
+            .iter()
+            .map(|(t, p)| {
+                serde_json::json!({
+                    "task_id": t,
+                    "paths": p,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn reservations_declare(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+
+    // `--paths` replaces the existing intended entry's paths;
+    // `--add-paths` merges into them. Mixing both is rejected — the
+    // call-site always knows whether it's seeding or widening.
+    let (paths, replace) = match (f.paths.is_empty(), f.add_paths.is_empty()) {
+        (true, true) => {
+            return Err(CliError::Usage(
+                "--paths or --add-paths is required".into(),
+            ));
+        }
+        (false, true) => (f.paths.clone(), true),
+        (true, false) => (f.add_paths.clone(), false),
+        (false, false) => {
+            return Err(CliError::Usage(
+                "pass --paths OR --add-paths, not both".into(),
+            ));
+        }
+    };
+
+    if let Some(phase) = f.phase.as_deref() {
+        if phase != "intended" {
+            return Err(CliError::Usage(
+                "declare only supports --phase intended".into(),
+            ));
+        }
+    }
+
+    let owner = owner_session_from_env();
+    let entry = cc_hub_lib::reservations::declare(
+        &project_id,
+        &task_id,
+        &paths,
+        &owner,
+        replace,
+    )
+    .map_err(|e| CliError::Other(format!("declare: {}", e)))?;
+
+    // Surface conflicts the orchestrator might want to react to. This is a
+    // soft signal — declare always succeeds — so callers can choose to wait
+    // or proceed with research subtasks. Look at all paths the entry holds,
+    // not just the just-declared subset.
+    let blockers = cc_hub_lib::reservations::overlapping_active(
+        &project_id,
+        &task_id,
+        &entry.paths,
+    )
+    .unwrap_or_default();
+
+    print_json(&serde_json::json!({
+        "ok": true,
+        "reservation": reservation_to_json(&entry),
+        "conflicts": conflicts_to_json(&blockers),
+    }));
+    Ok(())
+}
+
+fn reservations_upgrade(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+
+    if f.to.as_deref() != Some("active") {
+        return Err(CliError::Usage("upgrade requires --to active".into()));
+    }
+    let worker_id = f
+        .worker_id
+        .clone()
+        .ok_or_else(|| CliError::Usage("--worker-id is required".into()))?;
+    if f.worker_paths.is_empty() {
+        return Err(CliError::Usage(
+            "--worker-paths is required (one or more paths)".into(),
+        ));
+    }
+
+    let outcome = cc_hub_lib::reservations::upgrade_to_active(
+        &project_id,
+        &task_id,
+        &worker_id,
+        &f.worker_paths,
+    )
+    .map_err(|e| CliError::Other(format!("upgrade: {}", e)))?;
+
+    match outcome {
+        cc_hub_lib::reservations::UpgradeOutcome::Ok(r) => {
+            print_json(&serde_json::json!({
+                "ok": true,
+                "reservation": reservation_to_json(&r),
+                "conflicts": serde_json::Value::Array(vec![]),
+            }));
+            Ok(())
+        }
+        cc_hub_lib::reservations::UpgradeOutcome::Conflict { task_id: blocking, paths } => {
+            print_json(&serde_json::json!({
+                "ok": false,
+                "conflicts": conflicts_to_json(&[(blocking.clone(), paths.clone())]),
+                "recipe": format!(
+                    "Wait for task {} to release its active reservation, then re-run upgrade.",
+                    blocking
+                ),
+            }));
+            Err(CliError::Other(format!(
+                "upgrade blocked by active reservation held by task {}",
+                blocking
+            )))
+        }
+    }
+}
+
+fn reservations_downgrade(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+
+    cc_hub_lib::reservations::downgrade(&project_id, &task_id, f.worker_id.as_deref())
+        .map_err(|e| CliError::Other(format!("downgrade: {}", e)))?;
+
+    print_json(&serde_json::json!({
+        "ok": true,
+        "task_id": task_id,
+        "project_id": project_id,
+        "worker_id": f.worker_id,
+    }));
+    Ok(())
+}
+
+fn reservations_release(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+
+    cc_hub_lib::reservations::release(&project_id, &task_id, f.worker_id.as_deref())
+        .map_err(|e| CliError::Other(format!("release: {}", e)))?;
+
+    print_json(&serde_json::json!({
+        "ok": true,
+        "task_id": task_id,
+        "project_id": project_id,
+        "worker_id": f.worker_id,
+    }));
+    Ok(())
+}
+
+fn reservations_list(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let project_id = resolve_project_id(&f)?;
+
+    let entries = cc_hub_lib::reservations::list(&project_id, f.include_stale)
+        .map_err(|e| CliError::Other(format!("list: {}", e)))?;
+    let arr: Vec<serde_json::Value> =
+        entries.iter().map(reservation_to_json).collect();
+    print_json(&serde_json::Value::Array(arr));
+    Ok(())
+}
+
+const WAIT_POLL_INTERVAL_SECS: u64 = 5;
+const WAIT_DEFAULT_TIMEOUT_SECS: u64 = 600;
+
+fn reservations_wait(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+    if f.until_clear.is_empty() {
+        return Err(CliError::Usage(
+            "--until-clear is required (one or more paths)".into(),
+        ));
+    }
+    let timeout = f.timeout_secs.unwrap_or(WAIT_DEFAULT_TIMEOUT_SECS);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(timeout);
+
+    loop {
+        let blockers = cc_hub_lib::reservations::overlapping_active(
+            &project_id,
+            &task_id,
+            &f.until_clear,
+        )
+        .unwrap_or_default();
+        if blockers.is_empty() {
+            print_json(&serde_json::json!({
+                "ok": true,
+                "waited_secs": started.elapsed().as_secs(),
+            }));
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            print_json(&serde_json::json!({
+                "ok": false,
+                "timed_out": true,
+                "blockers": conflicts_to_json(&blockers),
+            }));
+            return Err(CliError::Other(format!(
+                "timed out after {}s waiting for reservations to clear",
+                timeout
+            )));
+        }
+        std::thread::sleep(Duration::from_secs(WAIT_POLL_INTERVAL_SECS));
+    }
 }
 

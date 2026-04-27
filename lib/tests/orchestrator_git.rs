@@ -109,7 +109,7 @@ fn merge_branch_clean_succeeds() {
 
     let branch = orchestrator::worktree_branch("t-3", "edit");
     let (outcome, _stdout, _stderr) =
-        orchestrator::merge_branch(root, "main", &branch).unwrap();
+        orchestrator::merge_branch(root, "main", &branch, "test-proj", "t-3").unwrap();
     assert!(matches!(outcome, MergeOutcome::Ok), "expected Ok, got {:?}", outcome);
     assert!(root.join("new.txt").exists(), "merged file should be in main");
 }
@@ -135,7 +135,7 @@ fn merge_branch_conflict_returns_conflict_outcome() {
 
     let branch = orchestrator::worktree_branch("t-4", "fork");
     let (outcome, _stdout, _stderr) =
-        orchestrator::merge_branch(root, "main", &branch).unwrap();
+        orchestrator::merge_branch(root, "main", &branch, "test-proj", "t-4").unwrap();
     match outcome {
         MergeOutcome::Conflict { detail } => {
             assert!(!detail.is_empty(), "conflict detail should be populated");
