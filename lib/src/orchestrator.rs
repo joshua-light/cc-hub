@@ -115,6 +115,7 @@ pub fn now_unix_secs() -> i64 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
+    Backlog,
     Running,
     Done,
     Failed,
@@ -215,6 +216,27 @@ impl TaskState {
             orchestrator_session_id: None,
             orchestrator_tmux: None,
             status: TaskStatus::Running,
+            prompt,
+            created_at: now,
+            updated_at: now,
+            note: None,
+            summary: None,
+            title: None,
+            workers: Vec::new(),
+            merges: Vec::new(),
+            artifacts: Vec::new(),
+        }
+    }
+
+    pub fn new_backlog(project_id: String, project_root: PathBuf, prompt: String) -> Self {
+        let now = now_unix_secs();
+        Self {
+            task_id: new_task_id(),
+            project_id,
+            project_root,
+            orchestrator_session_id: None,
+            orchestrator_tmux: None,
+            status: TaskStatus::Backlog,
             prompt,
             created_at: now,
             updated_at: now,
@@ -445,6 +467,14 @@ The summary is the one-screen briefing the user reads to understand the task's o
 EOF
 )\"`
 
+# Queuing follow-up work
+
+If during this task you identify substantive follow-up work — a separate problem the user will likely want addressed but that's out of scope here — create a Backlog task for it instead of expanding scope or losing the idea:
+
+`{bin} task create --backlog --prompt \"<scoped prompt for the follow-up>\" [--project-id ID]`
+
+This writes a new task with status `backlog` and does NOT spawn an orchestrator. The user reviews backlog tasks from the Projects view and starts them manually when ready. Use it for: research findings that suggest a separate cleanup, bugs noticed but not in scope, refactors a worker recommended, etc. Keep the prompt self-contained — the future orchestrator won't have your context.
+
 # Rules
 
 - Don't ask the user clarifying questions. If the task is ambiguous, pick the most reasonable interpretation and note your assumption in the first status report.
@@ -494,6 +524,39 @@ pub fn spawn_orchestrator_for_new_task(
     write_task_state(&state)?;
 
     let cwd = canonical_root.to_string_lossy().into_owned();
+    let tmux_name = crate::spawn::spawn_claude_session(&cwd, None)?;
+
+    state.orchestrator_tmux = Some(tmux_name.clone());
+    state.touch();
+    write_task_state(&state)?;
+
+    let cc_hub_bin = std::env::current_exe()
+        .map_err(|e| io::Error::other(format!("resolve cc-hub binary path: {}", e)))?;
+    let orchestrator_prompt = build_orchestrator_prompt(&state, &cc_hub_bin);
+
+    Ok((state, tmux_name, orchestrator_prompt))
+}
+
+/// User-initiated transition from Backlog to Running. Mirrors
+/// spawn_orchestrator_for_new_task but operates on an existing Backlog task
+/// instead of creating a new one. Called from the TUI when the user hits the
+/// start-task keybind, and from \ on the CLI.
+pub fn start_backlog_task(
+    project_id: &str,
+    task_id: &str,
+) -> io::Result<(TaskState, String, String)> {
+    let mut state = read_task_state(project_id, task_id)?;
+    if state.status != TaskStatus::Backlog {
+        return Err(io::Error::other(format!(
+            "task is not in backlog (status = {:?})",
+            state.status
+        )));
+    }
+    state.status = TaskStatus::Running;
+    state.touch();
+    write_task_state(&state)?;
+
+    let cwd = state.project_root.to_string_lossy().into_owned();
     let tmux_name = crate::spawn::spawn_claude_session(&cwd, None)?;
 
     state.orchestrator_tmux = Some(tmux_name.clone());
@@ -804,6 +867,27 @@ mod tests {
         assert_eq!(s, "\"running\"");
         let f = serde_json::to_string(&TaskStatus::Failed).unwrap();
         assert_eq!(f, "\"failed\"");
+    }
+
+    #[test]
+    fn task_status_backlog_serialises_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&TaskStatus::Backlog).unwrap(),
+            "\"backlog\""
+        );
+    }
+
+    #[test]
+    fn backlog_task_round_trips_through_serde() {
+        let s = TaskState::new_backlog(
+            "myproj".into(),
+            PathBuf::from("/tmp/myproj"),
+            "queued for later".into(),
+        );
+        let body = serde_json::to_string(&s).unwrap();
+        let back: TaskState = serde_json::from_str(&body).unwrap();
+        assert_eq!(back, s);
+        assert_eq!(back.status, TaskStatus::Backlog);
     }
 
     #[test]

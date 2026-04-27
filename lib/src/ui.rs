@@ -1264,6 +1264,7 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
         crate::orchestrator::TaskStatus::Running => ("running", Color::LightYellow),
         crate::orchestrator::TaskStatus::Done => ("done", Color::LightGreen),
         crate::orchestrator::TaskStatus::Failed => ("failed", Color::LightRed),
+        crate::orchestrator::TaskStatus::Backlog => ("backlog", Color::LightBlue),
     };
     let title = match t.title.as_deref().filter(|s| !s.is_empty()) {
         Some(name) => format!(
@@ -2544,6 +2545,7 @@ fn render_project_tasks(frame: &mut Frame, area: Rect, app: &App) {
             crate::orchestrator::TaskStatus::Running => ("running", Color::LightYellow),
             crate::orchestrator::TaskStatus::Done => ("done", Color::LightGreen),
             crate::orchestrator::TaskStatus::Failed => ("failed", Color::LightRed),
+            crate::orchestrator::TaskStatus::Backlog => ("backlog", Color::LightBlue),
         };
 
         let arrow = if selected { "▌ " } else { "  " };

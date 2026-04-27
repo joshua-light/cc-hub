@@ -680,6 +680,7 @@ impl App {
             crate::orchestrator::TaskStatus::Running => "running",
             crate::orchestrator::TaskStatus::Done => "done",
             crate::orchestrator::TaskStatus::Failed => "failed",
+            crate::orchestrator::TaskStatus::Backlog => "backlog",
         };
         let display = format!(
             "{} — {} (task {})",
