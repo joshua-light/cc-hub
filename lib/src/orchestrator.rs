@@ -585,11 +585,13 @@ The cc-hub binary is at `{bin}`. Always invoke it by absolute path; it is not ne
    On success, the branch is in the project's main branch and the worktree dir stays for inspection. Four failure modes, each with its own recipe:
    - **Content conflict** (`ok=false`, no `blocked_by_dirty_tree`): git started the merge and hit overlapping committed history. Resolve manually in the worktree, or spawn a follow-up worker. Do NOT use `git stash` to dodge it.
    - **Blocked by dirty tree** (`ok=false`, `blocked_by_dirty_tree=true`, `overlap=[…]`): the user has uncommitted edits on the target branch in files the worker also touched. The merge was refused before touching the tree — nothing to clean up. Surface this verbatim via `task report --note \"merge blocked: <files>; commit/stash/revert and rerun merge-worktree\"` and stop. Do NOT auto-stash, do NOT touch the user's working tree, do NOT report status=done. The worker's branch is intact; the user merges once they clean those paths.
-   - **Blocked by active orchestrator** (`ok=false`, `blocked_by_active_orchestrator=true`, `task_id=<other>`): another orchestrator currently holds an active reservation on overlapping files. Wait for them to release (their `task done`/`failed` clears their reservations), then rerun `merge-worktree`. Don't try to win the race by force — the other task is mid-edit and your merge would land on shifting ground.
+   - **Blocked by active orchestrator** (`ok=false`, `blocked_by_active_orchestrator=true`, `blocking_task=<other>`, `overlap=[…]`): another orchestrator currently holds an active reservation on overlapping files. Wait for them to release (their `task done`/`failed` clears their reservations), then rerun `merge-worktree`. Don't try to win the race by force — the other task is mid-edit and your merge would land on shifting ground.
    - **Hard error** (CLI exits with a non-JSON error): treat as recoverable; retry once, then report failed.
-   After a successful merge, run the project's build/test (e.g. `cargo build`, `pnpm test`) before reporting status=done — a green merge that breaks compilation is still a failure. Then free the reservation so other tasks can proceed:
-   `{bin} reservations release --task {task_id} --worker-id <tmux>`
-   (At task done/failed, all of this task's reservations are released automatically — but releasing per-worker as soon as a merge lands shortens the window other orchestrators wait.)
+   After a successful merge:
+   - **Build/test** the project (e.g. `cargo build`, `pnpm test`) — a green merge that breaks compilation is still a failure.
+   - **Run `/simplify`** via the Skill tool to clean up the just-merged code; it may add follow-up commits on the main branch.
+   - **Run `/bump`** afterwards to cut a version commit reflecting the final tree. If either step modified files, re-run build/test before proceeding.
+   - **Free the reservation** so other tasks can proceed: `{bin} reservations release --task {task_id} --worker-id <tmux>`. (At task done/failed, all of this task's reservations are released automatically — but releasing per-worker as soon as a merge lands shortens the window other orchestrators wait.)
 
 5. **Report progress** after each meaningful step (worker spawned, worker finished, merge attempted, plan changed):
    `{bin} task report --task {task_id} --status running --note \"<one line>\"`
@@ -1319,5 +1321,23 @@ mod tests {
             p.contains("blocked_by_active_orchestrator"),
             "missing fourth merge-failure recipe (blocked by active orchestrator)"
         );
+        // The recipe must reference the actual JSON fields the merge CLI
+        // emits (cli.rs:455-465: blocked_by_active_orchestrator + blocking_task
+        // + overlap), otherwise an orchestrator following the recipe will
+        // grep for a non-existent `task_id` field and silently fall through.
+        assert!(
+            p.contains("blocking_task"),
+            "fourth merge-failure recipe must name the `blocking_task` JSON \
+             field emitted by the merge-worktree CLI, not a different one"
+        );
+        // Post-merge automation: each completed task should land on a green,
+        // simplified, version-stamped main.
+        for skill in ["/simplify", "/bump"] {
+            assert!(
+                p.contains(skill),
+                "missing post-merge `{}` step in prompt",
+                skill
+            );
+        }
     }
 }
