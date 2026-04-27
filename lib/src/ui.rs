@@ -448,12 +448,19 @@ fn render_tmux_pane(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
-    // The same view handles two confirmations: closing a session and
-    // deleting a project task. Whichever pending struct is set wins; we
-    // tweak the title and confirm-action label so the user knows which
-    // operation they're agreeing to.
+    // The same view handles three confirmations: registry-level project
+    // removal, project-task deletion, and session close. Project-delete
+    // wins precedence because it's the most destructive — if both somehow
+    // got staged we want to show the user the bigger blast radius.
     let (title, display, action_label, action_color) =
-        if let Some(pending) = &app.pending_task_delete {
+        if let Some(pending) = &app.pending_project_delete {
+            (
+                " Delete project? ",
+                pending.display.clone(),
+                "delete",
+                Color::Red,
+            )
+        } else if let Some(pending) = &app.pending_task_delete {
             (
                 " Delete task? ",
                 pending.display.clone(),
@@ -2309,7 +2316,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         let keybinds: &str = match app.view {
             View::Grid => match app.current_tab {
-                Tab::Projects => "tab:next  j/k:project  J/K:task  enter:focus orch  f:agent terminal  n:new task  N:register project  b:backlog  r:result  x:delete  q:quit",
+                Tab::Projects => "tab:next  j/k:project  J/K:task  enter:focus orch  f:agent terminal  n:new task  N:register project  b:backlog  r:result  x:delete task  X:remove project  q:quit",
                 Tab::Sessions => "tab:next  h/j/k/l:nav  n:new  N:new in…  i:info  D:why?  enter/f:focus/resume  o:shell  x:close  H:inactive  W:workers  q:quit",
                 Tab::Metrics => "tab:next  j/k:select  enter:view transcript  r:refresh  q:quit",
             },

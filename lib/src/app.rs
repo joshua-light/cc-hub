@@ -88,6 +88,15 @@ pub struct PendingTaskDelete {
     pub orchestrator_tmux: Option<String>,
 }
 
+/// Pending registry-level project removal. Shown via the same
+/// `ConfirmClose` view as task delete, distinguished by
+/// [`App::pending_project_delete`] being `Some`.
+#[derive(Clone, Debug)]
+pub struct PendingProjectDelete {
+    pub project_id: String,
+    pub display: String,
+}
+
 /// A prompt queued for a freshly-spawned tmux session that isn't yet Idle.
 /// Drained by [`App::poll_pending_dispatch`] once the session shows up in the
 /// next scan and its state flips to Idle, or times out after
@@ -122,6 +131,7 @@ pub struct App {
     pub status_msg: Option<(String, Instant)>,
     pub pending_close: Option<PendingClose>,
     pub pending_task_delete: Option<PendingTaskDelete>,
+    pub pending_project_delete: Option<PendingProjectDelete>,
     pub state_debug: Option<(SessionInfo, StateExplanation)>,
     pub state_debug_lines: Vec<Line<'static>>,
     pub state_debug_scroll: u16,
@@ -223,6 +233,7 @@ impl App {
             status_msg: None,
             pending_close: None,
             pending_task_delete: None,
+            pending_project_delete: None,
             state_debug: None,
             state_debug_lines: Vec::new(),
             state_debug_scroll: 0,
@@ -898,6 +909,7 @@ impl App {
     pub fn cancel_confirm_close(&mut self) {
         self.pending_close = None;
         self.pending_task_delete = None;
+        self.pending_project_delete = None;
         self.view = View::Grid;
     }
 
@@ -937,6 +949,35 @@ impl App {
     pub fn take_pending_task_delete(&mut self) -> Option<PendingTaskDelete> {
         self.view = View::Grid;
         self.pending_task_delete.take()
+    }
+
+    /// Stage removal of the currently-selected project from the cc-hub
+    /// registry, mirroring [`Self::enter_confirm_task_delete`]. Surfaces task
+    /// count in the prompt so the user sees how much state they're nuking.
+    pub fn enter_confirm_project_delete(&mut self) {
+        let Some(p) = self.selected_project().cloned() else { return };
+        let n = self
+            .projects
+            .tasks
+            .get(&p.id)
+            .map(|v| v.len())
+            .unwrap_or(0);
+        let display = format!(
+            "{} ({} task{})",
+            p.name,
+            n,
+            if n == 1 { "" } else { "s" }
+        );
+        self.pending_project_delete = Some(PendingProjectDelete {
+            project_id: p.id.clone(),
+            display,
+        });
+        self.view = View::ConfirmClose;
+    }
+
+    pub fn take_pending_project_delete(&mut self) -> Option<PendingProjectDelete> {
+        self.view = View::Grid;
+        self.pending_project_delete.take()
     }
 
     pub fn set_status(&mut self, msg: String) {
