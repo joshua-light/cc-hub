@@ -312,6 +312,16 @@ impl App {
             .and_then(|v| v.get(self.projects_task_sel))
     }
 
+    pub fn sessions_by_tmux(&self) -> HashMap<&str, &SessionInfo> {
+        let mut out = HashMap::new();
+        for s in &self.last_sessions {
+            if let Some(name) = s.tmux_session.as_deref() {
+                out.insert(name, s);
+            }
+        }
+        out
+    }
+
     pub fn update_metrics(&mut self, m: MetricsAnalysis) {
         let prev_sid = self
             .metrics_selected

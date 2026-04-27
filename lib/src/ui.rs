@@ -1836,7 +1836,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         let keybinds: &str = match app.view {
             View::Grid => match app.current_tab {
-                Tab::Projects => "tab:next  j/k:project  J/K:task  enter:focus orch  n:new task  N:register project  r:result  x:delete  q:quit",
+                Tab::Projects => "tab:next  j/k:project  J/K:task  enter:focus orch  f:agent terminal  n:new task  N:register project  r:result  x:delete  q:quit",
                 Tab::Sessions => "tab:next  h/j/k/l:nav  n:new  N:new in…  i:info  D:why?  enter/f:focus/resume  o:shell  x:close  H:inactive  W:workers  q:quit",
                 Tab::Metrics => "tab:next  j/k:select  enter:view transcript  r:refresh  q:quit",
             },

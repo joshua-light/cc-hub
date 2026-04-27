@@ -243,6 +243,35 @@ pub fn capture_pane(session: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// Capture the full scrollback of `session`'s window 0 pane (`-S -` walks
+/// to the start of history). Returns empty on failure. Used to archive an
+/// agent's terminal output before its tmux session is killed.
+pub fn capture_pane_full(session: &str) -> String {
+    let target = format!("{}:0", session);
+    let Ok(out) = Command::new(MUX_BIN)
+        .args(["capture-pane", "-t", &target, "-p", "-S", "-"])
+        .output()
+    else {
+        return String::new();
+    };
+    if !out.status.success() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// True when the multiplexer reports `session` exists.
+pub fn has_session(session: &str) -> bool {
+    Command::new(MUX_BIN)
+        .args(["has-session", "-t", session])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// True when `session`'s pane shows claude's input prompt — meaning claude
 /// is fully booted and ready to accept paste / Enter. Distinguishes a
 /// "freshly spawned, JSONL not yet written" session (which the scanner

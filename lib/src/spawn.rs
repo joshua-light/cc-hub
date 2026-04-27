@@ -106,6 +106,21 @@ pub fn spawn_shell_tmux_session(cwd: &str) -> io::Result<String> {
     Ok(name)
 }
 
+/// Spawn an ephemeral multiplexer session that runs `less` on `log_path`.
+/// `less +G -R` lands at the bottom (latest output) with ANSI colour
+/// rendered. Pair with [`crate::tmux_pane::TmuxPaneView::spawn_owned`].
+pub fn spawn_log_viewer_tmux_session(log_path: &Path) -> io::Result<String> {
+    let name = unique_session_name("cchub-log");
+    let cwd = log_path
+        .parent()
+        .and_then(|p| p.to_str())
+        .unwrap_or(".");
+    let quoted = format!("'{}'", log_path.to_string_lossy().replace('\'', "'\\''"));
+    let cmd = format!("less +G -R -- {}", quoted);
+    mux::spawn_detached(&name, cwd, Some(&cmd))?;
+    Ok(name)
+}
+
 /// Open a new terminal window that attaches to an existing detached session.
 /// Used to recover a session whose terminal was closed — the agent kept
 /// running headlessly, this brings it back into view.

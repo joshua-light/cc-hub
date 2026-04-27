@@ -60,6 +60,10 @@ pub fn task_state_file(project_id: &str, task_id: &str) -> Option<PathBuf> {
     task_state_dir(project_id, task_id).map(|d| d.join("state.json"))
 }
 
+pub fn task_orchestrator_log_path(project_id: &str, task_id: &str) -> Option<PathBuf> {
+    task_state_dir(project_id, task_id).map(|d| d.join("orchestrator.log"))
+}
+
 /// Compute a stable, human-readable project id from a filesystem path. The
 /// path is canonicalised when possible; symlink targets normalise to the same
 /// id as the symlink itself.
