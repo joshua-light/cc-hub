@@ -161,6 +161,22 @@ growth_threshold = 6.0
 top_interruptions = 10
 top_growth_findings = 10
 top_peak_context_findings = 10
+
+[backlog]
+# Background backlog triager. When enabled, every interval cc-hub asks a
+# short Claude session whether one of the pending backlog tasks is ready to
+# be promoted to Running. Off by default — the tick spawns a Claude
+# subprocess and you probably don't want surprise billed calls.
+enabled = false
+# Passed as `--model <model>` to the resolved spawn command.
+model = "sonnet"
+# How often the triager runs.
+interval_secs = 8
+# Per-call subprocess timeout for the triage Claude call.
+run_timeout_secs = 120
+# How long a triage decision sticks before a task becomes eligible again.
+# Caps the worst-case re-ask cadence per dormant task to one per ttl_secs.
+ttl_secs = 300
 ```
 
 Only the sections/fields you want to override need to be present — omit
@@ -226,13 +242,14 @@ start them.
 | `h` / `l` (or arrows) | Switch kanban column |
 | `j` / `k` (or arrows) | Move the cursor within the focused column |
 | `Enter` | Focus the orchestrator session for the selected task |
-| `f` | Embed the orchestrator's tmux pane in the TUI |
+| `f` | Embed the orchestrator's tmux pane; if the pane died (PC reboot), resume the orchestrator's Claude session from disk and embed the new pane |
 | `Space` | Approve the focused Review task → Done |
 | `r` | Open the Result popup (artifacts + summary) for the focused task |
 | `b` | Open the Backlog popup (`s`/`Enter` starts the selected backlog task) |
 | `n` | New task in the current project (prompt input) |
 | `N` | Folder picker → register a project, then prompt for a task |
 | `x` | Delete the selected task (kills its orchestrator, removes state) |
+| `X` | Remove the focused project from the hub (does not delete the repo) |
 
 ## Known limitations
 

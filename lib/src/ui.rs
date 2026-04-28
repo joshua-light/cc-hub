@@ -13,7 +13,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use ratatui_image::StatefulImage;
+use std::borrow::Cow;
 use std::path::Path;
+
+/// Shared dark band background painted by the tab strip, project chip strip,
+/// and contention strip — keeping these identical avoids a visible seam when
+/// rows abut.
+const BAND_BG: Color = Color::Rgb(20, 20, 28);
 
 fn cell_height() -> u16 {
     config::get().ui.cell_height.max(1)
@@ -70,8 +76,7 @@ fn render_tab_strip(frame: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 {
         return;
     }
-    let band_bg = Color::Rgb(20, 20, 28);
-    let bg = Style::default().bg(band_bg);
+    let bg = Style::default().bg(BAND_BG);
 
     // Paint the full band (top padding + tabs row + bottom padding) so the
     // background colour reads as a continuous header strip.
@@ -103,7 +108,7 @@ fn render_tab_strip(frame: &mut Frame, area: Rect, app: &App) {
     }
     spans.push(Span::styled(
         "   ⇥ next tab",
-        Style::default().fg(Color::Rgb(80, 80, 95)).bg(band_bg),
+        Style::default().fg(Color::Rgb(80, 80, 95)).bg(BAND_BG),
     ));
 
     // Tabs go on the visual middle row (or first row if the band is shorter).
@@ -414,7 +419,7 @@ fn render_tmux_pane(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     };
 
-    let title = format!(" tmux: {} ", pane.session_name);
+    let title = format!(" tmux · {} ", pane.session_name);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1082,6 +1087,7 @@ enum CardKind {
     Image,
     Video,
     Text,
+    Diff,
     Url,
     Fallback,
 }
@@ -1089,9 +1095,15 @@ enum CardKind {
 /// Body height (excluding the 1-line caption header) for a given card kind.
 const CARD_IMAGE_BODY_H: u16 = 10;
 const CARD_TEXT_BODY_H: u16 = 12;
+const CARD_DIFF_BODY_H: u16 = 14;
 const CARD_VIDEO_BODY_H: u16 = 2;
 const CARD_URL_BODY_H: u16 = 2;
 const CARD_FALLBACK_BODY_H: u16 = 1;
+
+/// Lead-artifact body heights — the headline proof gets more vertical room so
+/// the user can actually see it without expanding.
+const CARD_IMAGE_LEAD_BODY_H: u16 = 18;
+const CARD_TEXT_LEAD_BODY_H: u16 = 16;
 
 fn classify_artifact(a: &Artifact) -> CardKind {
     let kind = a.kind.to_ascii_lowercase();
@@ -1107,13 +1119,15 @@ fn classify_artifact(a: &Artifact) -> CardKind {
     match kind.as_str() {
         "screenshot" | "image" | "photo" => return CardKind::Image,
         "video" => return CardKind::Video,
-        "log" | "build" | "test" | "diff" | "text" | "output" => return CardKind::Text,
+        "diff" | "patch" => return CardKind::Diff,
+        "log" | "build" | "test" | "text" | "output" => return CardKind::Text,
         _ => {}
     }
     match ext.as_str() {
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => CardKind::Image,
         "mp4" | "mov" | "webm" | "mkv" => CardKind::Video,
-        "log" | "txt" | "md" | "diff" | "patch" | "json" | "yaml" | "yml" => CardKind::Text,
+        "diff" | "patch" => CardKind::Diff,
+        "log" | "txt" | "md" | "json" | "yaml" | "yml" => CardKind::Text,
         _ => CardKind::Fallback,
     }
 }
@@ -1122,9 +1136,18 @@ fn card_body_height(kind: CardKind) -> u16 {
     match kind {
         CardKind::Image => CARD_IMAGE_BODY_H,
         CardKind::Text => CARD_TEXT_BODY_H,
+        CardKind::Diff => CARD_DIFF_BODY_H,
         CardKind::Video => CARD_VIDEO_BODY_H,
         CardKind::Url => CARD_URL_BODY_H,
         CardKind::Fallback => CARD_FALLBACK_BODY_H,
+    }
+}
+
+fn lead_card_body_height(kind: CardKind) -> u16 {
+    match kind {
+        CardKind::Image => CARD_IMAGE_LEAD_BODY_H,
+        CardKind::Text => CARD_TEXT_LEAD_BODY_H,
+        _ => card_body_height(kind),
     }
 }
 
@@ -1151,19 +1174,7 @@ fn read_text_excerpt(path: &Path, max_bytes: usize) -> Option<(Vec<String>, usiz
     Some((head_lines, truncated))
 }
 
-fn diff_line_style(line: &str) -> Style {
-    if line.starts_with("+++") || line.starts_with("---") || line.starts_with("@@") {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-    } else if line.starts_with('+') {
-        Style::default().fg(Color::LightGreen)
-    } else if line.starts_with('-') {
-        Style::default().fg(Color::LightRed)
-    } else {
-        Style::default().fg(Color::Gray)
-    }
-}
-
-fn evidence_card_header(a: &Artifact, selected: bool) -> Line<'static> {
+fn evidence_card_header(a: &Artifact, selected: bool, is_lead: bool) -> Line<'static> {
     let basename = Path::new(&a.path)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -1181,6 +1192,13 @@ fn evidence_card_header(a: &Artifact, selected: bool) -> Line<'static> {
         Span::styled(" · ", Style::default().fg(Color::DarkGray)),
         Span::styled(basename, name_style),
     ];
+    if is_lead {
+        spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            "lead",
+            Style::default().fg(Color::Rgb(150, 195, 160)),
+        ));
+    }
     if let Some(c) = a.caption.as_deref() {
         if !c.is_empty() {
             spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)),);
@@ -1195,13 +1213,6 @@ fn render_text_card_body(frame: &mut Frame, area: Rect, a: &Artifact, max_bytes:
         return;
     }
     let path = Path::new(&a.path);
-    let kind_lower = a.kind.to_ascii_lowercase();
-    let ext_lower = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_default();
-    let is_diff = kind_lower == "diff" || ext_lower == "diff" || ext_lower == "patch";
     let lines: Vec<Line<'static>> = match read_text_excerpt(path, max_bytes) {
         None => match std::fs::metadata(path) {
             Ok(_) => vec![Line::from(Span::styled(
@@ -1221,24 +1232,271 @@ fn render_text_card_body(frame: &mut Frame, area: Rect, a: &Artifact, max_bytes:
             let mut out: Vec<Line<'static>> = content
                 .into_iter()
                 .map(|s| {
-                    let style = if is_diff {
-                        diff_line_style(&s)
-                    } else {
-                        Style::default().fg(Color::Gray)
-                    };
-                    Line::from(Span::styled(format!("  {}", s), style))
+                    Line::from(Span::styled(
+                        format!("  {}", s),
+                        Style::default().fg(Color::Gray),
+                    ))
                 })
                 .collect();
             if truncated > 0 {
-                out.push(Line::from(Span::styled(
-                    format!("  … (truncated, {} more line{})", truncated, if truncated == 1 { "" } else { "s" }),
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-                )));
+                out.push(truncated_footer(truncated));
             }
             out
         }
     };
     let p = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(p, area);
+}
+
+fn truncated_footer(n: usize) -> Line<'static> {
+    Line::from(Span::styled(
+        format!(
+            "  … (truncated, {} more line{})",
+            n,
+            if n == 1 { "" } else { "s" }
+        ),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    ))
+}
+
+const DIFF_ADDED_BG: Color = Color::Rgb(34, 92, 43);
+const DIFF_REMOVED_BG: Color = Color::Rgb(122, 41, 54);
+const DIFF_ADDED_FG: Color = Color::Rgb(180, 235, 190);
+const DIFF_REMOVED_FG: Color = Color::Rgb(245, 195, 200);
+const DIFF_GUTTER_FG: Color = Color::Rgb(120, 120, 130);
+const DIFF_CONTEXT_FG: Color = Color::Rgb(160, 160, 170);
+const DIFF_HEADER_FG: Color = Color::Rgb(140, 180, 230);
+
+// `{old:>3} {new:>3} {marker} ` + 1-cell margin = 11 used cols.
+const DIFF_GUTTER_W: usize = 11;
+
+#[derive(Clone, Copy)]
+enum DiffRowKind {
+    Added,
+    Removed,
+    Context,
+}
+
+impl DiffRowKind {
+    fn marker(self) -> &'static str {
+        match self {
+            DiffRowKind::Added => "+",
+            DiffRowKind::Removed => "-",
+            DiffRowKind::Context => " ",
+        }
+    }
+    fn palette(self) -> (Option<Color>, Color) {
+        match self {
+            DiffRowKind::Added => (Some(DIFF_ADDED_BG), DIFF_ADDED_FG),
+            DiffRowKind::Removed => (Some(DIFF_REMOVED_BG), DIFF_REMOVED_FG),
+            DiffRowKind::Context => (None, DIFF_CONTEXT_FG),
+        }
+    }
+}
+
+fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
+    let mut parts = line.split_whitespace();
+    parts.next()?;
+    let old = parts.next()?.strip_prefix('-')?;
+    let new = parts.next()?.strip_prefix('+')?;
+    let old_start: u32 = old.split(',').next()?.parse().ok()?;
+    let new_start: u32 = new.split(',').next()?.parse().ok()?;
+    Some((old_start, new_start))
+}
+
+fn diff_row(
+    area_width: u16,
+    old: Option<u32>,
+    new: Option<u32>,
+    content: &str,
+    kind: DiffRowKind,
+) -> Line<'static> {
+    let (bg_opt, content_fg) = kind.palette();
+    let base = match bg_opt {
+        Some(b) => Style::default().bg(b),
+        None => Style::default(),
+    };
+    let fmt_num = |n: Option<u32>| n.map_or_else(|| "   ".to_string(), |v| format!("{:>3}", v));
+
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
+    spans.push(Span::styled(fmt_num(old), base.fg(DIFF_GUTTER_FG)));
+    spans.push(Span::styled(" ", base));
+    spans.push(Span::styled(fmt_num(new), base.fg(DIFF_GUTTER_FG)));
+    spans.push(Span::styled(" ", base));
+    spans.push(Span::styled(kind.marker(), base.fg(content_fg)));
+    spans.push(Span::styled("  ", base));
+
+    let avail = (area_width as usize).saturating_sub(DIFF_GUTTER_W);
+    let normalized: Cow<'_, str> = if content.contains('\t') {
+        Cow::Owned(content.replace('\t', "    "))
+    } else {
+        Cow::Borrowed(content)
+    };
+    let body = truncate_str(&normalized, avail);
+    let body_w = body.chars().count();
+
+    let mut content_style = base.fg(content_fg);
+    if matches!(kind, DiffRowKind::Context) {
+        content_style = content_style.add_modifier(Modifier::DIM);
+    }
+    spans.push(Span::styled(body, content_style));
+
+    if matches!(kind, DiffRowKind::Added | DiffRowKind::Removed) {
+        let pad = avail.saturating_sub(body_w);
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), base));
+        }
+    }
+    Line::from(spans)
+}
+
+fn diff_separator_row() -> Line<'static> {
+    Line::from(vec![
+        Span::raw(" ".repeat(DIFF_GUTTER_W.saturating_sub(3))),
+        Span::styled(
+            "...",
+            Style::default()
+                .fg(DIFF_GUTTER_FG)
+                .add_modifier(Modifier::DIM),
+        ),
+    ])
+}
+
+fn is_diff_meta_line(s: &str) -> bool {
+    s.starts_with("diff --git")
+        || s.starts_with("index ")
+        || s.starts_with("--- ")
+        || s.starts_with("+++ ")
+        || s.starts_with("\\ No newline")
+        || s.starts_with("similarity index")
+        || s.starts_with("dissimilarity index")
+        || s.starts_with("rename from")
+        || s.starts_with("rename to")
+        || s.starts_with("copy from")
+        || s.starts_with("copy to")
+        || s.starts_with("new file mode")
+        || s.starts_with("deleted file mode")
+        || s.starts_with("old mode")
+        || s.starts_with("new mode")
+        || s.starts_with("Binary files")
+        || s.starts_with("GIT binary patch")
+}
+
+fn build_diff_lines(
+    content: Vec<String>,
+    truncated: usize,
+    body_h: u16,
+    area_width: u16,
+) -> Vec<Line<'static>> {
+    let truncated_indicator = truncated > 0;
+    let max_rows = (body_h as usize).saturating_sub(if truncated_indicator { 1 } else { 0 });
+    // Reserve space for a possible 2-row header (path + counts) so we don't
+    // push body rows that would later be truncated past the visible area.
+    let body_budget = max_rows.saturating_sub(2);
+
+    let mut header_path: Option<String> = None;
+    let mut added: u32 = 0;
+    let mut removed: u32 = 0;
+    let mut body_rows: Vec<Line<'static>> = Vec::new();
+    let mut old_line: u32 = 0;
+    let mut new_line: u32 = 0;
+    let mut first_hunk = true;
+
+    for raw in content.into_iter() {
+        if header_path.is_none() {
+            if let Some(rest) = raw.strip_prefix("+++ b/") {
+                header_path = Some(rest.to_string());
+            } else if let Some(rest) = raw.strip_prefix("+++ ") {
+                if !rest.is_empty() && rest != "/dev/null" {
+                    header_path = Some(rest.to_string());
+                }
+            }
+        }
+        if is_diff_meta_line(&raw) {
+            continue;
+        }
+        if raw.starts_with("@@") {
+            if let Some((o, n)) = parse_hunk_header(&raw) {
+                old_line = o;
+                new_line = n;
+            }
+            if !first_hunk && body_rows.len() < body_budget {
+                body_rows.push(diff_separator_row());
+            }
+            first_hunk = false;
+            continue;
+        }
+        let (kind, body, bump_old, bump_new) = match raw.as_bytes().first() {
+            Some(b'+') => (DiffRowKind::Added, &raw[1..], 0, 1),
+            Some(b'-') => (DiffRowKind::Removed, &raw[1..], 1, 0),
+            Some(b' ') => (DiffRowKind::Context, &raw[1..], 1, 1),
+            _ => (DiffRowKind::Context, raw.as_str(), 1, 1),
+        };
+        match kind {
+            DiffRowKind::Added => added += 1,
+            DiffRowKind::Removed => removed += 1,
+            DiffRowKind::Context => {}
+        }
+        if body_rows.len() < body_budget {
+            let (old_n, new_n) = match kind {
+                DiffRowKind::Added => (None, Some(new_line)),
+                DiffRowKind::Removed => (Some(old_line), None),
+                DiffRowKind::Context => (Some(old_line), Some(new_line)),
+            };
+            body_rows.push(diff_row(area_width, old_n, new_n, body, kind));
+        }
+        old_line += bump_old;
+        new_line += bump_new;
+    }
+
+    let mut rows: Vec<Line<'static>> = Vec::with_capacity(body_rows.len() + 3);
+    if let Some(p) = header_path {
+        rows.push(Line::from(Span::styled(
+            p,
+            Style::default()
+                .fg(DIFF_HEADER_FG)
+                .add_modifier(Modifier::BOLD),
+        )));
+        rows.push(Line::from(Span::styled(
+            format!("Added {} lines, removed {} lines", added, removed),
+            Style::default()
+                .fg(DIFF_GUTTER_FG)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+    rows.extend(body_rows);
+    if rows.len() > max_rows {
+        rows.truncate(max_rows);
+    }
+    if truncated_indicator {
+        rows.push(truncated_footer(truncated));
+    }
+    rows
+}
+
+fn render_diff_card_body(frame: &mut Frame, area: Rect, a: &Artifact, max_bytes: usize) {
+    if area.height == 0 {
+        return;
+    }
+    let path = Path::new(&a.path);
+    let lines: Vec<Line<'static>> = match read_text_excerpt(path, max_bytes) {
+        None => match std::fs::metadata(path) {
+            Ok(_) => vec![Line::from(Span::styled(
+                "  (binary file — open externally with `o`)",
+                Style::default().fg(Color::DarkGray),
+            ))],
+            Err(_) => vec![Line::from(Span::styled(
+                format!("  (cannot read {})", path.display()),
+                Style::default().fg(Color::Rgb(220, 100, 100)),
+            ))],
+        },
+        Some((content, truncated)) => {
+            build_diff_lines(content, truncated, area.height, area.width)
+        }
+    };
+    let p = Paragraph::new(lines);
     frame.render_widget(p, area);
 }
 
@@ -1337,11 +1595,11 @@ fn ensure_image_decoded(app: &mut App, path: &str) -> bool {
     true
 }
 
-/// "Result" popup for the selected Projects task: status + age + truncated
-/// prompt at the top, the orchestrator's `summary` next, then per-artifact
-/// "evidence cards" inlining the actual content (image, text excerpt, URL,
-/// or video hint) so the user sees *why* the task succeeded without clicking
-/// out to the filesystem.
+/// "Result" popup for the selected Projects task. Progressive-disclosure
+/// layout: header (status · age · count) → one-line note (proof headline) →
+/// lead artifact (large) → other artifacts → muted "summary" appendix at the
+/// bottom. The note is the headline; the agent's full summary is an appendix
+/// the user scrolls into, not the centerpiece.
 fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     let popup_area = centered_rect(area, 0.85);
     frame.render_widget(Clear, popup_area);
@@ -1361,7 +1619,7 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     };
     let title = match t.title.as_deref().filter(|s| !s.is_empty()) {
         Some(name) => format!(
-            " Result · {} — {} ",
+            " Result · {} · {} ",
             crate::orchestrator::short_task_id(&t.task_id),
             name,
         ),
@@ -1384,103 +1642,83 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     let now_secs = now_ms() / 1000;
     let age = format_age(now_secs.saturating_sub(t.updated_at as u64));
 
-    // ── Header: status badge + prompt excerpt ──────────────────────────────
+    // ── Header (status badge · age · count) + note headline ────────────────
     let mut header_lines: Vec<Line<'static>> = Vec::new();
-    header_lines.push(Line::from(vec![
+    let mut header_spans = vec![
         Span::styled(
             format!("[{}]", status_label),
             Style::default().fg(status_color).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(age, Style::default().fg(Color::Rgb(160, 160, 180))),
-        Span::raw("  "),
-        Span::styled(
-            format!("({} artifact{})", t.artifacts.len(), if t.artifacts.len() == 1 { "" } else { "s" }),
-            Style::default().fg(Color::Rgb(150, 130, 200)),
-        ),
-    ]));
-    header_lines.push(Line::raw(""));
-    header_lines.push(Line::from(Span::styled(
-        "Prompt",
-        Style::default().fg(Color::Rgb(120, 160, 220)).add_modifier(Modifier::BOLD),
-    )));
-    let prompt_lines: Vec<&str> = t.prompt.lines().take(3).collect();
-    if prompt_lines.is_empty() {
-        header_lines.push(Line::from(Span::styled(
-            "  (empty)",
-            Style::default().fg(Color::DarkGray),
-        )));
-    } else {
-        for line in &prompt_lines {
-            header_lines.push(Line::from(Span::styled(
-                format!("  {}", line),
-                Style::default().fg(Color::Gray),
-            )));
-        }
-        if t.prompt.lines().count() > 3 {
-            header_lines.push(Line::from(Span::styled(
-                "  …",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
+    ];
+    if let Some(v) = t.shipped_version.as_deref().filter(|s| !s.is_empty()) {
+        header_spans.push(Span::raw("  "));
+        header_spans.push(shipped_version_span(v));
     }
+    header_spans.push(Span::raw("  "));
+    header_spans.push(Span::styled(
+        format!("({} artifact{})", t.artifacts.len(), if t.artifacts.len() == 1 { "" } else { "s" }),
+        Style::default().fg(Color::Rgb(150, 130, 200)),
+    ));
+    header_lines.push(Line::from(header_spans));
     header_lines.push(Line::raw(""));
 
-    // ── Summary section ────────────────────────────────────────────────────
-    let mut summary_lines: Vec<Line<'static>> = Vec::new();
-    summary_lines.push(Line::from(Span::styled(
-        "Summary",
-        Style::default().fg(Color::Rgb(120, 160, 220)).add_modifier(Modifier::BOLD),
-    )));
-    match t.summary.as_deref() {
-        None => summary_lines.push(Line::from(Span::styled(
-            "  (no summary yet)",
-            Style::default().fg(Color::DarkGray),
-        ))),
-        Some(s) => {
-            for line in s.lines() {
-                summary_lines.push(Line::from(Span::styled(
-                    format!("  {}", line),
-                    Style::default().fg(Color::Gray),
-                )));
-            }
-        }
+    // Note is the headline proof; falls back to a single-line truncation of
+    // the prompt when the orchestrator hasn't written one yet.
+    let note_text: String = match t.note.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(n) => n.lines().next().unwrap_or("").to_string(),
+        None => t.prompt.lines().next().unwrap_or("").trim().to_string(),
+    };
+    if !note_text.is_empty() {
+        header_lines.push(Line::from(Span::styled(
+            note_text,
+            Style::default()
+                .fg(Color::Rgb(220, 220, 230))
+                .add_modifier(Modifier::ITALIC),
+        )));
+        header_lines.push(Line::raw(""));
     }
-    summary_lines.push(Line::raw(""));
-    summary_lines.push(Line::from(Span::styled(
-        "Evidence",
-        Style::default().fg(Color::Rgb(120, 160, 220)).add_modifier(Modifier::BOLD),
-    )));
+
+    // Lead artifact renders first; the rest follow in original order.
+    let lead_idx = t.lead_artifact.filter(|&i| i < t.artifacts.len());
+    let render_order: Vec<usize> = lead_idx
+        .into_iter()
+        .chain((0..t.artifacts.len()).filter(|i| Some(*i) != lead_idx))
+        .collect();
 
     // ── Layout & scrolling ────────────────────────────────────────────────
     let header_h = header_lines.len() as u16;
-    let summary_h = summary_lines.len() as u16;
     let body_h = inner.height.saturating_sub(1);
     let body_area = Rect::new(inner.x, inner.y, inner.width, body_h);
     let footer_area = Rect::new(inner.x, inner.y + body_h, inner.width, 1);
 
     // When the user has hit `e`, the selected card swells to fill most of
     // the visible body area; non-selected cards keep their default heights so
-    // the surrounding context (header, summary, neighbours) stays in view.
+    // the surrounding context stays in view.
     let expanded_body_h: u16 = if app.result_artifact_expanded {
         body_h.saturating_sub(6).min(40)
     } else {
         0
     };
-    let mut card_meta: Vec<(usize, CardKind, u16)> = Vec::new(); // (idx, kind, body_h)
-    for (idx, a) in t.artifacts.iter().enumerate() {
-        let kind = classify_artifact(a);
-        let default_h = card_body_height(kind);
-        let h = if app.result_artifact_expanded && idx == app.result_artifact_sel {
+    let mut card_meta: Vec<(usize, CardKind, u16)> = Vec::with_capacity(render_order.len());
+    for &art_idx in &render_order {
+        let kind = classify_artifact(&t.artifacts[art_idx]);
+        let default_h = if lead_idx == Some(art_idx) {
+            lead_card_body_height(kind)
+        } else {
+            card_body_height(kind)
+        };
+        let h = if app.result_artifact_expanded && art_idx == app.result_artifact_sel {
             expanded_body_h.max(default_h)
         } else {
             default_h
         };
-        card_meta.push((idx, kind, h));
+        card_meta.push((art_idx, kind, h));
     }
 
     let mut canvas_card_tops: Vec<u16> = Vec::with_capacity(card_meta.len());
-    let mut next_y = header_h + summary_h;
+    let mut next_y = header_h;
     for (_, _, body) in &card_meta {
         canvas_card_tops.push(next_y);
         // Card = header(1) + body + spacer(1).
@@ -1489,13 +1727,44 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     if t.artifacts.is_empty() {
         next_y = next_y.saturating_add(1); // "(no artifacts)" line
     }
+
+    let summary_lines: Vec<Line<'static>> = match t
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        None => Vec::new(),
+        Some(s) => {
+            let mut out: Vec<Line<'static>> = Vec::new();
+            out.push(Line::raw(""));
+            out.push(Line::from(Span::styled(
+                "summary",
+                Style::default().fg(Color::Rgb(120, 120, 140)),
+            )));
+            for line in s.lines() {
+                out.push(Line::from(Span::styled(
+                    format!("  {}", line),
+                    Style::default().fg(Color::Rgb(160, 160, 180)),
+                )));
+            }
+            out
+        }
+    };
+    let summary_h = summary_lines.len() as u16;
+    next_y = next_y.saturating_add(summary_h);
     let total_canvas_h = next_y;
 
     // Auto-scroll so the selected card stays on-screen.
     if !t.artifacts.is_empty() && body_h > 0 {
-        let sel_idx = app.result_artifact_sel.min(t.artifacts.len() - 1);
-        let sel_top = canvas_card_tops[sel_idx];
-        let sel_h = 1 + card_meta[sel_idx].2 + 1;
+        let sel_art_idx = app.result_artifact_sel.min(t.artifacts.len() - 1);
+        let sel_render_pos = render_order
+            .iter()
+            .position(|&i| i == sel_art_idx)
+            .unwrap_or(0);
+        let sel_top = canvas_card_tops[sel_render_pos];
+        let (_, _, sel_body) = card_meta[sel_render_pos];
+        let sel_h = 1 + sel_body + 1;
         if sel_top < app.result_scroll {
             app.result_scroll = sel_top;
         } else if sel_top + sel_h > app.result_scroll + body_h {
@@ -1508,46 +1777,43 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     }
     let scroll = app.result_scroll;
 
-    // Render header + summary as one paragraph with scroll. Image cards are
-    // overlaid on top of placeholder lines we'll write into the lines vec
-    // below, so the Paragraph never tries to "draw" the image area itself.
+    // The placeholder blank rows below each card header keep y-offsets honest
+    // for the Paragraph's vertical scroll; per-card widgets paint over them in
+    // the second pass.
     let mut canvas_lines: Vec<Line<'static>> = Vec::with_capacity(total_canvas_h as usize);
     canvas_lines.extend(header_lines);
-    canvas_lines.extend(summary_lines);
     if t.artifacts.is_empty() {
         canvas_lines.push(Line::from(Span::styled(
             "  (no artifacts attached)",
             Style::default().fg(Color::DarkGray),
         )));
     } else {
-        for (idx, a) in t.artifacts.iter().enumerate() {
-            let selected = idx == app.result_artifact_sel;
-            canvas_lines.push(evidence_card_header(a, selected));
-            // Body placeholder: blank lines so the Paragraph's vertical scroll
-            // produces correct y offsets, then card-specific widgets paint on
-            // top in the second pass below.
-            let body = card_meta[idx].2;
+        for &(art_idx, _, body) in &card_meta {
+            let a = &t.artifacts[art_idx];
+            let selected = art_idx == app.result_artifact_sel;
+            let is_lead = lead_idx == Some(art_idx);
+            canvas_lines.push(evidence_card_header(a, selected, is_lead));
             for _ in 0..body {
                 canvas_lines.push(Line::raw(""));
             }
             canvas_lines.push(Line::raw(""));
         }
     }
-    let canvas_para = Paragraph::new(canvas_lines).wrap(Wrap { trim: false }).scroll((scroll, 0));
+    canvas_lines.extend(summary_lines);
+    let canvas_para = Paragraph::new(canvas_lines)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
     frame.render_widget(canvas_para, body_area);
 
     // Per-card widgets, painted on top of the placeholder rows.
-    for (idx, a) in t.artifacts.iter().enumerate() {
-        let kind = card_meta[idx].1;
-        let body = card_meta[idx].2;
-        let card_top_canvas = canvas_card_tops[idx];
+    for (rp, &(art_idx, kind, body)) in card_meta.iter().enumerate() {
+        let a = &t.artifacts[art_idx];
+        let card_top_canvas = canvas_card_tops[rp];
         let body_top_canvas = card_top_canvas + 1;
-        // Card body in screen coordinates after scroll.
         let body_screen_top = body_area.y as i32 + body_top_canvas as i32 - scroll as i32;
         let body_screen_bot = body_screen_top + body as i32;
         let view_top = body_area.y as i32;
         let view_bot = (body_area.y + body_h) as i32;
-        // Off-screen entirely → skip.
         if body_screen_bot <= view_top || body_screen_top >= view_bot {
             continue;
         }
@@ -1566,10 +1832,8 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
         match kind {
             CardKind::Image => {
                 // Kitty/sixel/iterm2 protocols write pixel data tied to a fixed
-                // rect; if we let them paint over a partially-clipped rect the
-                // terminal leaves residue when the popup scrolls. So we only
-                // render the image when the *whole* body is on-screen and the
-                // picker actually exists.
+                // rect; partially-clipped rects leave terminal residue when the
+                // popup scrolls. Only render when fully visible.
                 let fully_visible =
                     body_screen_top >= view_top && body_screen_bot <= view_bot;
                 if !fully_visible {
@@ -1599,9 +1863,14 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
                 }
             }
             CardKind::Text => {
-                let expanded = app.result_artifact_expanded && idx == app.result_artifact_sel;
+                let expanded = app.result_artifact_expanded && art_idx == app.result_artifact_sel;
                 let max_bytes = if expanded { 64 * 1024 } else { 8 * 1024 };
                 render_text_card_body(frame, body_rect, a, max_bytes);
+            }
+            CardKind::Diff => {
+                let expanded = app.result_artifact_expanded && art_idx == app.result_artifact_sel;
+                let max_bytes = if expanded { 64 * 1024 } else { 8 * 1024 };
+                render_diff_card_body(frame, body_rect, a, max_bytes);
             }
             CardKind::Video => render_video_card_body(frame, body_rect, a),
             CardKind::Url => render_url_card_body(frame, body_rect, a),
@@ -1629,7 +1898,7 @@ fn render_state_debug(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let title = format!(
-        " Why is {} (PID {}) in state \"{}\"? ",
+        " Why · {} · PID {} · state {} ",
         info.project_name, info.pid, exp.final_state
     );
     let block = popup_block(Span::styled(
@@ -2316,7 +2585,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         let keybinds: &str = match app.view {
             View::Grid => match app.current_tab {
-                Tab::Projects => "tab:next  j/k:project  J/K:task  enter:focus orch  f:agent terminal  n:new task  N:register project  b:backlog  r:result  x:delete task  X:remove project  q:quit",
+                Tab::Projects => "tab:next  H/L:project  h/l:col  j/k:task  enter:focus orch  f:agent terminal/resurrect  space:approve  n:new task  N:register project  b:backlog  r:result  x:delete task  X:remove project  q:quit",
                 Tab::Sessions => "tab:next  h/j/k/l:nav  n:new  N:new in…  i:info  D:why?  enter/f:focus/resume  o:shell  x:close  H:inactive  W:workers  q:quit",
                 Tab::Metrics => "tab:next  j/k:select  enter:view transcript  r:refresh  q:quit",
             },
@@ -2409,21 +2678,8 @@ fn format_tool_label(tool: &crate::conversation::CurrentTool, inner_w: usize) ->
     // Reserve: icon (2) + space (1) + name + ": " (2) + min elapsed gutter (8).
     let prefix_cols = 2 + 1 + name.chars().count() + 2;
     let budget = inner_w.saturating_sub(prefix_cols).saturating_sub(8);
-    let hint_short = truncate_chars(hint, budget.max(6));
+    let hint_short = truncate_str(hint, budget.max(6));
     format!("󰖷 {}: {}", name, hint_short)
-}
-
-fn truncate_chars(s: &str, max: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        return s.to_string();
-    }
-    if max <= 1 {
-        return "…".to_string();
-    }
-    let mut out: String = chars.into_iter().take(max - 1).collect();
-    out.push('…');
-    out
 }
 
 /// Effective context-window size in tokens. The JSONL `model` field is the
@@ -2515,7 +2771,7 @@ fn render_projects_body(frame: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::DarkGray),
             ),
             Span::styled(
-                "Press N to pick a folder and start a task.",
+                "Press N to register a folder, then n to start a task.",
                 Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
             ),
         ]))
@@ -2538,13 +2794,13 @@ fn render_projects_body(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// Horizontal strip of project "chips". Selected chip is bold/inverse with
-/// per-column counts (R·D·F). Cycled with `[` / `]`.
+/// per-column counts (P·R·Rv·D·F). Cycled with `[` / `]`.
 fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 {
         return;
     }
     // Background band so the strip reads as a header even on dark themes.
-    let band = Style::default().bg(Color::Rgb(20, 20, 28));
+    let band = Style::default().bg(BAND_BG);
     frame.render_widget(Paragraph::new("").style(band), area);
 
     let chip_row = Rect {
@@ -2568,7 +2824,11 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(snap.projects.len() * 4 + 2);
     spans.push(Span::styled(
         "  󰉋 ",
-        Style::default().fg(Color::Rgb(150, 150, 170)).bg(Color::Rgb(20, 20, 28)),
+        Style::default().fg(Color::Rgb(150, 150, 170)).bg(BAND_BG),
+    ));
+    spans.push(Span::styled(
+        " P·R·Rv·D·F  ",
+        Style::default().fg(Color::Rgb(110, 110, 130)).bg(BAND_BG),
     ));
     for (idx, p) in snap.projects.iter().enumerate() {
         let tasks = snap.tasks.get(&p.id);
@@ -2642,18 +2902,20 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
 
     if let (Some(row), Some(p)) = (path_row, app.selected_project()) {
         let root = p.root.display().to_string();
-        let max = (row.width as usize).saturating_sub(4);
+        // The 5-cell prefix ("    …" when truncated, 5 spaces otherwise) keeps
+        // the path aligned in the same column either way.
+        let max = (row.width as usize).saturating_sub(5);
         let root = if root.chars().count() > max {
-            let cut = root.chars().count().saturating_sub(max - 1);
+            let cut = root.chars().count().saturating_sub(max);
             format!("    …{}", root.chars().skip(cut).collect::<String>())
         } else {
-            format!("    {}", root)
+            format!("     {}", root)
         };
         let line = Line::from(Span::styled(
             root,
             Style::default()
                 .fg(Color::Rgb(110, 110, 130))
-                .bg(Color::Rgb(20, 20, 28)),
+                .bg(BAND_BG),
         ));
         frame.render_widget(Paragraph::new(line).style(band), row);
     }
@@ -2661,6 +2923,11 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
 
 fn render_kanban_board(frame: &mut Frame, area: Rect, app: &App) {
     if area.height < 3 || area.width < 30 {
+        let hint = Paragraph::new("(terminal too narrow — resize or switch to Sessions)")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::Rgb(140, 140, 160)))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(hint, area);
         return;
     }
     // Six columns: Planning · Running · Review · Merging · Done · Failed.
@@ -3172,7 +3439,7 @@ fn render_task_card_active(
         let name = short_tool(tool);
         let max = inner.width.saturating_sub(4) as usize;
         let txt = match hint.as_deref().filter(|h| !h.is_empty()) {
-            Some(h) => format!("󰖷 {}: {}", name, truncate_chars(h, max.saturating_sub(name.len() + 4))),
+            Some(h) => format!("󰖷 {}: {}", name, truncate_str(h, max.saturating_sub(name.len() + 4))),
             None => format!("󰖷 {}", name),
         };
         lines.push(Line::from(Span::styled(
@@ -3282,6 +3549,12 @@ fn render_task_card_collapsed(
             Span::styled(summary_text, Style::default().fg(Color::Rgb(160, 165, 175))),
         ]));
     }
+    if let Some(v) = t.shipped_version.as_deref().filter(|s| !s.is_empty()) {
+        lines.push(Line::from(vec![
+            Span::styled("󰓹 ", Style::default().fg(Color::Rgb(110, 120, 135))),
+            shipped_version_span(v),
+        ]));
+    }
 
     let age = format_age(now_secs.saturating_sub(t.updated_at as u64));
     let arts = t.artifacts.len();
@@ -3309,6 +3582,20 @@ fn render_task_card_collapsed(
 
     let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
+}
+
+// Runtime opt-out for Nerd-Font glyphs: terminals without a Nerd Font render
+// the badge cell as blank/tofu. Set CC_HUB_ASCII_ICONS=1 (or true/yes) to
+// substitute ASCII fallbacks. Cached so per-frame badge rendering doesn't
+// hit `env::var`'s global lock.
+#[allow(dead_code)]
+fn ascii_icons() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("CC_HUB_ASCII_ICONS")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+    })
 }
 
 fn task_card_header_text(
@@ -3347,6 +3634,15 @@ fn format_age(secs: u64) -> String {
     } else {
         format!("{}d ago", secs / 86400)
     }
+}
+
+/// Styled `vX.Y.Z` span for the shipped-version display. Idempotent on the
+/// `v` prefix so `0.1` and `v0.1` both render as `v0.1`.
+fn shipped_version_span(v: &str) -> Span<'static> {
+    Span::styled(
+        format!("v{}", v.trim_start_matches('v')),
+        Style::default().fg(Color::Rgb(150, 200, 165)),
+    )
 }
 
 fn render_metrics_body(frame: &mut Frame, area: Rect, app: &App) {
@@ -3882,6 +4178,23 @@ mod result_popup_tests {
         out
     }
 
+    /// Returns the y-coordinate of the first row that contains `needle`, or
+    /// `None` when the substring is missing. Used to assert the proof-first
+    /// vertical ordering of the redesigned popup (note → lead → others →
+    /// summary appendix).
+    fn row_of(buf: &Buffer, needle: &str) -> Option<u16> {
+        for y in 0..buf.area().height {
+            let mut row = String::new();
+            for x in 0..buf.area().width {
+                row.push_str(buf[(x, y)].symbol());
+            }
+            if row.contains(needle) {
+                return Some(y);
+            }
+        }
+        None
+    }
+
     #[test]
     fn evidence_inlines_log_url_and_image_fallback() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -3901,6 +4214,7 @@ mod result_popup_tests {
         };
         let mut state = TaskState::new(project.id.clone(), project.root.clone(), "test prompt body".into());
         state.status = TaskStatus::Done;
+        state.note = Some("PROOF-LINE: build is green".into());
         state.summary = Some("WHY this works: build green; popup shows evidence cards.".into());
         state.artifacts = vec![
             Artifact {
@@ -3925,10 +4239,13 @@ mod result_popup_tests {
                 added_at: now,
             },
         ];
+        // Designate the build log as the lead artifact so it renders first
+        // and at the lead body height.
+        state.lead_artifact = Some(0);
 
         let mut app = App::new();
         let mut tasks = HashMap::new();
-        tasks.insert(project.id.clone(), vec![state]);
+        tasks.insert(project.id.clone(), vec![std::sync::Arc::new(state)]);
         let snap = ProjectsSnapshot {
             projects: vec![project],
             tasks,
@@ -3937,7 +4254,10 @@ mod result_popup_tests {
         app.update_projects(snap);
         assert!(app.enter_projects_result(), "popup should open");
 
-        let backend = TestBackend::new(120, 40);
+        // Tall buffer so the entire canvas (note → lead → others → summary
+        // appendix) fits without scrolling — the test asserts vertical order,
+        // so everything must be visible in one frame.
+        let backend = TestBackend::new(120, 60);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|f| super::render_projects_result(f, f.area(), &mut app))
@@ -3950,8 +4270,13 @@ mod result_popup_tests {
 
         assert!(dump.contains("Result"), "should render Result title");
         assert!(
+            dump.contains("PROOF-LINE: build is green"),
+            "note headline should appear above evidence\n{}",
+            dump
+        );
+        assert!(
             dump.contains("WHY this works"),
-            "summary text should be inlined\n{}",
+            "summary text should be inlined as appendix\n{}",
             dump
         );
         assert!(
@@ -3962,6 +4287,11 @@ mod result_popup_tests {
         assert!(
             dump.contains("compiling cc-hub-lib"),
             "log card body should inline file content\n{}",
+            dump
+        );
+        assert!(
+            dump.contains("lead"),
+            "lead artifact card header should carry a `lead` tag\n{}",
             dump
         );
         assert!(
@@ -3980,6 +4310,209 @@ mod result_popup_tests {
             dump.contains("[image preview unavailable") || dump.contains("[image hidden"),
             "image fallback placeholder should appear\n{}",
             dump
+        );
+
+        // Vertical ordering: note → lead body → other artifact body → summary.
+        let y_note = row_of(&buf, "PROOF-LINE").expect("note row");
+        let y_lead_body = row_of(&buf, "compiling cc-hub-lib").expect("lead body row");
+        let y_url = row_of(&buf, "https://example.com").expect("url body row");
+        let y_summary = row_of(&buf, "WHY this works").expect("summary appendix row");
+        assert!(
+            y_note < y_lead_body && y_lead_body < y_url && y_url < y_summary,
+            "expected order note({}) < lead({}) < url({}) < summary({})\n{}",
+            y_note, y_lead_body, y_url, y_summary, dump,
+        );
+    }
+
+    fn buffer_to_ansi(buf: &Buffer) -> String {
+        use ratatui::style::Color;
+        fn fg(c: Color) -> String {
+            match c {
+                Color::Reset => "\x1b[39m".into(),
+                Color::Rgb(r, g, b) => format!("\x1b[38;2;{};{};{}m", r, g, b),
+                Color::Indexed(i) => format!("\x1b[38;5;{}m", i),
+                Color::Black => "\x1b[30m".into(),
+                Color::Red => "\x1b[31m".into(),
+                Color::Green => "\x1b[32m".into(),
+                Color::Yellow => "\x1b[33m".into(),
+                Color::Blue => "\x1b[34m".into(),
+                Color::Magenta => "\x1b[35m".into(),
+                Color::Cyan => "\x1b[36m".into(),
+                Color::Gray => "\x1b[37m".into(),
+                Color::DarkGray => "\x1b[90m".into(),
+                Color::LightRed => "\x1b[91m".into(),
+                Color::LightGreen => "\x1b[92m".into(),
+                Color::LightYellow => "\x1b[93m".into(),
+                Color::LightBlue => "\x1b[94m".into(),
+                Color::LightMagenta => "\x1b[95m".into(),
+                Color::LightCyan => "\x1b[96m".into(),
+                Color::White => "\x1b[97m".into(),
+            }
+        }
+        fn bg(c: Color) -> String {
+            match c {
+                Color::Reset => "\x1b[49m".into(),
+                Color::Rgb(r, g, b) => format!("\x1b[48;2;{};{};{}m", r, g, b),
+                Color::Indexed(i) => format!("\x1b[48;5;{}m", i),
+                Color::Black => "\x1b[40m".into(),
+                Color::Red => "\x1b[41m".into(),
+                Color::Green => "\x1b[42m".into(),
+                Color::Yellow => "\x1b[43m".into(),
+                Color::Blue => "\x1b[44m".into(),
+                Color::Magenta => "\x1b[45m".into(),
+                Color::Cyan => "\x1b[46m".into(),
+                Color::Gray => "\x1b[47m".into(),
+                Color::DarkGray => "\x1b[100m".into(),
+                Color::LightRed => "\x1b[101m".into(),
+                Color::LightGreen => "\x1b[102m".into(),
+                Color::LightYellow => "\x1b[103m".into(),
+                Color::LightBlue => "\x1b[104m".into(),
+                Color::LightMagenta => "\x1b[105m".into(),
+                Color::LightCyan => "\x1b[106m".into(),
+                Color::White => "\x1b[107m".into(),
+            }
+        }
+        let mut out = String::new();
+        for y in 0..buf.area().height {
+            let mut last_fg = Color::Reset;
+            let mut last_bg = Color::Reset;
+            out.push_str("\x1b[0m");
+            for x in 0..buf.area().width {
+                let c = &buf[(x, y)];
+                if c.fg != last_fg {
+                    out.push_str(&fg(c.fg));
+                    last_fg = c.fg;
+                }
+                if c.bg != last_bg {
+                    out.push_str(&bg(c.bg));
+                    last_bg = c.bg;
+                }
+                out.push_str(c.symbol());
+            }
+            out.push_str("\x1b[0m\n");
+        }
+        out
+    }
+
+    fn buffer_bg_map(buf: &Buffer) -> String {
+        let mut out = String::new();
+        for y in 0..buf.area().height {
+            for x in 0..buf.area().width {
+                let c = &buf[(x, y)];
+                let m = match c.bg {
+                    ratatui::style::Color::Rgb(34, 92, 43) => '+',
+                    ratatui::style::Color::Rgb(122, 41, 54) => '-',
+                    ratatui::style::Color::Reset => '.',
+                    _ => '?',
+                };
+                out.push(m);
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn diff_artifact_renders_with_claude_style_backgrounds() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let patch_path = tmp.path().join("sample.patch");
+        let patch = "\
+diff --git a/lib/src/ui.rs b/lib/src/ui.rs
+index 0000001..0000002 100644
+--- a/lib/src/ui.rs
++++ b/lib/src/ui.rs
+@@ -42,3 +42,5 @@ fn render_status() {
+     let mut spans = Vec::new();
+-    spans.push(span_dim(&state.title));
++    spans.push(span_bold(&state.title));
++    if let Some(badge) = &state.badge {
++        spans.push(span_subtle(badge));
++    }
+     Line::from(spans)
+@@ -101,3 +103,3 @@ fn render_bar() {
+     let bar = renderer.bar();
+-    bar.draw(area);
++    bar.draw_with_offset(area, offset);
+     Ok(())
+";
+        std::fs::write(&patch_path, patch).unwrap();
+        std::fs::copy(&patch_path, "/tmp/cchub-diff-sample.patch").ok();
+
+        let now = crate::orchestrator::now_unix_secs();
+        let project = Project {
+            id: "p-diff".into(),
+            name: "diff".into(),
+            root: PathBuf::from("/tmp/diff"),
+            created_at: now,
+        };
+        let mut state = TaskState::new(project.id.clone(), project.root.clone(), "diff prompt".into());
+        state.status = TaskStatus::Done;
+        state.summary = Some("WHY: diff renderer matches Claude Code style.".into());
+        state.artifacts = vec![Artifact {
+            kind: "diff".into(),
+            path: patch_path.to_string_lossy().into_owned(),
+            original: patch_path.to_string_lossy().into_owned(),
+            caption: Some("ui.rs: structured diff".into()),
+            added_at: now,
+        }];
+
+        let mut app = App::new();
+        let mut tasks = HashMap::new();
+        tasks.insert(project.id.clone(), vec![std::sync::Arc::new(state)]);
+        let snap = ProjectsSnapshot {
+            projects: vec![project],
+            tasks,
+            titling: std::collections::HashSet::new(),
+        };
+        app.update_projects(snap);
+        assert!(app.enter_projects_result(), "popup should open");
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| super::render_projects_result(f, f.area(), &mut app))
+            .expect("render");
+
+        let buf = terminal.backend().buffer().clone();
+        let plain = buffer_to_string(&buf);
+        let ansi = buffer_to_ansi(&buf);
+        let bg_map = buffer_bg_map(&buf);
+        let combined = format!(
+            "--- plain ---\n{}\n--- ansi (cat with -R) ---\n{}\n--- bg map (+ added, - removed, . none) ---\n{}",
+            plain, ansi, bg_map
+        );
+        std::fs::write("/tmp/cchub-diff-render.txt", &combined).expect("dump write");
+
+        assert!(plain.contains("Result"), "should render Result title\n{}", plain);
+        assert!(
+            plain.contains("lib/src/ui.rs"),
+            "diff per-file header path should be visible\n{}",
+            plain
+        );
+        assert!(
+            plain.contains("Added") && plain.contains("removed"),
+            "diff header counts line should be visible\n{}",
+            plain
+        );
+        assert!(
+            !plain.contains("@@ -"),
+            "raw @@ hunk header should be suppressed\n{}",
+            plain
+        );
+        assert!(
+            bg_map.contains('+'),
+            "added rows should paint the diffAdded bg across cells\n{}",
+            bg_map
+        );
+        assert!(
+            bg_map.contains('-'),
+            "removed rows should paint the diffRemoved bg across cells\n{}",
+            bg_map
+        );
+        assert!(
+            bg_map.contains("..."),
+            "hunk separator marker should render in dim gray\n{}",
+            plain
         );
     }
 

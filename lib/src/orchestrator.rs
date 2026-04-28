@@ -245,6 +245,21 @@ pub struct TaskState {
     /// back-compat with state files written before this field existed.
     #[serde(default)]
     pub lead_artifact: Option<usize>,
+    /// Unix timestamp of the last time the backlog triager considered this
+    /// task. Bounds the rate of Claude calls per dormant task to one per
+    /// `[backlog].ttl_secs`. `None` means never triaged.
+    #[serde(default)]
+    pub triaged_at: Option<i64>,
+    /// Version of the project that was shipped as a result of this task,
+    /// captured at the moment the orchestrator first declares completion
+    /// (Running → Review/Done/Failed). Read from the project's manifest
+    /// (Cargo.toml / package.json / pyproject.toml / VERSION) in the project
+    /// root, which by that point reflects any /bump commit the orchestrator
+    /// just landed. `None` if the project has no recognised manifest, or if
+    /// the task never transitioned out of Running. `serde(default)` for
+    /// back-compat with state.json files written before this field existed.
+    #[serde(default)]
+    pub shipped_version: Option<String>,
 }
 
 impl TaskState {
@@ -268,6 +283,8 @@ impl TaskState {
             artifacts: Vec::new(),
             todos: Vec::new(),
             lead_artifact: None,
+            triaged_at: None,
+            shipped_version: None,
         }
     }
 
@@ -291,6 +308,8 @@ impl TaskState {
             artifacts: Vec::new(),
             todos: Vec::new(),
             lead_artifact: None,
+            triaged_at: None,
+            shipped_version: None,
         }
     }
 
@@ -591,6 +610,14 @@ pub fn remove_project(project_id: &str) -> io::Result<()> {
 /// process — pre-substituted into every example so the orchestrator's Bash
 /// shell doesn't need cc-hub on `PATH` (a real failure mode observed in
 /// the first end-to-end run, where the orch had to guess the path).
+/// Stable prefix of every orchestrator prompt. Shared with the resurrect
+/// path so a JSONL whose first user message starts with this is unambiguously
+/// the orchestrator's session — not a sibling Claude session that happens to
+/// run in the same cwd.
+pub fn orchestrator_prompt_prefix(task_id: &str) -> String {
+    format!("You are the cc-hub orchestrator for task `{}`", task_id)
+}
+
 pub fn build_orchestrator_prompt(state: &TaskState, cc_hub_bin: &Path) -> String {
     let TaskState {
         task_id,
@@ -600,8 +627,9 @@ pub fn build_orchestrator_prompt(state: &TaskState, cc_hub_bin: &Path) -> String
         ..
     } = state;
     let bin = cc_hub_bin.display();
+    let prefix = orchestrator_prompt_prefix(task_id);
     format!(
-        "You are the cc-hub orchestrator for task `{task_id}` in project `{project_id}` at `{root}`.
+        "{prefix} in project `{project_id}` at `{root}`.
 
 Your job is to deliver the user's task end-to-end via a Pull Request: explore, decompose, dispatch workers into a worktree, open a PR, iterate on review feedback, and merge when the user approves. **You never edit `main` directly.** Every change lands through the PR flow so the user sees a reviewable diff before anything touches their working branch.
 

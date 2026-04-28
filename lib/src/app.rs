@@ -162,8 +162,9 @@ pub struct App {
     /// task selection within the project lives in [`Self::projects_task_sel`].
     pub projects_sel: usize,
     pub projects_task_sel: usize,
-    /// Kanban column cursor: 0=Running, 1=Done, 2=Failed. Drives which
-    /// column [`Self::projects_task_sel`] indexes into.
+    /// Kanban column cursor: 0=Planning, 1=Running, 2=Review, 3=Done,
+    /// 4=Failed. Drives which column [`Self::projects_task_sel`] indexes
+    /// into.
     pub projects_col: usize,
     /// True while the folder picker / prompt input flow is creating a
     /// new project task (vs. spawning a regular session). Used to route
@@ -298,11 +299,28 @@ impl App {
             .projects
             .get(self.projects_sel)
             .map(|p| p.id.clone());
+        // Track the focused task by id so a status transition (Running →
+        // Review etc.) carries the cursor across columns. Mirrors the
+        // prev_sid trick in `update_metrics`.
+        let prev_task_id = self
+            .selected_project_task()
+            .map(|t| t.task_id.clone());
         let first_load = self.projects.projects.is_empty();
         self.projects = snap;
         if let Some(pid) = prev_pid {
             if let Some(idx) = self.projects.projects.iter().position(|p| p.id == pid) {
                 self.projects_sel = idx;
+            }
+        }
+        // If the task is gone, fall through and let clamp handle the row.
+        if let Some(task_id) = prev_task_id {
+            for col in 0..=4 {
+                let tasks = self.kanban_column_tasks(col);
+                if let Some(row) = tasks.iter().position(|t| t.task_id == task_id) {
+                    self.projects_col = col;
+                    self.projects_task_sel = row;
+                    break;
+                }
             }
         }
         // Jump-if-empty only on the very first load — once the user is in the
@@ -442,6 +460,7 @@ impl App {
                 4 => t.status == TaskStatus::Done,
                 _ => t.status == TaskStatus::Failed,
             })
+            .map(|t| t.as_ref())
             .collect()
     }
 
@@ -464,6 +483,7 @@ impl App {
         tasks
             .iter()
             .filter(|t| t.status == TaskStatus::Backlog)
+            .map(|t| t.as_ref())
             .collect()
     }
 
@@ -1444,3 +1464,101 @@ fn git_rev_parse_short(root: &std::path::Path, rev: &str) -> Option<String> {
     Some(out.stdout.trim().to_string())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::orchestrator::{Project, TaskState, TaskStatus, Worker};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn project(id: &str) -> Project {
+        Project {
+            id: id.to_string(),
+            name: id.to_string(),
+            root: PathBuf::from(format!("/tmp/{}", id)),
+            created_at: 0,
+        }
+    }
+
+    fn task(project_id: &str, task_id: &str, status: TaskStatus, with_worker: bool) -> TaskState {
+        let mut t = TaskState::new(
+            project_id.to_string(),
+            PathBuf::from(format!("/tmp/{}", project_id)),
+            String::new(),
+        );
+        t.task_id = task_id.to_string();
+        t.status = status;
+        if with_worker {
+            t.workers.push(Worker {
+                tmux_name: "w-1".to_string(),
+                cwd: PathBuf::from("/tmp/w"),
+                worktree: None,
+                readonly: false,
+                spawned_at: 0,
+            });
+        }
+        t
+    }
+
+    fn snapshot(p: Project, tasks: Vec<TaskState>) -> ProjectsSnapshot {
+        let mut snap = ProjectsSnapshot::empty();
+        let pid = p.id.clone();
+        snap.projects.push(p);
+        snap.tasks
+            .insert(pid, tasks.into_iter().map(Arc::new).collect());
+        snap
+    }
+
+    #[test]
+    fn projects_cursor_follows_task_across_status_transition() {
+        let mut app = App::new();
+        app.current_tab = Tab::Projects;
+
+        let p = project("p-1");
+        // Running + workers → kanban column 1 (true Running).
+        let snap1 = snapshot(p.clone(), vec![task("p-1", "t-1", TaskStatus::Running, true)]);
+        app.update_projects(snap1);
+
+        assert_eq!(app.projects_col, 1, "Running+workers should land in col 1");
+        assert_eq!(
+            app.selected_project_task().map(|t| t.task_id.clone()),
+            Some("t-1".to_string()),
+        );
+
+        // Same task moves to Review (column 2). Cursor must follow.
+        let snap2 = snapshot(p, vec![task("p-1", "t-1", TaskStatus::Review, false)]);
+        app.update_projects(snap2);
+
+        assert_eq!(
+            app.projects_col, 2,
+            "cursor should follow t-1 into the Review column"
+        );
+        assert_eq!(
+            app.selected_project_task().map(|t| t.task_id.clone()),
+            Some("t-1".to_string()),
+            "selected task should still be t-1",
+        );
+    }
+
+    #[test]
+    fn projects_cursor_clamps_when_task_disappears() {
+        let mut app = App::new();
+        app.current_tab = Tab::Projects;
+
+        let p = project("p-1");
+        let snap1 = snapshot(p.clone(), vec![task("p-1", "t-1", TaskStatus::Running, true)]);
+        app.update_projects(snap1);
+        assert_eq!(app.projects_col, 1);
+
+        // Task vanishes from the snapshot entirely.
+        let snap2 = snapshot(p, Vec::new());
+        app.update_projects(snap2);
+
+        assert!(app.selected_project_task().is_none());
+        assert_eq!(
+            app.projects_col, 1,
+            "column should stay where it was when task disappears",
+        );
+        assert_eq!(app.projects_task_sel, 0, "row should clamp to 0");
+    }
+}

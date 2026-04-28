@@ -46,6 +46,44 @@ pub fn find_jsonl(cwd: &str, session_id: &str) -> Option<PathBuf> {
     }
 }
 
+/// Recover the orchestrator's Claude session id for a task whose `state.json`
+/// lost the field (or never had it written). Returns the JSONL in
+/// `~/.claude/projects/<encoded_cwd>/` whose first user message starts with
+/// the orchestrator prompt for `task_id` — that prefix is unique to
+/// orchestrator sessions, so a hit is not a sibling Claude session running in
+/// the same cwd. Newest mtime wins; bails on the first match so a project
+/// with hundreds of JSONLs only parses one in the common case.
+pub fn find_orchestrator_session_id(project_root: &Path, task_id: &str) -> Option<String> {
+    let cwd = project_root.to_string_lossy();
+    let dir = projects_dir()?.join(encode_path(&cwd));
+    let needle = crate::orchestrator::orchestrator_prompt_prefix(task_id);
+    let mut candidates: Vec<(SystemTime, PathBuf)> = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                return None;
+            }
+            let mtime = path.metadata().ok()?.modified().ok()?;
+            Some((mtime, path))
+        })
+        .collect();
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in candidates {
+        let head = conversation::read_jsonl_head(&path, 4096);
+        let Some(first) = conversation::extract_first_user_message(&head) else {
+            continue;
+        };
+        if !first.starts_with(&needle) {
+            continue;
+        }
+        let stem = path.file_stem().and_then(|s| s.to_str())?.to_string();
+        return Some(stem);
+    }
+    None
+}
+
 /// Check if a process has a real parent (not reparented to init).
 fn has_real_parent(pid: u32) -> bool {
     Process::parent_pid(pid).is_some_and(|ppid| ppid > 1)

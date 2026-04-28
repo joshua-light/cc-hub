@@ -264,10 +264,50 @@ fn parse_resolution(raw: &str) -> Option<Vec<String>> {
     None
 }
 
-/// Run the resolved spawn command with `--model <title.model> -p
-/// "<prompt + first_msg>"` in the scratch cwd and return a sanitized
-/// short title. `None` on any failure (feature disabled, couldn't resolve
-/// the command, non-zero exit, empty output, timeout).
+/// Run `<spawn.command> --model <model> -p <prompt>` in the scratch cwd
+/// and return the raw stdout. Resolves the configured spawn command
+/// through the user's login shell on first call (cached afterwards), then
+/// execs the resolved binary directly. Returns `None` on any failure
+/// (resolve, spawn, non-zero exit, timeout, shutdown).
+pub fn run_claude_blocking(model: &str, prompt: &str, timeout: Duration) -> Option<String> {
+    fs::create_dir_all(scratch_cwd()).ok()?;
+    let resolved = resolve_spawn_command()?;
+    let (exe, base_args) = resolved.split_first()?;
+    let mut cmd = Command::new(exe);
+    cmd.args(base_args)
+        .arg("--model")
+        .arg(model)
+        .arg("-p")
+        .arg(prompt)
+        .current_dir(scratch_cwd())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    debug!(
+        "claude_blocking: model={} prompt_len={} timeout={:?}",
+        model,
+        prompt.len(),
+        timeout
+    );
+
+    let output = run_with_timeout(cmd, timeout)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!(
+            "claude_blocking: {} exit={} stderr={:?}",
+            config::get().spawn.command,
+            output.status,
+            stderr.trim()
+        );
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Generate a sanitized short title for a session by running the title
+/// prompt through `run_claude_blocking`. `None` when titling is disabled,
+/// the input is empty, or the underlying Claude call fails.
 pub fn generate_title_blocking(first_msg: &str) -> Option<String> {
     let title_cfg = &config::get().title;
     if !title_cfg.enabled {
@@ -276,42 +316,8 @@ pub fn generate_title_blocking(first_msg: &str) -> Option<String> {
     if first_msg.trim().is_empty() {
         return None;
     }
-    fs::create_dir_all(scratch_cwd()).ok()?;
-
-    let resolved = resolve_spawn_command()?;
     let prompt = format!("{}{}", title_cfg.prompt, first_msg);
-
-    let (exe, base_args) = resolved.split_first()?;
-    let mut cmd = Command::new(exe);
-    cmd.args(base_args)
-        .arg("--model")
-        .arg(&title_cfg.model)
-        .arg("-p")
-        .arg(&prompt)
-        .current_dir(scratch_cwd())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    debug!(
-        "title: running {:?} (cwd={}) prompt_len={}",
-        resolved,
-        scratch_cwd().display(),
-        prompt.len()
-    );
-
-    let output = run_with_timeout(cmd, title_cfg.run_timeout())?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        warn!(
-            "title: {} exit={} stderr={:?}",
-            config::get().spawn.command,
-            output.status,
-            stderr.trim()
-        );
-        return None;
-    }
-    let raw = String::from_utf8_lossy(&output.stdout);
+    let raw = run_claude_blocking(&title_cfg.model, &prompt, title_cfg.run_timeout())?;
     sanitize_title(&raw, title_cfg.max_length)
 }
 
