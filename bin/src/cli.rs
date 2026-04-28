@@ -648,12 +648,30 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         .ok()
         .map(|s| s.status);
 
+    // Backlog is only a valid target from a Backlog state. Flipping a
+    // running task to Backlog would hide it from the kanban while leaving
+    // the orchestrator/tmux session alive — a zombie. Callers wanting to
+    // abandon an active task should use `--status failed`, which runs the
+    // standard cleanup path below.
+    if raw_status == Some(TaskStatus::Backlog)
+        && prev_status.as_ref() != Some(&TaskStatus::Backlog)
+    {
+        return Err(CliError::Usage(
+            "--status backlog is only valid from a Backlog state; \
+             use --status failed to abandon an active task (cleanup runs automatically)"
+                .into(),
+        ));
+    }
+
     // An orchestrator's `--status done` means "I'm finished" — it does NOT
     // mean the work is approved. Route that into Review so a human (or
     // future agentic reviewer) signs off via the TUI's `Space` keybind.
     // The exception: if the task is already in Review, an explicit `done`
     // is the approval path (used by `approve_review_task`'s subprocess
     // fallback, if any) — let it through. `failed` always lands as Failed.
+    // The requested vs. effective distinction is exposed in the JSON
+    // output below (`requested_status` vs `status`) so scripted callers
+    // can detect the redirect instead of silently misreading the result.
     let effective_status = match (raw_status.clone(), prev_status.as_ref()) {
         (Some(TaskStatus::Done), prev) if prev != Some(&TaskStatus::Review) => {
             Some(TaskStatus::Review)
@@ -699,6 +717,7 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         "task_id": state.task_id,
         "project_id": state.project_id,
         "status": state.status,
+        "requested_status": raw_status,
         "note": state.note,
         "summary": state.summary,
         "updated_at": state.updated_at,
