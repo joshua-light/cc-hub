@@ -837,6 +837,21 @@ async fn run(
                                 .orchestrator_tmux
                                 .as_deref()
                                 .filter(|n| send::tmux_session_exists(n));
+                            let resurrectable_sid = if live_tmux.is_none()
+                                && matches!(
+                                    task.status,
+                                    cc_hub_lib::orchestrator::TaskStatus::Running
+                                        | cc_hub_lib::orchestrator::TaskStatus::Review
+                                ) {
+                                task.orchestrator_session_id.clone().or_else(|| {
+                                    scanner::find_orchestrator_session_id(
+                                        &task.project_root,
+                                        &task.task_id,
+                                    )
+                                })
+                            } else {
+                                None
+                            };
                             if let Some(tmux_name) = live_tmux {
                                 let (cols, rows) = popup_pane_size(terminal);
                                 match tmux_pane::TmuxPaneView::spawn(tmux_name, rows, cols) {
@@ -845,6 +860,44 @@ async fn run(
                                         "open orchestrator failed: {}",
                                         e
                                     )),
+                                }
+                            } else if let Some(sid) = resurrectable_sid {
+                                let cwd = task.project_root.to_string_lossy().into_owned();
+                                match spawn::spawn_claude_session(&cwd, Some(&sid)) {
+                                    Ok(new_tmux) => {
+                                        if let Err(e) = cc_hub_lib::orchestrator::update_task_state(
+                                            &task.project_id,
+                                            &task.task_id,
+                                            |s| {
+                                                s.orchestrator_tmux = Some(new_tmux.clone());
+                                                s.orchestrator_session_id = Some(sid.clone());
+                                            },
+                                        ) {
+                                            app.set_status(format!(
+                                                "resurrected [{}] but state write failed: {}",
+                                                new_tmux, e
+                                            ));
+                                        }
+                                        let (cols, rows) = popup_pane_size(terminal);
+                                        match tmux_pane::TmuxPaneView::spawn(&new_tmux, rows, cols)
+                                        {
+                                            Ok(pane) => {
+                                                app.set_status(format!(
+                                                    "resumed orchestrator {} [{}]",
+                                                    models::short_sid(&sid),
+                                                    new_tmux
+                                                ));
+                                                app.enter_tmux_pane(pane);
+                                            }
+                                            Err(e) => app.set_status(format!(
+                                                "resurrected [{}] but attach failed: {}",
+                                                new_tmux, e
+                                            )),
+                                        }
+                                    }
+                                    Err(e) => {
+                                        app.set_status(format!("resurrect failed: {}", e))
+                                    }
                                 }
                             } else if let Some(log_path) = cc_hub_lib::orchestrator::task_orchestrator_log_path(
                                 &task.project_id,
@@ -866,6 +919,14 @@ async fn run(
                                         e
                                     )),
                                 }
+                            } else if matches!(
+                                task.status,
+                                cc_hub_lib::orchestrator::TaskStatus::Running
+                                    | cc_hub_lib::orchestrator::TaskStatus::Review
+                            ) {
+                                app.set_status(
+                                    "orchestrator dead and no resumable session on disk — task may need a fresh start".into(),
+                                );
                             } else {
                                 app.set_status("no orchestrator log available".into());
                             }

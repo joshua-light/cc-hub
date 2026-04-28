@@ -2325,7 +2325,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         let keybinds: &str = match app.view {
             View::Grid => match app.current_tab {
-                Tab::Projects => "tab:next  H/L:project  h/l:col  j/k:task  enter:focus orch  f:agent terminal  space:approve  n:new task  N:register project  b:backlog  r:result  x:delete task  X:remove project  q:quit",
+                Tab::Projects => "tab:next  H/L:project  h/l:col  j/k:task  enter:focus orch  f:agent terminal/resurrect  space:approve  n:new task  N:register project  b:backlog  r:result  x:delete task  X:remove project  q:quit",
                 Tab::Sessions => "tab:next  h/j/k/l:nav  n:new  N:new in…  i:info  D:why?  enter/f:focus/resume  o:shell  x:close  H:inactive  W:workers  q:quit",
                 Tab::Metrics => "tab:next  j/k:select  enter:view transcript  r:refresh  q:quit",
             },
@@ -2418,21 +2418,8 @@ fn format_tool_label(tool: &crate::conversation::CurrentTool, inner_w: usize) ->
     // Reserve: icon (2) + space (1) + name + ": " (2) + min elapsed gutter (8).
     let prefix_cols = 2 + 1 + name.chars().count() + 2;
     let budget = inner_w.saturating_sub(prefix_cols).saturating_sub(8);
-    let hint_short = truncate_chars(hint, budget.max(6));
+    let hint_short = truncate_str(hint, budget.max(6));
     format!("󰖷 {}: {}", name, hint_short)
-}
-
-fn truncate_chars(s: &str, max: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        return s.to_string();
-    }
-    if max <= 1 {
-        return "…".to_string();
-    }
-    let mut out: String = chars.into_iter().take(max - 1).collect();
-    out.push('…');
-    out
 }
 
 /// Effective context-window size in tokens. The JSONL `model` field is the
@@ -3266,7 +3253,7 @@ fn render_task_card_active(
         let name = short_tool(tool);
         let max = inner.width.saturating_sub(4) as usize;
         let txt = match hint.as_deref().filter(|h| !h.is_empty()) {
-            Some(h) => format!("󰖷 {}: {}", name, truncate_chars(h, max.saturating_sub(name.len() + 4))),
+            Some(h) => format!("󰖷 {}: {}", name, truncate_str(h, max.saturating_sub(name.len() + 4))),
             None => format!("󰖷 {}", name),
         };
         lines.push(Line::from(Span::styled(

@@ -242,7 +242,7 @@ start them.
 | `h` / `l` (or arrows) | Switch kanban column |
 | `j` / `k` (or arrows) | Move the cursor within the focused column |
 | `Enter` | Focus the orchestrator session for the selected task |
-| `f` | Embed the orchestrator's tmux pane in the TUI |
+| `f` | Embed the orchestrator's tmux pane; if the pane died (PC reboot), resume the orchestrator's Claude session from disk and embed the new pane |
 | `Space` | Approve the focused Review task → Done |
 | `r` | Open the Result popup (artifacts + summary) for the focused task |
 | `b` | Open the Backlog popup (`s`/`Enter` starts the selected backlog task) |

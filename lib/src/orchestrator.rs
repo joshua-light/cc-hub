@@ -614,6 +614,14 @@ pub fn remove_project(project_id: &str) -> io::Result<()> {
 /// process — pre-substituted into every example so the orchestrator's Bash
 /// shell doesn't need cc-hub on `PATH` (a real failure mode observed in
 /// the first end-to-end run, where the orch had to guess the path).
+/// Stable prefix of every orchestrator prompt. Shared with the resurrect
+/// path so a JSONL whose first user message starts with this is unambiguously
+/// the orchestrator's session — not a sibling Claude session that happens to
+/// run in the same cwd.
+pub fn orchestrator_prompt_prefix(task_id: &str) -> String {
+    format!("You are the cc-hub orchestrator for task `{}`", task_id)
+}
+
 pub fn build_orchestrator_prompt(state: &TaskState, cc_hub_bin: &Path) -> String {
     let TaskState {
         task_id,
@@ -623,8 +631,9 @@ pub fn build_orchestrator_prompt(state: &TaskState, cc_hub_bin: &Path) -> String
         ..
     } = state;
     let bin = cc_hub_bin.display();
+    let prefix = orchestrator_prompt_prefix(task_id);
     format!(
-        "You are the cc-hub orchestrator for task `{task_id}` in project `{project_id}` at `{root}`.
+        "{prefix} in project `{project_id}` at `{root}`.
 
 Your job is to deliver the user's task. You can do it inline yourself OR delegate to worker sessions you spawn — pick whichever ships the result faster. Default to inline; only reach for sub-agents when the work is genuinely worth splitting.
 
