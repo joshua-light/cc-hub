@@ -354,6 +354,19 @@ pub fn refresh_heartbeat_in(home: &Path, project_id: &str, task_id: &str) -> io:
     if !pre.reservations.iter().any(|r| r.task_id == task_id) {
         return Ok(());
     }
+    // Second skip: if every matching reservation was heartbeat-bumped within
+    // TTL/4, don't rewrite the file just to advance the clock. The /4 bound
+    // is much tighter than the eviction TTL, so other readers still see this
+    // reservation as live without us paying read+lock+rewrite+rename per tick.
+    let now = now_unix_secs();
+    if pre
+        .reservations
+        .iter()
+        .filter(|r| r.task_id == task_id)
+        .all(|r| now - r.last_heartbeat < RESERVATION_TTL_SECS / 4)
+    {
+        return Ok(());
+    }
     with_lock(home, project_id, |file| {
         let now = now_unix_secs();
         for r in file.reservations.iter_mut() {
@@ -527,5 +540,37 @@ mod unit_tests {
         };
         assert!(is_stale(&r, RESERVATION_TTL_SECS + 1));
         assert!(!is_stale(&r, RESERVATION_TTL_SECS));
+    }
+
+    #[test]
+    fn refresh_heartbeat_skips_write_within_freshness_window() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let home = tmp.path();
+        let project = "p1";
+        let task = "t1";
+
+        declare_in(
+            home,
+            project,
+            task,
+            &["src/foo.rs".to_string()],
+            "sess",
+            false,
+        )
+        .expect("declare");
+
+        let path = reservations_path_in(home, project);
+        let mtime_before = fs::metadata(&path).unwrap().modified().unwrap();
+        let bytes_before = fs::read(&path).unwrap();
+
+        // Both refreshes should skip the lock+write entirely because the
+        // reservation just got a heartbeat well within TTL/4.
+        refresh_heartbeat_in(home, project, task).expect("refresh 1");
+        refresh_heartbeat_in(home, project, task).expect("refresh 2");
+
+        let mtime_after = fs::metadata(&path).unwrap().modified().unwrap();
+        let bytes_after = fs::read(&path).unwrap();
+        assert_eq!(mtime_before, mtime_after, "mtime should be unchanged");
+        assert_eq!(bytes_before, bytes_after, "contents should be unchanged");
     }
 }
