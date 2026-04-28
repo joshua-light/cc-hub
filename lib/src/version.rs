@@ -79,21 +79,32 @@ fn read_json(path: &Path) -> Option<serde_json::Value> {
 }
 
 fn read_cargo_version(path: &Path, doc: &toml::Value) -> Option<String> {
-    let ver = doc.get("package")?.get("version")?;
-    if let Some(s) = ver.as_str() {
-        return clean(s);
+    if let Some(ver) = doc.get("package").and_then(|p| p.get("version")) {
+        if let Some(s) = ver.as_str() {
+            return clean(s);
+        }
+        // Workspace inheritance: `version = { workspace = true }` (or `version.workspace = true`).
+        // Walk up parent dirs looking for a Cargo.toml with [workspace.package.version].
+        if ver
+            .as_table()
+            .and_then(|t| t.get("workspace"))
+            .and_then(|w| w.as_bool())
+            .unwrap_or(false)
+        {
+            return resolve_workspace_version(path);
+        }
+        return None;
     }
-    // Workspace inheritance: `version = { workspace = true }` (or `version.workspace = true`).
-    // Walk up parent dirs looking for a Cargo.toml with [workspace.package.version].
-    if ver
-        .as_table()
-        .and_then(|t| t.get("workspace"))
-        .and_then(|w| w.as_bool())
-        .unwrap_or(false)
-    {
-        return resolve_workspace_version(path);
-    }
-    None
+    // Pure workspace manifest (no [package] block at this root, e.g. a
+    // virtual workspace whose members live in subdirs): take the version
+    // straight from [workspace.package]. Without this, projects whose root
+    // is the workspace root (cc-hub itself, plenty of others) would report
+    // no version.
+    doc.get("workspace")
+        .and_then(|w| w.get("package"))
+        .and_then(|p| p.get("version"))
+        .and_then(|v| v.as_str())
+        .and_then(clean)
 }
 
 fn resolve_workspace_version(member_manifest: &Path) -> Option<String> {
@@ -166,6 +177,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(detect(&member), Some("0.42.0".into()));
+    }
+
+    #[test]
+    fn cargo_virtual_workspace_root() {
+        // detect() called on a workspace root that has no [package] of its own
+        // should return [workspace.package].version (this is cc-hub's own shape).
+        let d = tempdir().unwrap();
+        fs::write(
+            d.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"lib\"]\n\n[workspace.package]\nversion = \"0.25.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(detect(d.path()), Some("0.25.0".into()));
     }
 
     #[test]
