@@ -653,7 +653,7 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
     // the orchestrator/tmux session alive — a zombie. Callers wanting to
     // abandon an active task should use `--status failed`, which runs the
     // standard cleanup path below.
-    if raw_status == Some(TaskStatus::Backlog)
+    if raw_status.as_ref() == Some(&TaskStatus::Backlog)
         && prev_status.as_ref() != Some(&TaskStatus::Backlog)
     {
         return Err(CliError::Usage(
@@ -669,9 +669,6 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
     // The exception: if the task is already in Review, an explicit `done`
     // is the approval path (used by `approve_review_task`'s subprocess
     // fallback, if any) — let it through. `failed` always lands as Failed.
-    // The requested vs. effective distinction is exposed in the JSON
-    // output below (`requested_status` vs `status`) so scripted callers
-    // can detect the redirect instead of silently misreading the result.
     let effective_status = match (raw_status.clone(), prev_status.as_ref()) {
         (Some(TaskStatus::Done), prev) if prev != Some(&TaskStatus::Review) => {
             Some(TaskStatus::Review)
