@@ -1094,6 +1094,11 @@ const CARD_VIDEO_BODY_H: u16 = 2;
 const CARD_URL_BODY_H: u16 = 2;
 const CARD_FALLBACK_BODY_H: u16 = 1;
 
+/// Lead-artifact body heights — the headline proof gets more vertical room so
+/// the user can actually see it without expanding.
+const CARD_IMAGE_LEAD_BODY_H: u16 = 18;
+const CARD_TEXT_LEAD_BODY_H: u16 = 16;
+
 fn classify_artifact(a: &Artifact) -> CardKind {
     let kind = a.kind.to_ascii_lowercase();
     let path = &a.path;
@@ -1164,7 +1169,7 @@ fn diff_line_style(line: &str) -> Style {
     }
 }
 
-fn evidence_card_header(a: &Artifact, selected: bool) -> Line<'static> {
+fn evidence_card_header(a: &Artifact, selected: bool, is_lead: bool) -> Line<'static> {
     let basename = Path::new(&a.path)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -1182,6 +1187,13 @@ fn evidence_card_header(a: &Artifact, selected: bool) -> Line<'static> {
         Span::styled(" · ", Style::default().fg(Color::DarkGray)),
         Span::styled(basename, name_style),
     ];
+    if is_lead {
+        spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            "lead",
+            Style::default().fg(Color::Rgb(150, 195, 160)),
+        ));
+    }
     if let Some(c) = a.caption.as_deref() {
         if !c.is_empty() {
             spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)),);
@@ -1338,11 +1350,11 @@ fn ensure_image_decoded(app: &mut App, path: &str) -> bool {
     true
 }
 
-/// "Result" popup for the selected Projects task: status + age + truncated
-/// prompt at the top, the orchestrator's `summary` next, then per-artifact
-/// "evidence cards" inlining the actual content (image, text excerpt, URL,
-/// or video hint) so the user sees *why* the task succeeded without clicking
-/// out to the filesystem.
+/// "Result" popup for the selected Projects task. Progressive-disclosure
+/// layout: header (status · age · count) → one-line note (proof headline) →
+/// lead artifact (large) → other artifacts → muted "summary" appendix at the
+/// bottom. The note is the headline; the agent's full summary is an appendix
+/// the user scrolls into, not the centerpiece.
 fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     let popup_area = centered_rect(area, 0.85);
     frame.render_widget(Clear, popup_area);
@@ -1384,7 +1396,7 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     let now_secs = now_ms() / 1000;
     let age = format_age(now_secs.saturating_sub(t.updated_at as u64));
 
-    // ── Header: status badge + prompt excerpt ──────────────────────────────
+    // ── Header (status badge · age · count) + note headline ────────────────
     let mut header_lines: Vec<Line<'static>> = Vec::new();
     header_lines.push(Line::from(vec![
         Span::styled(
@@ -1400,88 +1412,77 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
         ),
     ]));
     header_lines.push(Line::raw(""));
-    header_lines.push(Line::from(Span::styled(
-        "Prompt",
-        Style::default().fg(Color::Rgb(120, 160, 220)).add_modifier(Modifier::BOLD),
-    )));
-    let prompt_lines: Vec<&str> = t.prompt.lines().take(3).collect();
-    if prompt_lines.is_empty() {
-        header_lines.push(Line::from(Span::styled(
-            "  (empty)",
-            Style::default().fg(Color::DarkGray),
-        )));
-    } else {
-        for line in &prompt_lines {
-            header_lines.push(Line::from(Span::styled(
-                format!("  {}", line),
-                Style::default().fg(Color::Gray),
-            )));
-        }
-        if t.prompt.lines().count() > 3 {
-            header_lines.push(Line::from(Span::styled(
-                "  …",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-    }
-    header_lines.push(Line::raw(""));
 
-    // ── Summary section ────────────────────────────────────────────────────
-    let mut summary_lines: Vec<Line<'static>> = Vec::new();
-    summary_lines.push(Line::from(Span::styled(
-        "Summary",
-        Style::default().fg(Color::Rgb(120, 160, 220)).add_modifier(Modifier::BOLD),
-    )));
-    match t.summary.as_deref() {
-        None => summary_lines.push(Line::from(Span::styled(
-            "  (no summary yet)",
-            Style::default().fg(Color::DarkGray),
-        ))),
-        Some(s) => {
-            for line in s.lines() {
-                summary_lines.push(Line::from(Span::styled(
-                    format!("  {}", line),
-                    Style::default().fg(Color::Gray),
-                )));
+    // Note is the headline proof; falls back to a single-line truncation of
+    // the prompt when the orchestrator hasn't written one yet.
+    let note_text: String = match t.note.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(n) => n.lines().next().unwrap_or("").to_string(),
+        None => t.prompt.lines().next().unwrap_or("").trim().to_string(),
+    };
+    if !note_text.is_empty() {
+        header_lines.push(Line::from(Span::styled(
+            note_text,
+            Style::default()
+                .fg(Color::Rgb(220, 220, 230))
+                .add_modifier(Modifier::ITALIC),
+        )));
+        header_lines.push(Line::raw(""));
+    }
+
+    // ── Render order: lead artifact first, then the rest in original order
+    let lead_idx = t.lead_artifact.filter(|&i| i < t.artifacts.len());
+    let mut render_order: Vec<usize> = Vec::with_capacity(t.artifacts.len());
+    if let Some(l) = lead_idx {
+        render_order.push(l);
+        for i in 0..t.artifacts.len() {
+            if i != l {
+                render_order.push(i);
             }
         }
+    } else {
+        render_order.extend(0..t.artifacts.len());
     }
-    summary_lines.push(Line::raw(""));
-    summary_lines.push(Line::from(Span::styled(
-        "Evidence",
-        Style::default().fg(Color::Rgb(120, 160, 220)).add_modifier(Modifier::BOLD),
-    )));
 
     // ── Layout & scrolling ────────────────────────────────────────────────
     let header_h = header_lines.len() as u16;
-    let summary_h = summary_lines.len() as u16;
     let body_h = inner.height.saturating_sub(1);
     let body_area = Rect::new(inner.x, inner.y, inner.width, body_h);
     let footer_area = Rect::new(inner.x, inner.y + body_h, inner.width, 1);
 
     // When the user has hit `e`, the selected card swells to fill most of
     // the visible body area; non-selected cards keep their default heights so
-    // the surrounding context (header, summary, neighbours) stays in view.
+    // the surrounding context stays in view.
     let expanded_body_h: u16 = if app.result_artifact_expanded {
         body_h.saturating_sub(6).min(40)
     } else {
         0
     };
-    let mut card_meta: Vec<(usize, CardKind, u16)> = Vec::new(); // (idx, kind, body_h)
-    for (idx, a) in t.artifacts.iter().enumerate() {
+    // (artifact_idx, kind, body_h, is_lead) keyed by render position.
+    let mut card_meta: Vec<(usize, CardKind, u16, bool)> = Vec::with_capacity(render_order.len());
+    for &art_idx in &render_order {
+        let a = &t.artifacts[art_idx];
         let kind = classify_artifact(a);
-        let default_h = card_body_height(kind);
-        let h = if app.result_artifact_expanded && idx == app.result_artifact_sel {
+        let is_lead = lead_idx == Some(art_idx);
+        let default_h = if is_lead {
+            match kind {
+                CardKind::Image => CARD_IMAGE_LEAD_BODY_H,
+                CardKind::Text => CARD_TEXT_LEAD_BODY_H,
+                _ => card_body_height(kind),
+            }
+        } else {
+            card_body_height(kind)
+        };
+        let h = if app.result_artifact_expanded && art_idx == app.result_artifact_sel {
             expanded_body_h.max(default_h)
         } else {
             default_h
         };
-        card_meta.push((idx, kind, h));
+        card_meta.push((art_idx, kind, h, is_lead));
     }
 
     let mut canvas_card_tops: Vec<u16> = Vec::with_capacity(card_meta.len());
-    let mut next_y = header_h + summary_h;
-    for (_, _, body) in &card_meta {
+    let mut next_y = header_h;
+    for (_, _, body, _) in &card_meta {
         canvas_card_tops.push(next_y);
         // Card = header(1) + body + spacer(1).
         next_y = next_y.saturating_add(1 + body + 1);
@@ -1489,13 +1490,45 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     if t.artifacts.is_empty() {
         next_y = next_y.saturating_add(1); // "(no artifacts)" line
     }
+
+    // Summary appendix at the very bottom, behind a single muted lowercase
+    // label. Skipped entirely when the orchestrator hasn't produced one.
+    let summary_lines: Vec<Line<'static>> = match t
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        None => Vec::new(),
+        Some(s) => {
+            let mut out: Vec<Line<'static>> = Vec::new();
+            out.push(Line::raw(""));
+            out.push(Line::from(Span::styled(
+                "summary",
+                Style::default().fg(Color::Rgb(120, 120, 140)),
+            )));
+            for line in s.lines() {
+                out.push(Line::from(Span::styled(
+                    format!("  {}", line),
+                    Style::default().fg(Color::Rgb(160, 160, 180)),
+                )));
+            }
+            out
+        }
+    };
+    let summary_h = summary_lines.len() as u16;
+    next_y = next_y.saturating_add(summary_h);
     let total_canvas_h = next_y;
 
     // Auto-scroll so the selected card stays on-screen.
     if !t.artifacts.is_empty() && body_h > 0 {
-        let sel_idx = app.result_artifact_sel.min(t.artifacts.len() - 1);
-        let sel_top = canvas_card_tops[sel_idx];
-        let sel_h = 1 + card_meta[sel_idx].2 + 1;
+        let sel_art_idx = app.result_artifact_sel.min(t.artifacts.len() - 1);
+        let sel_render_pos = render_order
+            .iter()
+            .position(|&i| i == sel_art_idx)
+            .unwrap_or(0);
+        let sel_top = canvas_card_tops[sel_render_pos];
+        let sel_h = 1 + card_meta[sel_render_pos].2 + 1;
         if sel_top < app.result_scroll {
             app.result_scroll = sel_top;
         } else if sel_top + sel_h > app.result_scroll + body_h {
@@ -1508,46 +1541,43 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     }
     let scroll = app.result_scroll;
 
-    // Render header + summary as one paragraph with scroll. Image cards are
-    // overlaid on top of placeholder lines we'll write into the lines vec
-    // below, so the Paragraph never tries to "draw" the image area itself.
+    // Build the canvas: header → cards (header + body placeholders + spacer)
+    // → summary appendix. Image / text card bodies are overlaid by widgets in
+    // the second pass below; the placeholder rows just keep the y-offsets
+    // honest for the Paragraph's vertical scroll.
     let mut canvas_lines: Vec<Line<'static>> = Vec::with_capacity(total_canvas_h as usize);
     canvas_lines.extend(header_lines);
-    canvas_lines.extend(summary_lines);
     if t.artifacts.is_empty() {
         canvas_lines.push(Line::from(Span::styled(
             "  (no artifacts attached)",
             Style::default().fg(Color::DarkGray),
         )));
     } else {
-        for (idx, a) in t.artifacts.iter().enumerate() {
-            let selected = idx == app.result_artifact_sel;
-            canvas_lines.push(evidence_card_header(a, selected));
-            // Body placeholder: blank lines so the Paragraph's vertical scroll
-            // produces correct y offsets, then card-specific widgets paint on
-            // top in the second pass below.
-            let body = card_meta[idx].2;
+        for &(art_idx, _, body, is_lead) in &card_meta {
+            let a = &t.artifacts[art_idx];
+            let selected = art_idx == app.result_artifact_sel;
+            canvas_lines.push(evidence_card_header(a, selected, is_lead));
             for _ in 0..body {
                 canvas_lines.push(Line::raw(""));
             }
             canvas_lines.push(Line::raw(""));
         }
     }
-    let canvas_para = Paragraph::new(canvas_lines).wrap(Wrap { trim: false }).scroll((scroll, 0));
+    canvas_lines.extend(summary_lines);
+    let canvas_para = Paragraph::new(canvas_lines)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
     frame.render_widget(canvas_para, body_area);
 
     // Per-card widgets, painted on top of the placeholder rows.
-    for (idx, a) in t.artifacts.iter().enumerate() {
-        let kind = card_meta[idx].1;
-        let body = card_meta[idx].2;
-        let card_top_canvas = canvas_card_tops[idx];
+    for (rp, &(art_idx, kind, body, _)) in card_meta.iter().enumerate() {
+        let a = &t.artifacts[art_idx];
+        let card_top_canvas = canvas_card_tops[rp];
         let body_top_canvas = card_top_canvas + 1;
-        // Card body in screen coordinates after scroll.
         let body_screen_top = body_area.y as i32 + body_top_canvas as i32 - scroll as i32;
         let body_screen_bot = body_screen_top + body as i32;
         let view_top = body_area.y as i32;
         let view_bot = (body_area.y + body_h) as i32;
-        // Off-screen entirely → skip.
         if body_screen_bot <= view_top || body_screen_top >= view_bot {
             continue;
         }
@@ -1566,10 +1596,8 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
         match kind {
             CardKind::Image => {
                 // Kitty/sixel/iterm2 protocols write pixel data tied to a fixed
-                // rect; if we let them paint over a partially-clipped rect the
-                // terminal leaves residue when the popup scrolls. So we only
-                // render the image when the *whole* body is on-screen and the
-                // picker actually exists.
+                // rect; partially-clipped rects leave terminal residue when the
+                // popup scrolls. Only render when fully visible.
                 let fully_visible =
                     body_screen_top >= view_top && body_screen_bot <= view_bot;
                 if !fully_visible {
@@ -1599,7 +1627,7 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
                 }
             }
             CardKind::Text => {
-                let expanded = app.result_artifact_expanded && idx == app.result_artifact_sel;
+                let expanded = app.result_artifact_expanded && art_idx == app.result_artifact_sel;
                 let max_bytes = if expanded { 64 * 1024 } else { 8 * 1024 };
                 render_text_card_body(frame, body_rect, a, max_bytes);
             }
@@ -3982,6 +4010,23 @@ mod result_popup_tests {
         out
     }
 
+    /// Returns the y-coordinate of the first row that contains `needle`, or
+    /// `None` when the substring is missing. Used to assert the proof-first
+    /// vertical ordering of the redesigned popup (note → lead → others →
+    /// summary appendix).
+    fn row_of(buf: &Buffer, needle: &str) -> Option<u16> {
+        for y in 0..buf.area().height {
+            let mut row = String::new();
+            for x in 0..buf.area().width {
+                row.push_str(buf[(x, y)].symbol());
+            }
+            if row.contains(needle) {
+                return Some(y);
+            }
+        }
+        None
+    }
+
     #[test]
     fn evidence_inlines_log_url_and_image_fallback() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4001,6 +4046,7 @@ mod result_popup_tests {
         };
         let mut state = TaskState::new(project.id.clone(), project.root.clone(), "test prompt body".into());
         state.status = TaskStatus::Done;
+        state.note = Some("PROOF-LINE: build is green".into());
         state.summary = Some("WHY this works: build green; popup shows evidence cards.".into());
         state.artifacts = vec![
             Artifact {
@@ -4025,6 +4071,9 @@ mod result_popup_tests {
                 added_at: now,
             },
         ];
+        // Designate the build log as the lead artifact so it renders first
+        // and at the lead body height.
+        state.lead_artifact = Some(0);
 
         let mut app = App::new();
         let mut tasks = HashMap::new();
@@ -4038,7 +4087,10 @@ mod result_popup_tests {
         app.update_projects(snap);
         assert!(app.enter_projects_result(), "popup should open");
 
-        let backend = TestBackend::new(120, 40);
+        // Tall buffer so the entire canvas (note → lead → others → summary
+        // appendix) fits without scrolling — the test asserts vertical order,
+        // so everything must be visible in one frame.
+        let backend = TestBackend::new(120, 60);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|f| super::render_projects_result(f, f.area(), &mut app))
@@ -4051,8 +4103,13 @@ mod result_popup_tests {
 
         assert!(dump.contains("Result"), "should render Result title");
         assert!(
+            dump.contains("PROOF-LINE: build is green"),
+            "note headline should appear above evidence\n{}",
+            dump
+        );
+        assert!(
             dump.contains("WHY this works"),
-            "summary text should be inlined\n{}",
+            "summary text should be inlined as appendix\n{}",
             dump
         );
         assert!(
@@ -4063,6 +4120,11 @@ mod result_popup_tests {
         assert!(
             dump.contains("compiling cc-hub-lib"),
             "log card body should inline file content\n{}",
+            dump
+        );
+        assert!(
+            dump.contains("lead"),
+            "lead artifact card header should carry a `lead` tag\n{}",
             dump
         );
         assert!(
@@ -4081,6 +4143,17 @@ mod result_popup_tests {
             dump.contains("[image preview unavailable") || dump.contains("[image hidden"),
             "image fallback placeholder should appear\n{}",
             dump
+        );
+
+        // Vertical ordering: note → lead body → other artifact body → summary.
+        let y_note = row_of(&buf, "PROOF-LINE").expect("note row");
+        let y_lead_body = row_of(&buf, "compiling cc-hub-lib").expect("lead body row");
+        let y_url = row_of(&buf, "https://example.com").expect("url body row");
+        let y_summary = row_of(&buf, "WHY this works").expect("summary appendix row");
+        assert!(
+            y_note < y_lead_body && y_lead_body < y_url && y_url < y_summary,
+            "expected order note({}) < lead({}) < url({}) < summary({})\n{}",
+            y_note, y_lead_body, y_url, y_summary, dump,
         );
     }
 
