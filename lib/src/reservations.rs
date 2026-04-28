@@ -354,16 +354,15 @@ pub fn refresh_heartbeat_in(home: &Path, project_id: &str, task_id: &str) -> io:
     if !pre.reservations.iter().any(|r| r.task_id == task_id) {
         return Ok(());
     }
-    // Second skip: if every matching reservation was heartbeat-bumped within
-    // TTL/4, don't rewrite the file just to advance the clock. The /4 bound
-    // is much tighter than the eviction TTL, so other readers still see this
-    // reservation as live without us paying read+lock+rewrite+rename per tick.
+    // TTL/4 bounds heartbeat freshness much tighter than the eviction TTL,
+    // so readers still see the reservation as live without a per-tick rewrite.
+    // saturating_sub mirrors `is_stale` and is safe under backward clock skew.
     let now = now_unix_secs();
     if pre
         .reservations
         .iter()
         .filter(|r| r.task_id == task_id)
-        .all(|r| now - r.last_heartbeat < RESERVATION_TTL_SECS / 4)
+        .all(|r| now.saturating_sub(r.last_heartbeat) < RESERVATION_TTL_SECS / 4)
     {
         return Ok(());
     }

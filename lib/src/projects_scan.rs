@@ -231,9 +231,8 @@ pub fn scan() -> ProjectsSnapshot {
         reservations_by_project.insert(p.id.clone(), live);
     }
 
-    // Drop cached entries for state.json paths we didn't see this scan
-    // (deleted tasks, removed projects). Scoped lock so we never hold it
-    // across IO.
+    // Evict cache entries for paths not seen this scan (deleted tasks,
+    // removed projects). Scoped so the lock isn't held across IO.
     {
         let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
         c.retain(|k, _| visited_all.contains(k));
@@ -255,10 +254,9 @@ fn load_tasks_for(project_id: &str) -> (Vec<TaskState>, HashSet<PathBuf>) {
     load_tasks_from_dir(&tasks_dir)
 }
 
-/// Inner walk-and-parse, factored out so tests can drive it against an
-/// arbitrary tempdir without overriding `$HOME`. Returns (tasks, visited
-/// state.json paths). The visited set is the cache-invalidation truth:
-/// any cache entry not in this set across the full scan is stale.
+/// Walk-and-parse keyed off an explicit `tasks_dir` so tests can drive it
+/// against a tempdir. The visited set is the cache-invalidation truth:
+/// any cache entry not in it across the full scan gets evicted.
 fn load_tasks_from_dir(tasks_dir: &Path) -> (Vec<TaskState>, HashSet<PathBuf>) {
     let entries = match fs::read_dir(tasks_dir) {
         Ok(it) => it,
@@ -317,9 +315,8 @@ fn load_tasks_from_dir(tasks_dir: &Path) -> (Vec<TaskState>, HashSet<PathBuf>) {
         };
         visited.insert(path.clone());
 
-        // Cache hit: clone the parsed state and skip read+parse. Drop the
-        // lock before the next iteration so other threads (or the
-        // invalidation pass at end-of-scan) aren't blocked across IO.
+        // Scoped so the lock is dropped before the read+parse below, never
+        // held across IO.
         {
             let c = cache().lock().unwrap_or_else(|e| e.into_inner());
             if let Some((cached_mtime, state)) = c.get(&path) {
