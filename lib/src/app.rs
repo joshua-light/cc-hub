@@ -11,6 +11,7 @@ use crate::usage::UsageInfo;
 use ratatui::text::Line;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub fn status_msg_ttl() -> Duration {
@@ -528,7 +529,7 @@ impl App {
         // waiting for the next scan tick.
         if let Some(tasks) = self.projects.tasks.get_mut(&project_id) {
             if let Some(t) = tasks.iter_mut().find(|t| t.task_id == task_id) {
-                let s = std::sync::Arc::make_mut(t);
+                let s = Arc::make_mut(t);
                 s.status = TaskStatus::Done;
                 s.updated_at = updated.updated_at;
             }
