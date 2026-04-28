@@ -185,6 +185,10 @@ pub struct App {
     /// until the user submits the task prompt; consumed in
     /// [`Self::submit_project_task`].
     pub projects_pending_cwd: Option<String>,
+    /// Agent override for the pending project task. `None` means "use the
+    /// project default at spawn time"; `Some(id)` is set by the user
+    /// cycling backends in the prompt-input view via Tab.
+    pub projects_pending_agent_id: Option<String>,
     /// Latest scan snapshot; drives [`rebuild_groups`].
     last_sessions: Vec<SessionInfo>,
     /// Session ids seen on the previous scan tick. `None` means the first
@@ -262,6 +266,7 @@ impl App {
             creating_project_task: false,
             registering_project_only: false,
             projects_pending_cwd: None,
+            projects_pending_agent_id: None,
             last_sessions: Vec::new(),
             known_session_ids: None,
             result_artifact_sel: 0,
@@ -385,8 +390,7 @@ impl App {
         if self.projects.projects.is_empty() {
             return;
         }
-        self.projects_sel =
-            (self.projects_sel + 1).min(self.projects.projects.len() - 1);
+        self.projects_sel = (self.projects_sel + 1).min(self.projects.projects.len() - 1);
         self.projects_task_sel = 0;
     }
 
@@ -401,8 +405,7 @@ impl App {
         if col_count == 0 {
             return;
         }
-        self.projects_task_sel =
-            (self.projects_task_sel + 1).min(col_count - 1);
+        self.projects_task_sel = (self.projects_task_sel + 1).min(col_count - 1);
     }
 
     pub fn projects_task_prev(&mut self) {
@@ -439,10 +442,7 @@ impl App {
     /// Indices: 0=Planning, 1=Running, 2=Review, 3=Done, 4=Failed.
     /// Order matches the underlying `tasks` Vec (already sorted
     /// newest-first by the orchestrator).
-    pub fn kanban_column_tasks(
-        &self,
-        col: usize,
-    ) -> Vec<&crate::orchestrator::TaskState> {
+    pub fn kanban_column_tasks(&self, col: usize) -> Vec<&crate::orchestrator::TaskState> {
         let Some(p) = self.selected_project() else {
             return Vec::new();
         };
@@ -527,7 +527,9 @@ impl App {
     /// after the merge actually lands.
     pub fn approve_review_task(&mut self) -> bool {
         use crate::orchestrator::TaskStatus;
-        let Some(t) = self.selected_project_task() else { return false };
+        let Some(t) = self.selected_project_task() else {
+            return false;
+        };
         if t.status != TaskStatus::Review {
             return false;
         }
@@ -643,8 +645,7 @@ impl App {
     }
 
     pub fn selected_metrics_session(&self) -> Option<&SelectableSession> {
-        self.metrics_selected
-            .and_then(|i| self.metrics_rows.get(i))
+        self.metrics_selected.and_then(|i| self.metrics_rows.get(i))
     }
 
     pub fn enter_folder_picker(&mut self) {
@@ -709,9 +710,45 @@ impl App {
     pub fn enter_project_task_prompt(&mut self, cwd: String) {
         self.folder_picker = None;
         self.projects_pending_cwd = Some(cwd);
+        self.projects_pending_agent_id = None;
         self.prompt_buffer.clear();
         self.dispatch_target = None;
         self.view = View::PromptInput;
+    }
+
+    /// Cycle the orchestrator agent for the pending project task to the
+    /// next entry in the resolved-agents map. No-op when fewer than two
+    /// agents are configured. Called from the prompt-input Tab handler.
+    pub fn cycle_pending_agent_id(&mut self) {
+        if self.projects_pending_cwd.is_none() {
+            return;
+        }
+        let agents = config::get().resolved_agents();
+        let ids: Vec<String> = agents.into_keys().collect();
+        if ids.len() < 2 {
+            return;
+        }
+        let current = self
+            .projects_pending_agent_id
+            .clone()
+            .unwrap_or_else(|| config::get().default_orchestrator_agent_id());
+        let idx = ids.iter().position(|id| id == &current).unwrap_or(0);
+        let next = ids[(idx + 1) % ids.len()].clone();
+        self.projects_pending_agent_id = Some(next);
+    }
+
+    /// Display label for the agent that will run the pending project task,
+    /// resolving `None` to the configured default. Returns `None` outside
+    /// the project-creation flow.
+    pub fn pending_agent_label(&self) -> Option<String> {
+        if self.projects_pending_cwd.is_none() {
+            return None;
+        }
+        Some(
+            self.projects_pending_agent_id
+                .clone()
+                .unwrap_or_else(|| config::get().default_orchestrator_agent_id()),
+        )
     }
 
     /// Shortcut for "new task on the currently-selected project" — same
@@ -798,6 +835,7 @@ impl App {
         self.prompt_buffer.clear();
         self.dispatch_target = None;
         self.projects_pending_cwd = None;
+        self.projects_pending_agent_id = None;
         self.creating_project_task = false;
         self.view = View::Grid;
     }
@@ -808,14 +846,17 @@ impl App {
         self.projects_pending_cwd.is_some()
     }
 
-    /// Consumes the pending cwd, clears prompt input, returns the
-    /// `(cwd, prompt)` pair. Returns `None` if either is missing.
-    pub fn submit_project_task(&mut self) -> Option<(String, String)> {
+    /// Consumes the pending cwd, prompt, and agent override, clears
+    /// prompt input, returns the `(cwd, prompt, agent_id_override)` tuple.
+    /// Returns `None` if no project task is pending. The override is
+    /// `None` when the user didn't cycle off the configured default.
+    pub fn submit_project_task(&mut self) -> Option<(String, String, Option<String>)> {
         let cwd = self.projects_pending_cwd.take()?;
+        let agent_id = self.projects_pending_agent_id.take();
         self.creating_project_task = false;
         self.view = View::Grid;
         let prompt = std::mem::take(&mut self.prompt_buffer);
-        Some((cwd, prompt))
+        Some((cwd, prompt, agent_id))
     }
 
     pub fn submit_prompt_input(&mut self) -> String {
@@ -864,8 +905,7 @@ impl App {
         // view filter, so checking `groups` here would block dispatch
         // forever for the very sessions we need to dispatch into.
         let scanner_idle = self.last_sessions.iter().any(|s| {
-            s.tmux_session.as_deref() == Some(pd.tmux.as_str())
-                && s.state == SessionState::Idle
+            s.tmux_session.as_deref() == Some(pd.tmux.as_str()) && s.state == SessionState::Idle
         });
         if scanner_idle {
             let pane_ready = crate::send::pane_ready_for_input(&pd.tmux);
@@ -878,7 +918,10 @@ impl App {
                         pd.tmux
                     );
                 }
-                return DispatchAction::Send { tmux: pd.tmux, prompt: pd.prompt };
+                return DispatchAction::Send {
+                    tmux: pd.tmux,
+                    prompt: pd.prompt,
+                };
             }
         }
         if pd.queued_at.elapsed() > config::get().ui.pending_dispatch_timeout() {
@@ -893,7 +936,9 @@ impl App {
     /// at a glance that an orchestrator/dispatch is still booting rather
     /// than wondering why nothing is happening.
     pub fn pending_dispatch_age(&self) -> Option<Duration> {
-        self.pending_dispatch.as_ref().map(|pd| pd.queued_at.elapsed())
+        self.pending_dispatch
+            .as_ref()
+            .map(|pd| pd.queued_at.elapsed())
     }
 
     /// Tmux session name of the current pending dispatch, if any.
@@ -949,8 +994,12 @@ impl App {
     /// for sessions. Resolves `orchestrator_tmux` synchronously so the kill
     /// step doesn't have to re-load state.json.
     pub fn enter_confirm_task_delete(&mut self) {
-        let Some(p) = self.selected_project().cloned() else { return };
-        let Some(task) = self.selected_project_task().cloned() else { return };
+        let Some(p) = self.selected_project().cloned() else {
+            return;
+        };
+        let Some(task) = self.selected_project_task().cloned() else {
+            return;
+        };
         let status_label = match task.status {
             crate::orchestrator::TaskStatus::Running => "running",
             crate::orchestrator::TaskStatus::Review => "review",
@@ -983,19 +1032,11 @@ impl App {
     /// registry, mirroring [`Self::enter_confirm_task_delete`]. Surfaces task
     /// count in the prompt so the user sees how much state they're nuking.
     pub fn enter_confirm_project_delete(&mut self) {
-        let Some(p) = self.selected_project().cloned() else { return };
-        let n = self
-            .projects
-            .tasks
-            .get(&p.id)
-            .map(|v| v.len())
-            .unwrap_or(0);
-        let display = format!(
-            "{} ({} task{})",
-            p.name,
-            n,
-            if n == 1 { "" } else { "s" }
-        );
+        let Some(p) = self.selected_project().cloned() else {
+            return;
+        };
+        let n = self.projects.tasks.get(&p.id).map(|v| v.len()).unwrap_or(0);
+        let display = format!("{} ({} task{})", p.name, n, if n == 1 { "" } else { "s" });
         self.pending_project_delete = Some(PendingProjectDelete {
             project_id: p.id.clone(),
             display,
@@ -1157,8 +1198,7 @@ impl App {
     }
 
     pub fn selected_session_id(&self) -> Option<String> {
-        self.selected_session_info()
-            .map(|s| s.session_id.clone())
+        self.selected_session_info().map(|s| s.session_id.clone())
     }
 
     pub fn selected_session_info(&self) -> Option<&SessionInfo> {
@@ -1181,8 +1221,7 @@ impl App {
                     s.state = SessionState::Idle;
                 }
             }
-            let live_ids: HashSet<&str> =
-                sessions.iter().map(|s| s.session_id.as_str()).collect();
+            let live_ids: HashSet<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
             self.acks.retain_existing(&live_ids);
         }
 
@@ -1273,7 +1312,8 @@ impl App {
             .collect();
 
         // Sort groups alphabetically by name for stable ordering.
-        self.groups.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        self.groups
+            .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
         if self.view == View::PromptInput {
             self.dispatch_target = Self::compute_dispatch_target(&self.groups);
@@ -1296,10 +1336,7 @@ impl App {
             self.sel_in_group = 0;
         } else {
             self.sel_group = self.sel_group.min(self.groups.len() - 1);
-            let max_in = self.groups[self.sel_group]
-                .sessions
-                .len()
-                .saturating_sub(1);
+            let max_in = self.groups[self.sel_group].sessions.len().saturating_sub(1);
             self.sel_in_group = self.sel_in_group.min(max_in);
         }
     }
@@ -1359,7 +1396,9 @@ impl App {
         if let Some((target_pid, name, tmux)) = &self.dispatch_target {
             log::info!(
                 "dispatch_target: pid={} project={} tmux={}",
-                target_pid, name, tmux
+                target_pid,
+                name,
+                tmux
             );
         }
         if !self.acks.is_empty() {
@@ -1495,6 +1534,8 @@ mod tests {
                 worktree: None,
                 readonly: false,
                 spawned_at: 0,
+                agent_id: "claude".to_string(),
+                agent_kind: crate::agent::AgentKind::Claude,
             });
         }
         t

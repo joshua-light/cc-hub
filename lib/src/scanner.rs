@@ -1,8 +1,11 @@
+use crate::agent::AgentKind;
 use crate::config;
 use crate::conversation;
 use crate::models::{short_sid, RawSession, SessionDetail, SessionInfo, SessionState};
+use crate::pi_scanner;
 use crate::platform::paths;
 use crate::platform::process::{Process, ProcessInfo};
+use crate::spawn::ResumeTarget;
 use log::{debug, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -38,7 +41,9 @@ fn encode_path(path: &str) -> String {
 pub fn find_jsonl(cwd: &str, session_id: &str) -> Option<PathBuf> {
     let projects = projects_dir()?;
     let encoded = encode_path(cwd);
-    let jsonl_path = projects.join(&encoded).join(format!("{}.jsonl", session_id));
+    let jsonl_path = projects
+        .join(&encoded)
+        .join(format!("{}.jsonl", session_id));
     if jsonl_path.exists() {
         Some(jsonl_path)
     } else {
@@ -169,8 +174,11 @@ fn resolve_jsonl_paths(
             let resolved = chained.or_else(|| find_jsonl(&raw.cwd, &raw.session_id));
             debug!(
                 "resolve sid={} (cleared at {}) → {}",
-                sid_short, clear_ts,
-                resolved.as_ref().map_or("not found".to_string(), |p| p.display().to_string())
+                sid_short,
+                clear_ts,
+                resolved
+                    .as_ref()
+                    .map_or("not found".to_string(), |p| p.display().to_string())
             );
             resolved
         } else {
@@ -199,11 +207,19 @@ impl OrphanIndex {
     fn build(cwd: &str, claimed: &HashSet<String>) -> Self {
         let proj_dir = match projects_dir().map(|p| p.join(encode_path(cwd))) {
             Some(d) => d,
-            None => return Self { entries: Vec::new() },
+            None => {
+                return Self {
+                    entries: Vec::new(),
+                }
+            }
         };
         let dir_entries = match std::fs::read_dir(&proj_dir) {
             Ok(e) => e,
-            Err(_) => return Self { entries: Vec::new() },
+            Err(_) => {
+                return Self {
+                    entries: Vec::new(),
+                }
+            }
         };
 
         let mut entries = Vec::new();
@@ -251,11 +267,7 @@ impl OrphanIndex {
     /// Follow the /clear chain starting from `start_sid` until we reach a
     /// session ID that was NOT cleared.  Returns the JSONL path at the end
     /// of the chain, or None if the chain is broken.
-    fn follow_chain(
-        &self,
-        start_sid: &str,
-        clears: &HashMap<String, u64>,
-    ) -> Option<PathBuf> {
+    fn follow_chain(&self, start_sid: &str, clears: &HashMap<String, u64>) -> Option<PathBuf> {
         let mut current_sid = start_sid.to_string();
         let mut visited = HashSet::new();
 
@@ -314,8 +326,12 @@ fn is_pid_alive(pid: u32) -> bool {
         debug!("pid {} not alive (kill(0) failed)", pid);
         return false;
     }
-    if !Process::is_claude(pid) {
-        debug!("pid {} alive but not claude (name={})", pid, Process::name(pid));
+    if !crate::platform::process::is_agent_process(AgentKind::Claude, pid) {
+        debug!(
+            "pid {} alive but not claude (name={})",
+            pid,
+            Process::name(pid)
+        );
         return false;
     }
     // A claude process reparented to init (ppid=1) is an orphan from a
@@ -366,13 +382,16 @@ fn read_raw_sessions() -> Vec<RawSession> {
                 if is_scratch_cwd(&raw.cwd) {
                     debug!(
                         "session file: skipping scratch-cwd sid={} pid={}",
-                        short_sid(&raw.session_id), raw.pid
+                        short_sid(&raw.session_id),
+                        raw.pid
                     );
                     continue;
                 }
                 debug!(
                     "session file: pid={} sid={} cwd={}",
-                    raw.pid, short_sid(&raw.session_id), raw.cwd
+                    raw.pid,
+                    short_sid(&raw.session_id),
+                    raw.cwd
                 );
                 let keep_existing = match by_session_id.get(&raw.session_id) {
                     Some(existing) => {
@@ -383,19 +402,23 @@ fn read_raw_sessions() -> Vec<RawSession> {
                             (true, false) => true,  // existing is alive, skip
                             // Both alive: prefer the one with a real parent
                             // (i.e. still attached to a terminal window).
-                            (true, true) => match (has_real_parent(existing.pid), has_real_parent(raw.pid)) {
-                                (true, false) => true,
-                                (false, true) => false,
-                                _ => existing.started_at >= raw.started_at,
-                            },
+                            (true, true) => {
+                                match (has_real_parent(existing.pid), has_real_parent(raw.pid)) {
+                                    (true, false) => true,
+                                    (false, true) => false,
+                                    _ => existing.started_at >= raw.started_at,
+                                }
+                            }
                             // Both dead: keep the most recently started.
                             (false, false) => existing.started_at >= raw.started_at,
                         };
                         debug!(
                             "dedup sid={}: existing pid={} alive={} vs new pid={} alive={} → {}",
                             short_sid(&raw.session_id),
-                            existing.pid, existing_alive,
-                            raw.pid, new_alive,
+                            existing.pid,
+                            existing_alive,
+                            raw.pid,
+                            new_alive,
                             if result { "keep existing" } else { "replace" }
                         );
                         result
@@ -409,7 +432,11 @@ fn read_raw_sessions() -> Vec<RawSession> {
         }
     }
 
-    debug!("read_raw_sessions: {} files, {} unique sessions", file_count, by_session_id.len());
+    debug!(
+        "read_raw_sessions: {} files, {} unique sessions",
+        file_count,
+        by_session_id.len()
+    );
     by_session_id.into_values().collect()
 }
 
@@ -459,7 +486,10 @@ fn synthesize_inactive_from_jsonl(
 
     let started_at = head_entries
         .iter()
-        .find_map(|e| e.get("timestamp").and_then(conversation::parse_timestamp_ms))
+        .find_map(|e| {
+            e.get("timestamp")
+                .and_then(conversation::parse_timestamp_ms)
+        })
         .unwrap_or(0);
 
     let tail_entries = conversation::read_jsonl_tail_for_state(path);
@@ -470,6 +500,8 @@ fn synthesize_inactive_from_jsonl(
     let title = titles.get(&session_id).cloned();
 
     Some(SessionInfo {
+        agent_id: "claude".into(),
+        agent_kind: AgentKind::Claude,
         pid: 0,
         session_id,
         project_name: project_name(&cwd),
@@ -523,9 +555,7 @@ fn scan_orphan_jsonls(
     // Skipping this project dir up front avoids reading dozens of one-shot
     // `cc-hub-new -p` JSONLs every scan just to throw them away inside
     // `synthesize_inactive_from_jsonl`.
-    let scratch_proj_dir = crate::title::scratch_cwd()
-        .to_str()
-        .map(encode_path);
+    let scratch_proj_dir = crate::title::scratch_cwd().to_str().map(encode_path);
 
     let mut out = Vec::new();
     let mut total_in_window = 0usize;
@@ -571,7 +601,7 @@ fn scan_orphan_jsonls(
     (out, total_in_window)
 }
 
-pub fn scan_sessions() -> Vec<SessionInfo> {
+fn scan_claude_sessions() -> Vec<SessionInfo> {
     let raw_sessions = read_raw_sessions();
     let clears = read_clears_from_history();
     // Derive claimed session IDs from the sessions we already read,
@@ -580,7 +610,9 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
 
     debug!(
         "scan_sessions: {} raw sessions, {} clears, {} claimed ids",
-        raw_sessions.len(), clears.len(), claimed.len()
+        raw_sessions.len(),
+        clears.len(),
+        claimed.len()
     );
 
     let alive_by_pid: HashMap<u32, bool> = raw_sessions
@@ -629,14 +661,22 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
             let was_cleared = clears.contains_key(&raw.session_id);
             debug!(
                 "pid={} sid={} cwd={} alive={} cleared={} jsonl={}",
-                raw.pid, sid_short, raw.cwd, is_alive, was_cleared,
-                jsonl_path.as_ref().map_or("none".to_string(), |p| p.display().to_string())
+                raw.pid,
+                sid_short,
+                raw.cwd,
+                is_alive,
+                was_cleared,
+                jsonl_path
+                    .as_ref()
+                    .map_or("none".to_string(), |p| p.display().to_string())
             );
 
             let mut data = match &jsonl_path {
                 Some(path) => {
                     let entries = conversation::read_jsonl_tail_for_state(path);
-                    let mtime_age_secs = path.metadata().ok()
+                    let mtime_age_secs = path
+                        .metadata()
+                        .ok()
                         .and_then(|m| m.modified().ok())
                         .and_then(|t| t.elapsed().ok())
                         .map(|d| d.as_secs());
@@ -652,7 +692,10 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
 
                     debug!(
                         "  sid={} tail_entries={} raw_state={} last_activity={:?}",
-                        sid_short, entries.len(), state, last_act
+                        sid_short,
+                        entries.len(),
+                        state,
+                        last_act
                     );
 
                     // If the JSONL was modified very recently but state
@@ -676,11 +719,33 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
                         sid_short, state, mdl, branch
                     );
 
-                    JsonlData { state, last_user_message: last_msg, last_activity: last_act, git_branch: branch, model: mdl, version: ver, summary, current_tool, is_thinking, context_tokens }
+                    JsonlData {
+                        state,
+                        last_user_message: last_msg,
+                        last_activity: last_act,
+                        git_branch: branch,
+                        model: mdl,
+                        version: ver,
+                        summary,
+                        current_tool,
+                        is_thinking,
+                        context_tokens,
+                    }
                 }
                 None => {
                     debug!("  sid={} no jsonl → Idle", sid_short);
-                    JsonlData { state: SessionState::Idle, last_user_message: None, last_activity: None, git_branch: None, model: None, version: None, summary: None, current_tool: None, is_thinking: false, context_tokens: None }
+                    JsonlData {
+                        state: SessionState::Idle,
+                        last_user_message: None,
+                        last_activity: None,
+                        git_branch: None,
+                        model: None,
+                        version: None,
+                        summary: None,
+                        current_tool: None,
+                        is_thinking: false,
+                        context_tokens: None,
+                    }
                 }
             };
 
@@ -697,6 +762,8 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
             let title = titles.get(&raw.session_id).cloned();
 
             SessionInfo {
+                agent_id: "claude".into(),
+                agent_kind: AgentKind::Claude,
                 pid: raw.pid,
                 session_id: raw.session_id,
                 project_name: project_name(&raw.cwd),
@@ -744,20 +811,76 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
     sessions
 }
 
+#[derive(Clone, Debug)]
+pub struct ResumableSession {
+    pub session_id: String,
+    pub resume: ResumeTarget,
+}
+
+pub fn find_orchestrator_session(
+    project_root: &Path,
+    task_id: &str,
+    kind: AgentKind,
+) -> Option<ResumableSession> {
+    match kind {
+        AgentKind::Claude => {
+            find_orchestrator_session_id(project_root, task_id).map(|sid| ResumableSession {
+                session_id: sid.clone(),
+                resume: ResumeTarget::SessionId(sid),
+            })
+        }
+        AgentKind::Pi => {
+            pi_scanner::find_orchestrator_session(project_root, task_id).map(|(sid, path)| {
+                ResumableSession {
+                    session_id: sid,
+                    resume: ResumeTarget::SessionFile(path),
+                }
+            })
+        }
+    }
+}
+
+pub fn scan_sessions() -> Vec<SessionInfo> {
+    let enabled = config::get().enabled_agent_kinds();
+    let mut sessions = Vec::new();
+    if enabled.contains(&AgentKind::Claude) {
+        sessions.extend(scan_claude_sessions());
+    }
+    if enabled.contains(&AgentKind::Pi) {
+        let pi_agents: Vec<_> = config::get()
+            .resolved_agents()
+            .into_values()
+            .filter(|a| a.kind == AgentKind::Pi)
+            .collect();
+        sessions.extend(pi_scanner::scan(&pi_agents));
+    }
+    sessions.sort_by(|a, b| {
+        a.state
+            .sort_key()
+            .cmp(&b.state.sort_key())
+            .then_with(|| b.started_at.cmp(&a.started_at))
+    });
+    sessions
+}
+
 pub fn load_detail(session_id: &str, sessions: &[SessionInfo]) -> Option<SessionDetail> {
     let info = sessions.iter().find(|s| s.session_id == session_id)?;
-    let jsonl_path = info.jsonl_path.as_ref()?;
-    let entries = conversation::read_jsonl_tail(&jsonl_path, 65536);
-
-    let recent_messages = conversation::extract_messages(&entries, 15);
-    let (total_input_tokens, total_output_tokens) = conversation::extract_token_totals(&entries);
-
-    Some(SessionDetail {
-        info: info.clone(),
-        recent_messages,
-        total_input_tokens,
-        total_output_tokens,
-    })
+    match info.agent_kind {
+        AgentKind::Claude => {
+            let jsonl_path = info.jsonl_path.as_ref()?;
+            let entries = conversation::read_jsonl_tail(&jsonl_path, 65536);
+            let recent_messages = conversation::extract_messages(&entries, 15);
+            let (total_input_tokens, total_output_tokens) =
+                conversation::extract_token_totals(&entries);
+            Some(SessionDetail {
+                info: info.clone(),
+                recent_messages,
+                total_input_tokens,
+                total_output_tokens,
+            })
+        }
+        AgentKind::Pi => pi_scanner::load_detail(info),
+    }
 }
 
 pub fn load_state_explanation(
@@ -765,13 +888,21 @@ pub fn load_state_explanation(
     sessions: &[SessionInfo],
 ) -> Option<(SessionInfo, conversation::StateExplanation)> {
     let info = sessions.iter().find(|s| s.session_id == session_id)?;
-    let jsonl_path = info.jsonl_path.as_ref()?;
-    let entries = conversation::read_jsonl_tail_for_state(jsonl_path);
-    let mtime_age_secs = jsonl_path
-        .metadata()
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.elapsed().ok())
-        .map(|d| d.as_secs());
-    Some((info.clone(), conversation::explain_state(&entries, mtime_age_secs)))
+    match info.agent_kind {
+        AgentKind::Claude => {
+            let jsonl_path = info.jsonl_path.as_ref()?;
+            let entries = conversation::read_jsonl_tail_for_state(jsonl_path);
+            let mtime_age_secs = jsonl_path
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.elapsed().ok())
+                .map(|d| d.as_secs());
+            Some((
+                info.clone(),
+                conversation::explain_state(&entries, mtime_age_secs),
+            ))
+        }
+        AgentKind::Pi => pi_scanner::load_state_explanation(info),
+    }
 }

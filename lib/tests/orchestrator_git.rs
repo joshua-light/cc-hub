@@ -57,8 +57,8 @@ fn create_worktree_makes_branch_and_dir() {
     let repo = init_repo();
     let root = repo.path();
 
-    let path = orchestrator::create_worktree(root, "t-1", "feature", "main")
-        .expect("create_worktree");
+    let path =
+        orchestrator::create_worktree(root, "t-1", "feature", "main").expect("create_worktree");
     assert!(path.exists(), "worktree path should exist");
     assert_eq!(
         path,
@@ -110,8 +110,15 @@ fn merge_branch_clean_succeeds() {
     let branch = orchestrator::worktree_branch("t-3", "edit");
     let (outcome, _stdout, _stderr) =
         orchestrator::merge_branch(root, "main", &branch).unwrap();
-    assert!(matches!(outcome, MergeOutcome::Ok), "expected Ok, got {:?}", outcome);
-    assert!(root.join("new.txt").exists(), "merged file should be in main");
+    assert!(
+        matches!(outcome, MergeOutcome::Ok),
+        "expected Ok, got {:?}",
+        outcome
+    );
+    assert!(
+        root.join("new.txt").exists(),
+        "merged file should be in main"
+    );
 }
 
 #[test]
@@ -206,7 +213,11 @@ fn merge_branch_proceeds_when_dirty_non_overlap() {
     let branch = orchestrator::worktree_branch("t-6", "disjoint");
     let (outcome, _, _) =
         orchestrator::merge_branch(root, "main", &branch).unwrap();
-    assert!(matches!(outcome, MergeOutcome::Ok), "expected Ok, got {:?}", outcome);
+    assert!(
+        matches!(outcome, MergeOutcome::Ok),
+        "expected Ok, got {:?}",
+        outcome
+    );
 
     // Branch's file is now in main
     assert!(root.join("branch_only.txt").exists());

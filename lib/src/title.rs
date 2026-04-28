@@ -187,7 +187,11 @@ fn resolve_spawn_command() -> Option<Vec<String>> {
 
     let mut guard = RESOLVED_CMD.lock().unwrap_or_else(|e| e.into_inner());
     let fresh = guard.as_ref().is_some_and(|c| {
-        let ttl = if c.value.is_some() { SUCCESS_TTL } else { FAILURE_TTL };
+        let ttl = if c.value.is_some() {
+            SUCCESS_TTL
+        } else {
+            FAILURE_TTL
+        };
         c.fetched_at.elapsed() < ttl
     });
     if !fresh {
@@ -322,14 +326,9 @@ pub fn generate_title_blocking(first_msg: &str) -> Option<String> {
 }
 
 fn sanitize_title(raw: &str, max: usize) -> Option<String> {
-    let line = raw
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())?;
+    let line = raw.lines().map(str::trim).find(|l| !l.is_empty())?;
     let cleaned: String = line
-        .trim_matches(|c: char| {
-            c == '"' || c == '\'' || c == '.' || c == '`' || c.is_whitespace()
-        })
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '.' || c == '`' || c.is_whitespace())
         .to_string();
     if cleaned.is_empty() {
         return None;
@@ -403,7 +402,10 @@ mod tests {
         // `alias cc-hub-new` in zsh prints `cc-hub-new='claude --flag'`.
         assert_eq!(
             parse_resolution("cc-hub-new='claude --dangerously-skip-permissions'\n"),
-            Some(vec!["claude".into(), "--dangerously-skip-permissions".into()])
+            Some(vec![
+                "claude".into(),
+                "--dangerously-skip-permissions".into()
+            ])
         );
     }
 

@@ -131,11 +131,7 @@ fn queue_missing_titles(
             })
             .await;
             match persist {
-                Ok(Ok(())) => log::info!(
-                    "title: sid={} → {:?}",
-                    models::short_sid(&sid),
-                    t
-                ),
+                Ok(Ok(())) => log::info!("title: sid={} → {:?}", models::short_sid(&sid), t),
                 Ok(Err(e)) => log::warn!("title: persist failed for {}: {}", sid, e),
                 Err(e) => log::warn!("title: persist task panicked for {}: {}", sid, e),
             }
@@ -243,8 +239,14 @@ fn queue_missing_task_titles(
                 .await;
                 match persist {
                     Ok(Ok(_)) => log::info!("title: task={} → {:?}", task_id, t),
-                    Ok(Err(e)) => log::warn!("title: persist task title failed for {}: {}", task_id, e),
-                    Err(e) => log::warn!("title: persist task title task panicked for {}: {}", task_id, e),
+                    Ok(Err(e)) => {
+                        log::warn!("title: persist task title failed for {}: {}", task_id, e)
+                    }
+                    Err(e) => log::warn!(
+                        "title: persist task title task panicked for {}: {}",
+                        task_id,
+                        e
+                    ),
                 }
 
                 inflight
@@ -317,7 +319,12 @@ fn open_path_detached(path: &str) -> io::Result<()> {
 fn popup_pane_size(terminal: &Terminal<CrosstermBackend<io::Stdout>>) -> (u16, u16) {
     terminal
         .size()
-        .map(|s| (s.width.saturating_sub(6).max(20), s.height.saturating_sub(6).max(10)))
+        .map(|s| {
+            (
+                s.width.saturating_sub(6).max(20),
+                s.height.saturating_sub(6).max(10),
+            )
+        })
         .unwrap_or((120, 30))
 }
 
@@ -432,10 +439,11 @@ fn run_no_tui() -> io::Result<()> {
     for s in &sessions {
         let last_msg = s.last_user_message.as_deref().unwrap_or("");
         println!(
-            "{:>7}:{} [{:<17}] {:<24} {}",
+            "{:>7}:{} [{:<17}] {:<10} {:<24} {}",
             s.pid,
             models::short_sid(&s.session_id),
             s.state,
+            s.agent_badge(),
             s.project_name,
             last_msg
         );
@@ -453,8 +461,7 @@ async fn run(
 
     let inflight_titles: Arc<Mutex<HashMap<String, Instant>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    let active_titles: Arc<Mutex<HashSet<String>>> =
-        Arc::new(Mutex::new(HashSet::new()));
+    let active_titles: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     let title_gate: Arc<tokio::sync::Semaphore> =
         Arc::new(tokio::sync::Semaphore::new(config::get().title.concurrency));
     // Task titles share the session title's Haiku subprocess pool — both
@@ -464,8 +471,7 @@ async fn run(
     // cheap to keep separate) can't collide.
     let inflight_task_titles: Arc<Mutex<HashMap<String, Instant>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    let active_task_titles: Arc<Mutex<HashSet<String>>> =
-        Arc::new(Mutex::new(HashSet::new()));
+    let active_task_titles: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
     let (scan_tx, mut scan_rx) = mpsc::channel::<ScanMsg>(16);
     let (detail_tx, mut detail_rx) = mpsc::channel::<String>(4);
@@ -474,8 +480,7 @@ async fn run(
     let usage_tx = scan_tx.clone();
     let scan_tx_main = scan_tx.clone();
     tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(config::get().scan.usage_refresh_interval());
+        let mut interval = tokio::time::interval(config::get().scan.usage_refresh_interval());
         loop {
             interval.tick().await;
             if let Some(u) = tokio::task::spawn_blocking(usage::fetch_usage)
@@ -494,8 +499,7 @@ async fn run(
     if config::get().backlog.enabled {
         let triage_tx = scan_tx.clone();
         tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(config::get().backlog.interval());
+            let mut interval = tokio::time::interval(config::get().backlog.interval());
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
@@ -526,8 +530,7 @@ async fn run(
     watcher::spawn_fs_watcher(fs_tx);
 
     tokio::spawn(async move {
-        let mut fallback =
-            tokio::time::interval(config::get().scan.fs_fallback_interval());
+        let mut fallback = tokio::time::interval(config::get().scan.fs_fallback_interval());
         fallback.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut latest_sessions: Vec<models::SessionInfo> = Vec::new();
 
@@ -599,8 +602,7 @@ async fn run(
                     let at_edge = scanned == 0 || scanned == total;
                     if at_edge || scanned.saturating_sub(last_sent) >= 20 {
                         last_sent = scanned;
-                        let _ = progress_tx
-                            .try_send(ScanMsg::MetricsProgress { scanned, total });
+                        let _ = progress_tx.try_send(ScanMsg::MetricsProgress { scanned, total });
                     }
                 })
             });
@@ -622,9 +624,7 @@ async fn run(
             }
         }
 
-        if app.view == View::TmuxPane
-            && app.tmux_pane.as_ref().is_some_and(|p| p.is_exited())
-        {
+        if app.view == View::TmuxPane && app.tmux_pane.as_ref().is_some_and(|p| p.is_exited()) {
             app.close_tmux_pane();
         }
 
@@ -682,9 +682,7 @@ async fn run(
                     (View::Grid, KeyCode::Tab | KeyCode::BackTab) => {
                         let was_metrics = app.current_tab == Tab::Metrics;
                         app.cycle_tab();
-                        if !was_metrics
-                            && app.current_tab == Tab::Metrics
-                            && app.metrics.is_none()
+                        if !was_metrics && app.current_tab == Tab::Metrics && app.metrics.is_none()
                         {
                             spawn_metrics();
                         }
@@ -705,9 +703,7 @@ async fn run(
                     (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_sessions => {
                         app.move_down()
                     }
-                    (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_sessions => {
-                        app.move_up()
-                    }
+                    (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_sessions => app.move_up(),
                     (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_metrics => {
                         if app.metrics_rows.is_empty() {
                             app.metrics_scroll_down();
@@ -755,7 +751,10 @@ async fn run(
                             app.set_status("no task selected".into());
                         }
                     }
-                    (View::ProjectsResult, KeyCode::Esc | KeyCode::Char('r') | KeyCode::Char('q')) => {
+                    (
+                        View::ProjectsResult,
+                        KeyCode::Esc | KeyCode::Char('r') | KeyCode::Char('q'),
+                    ) => {
                         app.close_projects_result();
                     }
                     (View::ProjectsResult, KeyCode::Down | KeyCode::Char('j')) => {
@@ -802,9 +801,7 @@ async fn run(
                     (View::Grid, KeyCode::Char('n')) if on_projects => {
                         // Start a new task on the currently-selected project.
                         if !app.enter_project_task_prompt_for_selected() {
-                            app.set_status(
-                                "no project selected — press N to register one".into(),
-                            );
+                            app.set_status("no project selected — press N to register one".into());
                         }
                     }
                     (View::Grid, KeyCode::Enter) if on_projects => {
@@ -822,10 +819,8 @@ async fn run(
                                     let (cols, rows) = popup_pane_size(terminal);
                                     match tmux_pane::TmuxPaneView::spawn(tmux_name, rows, cols) {
                                         Ok(pane) => app.enter_tmux_pane(pane),
-                                        Err(e) => app.set_status(format!(
-                                            "open orchestrator failed: {}",
-                                            e
-                                        )),
+                                        Err(e) => app
+                                            .set_status(format!("open orchestrator failed: {}", e)),
                                     }
                                 }
                             }
@@ -837,18 +832,17 @@ async fn run(
                                 .orchestrator_tmux
                                 .as_deref()
                                 .filter(|n| send::tmux_session_exists(n));
-                            let resurrectable_sid = if live_tmux.is_none()
+                            let resurrectable = if live_tmux.is_none()
                                 && matches!(
                                     task.status,
                                     cc_hub_lib::orchestrator::TaskStatus::Running
                                         | cc_hub_lib::orchestrator::TaskStatus::Review
                                 ) {
-                                task.orchestrator_session_id.clone().or_else(|| {
-                                    scanner::find_orchestrator_session_id(
-                                        &task.project_root,
-                                        &task.task_id,
-                                    )
-                                })
+                                scanner::find_orchestrator_session(
+                                    &task.project_root,
+                                    &task.task_id,
+                                    task.orchestrator_agent_kind,
+                                )
                             } else {
                                 None
                             };
@@ -856,21 +850,27 @@ async fn run(
                                 let (cols, rows) = popup_pane_size(terminal);
                                 match tmux_pane::TmuxPaneView::spawn(tmux_name, rows, cols) {
                                     Ok(pane) => app.enter_tmux_pane(pane),
-                                    Err(e) => app.set_status(format!(
-                                        "open orchestrator failed: {}",
-                                        e
-                                    )),
+                                    Err(e) => {
+                                        app.set_status(format!("open orchestrator failed: {}", e))
+                                    }
                                 }
-                            } else if let Some(sid) = resurrectable_sid {
+                            } else if let Some(resume) = resurrectable {
                                 let cwd = task.project_root.to_string_lossy().into_owned();
-                                match spawn::spawn_claude_session(&cwd, Some(&sid)) {
+                                match spawn::spawn_agent_session(
+                                    &task.orchestrator_agent_id,
+                                    &cwd,
+                                    Some(resume.resume.clone()),
+                                    None,
+                                    false,
+                                ) {
                                     Ok(new_tmux) => {
                                         if let Err(e) = cc_hub_lib::orchestrator::update_task_state(
                                             &task.project_id,
                                             &task.task_id,
                                             |s| {
                                                 s.orchestrator_tmux = Some(new_tmux.clone());
-                                                s.orchestrator_session_id = Some(sid.clone());
+                                                s.orchestrator_session_id =
+                                                    Some(resume.session_id.clone());
                                             },
                                         ) {
                                             app.set_status(format!(
@@ -884,7 +884,7 @@ async fn run(
                                             Ok(pane) => {
                                                 app.set_status(format!(
                                                     "resumed orchestrator {} [{}]",
-                                                    models::short_sid(&sid),
+                                                    models::short_sid(&resume.session_id),
                                                     new_tmux
                                                 ));
                                                 app.enter_tmux_pane(pane);
@@ -895,29 +895,27 @@ async fn run(
                                             )),
                                         }
                                     }
-                                    Err(e) => {
-                                        app.set_status(format!("resurrect failed: {}", e))
-                                    }
+                                    Err(e) => app.set_status(format!("resurrect failed: {}", e)),
                                 }
-                            } else if let Some(log_path) = cc_hub_lib::orchestrator::task_orchestrator_log_path(
-                                &task.project_id,
-                                &task.task_id,
-                            )
-                            .filter(|p| p.exists())
+                            } else if let Some(log_path) =
+                                cc_hub_lib::orchestrator::task_orchestrator_log_path(
+                                    &task.project_id,
+                                    &task.task_id,
+                                )
+                                .filter(|p| p.exists())
                             {
                                 let (cols, rows) = popup_pane_size(terminal);
                                 match spawn::spawn_log_viewer_tmux_session(&log_path) {
-                                    Ok(name) => match tmux_pane::TmuxPaneView::spawn_owned(&name, rows, cols) {
+                                    Ok(name) => match tmux_pane::TmuxPaneView::spawn_owned(
+                                        &name, rows, cols,
+                                    ) {
                                         Ok(pane) => app.enter_tmux_pane(pane),
-                                        Err(e) => app.set_status(format!(
-                                            "log viewer attach failed: {}",
-                                            e
-                                        )),
+                                        Err(e) => app
+                                            .set_status(format!("log viewer attach failed: {}", e)),
                                     },
-                                    Err(e) => app.set_status(format!(
-                                        "log viewer spawn failed: {}",
-                                        e
-                                    )),
+                                    Err(e) => {
+                                        app.set_status(format!("log viewer spawn failed: {}", e))
+                                    }
                                 }
                             } else if matches!(
                                 task.status,
@@ -951,7 +949,9 @@ async fn run(
                         app.backlog_up();
                     }
                     (View::Backlog, KeyCode::Char('s') | KeyCode::Enter)
-                    | (View::Grid, KeyCode::Char('s')) if on_projects || matches!(app.view, View::Backlog) => {
+                    | (View::Grid, KeyCode::Char('s'))
+                        if on_projects || matches!(app.view, View::Backlog) =>
+                    {
                         let Some(p) = app.selected_project().cloned() else {
                             app.set_status("no project selected".into());
                             continue;
@@ -972,19 +972,26 @@ async fn run(
                             ));
                             continue;
                         }
-                        match cc_hub_lib::orchestrator::start_backlog_task(&p.id, &task.task_id) {
+                        match cc_hub_lib::orchestrator::start_backlog_task(
+                            &p.id,
+                            &task.task_id,
+                            None,
+                        ) {
                             Ok((state, tmux_name, orch_prompt)) => {
-                                if app.has_pending_dispatch() {
-                                    app.set_status(format!(
-                                        "task started [{}] but a dispatch is already queued — orchestrator may be slow to start",
-                                        state.task_id
-                                    ));
-                                } else {
-                                    app.queue_pending_dispatch(tmux_name.clone(), orch_prompt);
+                                if let Some(prompt) = orch_prompt {
+                                    if app.has_pending_dispatch() {
+                                        app.set_status(format!(
+                                            "task started [{}] but a dispatch is already queued — orchestrator may be slow to start",
+                                            state.task_id
+                                        ));
+                                    } else {
+                                        app.queue_pending_dispatch(tmux_name.clone(), prompt);
+                                    }
                                 }
                                 log::info!(
                                     "project task: started backlog {} orchestrator [{}]",
-                                    state.task_id, tmux_name
+                                    state.task_id,
+                                    tmux_name
                                 );
                                 app.set_status(format!(
                                     "task started [{}], orchestrator [{}] starting…",
@@ -1002,8 +1009,17 @@ async fn run(
                     }
                     (View::Grid, KeyCode::Enter) if on_metrics => {
                         if let Some(row) = app.selected_metrics_session().cloned() {
+                            let agent_kind = if platform::paths::pi_sessions_dir()
+                                .as_ref()
+                                .is_some_and(|dir| row.jsonl_path.starts_with(dir))
+                            {
+                                cc_hub_lib::agent::AgentKind::Pi
+                            } else {
+                                cc_hub_lib::agent::AgentKind::Claude
+                            };
                             let lv = live_view::LiveView::review(
                                 row.jsonl_path.clone(),
+                                agent_kind,
                                 row.peak_timestamp_ms,
                             );
                             if lv.messages.is_empty() {
@@ -1050,22 +1066,41 @@ async fn run(
                     }
                     (View::Grid, KeyCode::Char('W')) if on_sessions => {
                         app.toggle_show_orch_workers();
-                        let state = if app.show_orch_workers { "shown" } else { "hidden" };
+                        let state = if app.show_orch_workers {
+                            "shown"
+                        } else {
+                            "hidden"
+                        };
                         app.set_status(format!("orchestrator/worker sessions {}", state));
                     }
                     (View::Grid, KeyCode::Char('f') | KeyCode::Enter) if on_sessions => {
                         if let Some(session) = app.selected_session_info().cloned() {
                             if session.state == models::SessionState::Inactive {
-                                let status = match spawn::spawn_claude_session(
-                                    &session.cwd,
-                                    Some(&session.session_id),
-                                ) {
-                                    Ok(name) => format!(
-                                        "resumed {} [{}]",
-                                        models::short_sid(&session.session_id),
-                                        name
+                                let resume = match session.agent_kind {
+                                    cc_hub_lib::agent::AgentKind::Claude => Some(
+                                        spawn::ResumeTarget::SessionId(session.session_id.clone()),
                                     ),
-                                    Err(e) => format!("resume failed: {}", e),
+                                    cc_hub_lib::agent::AgentKind::Pi => session
+                                        .jsonl_path
+                                        .clone()
+                                        .map(spawn::ResumeTarget::SessionFile),
+                                };
+                                let status = match resume {
+                                    Some(target) => match spawn::spawn_agent_session(
+                                        &session.agent_id,
+                                        &session.cwd,
+                                        Some(target),
+                                        None,
+                                        false,
+                                    ) {
+                                        Ok(name) => format!(
+                                            "resumed {} [{}]",
+                                            models::short_sid(&session.session_id),
+                                            name
+                                        ),
+                                        Err(e) => format!("resume failed: {}", e),
+                                    },
+                                    None => "resume failed: missing session transcript".to_string(),
                                 };
                                 app.set_status(status);
                             } else if let Some(tmux_name) = session.tmux_session.clone() {
@@ -1082,10 +1117,11 @@ async fn run(
                                 match focus::focus_window(session.pid) {
                                     focus::FocusOutcome::Focused => {}
                                     focus::FocusOutcome::NeedsReattach(name) => {
-                                        let msg = match spawn::attach_tmux_session(&name, &session.cwd) {
-                                            Ok(_) => format!("reattached terminal to {}", name),
-                                            Err(e) => format!("reattach failed: {}", e),
-                                        };
+                                        let msg =
+                                            match spawn::attach_tmux_session(&name, &session.cwd) {
+                                                Ok(_) => format!("reattached terminal to {}", name),
+                                                Err(e) => format!("reattach failed: {}", e),
+                                            };
                                         app.set_status(msg);
                                     }
                                     focus::FocusOutcome::Failed(msg) => {
@@ -1099,7 +1135,9 @@ async fn run(
                         if let Some(session) = app.selected_session_info().cloned() {
                             let (cols, rows) = popup_pane_size(terminal);
                             match spawn::spawn_shell_tmux_session(&session.cwd) {
-                                Ok(tmux_name) => match tmux_pane::TmuxPaneView::spawn_owned(&tmux_name, rows, cols) {
+                                Ok(tmux_name) => match tmux_pane::TmuxPaneView::spawn_owned(
+                                    &tmux_name, rows, cols,
+                                ) {
                                     Ok(pane) => app.enter_tmux_pane(pane),
                                     Err(e) => app.set_status(format!("shell attach failed: {}", e)),
                                 },
@@ -1142,12 +1180,12 @@ async fn run(
                     }
                     (View::ConfirmClose, KeyCode::Char('y') | KeyCode::Char('Y')) => {
                         if let Some(pending) = app.take_pending_project_delete() {
-                            let msg = match cc_hub_lib::orchestrator::remove_project(
-                                &pending.project_id,
-                            ) {
-                                Ok(()) => format!("removed {}", pending.display),
-                                Err(e) => format!("remove failed: {}", e),
-                            };
+                            let msg =
+                                match cc_hub_lib::orchestrator::remove_project(&pending.project_id)
+                                {
+                                    Ok(()) => format!("removed {}", pending.display),
+                                    Err(e) => format!("remove failed: {}", e),
+                                };
                             // Selection may dangle past the now-removed project
                             // until the next scan tick lands; reset to 0 so
                             // we don't render one bad frame.
@@ -1167,9 +1205,7 @@ async fn run(
                                 &pending.project_id,
                                 &pending.task_id,
                             );
-                            let removal = task_dir
-                                .as_ref()
-                                .map(|d| std::fs::remove_dir_all(d));
+                            let removal = task_dir.as_ref().map(|d| std::fs::remove_dir_all(d));
                             let kill_msg = match kill_result {
                                 Some(Ok(())) => "orchestrator killed",
                                 Some(Err(_)) => "orchestrator kill failed",
@@ -1210,8 +1246,14 @@ async fn run(
                     }
                     (View::Grid, KeyCode::Char('n')) if on_sessions => {
                         if let Some(sess) = app.selected_session_info().cloned() {
-                            let status = match spawn::spawn_claude_session(&sess.cwd, None) {
-                                Ok(name) => format!("started cc-hub-new [{}]", name),
+                            let status = match spawn::spawn_agent_session(
+                                &sess.agent_id,
+                                &sess.cwd,
+                                None,
+                                None,
+                                false,
+                            ) {
+                                Ok(name) => format!("started {} [{}]", sess.agent_badge(), name),
                                 Err(e) => format!("spawn failed: {}", e),
                             };
                             app.set_status(status);
@@ -1238,7 +1280,10 @@ async fn run(
                             p.descend();
                         }
                     }
-                    (View::FolderPicker, KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h')) => {
+                    (
+                        View::FolderPicker,
+                        KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h'),
+                    ) => {
                         if let Some(p) = app.folder_picker.as_mut() {
                             p.ascend();
                         }
@@ -1262,8 +1307,11 @@ async fn run(
                                 app.enter_project_task_prompt(cwd);
                             } else {
                                 app.close_folder_picker();
-                                let status = match spawn::spawn_claude_session(&cwd, None) {
-                                    Ok(name) => format!("started cc-hub-new [{}]", name),
+                                let agent_id = config::get().default_session_agent_id();
+                                let status = match spawn::spawn_agent_session(
+                                    &agent_id, &cwd, None, None, false,
+                                ) {
+                                    Ok(name) => format!("started {} [{}]", agent_id, name),
                                     Err(e) => format!("spawn failed: {}", e),
                                 };
                                 app.set_status(status);
@@ -1290,8 +1338,11 @@ async fn run(
                                 app.enter_project_task_prompt(cwd);
                             } else {
                                 app.close_folder_picker();
-                                let status = match spawn::spawn_claude_session(&cwd, None) {
-                                    Ok(name) => format!("started cc-hub-new [{}]", name),
+                                let agent_id = config::get().default_session_agent_id();
+                                let status = match spawn::spawn_agent_session(
+                                    &agent_id, &cwd, None, None, false,
+                                ) {
+                                    Ok(name) => format!("started {} [{}]", agent_id, name),
                                     Err(e) => format!("spawn failed: {}", e),
                                 };
                                 app.set_status(status);
@@ -1363,6 +1414,9 @@ async fn run(
                     (View::PromptInput, KeyCode::Esc) => {
                         app.close_prompt_input();
                     }
+                    (View::PromptInput, KeyCode::Tab) => {
+                        app.cycle_pending_agent_id();
+                    }
                     (View::PromptInput, KeyCode::Backspace) => {
                         app.prompt_buffer.pop();
                     }
@@ -1379,7 +1433,7 @@ async fn run(
                         // Projects-tab flow: create task, spawn orchestrator,
                         // queue the orchestrator prompt for dispatch when Idle.
                         if app.prompt_input_for_project() {
-                            let Some((cwd, prompt)) = app.submit_project_task() else {
+                            let Some((cwd, prompt, agent_id)) = app.submit_project_task() else {
                                 app.set_status("project task: missing cwd".into());
                                 continue;
                             };
@@ -1392,19 +1446,24 @@ async fn run(
                                 project_root,
                                 &project_name,
                                 prompt,
+                                agent_id.as_deref(),
                             ) {
                                 Ok((state, tmux_name, orch_prompt)) => {
-                                    if app.has_pending_dispatch() {
-                                        app.set_status(format!(
-                                            "task created [{}] but a dispatch is already queued — orchestrator may be slow to start",
-                                            state.task_id
-                                        ));
-                                    } else {
-                                        app.queue_pending_dispatch(tmux_name.clone(), orch_prompt);
+                                    if let Some(prompt) = orch_prompt {
+                                        if app.has_pending_dispatch() {
+                                            app.set_status(format!(
+                                                "task created [{}] but a dispatch is already queued — orchestrator may be slow to start",
+                                                state.task_id
+                                            ));
+                                        } else {
+                                            app.queue_pending_dispatch(tmux_name.clone(), prompt);
+                                        }
                                     }
                                     log::info!(
                                         "project task: created {} in {}, orchestrator [{}]",
-                                        state.task_id, cwd, tmux_name
+                                        state.task_id,
+                                        cwd,
+                                        tmux_name
                                     );
                                     app.set_status(format!(
                                         "task created [{}], orchestrator [{}] starting…",
@@ -1425,10 +1484,15 @@ async fn run(
                         if let Some((pid, name, tmux)) = target {
                             log::info!(
                                 "dispatch: idle target {} (PID {}) [{}] prompt_len={}",
-                                name, pid, tmux, prompt.len()
+                                name,
+                                pid,
+                                tmux,
+                                prompt.len()
                             );
                             let status = match send::send_prompt(&tmux, &prompt) {
-                                Ok(()) => format!("dispatched to {} (PID {}) [{}]", name, pid, tmux),
+                                Ok(()) => {
+                                    format!("dispatched to {} (PID {}) [{}]", name, pid, tmux)
+                                }
                                 Err(e) => {
                                     log::warn!("dispatch: send_prompt failed: {}", e);
                                     format!("dispatch failed: {}", e)
@@ -1440,7 +1504,8 @@ async fn run(
 
                         if app.has_pending_dispatch() {
                             app.set_status(
-                                "dispatch already pending — wait for the new agent to come up".into(),
+                                "dispatch already pending — wait for the new agent to come up"
+                                    .into(),
                             );
                             continue;
                         }
@@ -1448,17 +1513,42 @@ async fn run(
                             app.set_status("no idle agent and no cwd to spawn in".into());
                             continue;
                         };
-                        match spawn::spawn_claude_session(&cwd, None) {
+                        let agent_id = config::get().default_session_agent_id();
+                        let agent = config::get().agent(&agent_id);
+                        let supports_initial_prompt =
+                            agent.as_ref().is_some_and(|a| a.supports_initial_prompt());
+                        match spawn::spawn_agent_session(
+                            &agent_id,
+                            &cwd,
+                            None,
+                            if supports_initial_prompt {
+                                Some(prompt.as_str())
+                            } else {
+                                None
+                            },
+                            false,
+                        ) {
                             Ok(tmux_name) => {
-                                log::info!(
-                                    "dispatch: no idle agent, spawned [{}] in {} — queueing prompt (len={})",
-                                    tmux_name, cwd, prompt.len()
-                                );
-                                app.queue_pending_dispatch(tmux_name.clone(), prompt);
-                                app.set_status(format!(
-                                    "no idle agent — spawned [{}], prompt queued",
-                                    tmux_name
-                                ));
+                                if supports_initial_prompt {
+                                    log::info!(
+                                        "dispatch: no idle agent, spawned [{}] in {} with inline prompt (len={})",
+                                        tmux_name, cwd, prompt.len()
+                                    );
+                                    app.set_status(format!(
+                                        "no idle agent — spawned {} [{}]",
+                                        agent_id, tmux_name
+                                    ));
+                                } else {
+                                    log::info!(
+                                        "dispatch: no idle agent, spawned [{}] in {} — queueing prompt (len={})",
+                                        tmux_name, cwd, prompt.len()
+                                    );
+                                    app.queue_pending_dispatch(tmux_name.clone(), prompt);
+                                    app.set_status(format!(
+                                        "no idle agent — spawned {} [{}], prompt queued",
+                                        agent_id, tmux_name
+                                    ));
+                                }
                             }
                             Err(e) => {
                                 log::warn!("dispatch: auto-spawn failed: {}", e);
@@ -1540,7 +1630,9 @@ async fn run(
                         }
                     }
                     let status = match result {
-                        Ok(url) if !url.is_empty() => format!("created {} — press space to spawn", url),
+                        Ok(url) if !url.is_empty() => {
+                            format!("created {} — press space to spawn", url)
+                        }
                         Ok(_) => format!("created {} — press space to spawn", name),
                         Err(e) => format!("gh create failed: {}", e),
                     };
@@ -1548,16 +1640,15 @@ async fn run(
                 }
                 ScanMsg::BacklogTriage { promotion, status } => {
                     if let Some(p) = promotion {
-                        // Mirrors the user-driven backlog-start path: if a
-                        // dispatch is already queued, surface a status note
-                        // rather than clobbering it.
-                        if app.has_pending_dispatch() {
-                            app.set_status(format!(
-                                "triage: promotion ready [{}] but a dispatch is already queued — orchestrator may be slow to start",
-                                p.tmux
-                            ));
-                        } else {
-                            app.queue_pending_dispatch(p.tmux, p.orchestrator_prompt);
+                        if let Some(prompt) = p.orchestrator_prompt {
+                            if app.has_pending_dispatch() {
+                                app.set_status(format!(
+                                    "triage: promotion ready [{}] but a dispatch is already queued — orchestrator may be slow to start",
+                                    p.tmux
+                                ));
+                            } else {
+                                app.queue_pending_dispatch(p.tmux, prompt);
+                            }
                         }
                     }
                     if let Some(s) = status {
@@ -1573,7 +1664,8 @@ async fn run(
             app::DispatchAction::Send { tmux, prompt } => {
                 log::info!(
                     "dispatch: pending target [{}] now idle, sending (len={})",
-                    tmux, prompt.len()
+                    tmux,
+                    prompt.len()
                 );
                 let status = match send::send_prompt(&tmux, &prompt) {
                     Ok(()) => format!("dispatched queued prompt to [{}]", tmux),

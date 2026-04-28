@@ -40,14 +40,22 @@ pub fn detect(root: &Path) -> Option<String> {
         }
     }
     if let Some(raw) = try_read(&root.join("VERSION")) {
-        return raw.lines().map(str::trim).find(|l| !l.is_empty()).and_then(clean);
+        return raw
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .and_then(clean);
     }
     None
 }
 
 fn clean(s: &str) -> Option<String> {
     let t = s.trim();
-    if t.is_empty() { None } else { Some(t.to_string()) }
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
 }
 
 /// Read a file as a String, returning `None` for both "not present" and any

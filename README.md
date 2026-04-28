@@ -1,12 +1,12 @@
 # cc-hub
 
-A TUI-based Claude Code agentic hub. cc-hub reads Claude Code's own on-disk
-session files (`~/.claude/sessions`, `~/.claude/projects`) and gives you a grid
-of every session on the box: what state it's in (processing / waiting /
-idle), the last user prompt, token usage, and a live tail of the JSONL
-transcript. From the grid you can:
+A TUI-based coding-agent hub. cc-hub can manage multiple backends: Claude
+Code sessions from `~/.claude/...` and Pi sessions from `~/.pi/agent/sessions`.
+It gives you a grid of every discovered session on the box: what state it's in
+(processing / waiting / idle), the last user prompt, token usage, and a live
+ tail of the JSONL transcript. From the grid you can:
 
-- spawn new `cc-hub-new` sessions in any folder,
+- spawn new configured agent sessions in any folder,
 - dispatch a prompt to the first idle agent (or auto-spawn one if none
   exist),
 - embed an existing session's terminal pane inside the TUI,
@@ -15,14 +15,14 @@ transcript. From the grid you can:
 
 A separate **Projects** tab adds a higher-level layer: register a directory
 as a project, file a free-form *task* against it, and cc-hub spawns an
-*orchestrator* Claude session that decomposes the task and dispatches
-*worker* sessions (read-only research workers, or worktree-isolated edit
-workers) via four new CLI primitives:
+*orchestrator* session that decomposes the task and dispatches *worker*
+sessions (read-only research workers, or worktree-isolated edit workers) via
+four new CLI primitives:
 
-- `cc-hub spawn-worker --task ID [--worktree NAME | --readonly] [--prompt P]`
+- `cc-hub spawn-worker --task ID [--agent AGENT] [--worktree NAME | --readonly] [--prompt P]`
 - `cc-hub merge-worktree --task ID --worktree NAME`
 - `cc-hub task report --task ID [--status S] [--note N]`
-- `cc-hub task create --prompt "…"` / `cc-hub orchestrate start --task ID`
+- `cc-hub task create --prompt "…"` / `cc-hub orchestrate start --task ID [--agent AGENT]`
 
 Project state lives at `~/.cc-hub/projects.toml` and
 `~/.cc-hub/projects/<id>/tasks/<id>/state.json`; worktrees are placed under
@@ -101,10 +101,23 @@ Full schema with defaults:
 
 ```toml
 [spawn]
-# Command invoked inside each multiplexer pane. Resolved through the user's
-# interactive shell so rc-file aliases/functions expand. The title feature
-# reuses this name for its `-p` calls.
+# Legacy default Claude backend command. If you don't configure [agents],
+# this becomes the implicit `claude` agent.
 command = "cc-hub-new"
+
+[agents.claude]
+kind = "claude"
+command = "cc-hub-new"
+
+[agents.pi-codex]
+kind = "pi"
+command = "pi --provider openai-codex --model gpt-5.5 --thinking xhigh"
+use_bridge = true
+
+[projects]
+default_orchestrator_agent = "claude"
+default_worker_agent = "pi-codex"
+default_session_agent = "claude"
 
 [title]
 # Master switch for the background Haiku titler. When false, cards fall back
@@ -122,7 +135,7 @@ resolve_timeout_secs = 10
 concurrency = 2
 # Prompt prepended to the first user message. Keep the trailing `Request:`
 # marker so Haiku has a cue.
-prompt = """Output a 2 or 3 word title summarizing this Claude Code user request. Output only the title — no quotes, no punctuation, no prefix like "Title:". Just the words.
+prompt = """Output a 2 or 3 word title summarizing this coding-agent user request. Output only the title — no quotes, no punctuation, no prefix like "Title:". Just the words.
 
 Request:
 """

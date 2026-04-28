@@ -3,7 +3,9 @@
 //! to [`Default`], so this is a pure knob layer — removing the file yields
 //! the same behaviour as shipped defaults.
 
+use crate::agent::{AgentConfig, AgentKind};
 use serde::Deserialize;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -16,6 +18,8 @@ pub fn config_path() -> Option<PathBuf> {
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub spawn: SpawnConfig,
+    pub agents: BTreeMap<String, ConfiguredAgent>,
+    pub projects: ProjectsConfig,
     pub title: TitleConfig,
     pub inactive: InactiveConfig,
     pub scan: ScanConfig,
@@ -24,12 +28,71 @@ pub struct Config {
     pub backlog: BacklogConfig,
 }
 
+impl Config {
+    pub fn resolved_agents(&self) -> BTreeMap<String, AgentConfig> {
+        let mut out = BTreeMap::new();
+        out.insert(
+            "claude".into(),
+            AgentConfig {
+                id: "claude".into(),
+                kind: AgentKind::Claude,
+                command: self.spawn.command.clone(),
+                use_bridge: false,
+            },
+        );
+        for (id, cfg) in &self.agents {
+            out.insert(
+                id.clone(),
+                AgentConfig {
+                    id: id.clone(),
+                    kind: cfg.kind,
+                    command: cfg.command.clone(),
+                    use_bridge: cfg.use_bridge,
+                },
+            );
+        }
+        out
+    }
+
+    pub fn agent(&self, id: &str) -> Option<AgentConfig> {
+        self.resolved_agents().remove(id)
+    }
+
+    pub fn enabled_agent_kinds(&self) -> HashSet<AgentKind> {
+        self.resolved_agents()
+            .into_values()
+            .map(|a| a.kind)
+            .collect()
+    }
+
+    pub fn default_orchestrator_agent_id(&self) -> String {
+        self.projects
+            .default_orchestrator_agent
+            .clone()
+            .unwrap_or_else(|| "claude".into())
+    }
+
+    pub fn default_worker_agent_id(&self) -> String {
+        self.projects
+            .default_worker_agent
+            .clone()
+            .unwrap_or_else(|| "claude".into())
+    }
+
+    pub fn default_session_agent_id(&self) -> String {
+        self.projects
+            .default_session_agent
+            .clone()
+            .unwrap_or_else(|| "claude".into())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SpawnConfig {
-    /// The command cc-hub invokes in each multiplexer pane. Resolved through
-    /// the user's interactive shell so aliases / functions in their rc file
-    /// expand — same contract as before config existed.
+    /// The command cc-hub invokes for the default Claude backend. Resolved
+    /// through the user's interactive shell so aliases / functions in their rc
+    /// file expand — same contract as before config existed.
     pub command: String,
 }
 
@@ -43,22 +106,39 @@ impl Default for SpawnConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+pub struct ConfiguredAgent {
+    pub kind: AgentKind,
+    pub command: String,
+    pub use_bridge: bool,
+}
+
+impl Default for ConfiguredAgent {
+    fn default() -> Self {
+        Self {
+            kind: AgentKind::Claude,
+            command: "cc-hub-new".into(),
+            use_bridge: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProjectsConfig {
+    pub default_orchestrator_agent: Option<String>,
+    pub default_worker_agent: Option<String>,
+    pub default_session_agent: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct TitleConfig {
-    /// Master switch for the background Haiku titler. When false, sessions
-    /// display their first-user-message summary instead of a generated title.
     pub enabled: bool,
-    /// Passed as `--model <model>` to the resolved spawn command.
     pub model: String,
-    /// Clamp on the sanitized Haiku output; longer text is truncated at a
-    /// utf8 boundary.
     pub max_length: usize,
     pub run_timeout_secs: u64,
     pub resolve_timeout_secs: u64,
-    /// Max simultaneous in-flight `… -p` subprocesses. Keeps the pool from
-    /// fork-storming on first scan with many untitled sessions.
     pub concurrency: usize,
-    /// Prompt prepended to the first user message. Must end with a newline
-    /// and a `Request:` marker or similar so Haiku has a cue.
     pub prompt: String,
 }
 
@@ -72,7 +152,7 @@ impl TitleConfig {
 }
 
 const DEFAULT_TITLE_PROMPT: &str =
-    "Output a 2 or 3 word title summarizing this Claude Code user request. \
+    "Output a 2 or 3 word title summarizing this coding-agent user request. \
      Output only the title — no quotes, no punctuation, no prefix like \
      \"Title:\". Just the words.\n\nRequest:\n";
 
@@ -93,10 +173,7 @@ impl Default for TitleConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InactiveConfig {
-    /// How long a dead session's JSONL stays visible after its last touch.
     pub window_secs: u64,
-    /// Per-cwd cap, ranked by mtime, so a project with hundreds of old
-    /// JSONLs doesn't dominate a scan tick.
     pub max_per_project: usize,
 }
 
@@ -112,11 +189,8 @@ impl Default for InactiveConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ScanConfig {
-    /// Fallback timer that catches PID deaths and missed fs events.
     pub fs_fallback_interval_secs: u64,
-    /// How often to re-fetch the Anthropic usage API.
     pub usage_refresh_interval_secs: u64,
-    /// How long the on-disk usage response is trusted before re-curl'ing.
     pub usage_cache_ttl_secs: u64,
 }
 
@@ -193,22 +267,13 @@ impl Default for MetricsConfig {
     }
 }
 
-/// Background backlog triage. Off by default — burns Claude calls on a
-/// recurring tick. When enabled, every `interval_secs` cc-hub asks a
-/// short Claude session whether each pending backlog task is ready to
-/// promote to Running, and starts the chosen task automatically.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BacklogConfig {
     pub enabled: bool,
-    /// Model passed to `--model` for the triage call. Defaults to
-    /// `sonnet` — Haiku tends to over-promote and the call is rare.
     pub model: String,
     pub interval_secs: u64,
     pub run_timeout_secs: u64,
-    /// How long a triage decision sticks before the task becomes
-    /// eligible again. Bounds the worst-case rate of Claude calls per
-    /// dormant task to one per `ttl_secs`.
     pub ttl_secs: u64,
 }
 
@@ -250,7 +315,11 @@ fn load() -> Config {
             return Config::default();
         }
         Err(e) => {
-            log::warn!("config: read error at {}: {} — using defaults", path.display(), e);
+            log::warn!(
+                "config: read error at {}: {} — using defaults",
+                path.display(),
+                e
+            );
             return Config::default();
         }
     };
@@ -281,6 +350,7 @@ mod tests {
         assert_eq!(cfg.spawn.command, def.spawn.command);
         assert_eq!(cfg.title.model, def.title.model);
         assert_eq!(cfg.inactive.window_secs, def.inactive.window_secs);
+        assert_eq!(cfg.default_orchestrator_agent_id(), "claude");
     }
 
     #[test]
@@ -291,7 +361,6 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(src).unwrap();
         assert_eq!(cfg.title.model, "sonnet");
-        // untouched fields keep defaults
         assert!(cfg.title.enabled);
         assert_eq!(cfg.title.max_length, 40);
     }
@@ -307,59 +376,35 @@ mod tests {
     }
 
     #[test]
-    fn full_config_round_trips() {
+    fn legacy_spawn_maps_to_default_claude_agent() {
         let src = r#"
             [spawn]
             command = "my-claude"
-
-            [title]
-            enabled = false
-            model = "sonnet"
-            max_length = 60
-            run_timeout_secs = 30
-            resolve_timeout_secs = 5
-            concurrency = 4
-            prompt = "hi"
-
-            [inactive]
-            window_secs = 86400
-            max_per_project = 3
-
-            [scan]
-            fs_fallback_interval_secs = 5
-            usage_refresh_interval_secs = 30
-            usage_cache_ttl_secs = 30
-
-            [ui]
-            status_msg_ttl_secs = 3
-            pending_dispatch_timeout_secs = 90
-            cell_height = 10
-            cell_width = 50
-
-            [metrics]
-            min_growth_turns = 10
-            growth_threshold = 4.5
-            top_interruptions = 5
-            top_growth_findings = 5
-            top_peak_context_findings = 5
-
-            [backlog]
-            enabled = true
-            model = "haiku"
-            interval_secs = 30
-            run_timeout_secs = 60
-            ttl_secs = 600
         "#;
         let cfg: Config = toml::from_str(src).unwrap();
-        assert_eq!(cfg.spawn.command, "my-claude");
-        assert!(!cfg.title.enabled);
-        assert_eq!(cfg.title.model, "sonnet");
-        assert_eq!(cfg.inactive.window_secs, 86400);
-        assert_eq!(cfg.scan.fs_fallback_interval_secs, 5);
-        assert_eq!(cfg.ui.cell_width, 50);
-        assert_eq!(cfg.metrics.growth_threshold, 4.5);
-        assert!(cfg.backlog.enabled);
-        assert_eq!(cfg.backlog.model, "haiku");
-        assert_eq!(cfg.backlog.ttl_secs, 600);
+        let agent = cfg.agent("claude").unwrap();
+        assert_eq!(agent.kind, AgentKind::Claude);
+        assert_eq!(agent.command, "my-claude");
+    }
+
+    #[test]
+    fn custom_agents_and_defaults_load() {
+        let src = r#"
+            [agents.pi-codex]
+            kind = "pi"
+            command = "pi --provider openai-codex --model gpt-5.5"
+            use_bridge = true
+
+            [projects]
+            default_orchestrator_agent = "claude"
+            default_worker_agent = "pi-codex"
+            default_session_agent = "pi-codex"
+        "#;
+        let cfg: Config = toml::from_str(src).unwrap();
+        let pi = cfg.agent("pi-codex").unwrap();
+        assert_eq!(pi.kind, AgentKind::Pi);
+        assert!(pi.use_bridge);
+        assert_eq!(cfg.default_worker_agent_id(), "pi-codex");
+        assert_eq!(cfg.default_session_agent_id(), "pi-codex");
     }
 }

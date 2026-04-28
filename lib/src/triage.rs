@@ -21,7 +21,7 @@ use log::{debug, info, warn};
 #[derive(Debug, Clone)]
 pub struct Promotion {
     pub tmux: String,
-    pub orchestrator_prompt: String,
+    pub orchestrator_prompt: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -104,8 +104,11 @@ pub fn tick() -> TickOutcome {
     }
 
     match decision {
-        Decision::Promote(task_id) => match orchestrator::start_backlog_task(&project.id, &task_id)
-        {
+        Decision::Promote(task_id) => match orchestrator::start_backlog_task(
+            &project.id,
+            &task_id,
+            None,
+        ) {
             Ok((state, tmux_name, orch_prompt)) => {
                 info!(
                     "triage: promoted backlog {} → orchestrator [{}]",

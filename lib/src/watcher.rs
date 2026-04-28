@@ -1,30 +1,19 @@
 use crate::platform::paths;
 use log::{debug, warn};
-use notify_debouncer_mini::{
-    new_debouncer,
-    notify::RecursiveMode,
-    DebounceEventResult,
-};
+use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 const DEBOUNCE: Duration = Duration::from_millis(100);
 
-/// Spawn a filesystem watcher that signals `tx` whenever anything of interest
-/// under `~/.claude/` changes. Runs on a dedicated thread for the process
-/// lifetime; the debouncer is leaked into that thread so it's never dropped.
-///
-/// Watched paths (best-effort — failures to watch are logged, not fatal):
-///   - `~/.claude/sessions/` — session metadata (new/resumed/ended sessions)
-///   - `~/.claude/projects/` — JSONL conversation files (/clear chains live here)
-///   - `~/.claude/history.jsonl` — user prompts, source of /clear events
-///
-/// Recursive watches cover project subdirs that appear after startup.
 pub fn spawn_fs_watcher(tx: mpsc::Sender<()>) {
-    let Some(claude) = paths::claude_home() else {
-        warn!("fs watcher: ~/.claude unresolvable, skipping");
+    let claude = paths::claude_home();
+    let pi = paths::pi_home();
+    let cc_hub = paths::cc_hub_home();
+    if claude.is_none() && pi.is_none() && cc_hub.is_none() {
+        warn!("fs watcher: no agent homes resolvable, skipping");
         return;
-    };
+    }
 
     std::thread::spawn(move || {
         let (std_tx, std_rx) = std::sync::mpsc::channel::<DebounceEventResult>();
@@ -37,11 +26,19 @@ pub fn spawn_fs_watcher(tx: mpsc::Sender<()>) {
         };
 
         let watcher = debouncer.watcher();
-        let targets = [
-            (claude.join("sessions"), RecursiveMode::Recursive),
-            (claude.join("projects"), RecursiveMode::Recursive),
-            (claude.join("history.jsonl"), RecursiveMode::NonRecursive),
-        ];
+        let mut targets = Vec::new();
+        if let Some(claude) = claude {
+            targets.push((claude.join("sessions"), RecursiveMode::Recursive));
+            targets.push((claude.join("projects"), RecursiveMode::Recursive));
+            targets.push((claude.join("history.jsonl"), RecursiveMode::NonRecursive));
+        }
+        if let Some(pi) = pi {
+            targets.push((pi.join("sessions"), RecursiveMode::Recursive));
+        }
+        if let Some(cc_hub) = cc_hub {
+            targets.push((cc_hub.join("pi-heartbeats"), RecursiveMode::Recursive));
+        }
+
         for (path, mode) in &targets {
             match watcher.watch(path, *mode) {
                 Ok(()) => debug!("fs watcher: watching {}", path.display()),

@@ -51,7 +51,10 @@ impl FolderPicker {
         let Some(parent) = self.current_dir.parent().map(Path::to_path_buf) else {
             return;
         };
-        let prior = self.current_dir.file_name().map(|s| s.to_string_lossy().into_owned());
+        let prior = self
+            .current_dir
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned());
         self.current_dir = parent;
         self.reload();
         if let Some(name) = prior {

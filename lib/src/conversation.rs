@@ -32,7 +32,10 @@ pub fn read_jsonl_tail_for_state(path: &Path) -> Vec<Value> {
         if has_assistant || window >= total_len || window >= MAX {
             debug!(
                 "read_jsonl_tail_for_state: window={}B entries={} has_assistant={} total={}B",
-                window, entries.len(), has_assistant, total_len
+                window,
+                entries.len(),
+                has_assistant,
+                total_len
             );
             return entries;
         }
@@ -209,9 +212,9 @@ fn is_meaningful_entry(entry: &Value) -> bool {
             if let Some(content) = entry.get("message").and_then(|m| m.get("content")) {
                 // Skip tool_result messages (auto-generated, not real user input)
                 if let Some(arr) = content.as_array() {
-                    let only_tool_results = arr.iter().all(|b| {
-                        b.get("type").and_then(|t| t.as_str()) == Some("tool_result")
-                    });
+                    let only_tool_results = arr
+                        .iter()
+                        .all(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"));
                     if only_tool_results && !arr.is_empty() {
                         return false;
                     }
@@ -236,11 +239,7 @@ fn is_meaningful_entry(entry: &Value) -> bool {
 /// Tools that block on user interaction (permission prompts, plan mode, etc.).
 /// When the assistant's last action is calling one of these, the session is
 /// waiting for user input, not actively processing.
-const USER_INPUT_TOOLS: &[&str] = &[
-    "EnterPlanMode",
-    "ExitPlanMode",
-    "AskUserQuestion",
-];
+const USER_INPUT_TOOLS: &[&str] = &["EnterPlanMode", "ExitPlanMode", "AskUserQuestion"];
 
 /// Returns true if the assistant message contains a tool_use block for a tool
 /// that requires user interaction.
@@ -371,7 +370,10 @@ pub fn extract_state(entries: &[Value]) -> SessionState {
                     }
                 }
                 _ => {
-                    debug!("extract_state: last=assistant stop_reason={:?} → Processing", stop);
+                    debug!(
+                        "extract_state: last=assistant stop_reason={:?} → Processing",
+                        stop
+                    );
                     SessionState::Processing
                 }
             }
@@ -467,17 +469,19 @@ fn format_tool_hint(name: &str, input: Option<&Value>) -> Option<String> {
     // dispatches by its leaf (`notion-search`).
     let leaf = name.rsplit("__").next().unwrap_or(name);
     let raw = match leaf {
-        "Bash" => input.get("command").and_then(|v| v.as_str()).map(str::to_string),
-        "Edit" | "Read" | "Write" | "NotebookEdit" => input
-            .get("file_path")
+        "Bash" => input
+            .get("command")
             .and_then(|v| v.as_str())
-            .map(|p| {
+            .map(str::to_string),
+        "Edit" | "Read" | "Write" | "NotebookEdit" => {
+            input.get("file_path").and_then(|v| v.as_str()).map(|p| {
                 Path::new(p)
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or(p)
                     .to_string()
-            }),
+            })
+        }
         "Grep" | "Glob" => input
             .get("pattern")
             .and_then(|v| v.as_str())
@@ -486,7 +490,10 @@ fn format_tool_hint(name: &str, input: Option<&Value>) -> Option<String> {
             .get("description")
             .and_then(|v| v.as_str())
             .map(str::to_string),
-        "WebFetch" => input.get("url").and_then(|v| v.as_str()).map(str::to_string),
+        "WebFetch" => input
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         "WebSearch" => input
             .get("query")
             .and_then(|v| v.as_str())
@@ -498,7 +505,11 @@ fn format_tool_hint(name: &str, input: Option<&Value>) -> Option<String> {
         _ => None,
     }?;
     let cleaned = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    if cleaned.is_empty() { None } else { Some(cleaned) }
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
 }
 
 /// Sum of input + cache_read + cache_creation tokens from the *most recent*
@@ -512,10 +523,13 @@ pub fn extract_context_tokens(entries: &[Value]) -> Option<u64> {
         .and_then(|e| {
             let usage = e.get("message").and_then(|m| m.get("usage"))?;
             let f = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-            let total = f("input_tokens")
-                + f("cache_read_input_tokens")
-                + f("cache_creation_input_tokens");
-            if total == 0 { None } else { Some(total) }
+            let total =
+                f("input_tokens") + f("cache_read_input_tokens") + f("cache_creation_input_tokens");
+            if total == 0 {
+                None
+            } else {
+                Some(total)
+            }
         })
 }
 
@@ -563,39 +577,44 @@ pub fn explain_state(entries: &[Value], mtime_age_secs: Option<u64>) -> StateExp
     let interrupted = matches!(int_step.verdict, Verdict::Decided(_));
     steps.push(int_step);
     if interrupted {
-        return finalize(SessionState::WaitingForInput, mtime_age_secs, entries, steps);
+        return finalize(
+            SessionState::WaitingForInput,
+            mtime_age_secs,
+            entries,
+            steps,
+        );
     }
 
     let (last_step, base_state) = explain_last_meaningful(entries);
     steps.push(last_step);
 
-    let final_state =
-        if base_state == SessionState::Idle && mtime_age_secs.is_some_and(|s| s < 30) {
-            steps.push(ExplanationStep {
-                name: "mtime_upgrade Idle→Processing",
-                verdict: Verdict::Decided(SessionState::Processing),
-                details: vec![format!(
-                    "state is Idle but mtime age {}s < 30s → upgrade to Processing",
-                    mtime_age_secs.unwrap_or(0)
-                )],
-            });
-            SessionState::Processing
+    let final_state = if base_state == SessionState::Idle && mtime_age_secs.is_some_and(|s| s < 30)
+    {
+        steps.push(ExplanationStep {
+            name: "mtime_upgrade Idle→Processing",
+            verdict: Verdict::Decided(SessionState::Processing),
+            details: vec![format!(
+                "state is Idle but mtime age {}s < 30s → upgrade to Processing",
+                mtime_age_secs.unwrap_or(0)
+            )],
+        });
+        SessionState::Processing
+    } else {
+        let why = if base_state != SessionState::Idle {
+            format!("state is {} (not Idle), no upgrade needed", base_state)
         } else {
-            let why = if base_state != SessionState::Idle {
-                format!("state is {} (not Idle), no upgrade needed", base_state)
-            } else {
-                format!(
-                    "mtime age {} ≥ 30s threshold, no upgrade",
-                    mtime_age_secs.map_or("unknown".to_string(), |s| format!("{}s", s))
-                )
-            };
-            steps.push(ExplanationStep {
-                name: "mtime_upgrade Idle→Processing",
-                verdict: Verdict::Skipped,
-                details: vec![why],
-            });
-            base_state
+            format!(
+                "mtime age {} ≥ 30s threshold, no upgrade",
+                mtime_age_secs.map_or("unknown".to_string(), |s| format!("{}s", s))
+            )
         };
+        steps.push(ExplanationStep {
+            name: "mtime_upgrade Idle→Processing",
+            verdict: Verdict::Skipped,
+            details: vec![why],
+        });
+        base_state
+    };
 
     finalize(final_state, mtime_age_secs, entries, steps)
 }
@@ -992,10 +1011,7 @@ pub fn extract_messages(entries: &[Value], count: usize) -> Vec<ConversationMess
                 .to_string();
 
             let content_preview = extract_text_content(e);
-            let timestamp = e
-                .get("timestamp")
-                .and_then(parse_timestamp_ms)
-                .unwrap_or(0);
+            let timestamp = e.get("timestamp").and_then(parse_timestamp_ms).unwrap_or(0);
 
             let model = e
                 .get("message")
@@ -1073,10 +1089,7 @@ pub(crate) const TOOL_MARKER_PREFIX: &str = "[tool: ";
 pub(crate) const THINKING_MARKER: &str = "[thinking...]";
 
 fn extract_text_content(entry: &Value) -> String {
-    let msg_type = entry
-        .get("type")
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
+    let msg_type = entry.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
     match msg_type {
         "user" => {
@@ -1117,7 +1130,11 @@ fn extract_text_content(entry: &Value) -> String {
                                 }
                             }
                             Some("tool_use") => {
-                                parts.push(format!("{}{}]", TOOL_MARKER_PREFIX, tool_display(block)));
+                                parts.push(format!(
+                                    "{}{}]",
+                                    TOOL_MARKER_PREFIX,
+                                    tool_display(block)
+                                ));
                             }
                             Some("thinking") => {
                                 parts.push(THINKING_MARKER.to_string());
@@ -1240,10 +1257,8 @@ mod tests {
     #[test]
     fn read_jsonl_tail_for_state_expands_past_64k_of_tool_results() {
         use std::io::Write;
-        let tmp = std::env::temp_dir().join(format!(
-            "cc_hub_expand_test_{}.jsonl",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("cc_hub_expand_test_{}.jsonl", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
 
         let mut f = std::fs::File::create(&tmp).expect("create tmp");
@@ -1273,14 +1288,18 @@ mod tests {
         // Fixed 64 KiB tail would miss the assistant entry entirely.
         let fixed = read_jsonl_tail(&tmp, 65536);
         assert!(
-            !fixed.iter().any(|e| e.get("type").and_then(|t| t.as_str()) == Some("assistant")),
+            !fixed
+                .iter()
+                .any(|e| e.get("type").and_then(|t| t.as_str()) == Some("assistant")),
             "precondition: fixed 64 KiB tail must not contain the spawning assistant entry"
         );
 
         // Expanding reader should pull it in.
         let expanded = read_jsonl_tail_for_state(&tmp);
         assert!(
-            expanded.iter().any(|e| e.get("type").and_then(|t| t.as_str()) == Some("assistant")),
+            expanded
+                .iter()
+                .any(|e| e.get("type").and_then(|t| t.as_str()) == Some("assistant")),
             "expanding reader should surface the assistant entry"
         );
 
@@ -1434,9 +1453,8 @@ mod tests {
 
     #[test]
     fn is_currently_thinking_false_when_no_assistant_entry() {
-        let entries = vec![
-            serde_json::json!({"type": "user", "message": {"role": "user", "content": "hi"}}),
-        ];
+        let entries =
+            vec![serde_json::json!({"type": "user", "message": {"role": "user", "content": "hi"}})];
         assert!(!is_currently_thinking(&entries));
     }
 
@@ -1487,10 +1505,7 @@ fn strip_xml_tags(s: &str) -> String {
 }
 
 fn tool_display(block: &serde_json::Value) -> String {
-    let name = block
-        .get("name")
-        .and_then(|n| n.as_str())
-        .unwrap_or("?");
+    let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("?");
     let Some(raw) = block.get("input").and_then(|i| tool_brief_arg(name, i)) else {
         return name.to_string();
     };
@@ -1532,9 +1547,7 @@ fn tool_brief_arg(name: &str, input: &serde_json::Value) -> Option<String> {
         "WebFetch" => s("url"),
         "WebSearch" => s("query"),
         "Task" | "Agent" => s("description").or_else(|| s("subagent_type")),
-        "TodoWrite" | "TaskCreate" | "TaskUpdate" => {
-            s("title").or_else(|| s("description"))
-        }
+        "TodoWrite" | "TaskCreate" | "TaskUpdate" => s("title").or_else(|| s("description")),
         _ => {
             // Generic fallback: first string-valued field in the input object.
             input

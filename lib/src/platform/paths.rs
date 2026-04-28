@@ -20,10 +20,31 @@ pub fn cache_dir() -> PathBuf {
         .join("cc-hub")
 }
 
+pub fn cc_hub_home() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".cc-hub"))
+}
+
 /// Claude Code's user data directory (`~/.claude`). None when home is
 /// unresolvable (very unusual — daemons without HOME, broken chroots).
 pub fn claude_home() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude"))
+}
+
+/// Pi's user data directory (`~/.pi/agent`). None when home is unresolvable.
+pub fn pi_home() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".pi").join("agent"))
+}
+
+pub fn pi_sessions_dir() -> Option<PathBuf> {
+    pi_home().map(|h| h.join("sessions"))
+}
+
+pub fn pi_bridge_file() -> Option<PathBuf> {
+    cc_hub_home().map(|h| h.join("pi-bridge.ts"))
+}
+
+pub fn pi_heartbeats_dir() -> Option<PathBuf> {
+    cc_hub_home().map(|h| h.join("pi-heartbeats"))
 }
 
 /// Optional user-provided wrapper script for a terminal emulator under the
@@ -33,9 +54,7 @@ pub fn claude_home() -> Option<PathBuf> {
 /// cc-hub's spawned windows visually consistent with their normal terminals.
 pub fn terminal_wrapper_script(name: &str) -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    let p = PathBuf::from(home)
-        .join(".config/hypr/scripts")
-        .join(name);
+    let p = PathBuf::from(home).join(".config/hypr/scripts").join(name);
     if p.is_file() {
         Some(p)
     } else {
