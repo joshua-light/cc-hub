@@ -300,10 +300,9 @@ impl App {
             .projects
             .get(self.projects_sel)
             .map(|p| p.id.clone());
-        // Track the focused task by id so a status transition (e.g. Running →
-        // Review) carries the cursor across columns instead of leaving it
-        // pointed at whichever task happens to occupy the same row in the
-        // old column. Mirrors the prev_sid trick in `update_metrics`.
+        // Track the focused task by id so a status transition (Running →
+        // Review etc.) carries the cursor across columns. Mirrors the
+        // prev_sid trick in `update_metrics`.
         let prev_task_id = self
             .selected_project_task()
             .map(|t| t.task_id.clone());
@@ -314,17 +313,14 @@ impl App {
                 self.projects_sel = idx;
             }
         }
-        // Re-locate the previously-focused task in the (possibly relocated)
-        // selected project. If found, snap projects_col / projects_task_sel
-        // to its new (column, row). If not found — task deleted, project
-        // changed — leave projects_col alone and let clamp handle the row.
+        // If the task is gone, fall through and let clamp handle the row.
         if let Some(task_id) = prev_task_id {
-            'find: for col in 0..=4 {
+            for col in 0..=4 {
                 let tasks = self.kanban_column_tasks(col);
                 if let Some(row) = tasks.iter().position(|t| t.task_id == task_id) {
                     self.projects_col = col;
                     self.projects_task_sel = row;
-                    break 'find;
+                    break;
                 }
             }
         }
@@ -1471,38 +1467,23 @@ mod tests {
     }
 
     fn task(project_id: &str, task_id: &str, status: TaskStatus, with_worker: bool) -> TaskState {
-        let workers = if with_worker {
-            vec![Worker {
+        let mut t = TaskState::new(
+            project_id.to_string(),
+            PathBuf::from(format!("/tmp/{}", project_id)),
+            String::new(),
+        );
+        t.task_id = task_id.to_string();
+        t.status = status;
+        if with_worker {
+            t.workers.push(Worker {
                 tmux_name: "w-1".to_string(),
                 cwd: PathBuf::from("/tmp/w"),
                 worktree: None,
                 readonly: false,
                 spawned_at: 0,
-            }]
-        } else {
-            Vec::new()
-        };
-        TaskState {
-            task_id: task_id.to_string(),
-            project_id: project_id.to_string(),
-            project_root: PathBuf::from(format!("/tmp/{}", project_id)),
-            orchestrator_session_id: None,
-            orchestrator_tmux: None,
-            status,
-            prompt: String::new(),
-            created_at: 0,
-            updated_at: 0,
-            note: None,
-            summary: None,
-            title: None,
-            workers,
-            merges: Vec::new(),
-            artifacts: Vec::new(),
-            todos: Vec::new(),
-            lead_artifact: None,
-            triaged_at: None,
-            shipped_version: None,
+            });
         }
+        t
     }
 
     fn snapshot(p: Project, tasks: Vec<TaskState>) -> ProjectsSnapshot {
