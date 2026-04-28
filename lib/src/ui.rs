@@ -2845,6 +2845,7 @@ fn render_kanban_column(
         let reservation = app
             .projects
             .reservation_for_task(&t.project_id, &t.task_id);
+        let titling_in_flight = app.projects.titling.contains(&t.task_id);
         if col_idx <= 1 {
             render_task_card_active(
                 frame,
@@ -2855,9 +2856,19 @@ fn render_kanban_column(
                 sessions_by_tmux,
                 now_secs,
                 reservation,
+                titling_in_flight,
             );
         } else {
-            render_task_card_collapsed(frame, card_area, t, selected, col_idx, now_secs, reservation);
+            render_task_card_collapsed(
+                frame,
+                card_area,
+                t,
+                selected,
+                col_idx,
+                now_secs,
+                reservation,
+                titling_in_flight,
+            );
         }
         y = y.saturating_add(card_height + gap);
         if y >= inner.y + inner.height {
@@ -3103,6 +3114,7 @@ fn render_task_card_active(
     sessions_by_tmux: &std::collections::HashMap<&str, &SessionInfo>,
     now_secs: u64,
     reservation: Option<&Reservation>,
+    titling_in_flight: bool,
 ) {
     let sum = collect_agent_summary(t, sessions_by_tmux);
 
@@ -3128,7 +3140,11 @@ fn render_task_card_active(
     let badge_spans = reservation_badge_spans(reservation, area.width.saturating_sub(14) as usize);
     let badge_w: usize = badge_spans.iter().map(|s| s.content.chars().count()).sum();
     let prompt_max = (area.width as usize).saturating_sub(14 + badge_w);
-    let prompt_preview = first_line_preview(&t.prompt, prompt_max);
+    let header_text = match t.title.as_deref().filter(|s| !s.is_empty()) {
+        Some(name) => first_line_preview(name, prompt_max),
+        None if titling_in_flight => first_line_preview("✎ …", prompt_max),
+        None => first_line_preview(&t.prompt, prompt_max),
+    };
     let mut title_spans = vec![
         Span::styled(format!(" {} ", title_icon), Style::default().fg(accent)),
         Span::styled(
@@ -3136,7 +3152,7 @@ fn render_task_card_active(
             Style::default().fg(Color::Rgb(150, 170, 200)),
         ),
         Span::styled(
-            prompt_preview,
+            header_text,
             Style::default()
                 .fg(if selected { Color::White } else { Color::Gray })
                 .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
@@ -3260,6 +3276,7 @@ fn render_task_card_collapsed(
     col_idx: usize,
     now_secs: u64,
     reservation: Option<&Reservation>,
+    titling_in_flight: bool,
 ) {
     // Review (2) gets a cyan accent, Done (3) green, Failed (4) red. The
     // dim-text color is used for the prompt preview when not selected.
@@ -3294,7 +3311,11 @@ fn render_task_card_collapsed(
     let badge_spans = reservation_badge_spans(reservation, area.width.saturating_sub(14) as usize);
     let badge_w: usize = badge_spans.iter().map(|s| s.content.chars().count()).sum();
     let prompt_max = (area.width as usize).saturating_sub(14 + badge_w);
-    let prompt_preview = first_line_preview(&t.prompt, prompt_max);
+    let header_text = match t.title.as_deref().filter(|s| !s.is_empty()) {
+        Some(name) => first_line_preview(name, prompt_max),
+        None if titling_in_flight => first_line_preview("✎ …", prompt_max),
+        None => first_line_preview(&t.prompt, prompt_max),
+    };
     let mut title_spans = vec![
         Span::styled(format!(" {} ", icon), Style::default().fg(accent)),
         Span::styled(
@@ -3302,7 +3323,7 @@ fn render_task_card_collapsed(
             Style::default().fg(Color::Rgb(120, 130, 150)),
         ),
         Span::styled(
-            prompt_preview,
+            header_text,
             Style::default()
                 .fg(if selected { Color::White } else { dim_text })
                 .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
