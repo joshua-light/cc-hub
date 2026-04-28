@@ -188,7 +188,10 @@ pub fn scan() -> ProjectsSnapshot {
     for p in &projects {
         let mut list = load_tasks_for(&p.id);
         // Newest activity at the top, regardless of creation order.
-        list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        // Tie-break on task_id (which encodes a unix-nanos timestamp and is
+        // lexicographically sortable) so two tasks reported in the same second
+        // hold a stable order across rescans — otherwise the cursor jiggles.
+        list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(b.task_id.cmp(&a.task_id)));
         tasks.insert(p.id.clone(), list);
         // Reservations file may not exist yet for projects that have never
         // declared any — swallow IO errors and treat as empty.
