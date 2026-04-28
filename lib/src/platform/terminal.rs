@@ -30,7 +30,9 @@ pub struct Wezterm;
 pub struct Ghostty;
 
 impl Launcher for Kitty {
-    fn name(&self) -> &'static str { "kitty" }
+    fn name(&self) -> &'static str {
+        "kitty"
+    }
     fn argv_bare(&self, cwd: &str, cmd_argv: &[&str]) -> Vec<String> {
         let mut v = vec!["--directory".into(), cwd.into()];
         v.extend(cmd_argv.iter().map(|s| s.to_string()));
@@ -39,19 +41,20 @@ impl Launcher for Kitty {
 }
 
 impl Launcher for Alacritty {
-    fn name(&self) -> &'static str { "alacritty" }
+    fn name(&self) -> &'static str {
+        "alacritty"
+    }
     fn argv_bare(&self, cwd: &str, cmd_argv: &[&str]) -> Vec<String> {
-        let mut v = vec![
-            "--working-directory".into(), cwd.into(),
-            "-e".into(),
-        ];
+        let mut v = vec!["--working-directory".into(), cwd.into(), "-e".into()];
         v.extend(cmd_argv.iter().map(|s| s.to_string()));
         v
     }
 }
 
 impl Launcher for Foot {
-    fn name(&self) -> &'static str { "foot" }
+    fn name(&self) -> &'static str {
+        "foot"
+    }
     fn argv_bare(&self, cwd: &str, cmd_argv: &[&str]) -> Vec<String> {
         let mut v = vec![format!("--working-directory={}", cwd)];
         v.extend(cmd_argv.iter().map(|s| s.to_string()));
@@ -60,26 +63,28 @@ impl Launcher for Foot {
 }
 
 impl Launcher for Wezterm {
-    fn name(&self) -> &'static str { "wezterm" }
+    fn name(&self) -> &'static str {
+        "wezterm"
+    }
     fn argv_bare(&self, cwd: &str, cmd_argv: &[&str]) -> Vec<String> {
-        let mut v = vec![
-            "start".into(), "--cwd".into(), cwd.into(),
-            "--".into(),
-        ];
+        let mut v = vec!["start".into(), "--cwd".into(), cwd.into(), "--".into()];
         v.extend(cmd_argv.iter().map(|s| s.to_string()));
         v
     }
 }
 
 impl Launcher for Ghostty {
-    fn name(&self) -> &'static str { "ghostty" }
+    fn name(&self) -> &'static str {
+        "ghostty"
+    }
     fn argv_bare(&self, cwd: &str, cmd_argv: &[&str]) -> Vec<String> {
         // Ghostty's -e takes a single command string it re-parses, so quote
         // each argv entry to survive.
         let quoted: Vec<String> = cmd_argv.iter().map(|s| shell_quote(s)).collect();
         vec![
             format!("--working-directory={}", cwd),
-            "-e".into(), quoted.join(" "),
+            "-e".into(),
+            quoted.join(" "),
         ]
     }
 }

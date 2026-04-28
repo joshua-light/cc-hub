@@ -28,6 +28,7 @@
 //! `main`. The orchestrator picks `<name>`; cc-hub creates the directory and
 //! the branch.
 
+use crate::agent::AgentKind;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -112,6 +113,14 @@ pub fn now_unix_secs() -> i64 {
         .unwrap_or(0)
 }
 
+fn default_claude_agent_id() -> String {
+    "claude".into()
+}
+
+fn default_claude_agent_kind() -> AgentKind {
+    AgentKind::Claude
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
@@ -134,6 +143,10 @@ pub enum TaskStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Worker {
+    #[serde(default = "default_claude_agent_id")]
+    pub agent_id: String,
+    #[serde(default = "default_claude_agent_kind")]
+    pub agent_kind: AgentKind,
     pub tmux_name: String,
     pub cwd: PathBuf,
     pub worktree: Option<String>,
@@ -154,7 +167,9 @@ pub enum MergeOutcome {
     /// repo-relative paths the user must commit, stash, or revert before
     /// retrying. Distinct from `Conflict`, which means git started the
     /// merge and hit content conflicts during it.
-    BlockedByDirtyTree { overlap: Vec<String> },
+    BlockedByDirtyTree {
+        overlap: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,9 +211,13 @@ pub struct TaskState {
     pub project_id: String,
     pub project_root: PathBuf,
     /// Filled in by the orchestrator the first time it reports — cc-hub
-    /// can't know its session id at spawn time (Claude generates it).
+    /// can't know its session id at spawn time.
     #[serde(default)]
     pub orchestrator_session_id: Option<String>,
+    #[serde(default = "default_claude_agent_id")]
+    pub orchestrator_agent_id: String,
+    #[serde(default = "default_claude_agent_kind")]
+    pub orchestrator_agent_kind: AgentKind,
     /// tmux session name hosting the orchestrator. Set by `orchestrate
     /// start` immediately after spawn so the TUI / scanner can group
     /// child workers under the right parent without waiting for the
@@ -270,6 +289,8 @@ impl TaskState {
             project_id,
             project_root,
             orchestrator_session_id: None,
+            orchestrator_agent_id: default_claude_agent_id(),
+            orchestrator_agent_kind: default_claude_agent_kind(),
             orchestrator_tmux: None,
             status: TaskStatus::Running,
             prompt,
@@ -295,6 +316,8 @@ impl TaskState {
             project_id,
             project_root,
             orchestrator_session_id: None,
+            orchestrator_agent_id: default_claude_agent_id(),
+            orchestrator_agent_kind: default_claude_agent_kind(),
             orchestrator_tmux: None,
             status: TaskStatus::Backlog,
             prompt,
@@ -322,11 +345,15 @@ impl TaskState {
 /// surface as InvalidData so callers can distinguish "no such task" from
 /// "schema drift".
 pub fn read_task_state(project_id: &str, task_id: &str) -> io::Result<TaskState> {
-    let path = task_state_file(project_id, task_id)
-        .ok_or_else(|| io::Error::other("no home dir"))?;
+    let path =
+        task_state_file(project_id, task_id).ok_or_else(|| io::Error::other("no home dir"))?;
     let raw = fs::read_to_string(&path)?;
-    serde_json::from_str(&raw)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {}", path.display(), e)))
+    serde_json::from_str(&raw).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{}: {}", path.display(), e),
+        )
+    })
 }
 
 /// Atomically write a task state file via tempfile + rename. Creates parent
@@ -368,11 +395,7 @@ where
 /// Persist a Haiku-generated short title onto a task's state file. Reuses
 /// the per-task atomic-write store rather than a side cache file so the
 /// title travels with the rest of the task state.
-pub fn set_task_title(
-    project_id: &str,
-    task_id: &str,
-    title: &str,
-) -> io::Result<TaskState> {
+pub fn set_task_title(project_id: &str, task_id: &str, title: &str) -> io::Result<TaskState> {
     update_task_state(project_id, task_id, |s| {
         s.title = Some(title.to_string());
     })
@@ -396,7 +419,9 @@ pub fn cleanup_task_sessions(state: &TaskState) {
         if let Err(e) = crate::send::kill_tmux_session(&w.tmux_name) {
             log::warn!(
                 "task {}: kill worker tmux [{}] failed: {}",
-                state.task_id, w.tmux_name, e
+                state.task_id,
+                w.tmux_name,
+                e
             );
         }
     }
@@ -411,7 +436,8 @@ pub fn cleanup_task_sessions(state: &TaskState) {
         if safe_name != orch {
             log::warn!(
                 "task {}: orchestrator tmux name [{}] has unexpected chars; not scheduling kill",
-                state.task_id, orch
+                state.task_id,
+                orch
             );
             return;
         }
@@ -426,11 +452,13 @@ pub fn cleanup_task_sessions(state: &TaskState) {
         {
             Ok(_) => log::info!(
                 "task {}: scheduled orchestrator tmux [{}] kill in 2s",
-                state.task_id, orch
+                state.task_id,
+                orch
             ),
             Err(e) => log::warn!(
                 "task {}: schedule orchestrator kill failed: {}",
-                state.task_id, e
+                state.task_id,
+                e
             ),
         }
     }
@@ -444,7 +472,8 @@ fn capture_orchestrator_log(state: &TaskState, orch: &str) {
     if let Err(e) = std::fs::create_dir_all(dir) {
         log::warn!(
             "task {}: orchestrator.log mkdir failed: {}",
-            state.task_id, e
+            state.task_id,
+            e
         );
         return;
     }
@@ -452,14 +481,16 @@ fn capture_orchestrator_log(state: &TaskState, orch: &str) {
     if body.is_empty() {
         log::warn!(
             "task {}: orchestrator capture-pane returned empty for [{}]",
-            state.task_id, orch
+            state.task_id,
+            orch
         );
         return;
     }
     if let Err(e) = std::fs::write(&path, body) {
         log::warn!(
             "task {}: write orchestrator.log failed: {}",
-            state.task_id, e
+            state.task_id,
+            e
         );
     } else {
         log::info!(
@@ -624,16 +655,19 @@ pub fn build_orchestrator_prompt(state: &TaskState, cc_hub_bin: &Path) -> String
         project_id,
         project_root,
         prompt,
+        orchestrator_agent_id,
         ..
     } = state;
     let bin = cc_hub_bin.display();
     let prefix = orchestrator_prompt_prefix(task_id);
+    let worker_agent = crate::config::get().default_worker_agent_id();
     format!(
         "{prefix} in project `{project_id}` at `{root}`.
 
 Your job is to deliver the user's task end-to-end via a Pull Request: explore, decompose, dispatch workers into a worktree, open a PR, iterate on review feedback, and merge when the user approves. **You never edit `main` directly.** Every change lands through the PR flow so the user sees a reviewable diff before anything touches their working branch.
 
 The cc-hub binary is at `{bin}`. Always invoke it by absolute path; it is not necessarily on PATH inside worker shells.
+You're currently running as agent `{orchestrator_agent_id}`. The default worker agent is `{worker_agent}`; pass `--agent <id>` when you want a different backend.
 
 # Start here
 
@@ -649,11 +683,11 @@ The cc-hub binary is at `{bin}`. Always invoke it by absolute path; it is not ne
 All edits happen inside a worktree branch. You **do not** edit the project's main branch from inside this orchestrator session.
 
 - Spin up an editing worker with:
-  `{bin} spawn-worker --task {task_id} --worktree NAME --prompt \"…\"`
-  cc-hub creates a fresh worktree at `.cc-hub-wt/{task_id}-NAME` on a new branch off main. Multiple worktree workers may run in parallel only if they edit disjoint files; otherwise serialise them.
+  `{bin} spawn-worker --task {task_id} --agent {worker_agent} --worktree NAME --prompt \"…\"`
+  cc-hub creates a fresh worktree at `.cc-hub-wt/{task_id}-NAME` on a new branch off main. Multiple worktree workers may run in parallel only if they edit disjoint files; otherwise serialise them. Omit `--agent` to use the project default.
 
 - Spin up read-only research with:
-  `{bin} spawn-worker --task {task_id} --readonly --prompt \"…\"`
+  `{bin} spawn-worker --task {task_id} --agent {worker_agent} --readonly --prompt \"…\"`
   No edits, no worktree, runs in the project root. Many can run at once.
 
 - Each `spawn-worker` emits one JSON line on stdout — capture the `tmux` field if you need to talk to that worker later.
@@ -664,7 +698,7 @@ All edits happen inside a worktree branch. You **do not** edit the project's mai
 
 Two reliable channels, in order of preference:
 - `tmux capture-pane -t <tmux>:0 -p | tail -40` — shows the worker's current screen, including its last action and whether it's at the input prompt (idle) or thinking. Use this to tell when a worker is done.
-- JSONL transcripts under `~/.claude/projects/<sanitised-cwd>/<sid>.jsonl` — full conversation history when you need detail.
+- Session transcripts on disk — Claude uses `~/.claude/projects/<sanitised-cwd>/<sid>.jsonl`; Pi uses `~/.pi/agent/sessions/--encoded-cwd--/*.jsonl`. Useful when you need full conversation history.
 
 Avoid `until [ -f X ]; do sleep …; done` shell loops on file existence — they hide a stuck worker behind a 5-minute timeout.
 
@@ -785,21 +819,22 @@ Begin by exploring the relevant files, then open with your first `{bin} task rep
         root = project_root.display(),
         bin = bin,
         prompt = prompt,
+        orchestrator_agent_id = orchestrator_agent_id,
+        worker_agent = worker_agent,
     )
 }
 
 /// Create + persist a fresh task and spawn its orchestrator session.
 ///
-/// Returns the `(TaskState, tmux_session_name)` so callers can immediately
-/// queue the orchestrator prompt for dispatch (typically via the pending-
-/// dispatch path: spawn now, send when Idle). The system prompt is built
-/// against `cc_hub_bin`, which the caller resolves with
-/// [`std::env::current_exe`].
+/// Returns the `(TaskState, tmux_session_name, prompt_to_dispatch)` so callers
+/// can queue the orchestrator prompt only when the chosen backend needs a
+/// follow-up tmux paste. Pi can consume the initial prompt directly, so its
+/// `prompt_to_dispatch` is `None`.
 ///
 /// Concretely:
 /// 1. registers the project (if new) in `~/.cc-hub/projects.toml`
 /// 2. writes the initial task state
-/// 3. spawns `cc-hub-new` via the existing detached-tmux pathway
+/// 3. spawns the configured orchestrator backend via the existing detached-tmux pathway
 /// 4. records the resulting tmux name back on the state
 ///
 /// This mirrors what `cc-hub orchestrate start` does, minus the synchronous
@@ -809,24 +844,50 @@ pub fn spawn_orchestrator_for_new_task(
     project_root: &Path,
     project_name: &str,
     user_prompt: String,
-) -> io::Result<(TaskState, String, String)> {
+    agent_id_override: Option<&str>,
+) -> io::Result<(TaskState, String, Option<String>)> {
     let project_id = ensure_project_registered(project_root, project_name)?;
-    let canonical_root = fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    let canonical_root =
+        fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
     let mut state = TaskState::new(project_id, canonical_root.clone(), user_prompt);
     write_task_state(&state)?;
 
+    let agent_id = agent_id_override
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::config::get().default_orchestrator_agent_id());
+    let agent = crate::config::get()
+        .agent(&agent_id)
+        .ok_or_else(|| io::Error::other(format!("unknown orchestrator agent: {}", agent_id)))?;
+
+    let cc_hub_bin = std::env::current_exe()
+        .map_err(|e| io::Error::other(format!("resolve cc-hub binary path: {}", e)))?;
+    state.orchestrator_agent_id = agent_id.clone();
+    state.orchestrator_agent_kind = agent.kind;
+    let orchestrator_prompt = build_orchestrator_prompt(&state, &cc_hub_bin);
+
     let cwd = canonical_root.to_string_lossy().into_owned();
-    let tmux_name = crate::spawn::spawn_claude_session(&cwd, None)?;
+    let prompt_to_dispatch = if agent.supports_initial_prompt() {
+        None
+    } else {
+        Some(orchestrator_prompt.clone())
+    };
+    let tmux_name = crate::spawn::spawn_agent_session(
+        &agent_id,
+        &cwd,
+        None,
+        if agent.supports_initial_prompt() {
+            Some(orchestrator_prompt.as_str())
+        } else {
+            None
+        },
+        false,
+    )?;
 
     state.orchestrator_tmux = Some(tmux_name.clone());
     state.touch();
     write_task_state(&state)?;
 
-    let cc_hub_bin = std::env::current_exe()
-        .map_err(|e| io::Error::other(format!("resolve cc-hub binary path: {}", e)))?;
-    let orchestrator_prompt = build_orchestrator_prompt(&state, &cc_hub_bin);
-
-    Ok((state, tmux_name, orchestrator_prompt))
+    Ok((state, tmux_name, prompt_to_dispatch))
 }
 
 /// User-initiated transition from Backlog to Running. Mirrors
@@ -836,7 +897,8 @@ pub fn spawn_orchestrator_for_new_task(
 pub fn start_backlog_task(
     project_id: &str,
     task_id: &str,
-) -> io::Result<(TaskState, String, String)> {
+    agent_id_override: Option<&str>,
+) -> io::Result<(TaskState, String, Option<String>)> {
     let mut state = read_task_state(project_id, task_id)?;
     if state.status != TaskStatus::Backlog {
         return Err(io::Error::other(format!(
@@ -848,18 +910,42 @@ pub fn start_backlog_task(
     state.touch();
     write_task_state(&state)?;
 
+    let agent_id = agent_id_override
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::config::get().default_orchestrator_agent_id());
+    let agent = crate::config::get()
+        .agent(&agent_id)
+        .ok_or_else(|| io::Error::other(format!("unknown orchestrator agent: {}", agent_id)))?;
+
+    let cc_hub_bin = std::env::current_exe()
+        .map_err(|e| io::Error::other(format!("resolve cc-hub binary path: {}", e)))?;
+    state.orchestrator_agent_id = agent_id.clone();
+    state.orchestrator_agent_kind = agent.kind;
+    let orchestrator_prompt = build_orchestrator_prompt(&state, &cc_hub_bin);
+
     let cwd = state.project_root.to_string_lossy().into_owned();
-    let tmux_name = crate::spawn::spawn_claude_session(&cwd, None)?;
+    let prompt_to_dispatch = if agent.supports_initial_prompt() {
+        None
+    } else {
+        Some(orchestrator_prompt.clone())
+    };
+    let tmux_name = crate::spawn::spawn_agent_session(
+        &agent_id,
+        &cwd,
+        None,
+        if agent.supports_initial_prompt() {
+            Some(orchestrator_prompt.as_str())
+        } else {
+            None
+        },
+        false,
+    )?;
 
     state.orchestrator_tmux = Some(tmux_name.clone());
     state.touch();
     write_task_state(&state)?;
 
-    let cc_hub_bin = std::env::current_exe()
-        .map_err(|e| io::Error::other(format!("resolve cc-hub binary path: {}", e)))?;
-    let orchestrator_prompt = build_orchestrator_prompt(&state, &cc_hub_bin);
-
-    Ok((state, tmux_name, orchestrator_prompt))
+    Ok((state, tmux_name, prompt_to_dispatch))
 }
 
 /// Standard worktree path for `<task>-<name>` under `<root>/.cc-hub-wt/`.
@@ -879,7 +965,10 @@ pub fn worktree_branch(task_id: &str, name: &str) -> String {
 /// then `master`, falling back to `"main"` (which lets the caller's git
 /// command surface the real failure rather than us inventing one).
 pub fn detect_main_branch(root: &Path) -> String {
-    if let Ok(out) = run_git(root, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]) {
+    if let Ok(out) = run_git(
+        root,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    ) {
         if out.status_ok {
             if let Some(name) = out.stdout.trim().strip_prefix("origin/") {
                 return name.to_string();
@@ -906,7 +995,11 @@ pub struct GitOutput {
 }
 
 pub fn run_git(root: &Path, args: &[&str]) -> io::Result<GitOutput> {
-    let out = Command::new("git").arg("-C").arg(root).args(args).output()?;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()?;
     Ok(GitOutput {
         status_ok: out.status.success(),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -945,7 +1038,10 @@ pub fn create_worktree(
     let stderr = out.stderr.trim();
     let already = stderr.contains("already exists") || stderr.contains("already checked out");
     if already {
-        log::info!("create_worktree: {} already exists, reusing", path.display());
+        log::info!(
+            "create_worktree: {} already exists, reusing",
+            path.display()
+        );
         return Ok(path);
     }
     Err(io::Error::other(format!(
@@ -1048,8 +1144,7 @@ pub fn merge_branch(
     let dirty: std::collections::BTreeSet<String> =
         dirty_paths(project_root)?.into_iter().collect();
     if !dirty.is_empty() {
-        let branch_files: std::collections::BTreeSet<String> =
-            changed.iter().cloned().collect();
+        let branch_files: std::collections::BTreeSet<String> = changed.iter().cloned().collect();
         let overlap: Vec<String> = dirty.intersection(&branch_files).cloned().collect();
         if !overlap.is_empty() {
             return Ok((
@@ -1118,6 +1213,8 @@ mod tests {
         );
         s.note = Some("kicked off worker A".into());
         s.workers.push(Worker {
+            agent_id: "claude".into(),
+            agent_kind: AgentKind::Claude,
             tmux_name: "cchub-1".into(),
             cwd: PathBuf::from("/tmp/myproj"),
             worktree: Some("a".into()),
@@ -1240,14 +1337,16 @@ mod tests {
             write_task_state(&initial).expect("write seed state");
         }
 
-        let result = set_task_title(&project_id, &task_id_set, "build thing")
-            .expect("set_task_title");
+        let result =
+            set_task_title(&project_id, &task_id_set, "build thing").expect("set_task_title");
         assert_eq!(result.title.as_deref(), Some("build thing"));
 
-        let loaded = read_task_state(&project_id, &task_id_set)
-            .expect("read state back from disk");
+        let loaded = read_task_state(&project_id, &task_id_set).expect("read state back from disk");
         assert_eq!(loaded.title.as_deref(), Some("build thing"));
-        assert!(loaded.updated_at >= loaded.created_at, "touch() should bump updated_at");
+        assert!(
+            loaded.updated_at >= loaded.created_at,
+            "touch() should bump updated_at"
+        );
 
         // Restore HOME to keep other tests in the process oblivious.
         match prev_home {
@@ -1334,11 +1433,7 @@ mod tests {
         let bin_s = bin.display().to_string();
         let expected_primitives = [
             format!(
-                "{} spawn-worker --task {} --readonly",
-                bin_s, state.task_id
-            ),
-            format!(
-                "{} spawn-worker --task {} --worktree",
+                "{} spawn-worker --task {} --agent",
                 bin_s, state.task_id
             ),
             format!("{} pr create --task {}", bin_s, state.task_id),
@@ -1453,20 +1548,18 @@ mod tests {
 
         let project_root = home.path().join("proj-under-test");
         fs::create_dir_all(&project_root).expect("mkdir project root");
-        let project_id =
-            ensure_project_registered(&project_root, "proj").expect("register");
+        let project_id = ensure_project_registered(&project_root, "proj").expect("register");
 
         // Seed a task so the project state dir actually exists on disk.
-        let mut state = TaskState::new(
-            project_id.clone(),
-            project_root.clone(),
-            "do thing".into(),
-        );
+        let mut state = TaskState::new(project_id.clone(), project_root.clone(), "do thing".into());
         state.orchestrator_tmux = None;
         write_task_state(&state).expect("write seed task state");
 
         let proj_dir = project_state_dir(&project_id).expect("project_state_dir");
-        assert!(proj_dir.exists(), "project state dir should exist after seed");
+        assert!(
+            proj_dir.exists(),
+            "project state dir should exist after seed"
+        );
 
         remove_project(&project_id).expect("remove_project");
 

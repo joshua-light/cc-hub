@@ -12,6 +12,7 @@
 //! Stale cache entries (paths not visited this scan) are evicted in
 //! `scan()` so deleted tasks don't linger.
 
+use crate::agent::AgentKind;
 use crate::orchestrator::{self, Project, TaskState, TaskStatus};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -37,11 +38,18 @@ fn cache() -> &'static Mutex<HashMap<PathBuf, (SystemTime, Arc<TaskState>)>> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionRole {
     /// This session is itself an orchestrator for `task_id`.
-    Orchestrator { task_id: String, project_id: String },
+    Orchestrator {
+        task_id: String,
+        project_id: String,
+        agent_id: String,
+        agent_kind: AgentKind,
+    },
     /// This session is a worker spawned by the orchestrator for `task_id`.
     Worker {
         task_id: String,
         project_id: String,
+        agent_id: String,
+        agent_kind: AgentKind,
         worktree: Option<String>,
         readonly: bool,
     },
@@ -75,11 +83,7 @@ impl ProjectsSnapshot {
     pub fn active_task_count(&self, project_id: &str) -> usize {
         self.tasks
             .get(project_id)
-            .map(|v| {
-                v.iter()
-                    .filter(|t| t.status == TaskStatus::Running)
-                    .count()
-            })
+            .map(|v| v.iter().filter(|t| t.status == TaskStatus::Running).count())
             .unwrap_or(0)
     }
 
@@ -94,18 +98,24 @@ impl ProjectsSnapshot {
         for tasks in self.tasks.values() {
             for t in tasks {
                 if let Some(name) = t.orchestrator_tmux.as_deref() {
-                    out.entry(name.to_string()).or_insert(SessionRole::Orchestrator {
-                        task_id: t.task_id.clone(),
-                        project_id: t.project_id.clone(),
-                    });
+                    out.entry(name.to_string())
+                        .or_insert(SessionRole::Orchestrator {
+                            task_id: t.task_id.clone(),
+                            project_id: t.project_id.clone(),
+                            agent_id: t.orchestrator_agent_id.clone(),
+                            agent_kind: t.orchestrator_agent_kind,
+                        });
                 }
                 for w in &t.workers {
-                    out.entry(w.tmux_name.clone()).or_insert(SessionRole::Worker {
-                        task_id: t.task_id.clone(),
-                        project_id: t.project_id.clone(),
-                        worktree: w.worktree.clone(),
-                        readonly: w.readonly,
-                    });
+                    out.entry(w.tmux_name.clone())
+                        .or_insert(SessionRole::Worker {
+                            task_id: t.task_id.clone(),
+                            project_id: t.project_id.clone(),
+                            agent_id: w.agent_id.clone(),
+                            agent_kind: w.agent_kind,
+                            worktree: w.worktree.clone(),
+                            readonly: w.readonly,
+                        });
                 }
             }
         }
@@ -125,7 +135,11 @@ pub fn scan() -> ProjectsSnapshot {
         // Tie-break on task_id (which encodes a unix-nanos timestamp and is
         // lexicographically sortable) so two tasks reported in the same second
         // hold a stable order across rescans — otherwise the cursor jiggles.
-        list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(b.task_id.cmp(&a.task_id)));
+        list.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then(b.task_id.cmp(&a.task_id))
+        });
         tasks.insert(p.id.clone(), list);
     }
 
@@ -187,11 +201,7 @@ fn load_tasks_from_dir(tasks_dir: &Path) -> (Vec<Arc<TaskState>>, HashSet<PathBu
             Ok(m) => m,
             Err(e) => {
                 if e.kind() != io::ErrorKind::NotFound {
-                    log::warn!(
-                        "projects_scan: stat error at {}: {}",
-                        path.display(),
-                        e
-                    );
+                    log::warn!("projects_scan: stat error at {}: {}", path.display(), e);
                 }
                 continue;
             }
@@ -234,17 +244,9 @@ fn load_tasks_from_dir(tasks_dir: &Path) -> (Vec<Arc<TaskState>>, HashSet<PathBu
                     }
                     out.push(arc);
                 }
-                Err(e) => log::warn!(
-                    "projects_scan: parse error at {}: {}",
-                    path.display(),
-                    e
-                ),
+                Err(e) => log::warn!("projects_scan: parse error at {}: {}", path.display(), e),
             },
-            Err(e) => log::warn!(
-                "projects_scan: read error at {}: {}",
-                path.display(),
-                e
-            ),
+            Err(e) => log::warn!("projects_scan: read error at {}: {}", path.display(), e),
         }
     }
     (out, visited)

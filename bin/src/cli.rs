@@ -6,14 +6,14 @@
 //!
 //! Argument parsing is hand-rolled to avoid a clap dep. Three verbs:
 //!
-//! - `cc-hub spawn-worker --task ID [--worktree NAME | --readonly] [--prompt P]`
+//! - `cc-hub spawn-worker --task ID [--agent AGENT] [--worktree NAME | --readonly] [--prompt P]`
 //! - `cc-hub merge-worktree --task ID --worktree NAME`
 //! - `cc-hub task report --task ID [--status S] [--note N]`
 //!
 //! All three derive `project-id` from the current working directory by
 //! default; `--project-id ID` overrides for the rare case of operating
 //! cross-project. They emit a single JSON line on stdout describing the
-//! result so the orchestrator (a Claude Code session running under Bash)
+//! result so the orchestrator (a Claude or Pi session running under Bash)
 //! can parse the outcome programmatically.
 //!
 //! Worktree mechanics live here too: `git -C <root> worktree add -b <branch>
@@ -24,7 +24,7 @@ use cc_hub_lib::orchestrator::{
     self, Artifact, MergeOutcome, MergeRecord, TaskState, TaskStatus, TodoItem, Worker,
 };
 use cc_hub_lib::scanner;
-use cc_hub_lib::{models, send, spawn};
+use cc_hub_lib::{config, models, send, spawn};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -84,6 +84,7 @@ struct Flags {
     worktree: Option<String>,
     readonly: bool,
     prompt: Option<String>,
+    agent: Option<String>,
     project_id: Option<String>,
     status: Option<String>,
     note: Option<String>,
@@ -123,6 +124,9 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
             }
             "--prompt" => {
                 f.prompt = Some(next_value(args, &mut i, "--prompt")?);
+            }
+            "--agent" => {
+                f.agent = Some(next_value(args, &mut i, "--agent")?);
             }
             "--project-id" => {
                 f.project_id = Some(next_value(args, &mut i, "--project-id")?);
@@ -215,9 +219,20 @@ fn resolve_project_id(f: &Flags) -> Result<String, CliError> {
     if let Some(id) = f.project_id.clone() {
         return Ok(id);
     }
-    let cwd = std::env::current_dir()
-        .map_err(|e| CliError::Other(format!("cwd: {}", e)))?;
+    let cwd = std::env::current_dir().map_err(|e| CliError::Other(format!("cwd: {}", e)))?;
     Ok(orchestrator::project_id_for_path(&cwd))
+}
+
+fn resolve_worker_agent_id(f: &Flags) -> String {
+    f.agent
+        .clone()
+        .unwrap_or_else(|| config::get().default_worker_agent_id())
+}
+
+fn resolve_orchestrator_agent_id(f: &Flags) -> String {
+    f.agent
+        .clone()
+        .unwrap_or_else(|| config::get().default_orchestrator_agent_id())
 }
 
 fn print_json(value: &serde_json::Value) {
@@ -263,18 +278,27 @@ fn spawn_worker(args: &[String]) -> Result<(), CliError> {
         ));
     };
 
-    let tmux_name = spawn::spawn_claude_session(&cwd, None)
+    let agent_id = resolve_worker_agent_id(&f);
+    let agent = config::get()
+        .agent(&agent_id)
+        .ok_or_else(|| CliError::Other(format!("unknown worker agent: {}", agent_id)))?;
+    let initial_prompt = if agent.supports_initial_prompt() {
+        f.prompt.as_deref()
+    } else {
+        None
+    };
+    let tmux_name = spawn::spawn_agent_session(&agent_id, &cwd, None, initial_prompt, f.readonly)
         .map_err(|e| CliError::Other(format!("spawn session: {}", e)))?;
 
     let worker = Worker {
+        agent_id: agent_id.clone(),
+        agent_kind: agent.kind,
         tmux_name: tmux_name.clone(),
         cwd: PathBuf::from(&cwd),
         worktree: worktree_name.clone(),
         readonly: f.readonly,
         spawned_at: orchestrator::now_unix_secs(),
     };
-    // Surface what the orchestrator dispatched in the project view, so a
-    // glance at the Projects tab tells the user what each worker is doing.
     let prompt_preview = f.prompt.as_ref().map(|p| {
         let preview: String = p.chars().take(80).collect();
         format!("spawned worker: {}", preview)
@@ -288,13 +312,15 @@ fn spawn_worker(args: &[String]) -> Result<(), CliError> {
     .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
 
     let mut prompt_status = "skipped";
-    if let Some(prompt) = f.prompt.as_ref() {
+    if agent.supports_initial_prompt() {
+        if f.prompt.is_some() {
+            prompt_status = "sent";
+        }
+    } else if let Some(prompt) = f.prompt.as_ref() {
         let wait = f.wait_secs.unwrap_or(DEFAULT_PROMPT_WAIT_SECS);
         match wait_until_idle_and_send(&tmux_name, prompt, Duration::from_secs(wait)) {
             Ok(()) => prompt_status = "sent",
             Err(e) => {
-                // Don't fail the whole command — the session is up, the orch
-                // can retry the dispatch. Surface the issue in the report.
                 log::warn!("spawn-worker: prompt dispatch failed: {}", e);
                 prompt_status = "deferred";
                 eprintln!("warning: prompt dispatch failed ({}), session is up", e);
@@ -304,6 +330,8 @@ fn spawn_worker(args: &[String]) -> Result<(), CliError> {
 
     print_json(&serde_json::json!({
         "ok": true,
+        "agent_id": agent_id,
+        "agent_kind": agent.kind,
         "tmux": tmux_name,
         "cwd": cwd,
         "worktree": worktree_name,
@@ -332,8 +360,7 @@ fn wait_until_idle_and_send(
         //      timeout boundary.
         let sessions = scanner::scan_sessions();
         let scanner_idle = sessions.iter().any(|s| {
-            s.tmux_session.as_deref() == Some(tmux_name)
-                && s.state == models::SessionState::Idle
+            s.tmux_session.as_deref() == Some(tmux_name) && s.state == models::SessionState::Idle
         });
         if scanner_idle {
             let pane_ready = send::pane_ready_for_input(tmux_name);
@@ -431,9 +458,9 @@ fn merge_worktree(args: &[String]) -> Result<(), CliError> {
 // ─── orchestrate ─────────────────────────────────────────────────────────
 
 fn orchestrate_subcommand(args: &[String]) -> Result<(), CliError> {
-    let (verb, rest) = args.split_first().ok_or_else(|| {
-        CliError::Usage("orchestrate <verb>: missing verb (try `start`)".into())
-    })?;
+    let (verb, rest) = args
+        .split_first()
+        .ok_or_else(|| CliError::Usage("orchestrate <verb>: missing verb (try `start`)".into()))?;
     match verb.as_str() {
         "start" => orchestrate_start(rest),
         other => Err(CliError::Usage(format!(
@@ -445,7 +472,7 @@ fn orchestrate_subcommand(args: &[String]) -> Result<(), CliError> {
 
 /// `cc-hub orchestrate start --task ID [--project-id ID] [--wait-secs N]`
 ///
-/// Spawns `cc-hub-new` in the project root, waits up to `--wait-secs` (default
+/// Spawns the selected orchestrator backend in the project root, waits up to `--wait-secs` (default
 /// 60) for the new session to reach Idle, then dispatches the orchestrator
 /// prompt as the first user message. Records the resulting tmux name in
 /// state.json.
@@ -467,33 +494,46 @@ fn orchestrate_start(args: &[String]) -> Result<(), CliError> {
         return Ok(());
     }
 
+    let agent_id = resolve_orchestrator_agent_id(&f);
+    let agent = config::get()
+        .agent(&agent_id)
+        .ok_or_else(|| CliError::Other(format!("unknown orchestrator agent: {}", agent_id)))?;
+
     let cwd = state.project_root.to_string_lossy().into_owned();
-    let tmux_name = spawn::spawn_claude_session(&cwd, None)
+    let prompt = orchestrator::build_orchestrator_prompt(&state, &cc_hub_bin);
+    let initial_prompt = if agent.supports_initial_prompt() {
+        Some(prompt.as_str())
+    } else {
+        None
+    };
+    let tmux_name = spawn::spawn_agent_session(&agent_id, &cwd, None, initial_prompt, false)
         .map_err(|e| CliError::Other(format!("spawn orchestrator: {}", e)))?;
 
     state.orchestrator_tmux = Some(tmux_name.clone());
+    state.orchestrator_agent_id = agent_id.clone();
+    state.orchestrator_agent_kind = agent.kind;
     state.touch();
     orchestrator::write_task_state(&state)
         .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
 
-    let prompt = orchestrator::build_orchestrator_prompt(&state, &cc_hub_bin);
     let wait = f.wait_secs.unwrap_or(DEFAULT_PROMPT_WAIT_SECS);
-
-    let prompt_status = match wait_until_idle_and_send(
-        &tmux_name,
-        &prompt,
-        Duration::from_secs(wait),
-    ) {
-        Ok(()) => "sent",
-        Err(e) => {
-            log::warn!("orchestrate start: dispatch failed: {}", e);
-            eprintln!("warning: prompt dispatch failed ({}), session is up", e);
-            "deferred"
+    let prompt_status = if agent.supports_initial_prompt() {
+        "sent"
+    } else {
+        match wait_until_idle_and_send(&tmux_name, &prompt, Duration::from_secs(wait)) {
+            Ok(()) => "sent",
+            Err(e) => {
+                log::warn!("orchestrate start: dispatch failed: {}", e);
+                eprintln!("warning: prompt dispatch failed ({}), session is up", e);
+                "deferred"
+            }
         }
     };
 
     print_json(&serde_json::json!({
         "ok": true,
+        "agent_id": agent_id,
+        "agent_kind": agent.kind,
         "tmux": tmux_name,
         "cwd": cwd,
         "prompt_status": prompt_status,
@@ -522,7 +562,7 @@ fn task_subcommand(args: &[String]) -> Result<(), CliError> {
     }
 }
 
-/// `cc-hub task start --task ID [--project-id ID] [--wait-secs N]`
+/// `cc-hub task start --task ID [--project-id ID] [--agent ID] [--wait-secs N]`
 ///
 /// Flip a Backlog task to Running and spawn its orchestrator. Mirrors
 /// `orchestrate start` but goes through `start_backlog_task` so it errors
@@ -531,23 +571,24 @@ fn task_start(args: &[String]) -> Result<(), CliError> {
     let f = parse_flags(args)?;
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
+    let agent_id = f.agent.clone();
 
     let (_state, tmux_name, prompt) =
-        orchestrator::start_backlog_task(&project_id, &task_id)
+        orchestrator::start_backlog_task(&project_id, &task_id, agent_id.as_deref())
             .map_err(|e| CliError::Other(format!("start backlog task: {}", e)))?;
 
     let wait = f.wait_secs.unwrap_or(DEFAULT_PROMPT_WAIT_SECS);
-    let prompt_status = match wait_until_idle_and_send(
-        &tmux_name,
-        &prompt,
-        Duration::from_secs(wait),
-    ) {
-        Ok(()) => "sent",
-        Err(e) => {
-            log::warn!("task start: dispatch failed: {}", e);
-            eprintln!("warning: prompt dispatch failed ({}), session is up", e);
-            "deferred"
+    let prompt_status = if let Some(prompt) = prompt {
+        match wait_until_idle_and_send(&tmux_name, &prompt, Duration::from_secs(wait)) {
+            Ok(()) => "sent",
+            Err(e) => {
+                log::warn!("task start: dispatch failed: {}", e);
+                eprintln!("warning: prompt dispatch failed ({}), session is up", e);
+                "deferred"
+            }
         }
+    } else {
+        "sent"
     };
 
     print_json(&serde_json::json!({
@@ -725,16 +766,13 @@ fn task_artifact_add(args: &[String]) -> Result<(), CliError> {
         let basename = src
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .ok_or_else(|| {
-                CliError::Other(format!("{} has no file name", src.display()))
-            })?;
+            .ok_or_else(|| CliError::Other(format!("{} has no file name", src.display())))?;
 
         let dest_dir = orchestrator::task_state_dir(&project_id, &task_id)
             .ok_or_else(|| CliError::Other("no home dir".into()))?
             .join("artifacts");
-        std::fs::create_dir_all(&dest_dir).map_err(|e| {
-            CliError::Other(format!("create {}: {}", dest_dir.display(), e))
-        })?;
+        std::fs::create_dir_all(&dest_dir)
+            .map_err(|e| CliError::Other(format!("create {}: {}", dest_dir.display(), e)))?;
 
         let ts = orchestrator::now_unix_secs();
         let dest = dest_dir.join(format!("{}-{}", ts, basename));
@@ -757,7 +795,10 @@ fn task_artifact_add(args: &[String]) -> Result<(), CliError> {
         added_at: orchestrator::now_unix_secs(),
     };
     let lead_note_suffix = if f.lead { " (lead)" } else { "" };
-    let note = format!("artifact added: {} {}{}", kind, basename_for_note, lead_note_suffix);
+    let note = format!(
+        "artifact added: {} {}{}",
+        kind, basename_for_note, lead_note_suffix
+    );
     let mark_lead = f.lead;
     let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
         s.artifacts.push(artifact.clone());
@@ -821,7 +862,9 @@ fn task_artifact_list(args: &[String]) -> Result<(), CliError> {
 
 fn task_todos_subcommand(args: &[String]) -> Result<(), CliError> {
     let (verb, rest) = args.split_first().ok_or_else(|| {
-        CliError::Usage("task todos <verb>: missing verb (try `set`, `check`, `uncheck`, or `clear`)".into())
+        CliError::Usage(
+            "task todos <verb>: missing verb (try `set`, `check`, `uncheck`, or `clear`)".into(),
+        )
     })?;
     match verb.as_str() {
         "set" => task_todos_set(rest),
@@ -855,16 +898,18 @@ fn task_todos_set(args: &[String]) -> Result<(), CliError> {
     let f = parse_flags(args)?;
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
-    let raw = f
-        .items
-        .clone()
-        .ok_or_else(|| CliError::Usage("--items is required (newline-separated todo texts)".into()))?;
+    let raw = f.items.clone().ok_or_else(|| {
+        CliError::Usage("--items is required (newline-separated todo texts)".into())
+    })?;
 
     let new_todos: Vec<TodoItem> = raw
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
-        .map(|l| TodoItem { text: l.to_string(), done: false })
+        .map(|l| TodoItem {
+            text: l.to_string(),
+            done: false,
+        })
         .collect();
 
     let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
@@ -944,8 +989,7 @@ fn task_create(args: &[String]) -> Result<(), CliError> {
         .prompt
         .clone()
         .ok_or_else(|| CliError::Usage("--prompt is required".into()))?;
-    let cwd = std::env::current_dir()
-        .map_err(|e| CliError::Other(format!("cwd: {}", e)))?;
+    let cwd = std::env::current_dir().map_err(|e| CliError::Other(format!("cwd: {}", e)))?;
     let project_id = f
         .project_id
         .clone()
@@ -1499,4 +1543,3 @@ fn resolve_worktree_path(
     let name = stripped.strip_prefix(&prefix)?;
     Some(orchestrator::worktree_path(&state.project_root, &state.task_id, name))
 }
-

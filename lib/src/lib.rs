@@ -1,4 +1,5 @@
 pub mod acks;
+pub mod agent;
 pub mod app;
 pub mod clipboard;
 pub mod config;
@@ -11,6 +12,10 @@ pub mod merge_lock;
 pub mod metrics;
 pub mod models;
 pub mod orchestrator;
+pub mod pi_bridge;
+pub mod pi_conversation;
+pub mod pi_scanner;
+pub mod platform;
 pub mod pr;
 pub mod projects_scan;
 
@@ -22,7 +27,6 @@ pub(crate) mod test_util {
     use std::sync::Mutex;
     pub static HOME_TEST_LOCK: Mutex<()> = Mutex::new(());
 }
-pub mod platform;
 pub mod scanner;
 pub mod send;
 pub mod spawn;

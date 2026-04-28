@@ -86,11 +86,7 @@ fn render_tab_strip(frame: &mut Frame, area: Rect, app: &App) {
     for (i, tab) in TABS.iter().enumerate() {
         let is_active = *tab == app.current_tab;
         let (fg, bgc, modi) = if is_active {
-            (
-                Color::Black,
-                Color::Rgb(180, 200, 230),
-                Modifier::BOLD,
-            )
+            (Color::Black, Color::Rgb(180, 200, 230), Modifier::BOLD)
         } else {
             (
                 Color::Rgb(170, 170, 190),
@@ -148,7 +144,9 @@ fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(" 󰉋 ", Style::default().fg(Color::Cyan)),
         Span::styled(
             path_str,
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ),
     ]);
     frame.render_widget(Paragraph::new(path_line), path_area);
@@ -164,9 +162,7 @@ fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
         )));
     } else {
         let visible = list_h as usize;
-        let start = picker
-            .selection
-            .saturating_sub(visible.saturating_sub(1));
+        let start = picker.selection.saturating_sub(visible.saturating_sub(1));
         for (i, name) in picker.entries.iter().enumerate().skip(start).take(visible) {
             let selected = i == picker.selection;
             let (marker, style) = if selected {
@@ -235,7 +231,9 @@ fn render_gh_create_input(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(" name: ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             name_str,
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ),
     ]);
 
@@ -269,10 +267,7 @@ fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
             .sum();
         total.try_into().unwrap_or(u16::MAX)
     };
-    let desired_h = 5u16
-        .saturating_add(prompt_lines)
-        .max(9)
-        .min(area.height);
+    let desired_h = 5u16.saturating_add(prompt_lines).max(9).min(area.height);
 
     let popup = centered_fixed(area, desired_w, desired_h);
     frame.render_widget(Clear, popup);
@@ -283,9 +278,12 @@ fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
             .projects_pending_cwd
             .clone()
             .unwrap_or_else(|| "?".into());
+        let agent = app
+            .pending_agent_label()
+            .unwrap_or_else(|| "?".into());
         (
             " New project task ",
-            format!(" → orchestrator in {} ", cwd),
+            format!(" → {} orchestrator in {} ", agent, cwd),
             Color::Cyan,
         )
     } else {
@@ -309,7 +307,9 @@ fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
     ))
     .title_bottom(Span::styled(
         target_label,
-        Style::default().fg(title_color).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(title_color)
+            .add_modifier(Modifier::BOLD),
     ));
 
     let inner = block.inner(popup);
@@ -319,29 +319,49 @@ fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
+    let mut footer_spans = vec![
+        Span::raw("  "),
+        Span::styled(
+            "[enter]",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" dispatch   ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "[esc]",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+    ];
+    if project_mode && config::get().resolved_agents().len() > 1 {
+        footer_spans.push(Span::styled("   ", Style::default().fg(Color::DarkGray)));
+        footer_spans.push(Span::styled(
+            "[tab]",
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+        footer_spans.push(Span::styled(
+            " cycle agent",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
     let lines = vec![
         Line::raw(""),
         Line::from(vec![
             Span::styled("  ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 input_line,
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::raw(""),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                "[enter]",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" dispatch   ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                "[esc]",
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
-        ]),
+        Line::from(footer_spans),
     ];
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -390,7 +410,9 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
             None => first_line_preview(&t.prompt, max_w),
         };
         let title_style = if selected {
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Gray)
         };
@@ -505,15 +527,30 @@ fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
             Span::raw("  "),
             Span::styled(
                 display,
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::raw(""),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled("[y]", Style::default().fg(action_color).add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" {}   ", action_label), Style::default().fg(Color::DarkGray)),
-            Span::styled("[n/esc]", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[y]",
+                Style::default()
+                    .fg(action_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {}   ", action_label),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                "[n/esc]",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
         ]),
     ];
@@ -637,7 +674,12 @@ fn bar_color(pct: u8) -> Color {
 
 fn format_reset(iso: &str, fmt: &str) -> Option<String> {
     let dt = DateTime::parse_from_rfc3339(iso).ok()?;
-    Some(dt.with_timezone(&Local).format(fmt).to_string().to_lowercase())
+    Some(
+        dt.with_timezone(&Local)
+            .format(fmt)
+            .to_string()
+            .to_lowercase(),
+    )
 }
 
 const GROUP_HEADER_HEIGHT: u16 = 1;
@@ -645,9 +687,8 @@ const GROUP_GAP: u16 = 1;
 
 fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
     if app.groups.is_empty() {
-        let empty =
-            Paragraph::new("No sessions found. Start a Claude Code session to see it here.")
-                .style(Style::default().fg(Color::DarkGray));
+        let empty = Paragraph::new("No sessions found. Start an agent session to see it here.")
+            .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(empty, area);
         return;
     }
@@ -703,7 +744,11 @@ fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
         if header_sy >= 0 && header_sy < area.height as i32 {
             let hy = area.y + header_sy as u16;
             let total = group.sessions.len();
-            let attn = group.sessions.iter().filter(|s| s.needs_attention()).count();
+            let attn = group
+                .sessions
+                .iter()
+                .filter(|s| s.needs_attention())
+                .count();
 
             let mut spans = vec![
                 Span::styled(
@@ -796,9 +841,10 @@ fn render_card(
     // attached to. Workers also get their worktree name (or "RO" for
     // read-only). None for ordinary sessions.
     let role_prefix = match role {
-        Some(crate::projects_scan::SessionRole::Orchestrator { task_id, .. }) => {
-            Some(format!("★ orch[{}] ", crate::orchestrator::short_task_id(task_id)))
-        }
+        Some(crate::projects_scan::SessionRole::Orchestrator { task_id, .. }) => Some(format!(
+            "★ orch[{}] ",
+            crate::orchestrator::short_task_id(task_id)
+        )),
         Some(crate::projects_scan::SessionRole::Worker {
             task_id,
             worktree,
@@ -810,11 +856,16 @@ fn render_card(
             } else {
                 worktree.clone().unwrap_or_else(|| "wt".into())
             };
-            Some(format!("↳ wkr[{}/{}] ", crate::orchestrator::short_task_id(task_id), suffix))
+            Some(format!(
+                "↳ wkr[{}/{}] ",
+                crate::orchestrator::short_task_id(task_id),
+                suffix
+            ))
         }
         None => None,
     };
     let prefix = role_prefix.as_deref().unwrap_or("");
+    let agent_badge = format!("[{}] ", session.agent_badge());
 
     // Border title is the primary skim surface — prepending the Haiku-
     // generated 2-3 word title when available lets users scan what each
@@ -824,12 +875,21 @@ fn render_card(
     // pending title from one that's never going to arrive.
     let title = match session.title.as_deref() {
         Some(t) if !t.is_empty() => {
-            format!("{}{} {} — {}", prefix, indicator, session.project_name, t)
+            format!(
+                "{}{}{} {} — {}",
+                prefix, agent_badge, indicator, session.project_name, t
+            )
         }
         _ if session.titling => {
-            format!("{}{} {} — ✎ …", prefix, indicator, session.project_name)
+            format!(
+                "{}{}{} {} — ✎ …",
+                prefix, agent_badge, indicator, session.project_name
+            )
         }
-        _ => format!("{}{} {}", prefix, indicator, session.project_name),
+        _ => format!(
+            "{}{}{} {}",
+            prefix, agent_badge, indicator, session.project_name
+        ),
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -837,9 +897,7 @@ fn render_card(
         .border_style(Style::default().fg(border_color))
         .title(Span::styled(
             title,
-            Style::default()
-                .fg(ind_color)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(ind_color).add_modifier(Modifier::BOLD),
         ));
 
     let inner = block.inner(area);
@@ -851,14 +909,10 @@ fn render_card(
 
     let mut lines = Vec::new();
 
-
     let branch = session.git_branch.as_deref().unwrap_or("");
     lines.push(Line::from(vec![
         Span::styled(" ", Style::default().fg(Color::Rgb(100, 100, 120))),
-        Span::styled(
-            branch.to_string(),
-            Style::default().fg(Color::Cyan),
-        ),
+        Span::styled(branch.to_string(), Style::default().fg(Color::Cyan)),
         Span::styled(
             format!("  {}:{}", session.pid, short_sid(&session.session_id)),
             Style::default().fg(Color::Rgb(50, 50, 60)),
@@ -927,7 +981,10 @@ fn render_card(
     // when both are present — a running tool is always more actionable than
     // recent reasoning.
     let activity: Option<(String, Color)> = if let Some(tool) = session.current_tool.as_ref() {
-        Some((format_tool_label(tool, inner_w), state_color(&session.state)))
+        Some((
+            format_tool_label(tool, inner_w),
+            state_color(&session.state),
+        ))
     } else if session.is_thinking && session.state == SessionState::Processing {
         Some(("󰛨 Thinking".to_string(), Color::Rgb(170, 140, 210)))
     } else {
@@ -946,7 +1003,10 @@ fn render_card(
     let display_msg = if session.title.as_deref().is_some_and(|t| !t.is_empty()) {
         None
     } else {
-        session.last_user_message.as_ref().or(session.summary.as_ref())
+        session
+            .last_user_message
+            .as_ref()
+            .or(session.summary.as_ref())
     };
     if let Some(msg) = display_msg {
         let max_w = inner_w.saturating_sub(3); // account for icon prefix
@@ -954,20 +1014,17 @@ fn render_card(
         if chars.len() <= max_w {
             lines.push(Line::from(vec![
                 Span::styled("󰍡 ", Style::default().fg(Color::Rgb(100, 100, 120))),
-                Span::styled(
-                    msg.clone(),
-                    Style::default().fg(Color::Rgb(160, 160, 170)),
-                ),
+                Span::styled(msg.clone(), Style::default().fg(Color::Rgb(160, 160, 170))),
             ]));
         } else {
             let first_line: String = chars[..max_w].iter().collect();
-            let remaining: String = chars[max_w..].iter().take(max_w.saturating_sub(3)).collect();
+            let remaining: String = chars[max_w..]
+                .iter()
+                .take(max_w.saturating_sub(3))
+                .collect();
             lines.push(Line::from(vec![
                 Span::styled("󰍡 ", Style::default().fg(Color::Rgb(100, 100, 120))),
-                Span::styled(
-                    first_line,
-                    Style::default().fg(Color::Rgb(160, 160, 170)),
-                ),
+                Span::styled(first_line, Style::default().fg(Color::Rgb(160, 160, 170))),
             ]));
             let second = if chars.len() > max_w * 2 - 3 {
                 format!("{}...", remaining)
@@ -976,10 +1033,7 @@ fn render_card(
             };
             lines.push(Line::from(vec![
                 Span::raw("  "),
-                Span::styled(
-                    second,
-                    Style::default().fg(Color::Rgb(160, 160, 170)),
-                ),
+                Span::styled(second, Style::default().fg(Color::Rgb(160, 160, 170))),
             ]));
         }
     }
@@ -1031,10 +1085,7 @@ fn render_popup(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let session = &detail.info;
-    let title = format!(
-        " {} (PID {}) ",
-        session.project_name, session.pid
-    );
+    let title = format!(" {} (PID {}) ", session.project_name, session.pid);
 
     let block = popup_block(Span::styled(
         title,
@@ -1180,9 +1231,15 @@ fn evidence_card_header(a: &Artifact, selected: bool, is_lead: bool) -> Line<'st
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| a.path.clone());
     let stripe = if selected { "▌ " } else { "  " };
-    let stripe_color = if selected { Color::LightCyan } else { Color::DarkGray };
+    let stripe_color = if selected {
+        Color::LightCyan
+    } else {
+        Color::DarkGray
+    };
     let name_style = if selected {
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Gray)
     };
@@ -1201,8 +1258,11 @@ fn evidence_card_header(a: &Artifact, selected: bool, is_lead: bool) -> Line<'st
     }
     if let Some(c) = a.caption.as_deref() {
         if !c.is_empty() {
-            spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)),);
-            spans.push(Span::styled(c.to_string(), Style::default().fg(Color::Rgb(180, 180, 200))));
+            spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                c.to_string(),
+                Style::default().fg(Color::Rgb(180, 180, 200)),
+            ));
         }
     }
     Line::from(spans)
@@ -1225,7 +1285,8 @@ fn render_text_card_body(frame: &mut Frame, area: Rect, a: &Artifact, max_bytes:
             ))],
         },
         Some((mut content, truncated)) => {
-            let body_rows = (area.height as usize).saturating_sub(if truncated > 0 { 1 } else { 0 });
+            let body_rows =
+                (area.height as usize).saturating_sub(if truncated > 0 { 1 } else { 0 });
             if content.len() > body_rows {
                 content.truncate(body_rows);
             }
@@ -1528,7 +1589,9 @@ fn render_url_card_body(frame: &mut Frame, area: Rect, a: &Artifact) {
     let lines = vec![
         Line::from(Span::styled(
             format!("  {}", a.path),
-            Style::default().fg(Color::LightBlue).add_modifier(Modifier::UNDERLINED),
+            Style::default()
+                .fg(Color::LightBlue)
+                .add_modifier(Modifier::UNDERLINED),
         )),
         Line::from(Span::styled(
             "  press `o` to open in browser",
@@ -1559,7 +1622,9 @@ fn render_image_placeholder(frame: &mut Frame, area: Rect, msg: &str) {
     }
     let line = Line::from(Span::styled(
         format!("  {}", msg),
-        Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
     ));
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -1630,7 +1695,9 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     };
     let block = popup_block(Span::styled(
         title,
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
     ));
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
@@ -1647,7 +1714,9 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     let mut header_spans = vec![
         Span::styled(
             format!("[{}]", status_label),
-            Style::default().fg(status_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(status_color)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(age, Style::default().fg(Color::Rgb(160, 160, 180))),
@@ -1658,7 +1727,11 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     }
     header_spans.push(Span::raw("  "));
     header_spans.push(Span::styled(
-        format!("({} artifact{})", t.artifacts.len(), if t.artifacts.len() == 1 { "" } else { "s" }),
+        format!(
+            "({} artifact{})",
+            t.artifacts.len(),
+            if t.artifacts.len() == 1 { "" } else { "s" }
+        ),
         Style::default().fg(Color::Rgb(150, 130, 200)),
     ));
     header_lines.push(Line::from(header_spans));
@@ -1858,7 +1931,8 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
                     continue;
                 }
                 if let Some(state) = app.artifact_images.get_mut(&path) {
-                    let widget = StatefulImage::<ratatui_image::protocol::StatefulProtocol>::default();
+                    let widget =
+                        StatefulImage::<ratatui_image::protocol::StatefulProtocol>::default();
                     frame.render_stateful_widget(widget, body_rect, state);
                 }
             }
@@ -1878,7 +1952,8 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
-    let hint = " esc/r:close   j/k:artifact   e:expand   PgUp/PgDn:scroll   c:copy path   o:xdg-open ";
+    let hint =
+        " esc/r:close   j/k:artifact   e:expand   PgUp/PgDn:scroll   c:copy path   o:xdg-open ";
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             hint,
@@ -1938,10 +2013,7 @@ fn render_state_debug(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(content, inner);
 }
 
-pub fn build_state_debug_content(
-    info: &SessionInfo,
-    exp: &StateExplanation,
-) -> Vec<Line<'static>> {
+pub fn build_state_debug_content(info: &SessionInfo, exp: &StateExplanation) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     let final_color = state_color(&exp.final_state);
@@ -1950,7 +2022,9 @@ pub fn build_state_debug_content(
         Span::styled("Final state: ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             format!("{}", exp.final_state),
-            Style::default().fg(final_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(final_color)
+                .add_modifier(Modifier::BOLD),
         ),
     ]));
 
@@ -2002,7 +2076,9 @@ pub fn build_state_debug_content(
             ),
             Span::styled(
                 step.name.to_string(),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]));
         for d in &step.details {
@@ -2037,10 +2113,7 @@ pub fn build_state_debug_content(
                 format!("  {:>3}  ", e.idx),
                 Style::default().fg(Color::Rgb(80, 80, 90)),
             ),
-            Span::styled(
-                format!("{}  ", ts),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(format!("{}  ", ts), Style::default().fg(Color::DarkGray)),
             Span::styled(e.kind.clone(), Style::default().fg(Color::Cyan)),
             Span::styled(stop, Style::default().fg(Color::Yellow)),
             Span::styled(blocks, Style::default().fg(Color::Rgb(160, 160, 170))),
@@ -2436,7 +2509,10 @@ fn build_popup_content(detail: &SessionDetail, width: u16) -> Vec<Line<'static>>
     ]));
 
     let mut meta_spans = vec![
-        Span::styled("  ", Style::default().fg(Color::Rgb(100, 100, 120))),
+        Span::styled("󰚩  ", Style::default().fg(Color::Rgb(100, 100, 120))),
+        Span::styled("Agent:  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(session.agent_badge(), Style::default().fg(Color::White)),
+        Span::styled("     ", Style::default().fg(Color::Rgb(100, 100, 120))),
         Span::styled("Branch:  ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             session.git_branch.clone().unwrap_or_default(),
@@ -2444,7 +2520,10 @@ fn build_popup_content(detail: &SessionDetail, width: u16) -> Vec<Line<'static>>
         ),
     ];
     if let Some(model) = &session.model {
-        meta_spans.push(Span::styled("   󰧑 Model: ", Style::default().fg(Color::DarkGray)));
+        meta_spans.push(Span::styled(
+            "   󰧑 Model: ",
+            Style::default().fg(Color::DarkGray),
+        ));
         meta_spans.push(Span::styled(
             short_model(model).to_string(),
             Style::default().fg(Color::White),
@@ -2452,7 +2531,10 @@ fn build_popup_content(detail: &SessionDetail, width: u16) -> Vec<Line<'static>>
     }
     if let Some(version) = &session.version {
         meta_spans.push(Span::styled("   v", Style::default().fg(Color::DarkGray)));
-        meta_spans.push(Span::styled(version.clone(), Style::default().fg(Color::DarkGray)));
+        meta_spans.push(Span::styled(
+            version.clone(),
+            Style::default().fg(Color::DarkGray),
+        ));
     }
     lines.push(Line::from(meta_spans));
 
@@ -2510,9 +2592,7 @@ fn build_popup_content(detail: &SessionDetail, width: u16) -> Vec<Line<'static>>
         let mut header_spans = vec![
             Span::styled(
                 format!("{} {} ", role_icon, role_label),
-                Style::default()
-                    .fg(role_color)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(role_color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("󰥔 {}", time_str),
@@ -2530,10 +2610,7 @@ fn build_popup_content(detail: &SessionDetail, width: u16) -> Vec<Line<'static>>
 
         if let Some(stop) = &msg.stop_reason {
             if stop == "tool_use" {
-                header_spans.push(Span::styled(
-                    "   tools",
-                    Style::default().fg(Color::Cyan),
-                ));
+                header_spans.push(Span::styled("   tools", Style::default().fg(Color::Cyan)));
             }
         }
 
@@ -2580,7 +2657,9 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(msg) = fresh_status {
         spans.push(Span::styled(
             format!(" {} ", msg),
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         ));
     } else {
         let keybinds: &str = match app.view {
@@ -2611,10 +2690,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     // no way to tell that "session sitting there empty" actually has a
     // dispatch in flight, or that it's about to time out.
     if let Some(target) = app.pending_dispatch_target() {
-        let age = app
-            .pending_dispatch_age()
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let age = app.pending_dispatch_age().map(|d| d.as_secs()).unwrap_or(0);
         spans.push(Span::styled(
             format!(" ↻ dispatch waiting [{}] {}s ", target, age),
             Style::default()
@@ -2772,7 +2848,9 @@ fn render_projects_body(frame: &mut Frame, area: Rect, app: &App) {
             ),
             Span::styled(
                 "Press N to register a folder, then n to start a task.",
-                Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]))
         .alignment(Alignment::Center)
@@ -2893,9 +2971,16 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
             Style::default()
                 .fg(chip_fg)
                 .bg(chip_bg)
-                .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
+                .add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
         ));
-        spans.push(Span::styled(counts, Style::default().fg(counts_fg).bg(counts_bg)));
+        spans.push(Span::styled(
+            counts,
+            Style::default().fg(counts_fg).bg(counts_bg),
+        ));
         spans.push(Span::styled(" ", band));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)).style(band), chip_row);
@@ -2913,9 +2998,7 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
         };
         let line = Line::from(Span::styled(
             root,
-            Style::default()
-                .fg(Color::Rgb(110, 110, 130))
-                .bg(BAND_BG),
+            Style::default().fg(Color::Rgb(110, 110, 130)).bg(BAND_BG),
         ));
         frame.render_widget(Paragraph::new(line).style(band), row);
     }
@@ -3035,10 +3118,15 @@ fn render_kanban_column(
     // 3-line cards since they're terminal states from the UI's POV.
     let card_height: u16 = if col_idx <= 1 { 8 } else { 4 };
     let gap: u16 = 1;
-    let max_cards = ((inner.height as u32 + gap as u32) / (card_height as u32 + gap as u32)) as usize;
+    let max_cards =
+        ((inner.height as u32 + gap as u32) / (card_height as u32 + gap as u32)) as usize;
 
     // Anchor the cursor: keep the selected card visible by scrolling.
-    let sel = if col_focused { app.projects_task_sel.min(count - 1) } else { 0 };
+    let sel = if col_focused {
+        app.projects_task_sel.min(count - 1)
+    } else {
+        0
+    };
     let scroll_top = if max_cards == 0 || sel < max_cards {
         0
     } else {
@@ -3129,7 +3217,10 @@ fn collect_agent_summary(
     };
 
     let mut tool_priority = 0u8; // prefer Processing > WaitingForInput tools
-    for s in std::iter::once(orch).chain(workers.iter().copied()).flatten() {
+    for s in std::iter::once(orch)
+        .chain(workers.iter().copied())
+        .flatten()
+    {
         sum.total += 1;
         match s.state {
             SessionState::Processing => {
@@ -3199,7 +3290,10 @@ fn agent_dot_strip(sum: &AgentSummary) -> Vec<Span<'static>> {
     for (count, color, glyph) in buckets.iter_mut() {
         let take = (*count as usize).min(left);
         for _ in 0..take {
-            spans.push(Span::styled((*glyph).to_string(), Style::default().fg(*color)));
+            spans.push(Span::styled(
+                (*glyph).to_string(),
+                Style::default().fg(*color),
+            ));
         }
         left -= take;
         if left == 0 {
@@ -3217,9 +3311,7 @@ fn agent_dot_strip(sum: &AgentSummary) -> Vec<Span<'static>> {
 
 fn worker_was_merged(w: &crate::orchestrator::Worker, t: &crate::orchestrator::TaskState) -> bool {
     t.merges.iter().any(|m| {
-        w.worktree
-            .as_deref()
-            .is_some_and(|wn| m.worktree == wn)
+        w.worktree.as_deref().is_some_and(|wn| m.worktree == wn)
             && matches!(m.outcome, crate::orchestrator::MergeOutcome::Ok)
     })
 }
@@ -3247,7 +3339,10 @@ fn merge_progress_spans(t: &crate::orchestrator::TaskState) -> Vec<Span<'static>
         if i < merged_shown {
             spans.push(Span::styled("▰", Style::default().fg(Color::LightGreen)));
         } else {
-            spans.push(Span::styled("▱", Style::default().fg(Color::Rgb(90, 90, 110))));
+            spans.push(Span::styled(
+                "▱",
+                Style::default().fg(Color::Rgb(90, 90, 110)),
+            ));
         }
     }
     spans.push(Span::styled(
@@ -3303,7 +3398,10 @@ fn ctx_bar(pct: u8, width: usize) -> Vec<Span<'static>> {
     out.push(Span::styled(s, Style::default().fg(color)));
     if drawn < width {
         let pad: String = std::iter::repeat('░').take(width - drawn).collect();
-        out.push(Span::styled(pad, Style::default().fg(Color::Rgb(50, 50, 65))));
+        out.push(Span::styled(
+            pad,
+            Style::default().fg(Color::Rgb(50, 50, 65)),
+        ));
     }
     out
 }
@@ -3351,7 +3449,11 @@ fn render_task_card_active(
             header_text,
             Style::default()
                 .fg(if selected { Color::White } else { Color::Gray })
-                .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
+                .add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
         ),
         Span::raw(" "),
     ];
@@ -3421,10 +3523,7 @@ fn render_task_card_active(
         .saturating_sub(left_w + bar_label_w)
         .min(20);
     if bar_w >= 4 {
-        row3.push(Span::styled(
-            ctx_label,
-            Style::default().fg(ctx_color(pct)),
-        ));
+        row3.push(Span::styled(ctx_label, Style::default().fg(ctx_color(pct))));
         row3.extend(ctx_bar(pct, bar_w));
     } else {
         row3.push(Span::styled(
@@ -3439,7 +3538,11 @@ fn render_task_card_active(
         let name = short_tool(tool);
         let max = inner.width.saturating_sub(4) as usize;
         let txt = match hint.as_deref().filter(|h| !h.is_empty()) {
-            Some(h) => format!("󰖷 {}: {}", name, truncate_str(h, max.saturating_sub(name.len() + 4))),
+            Some(h) => format!(
+                "󰖷 {}: {}",
+                name,
+                truncate_str(h, max.saturating_sub(name.len() + 4))
+            ),
             None => format!("󰖷 {}", name),
         };
         lines.push(Line::from(Span::styled(
@@ -3518,7 +3621,11 @@ fn render_task_card_collapsed(
             header_text,
             Style::default()
                 .fg(if selected { Color::White } else { dim_text })
-                .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
+                .add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
         ),
         Span::raw(" "),
     ];
@@ -3657,11 +3764,11 @@ fn render_metrics_body(frame: &mut Frame, area: Rect, app: &App) {
                 Some((scanned, total)) if total > 0 => {
                     let pct = (scanned as f64 / total as f64 * 100.0).round() as u64;
                     format!(
-                        " Scanning ~/.claude/projects … {} / {} sessions ({}%)",
+                        " Scanning agent transcripts … {} / {} sessions ({}%)",
                         scanned, total, pct
                     )
                 }
-                _ => " Scanning ~/.claude/projects …".to_string(),
+                _ => " Scanning agent transcripts …".to_string(),
             };
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
@@ -3762,12 +3869,33 @@ fn build_metrics_content(
 
     lines.push(section_header("Cost breakdown"));
     let breakdown = [
-        ("input        ", m.total_tokens.input, Color::Rgb(120, 200, 240)),
-        ("output       ", m.total_tokens.output, Color::Rgb(240, 180, 120)),
-        ("cache read   ", m.total_tokens.cache_read, Color::Rgb(160, 220, 160)),
-        ("cache create ", m.total_tokens.cache_creation, Color::Rgb(220, 160, 200)),
+        (
+            "input        ",
+            m.total_tokens.input,
+            Color::Rgb(120, 200, 240),
+        ),
+        (
+            "output       ",
+            m.total_tokens.output,
+            Color::Rgb(240, 180, 120),
+        ),
+        (
+            "cache read   ",
+            m.total_tokens.cache_read,
+            Color::Rgb(160, 220, 160),
+        ),
+        (
+            "cache create ",
+            m.total_tokens.cache_creation,
+            Color::Rgb(220, 160, 200),
+        ),
     ];
-    let max_tokens = breakdown.iter().map(|(_, t, _)| *t).max().unwrap_or(0).max(1);
+    let max_tokens = breakdown
+        .iter()
+        .map(|(_, t, _)| *t)
+        .max()
+        .unwrap_or(0)
+        .max(1);
     for (name, toks, col) in breakdown {
         let bar_w = ((toks as f64 / max_tokens as f64) * 30.0).round() as usize;
         let bar: String = "━".repeat(bar_w);
@@ -3846,12 +3974,20 @@ fn build_metrics_content(
     lines.push(Line::raw(""));
 
     lines.push(section_header("Top projects"));
-    let max_proj = m.top_projects.first().map(|(_, s)| s.cost).unwrap_or(0.0).max(0.01);
+    let max_proj = m
+        .top_projects
+        .first()
+        .map(|(_, s)| s.cost)
+        .unwrap_or(0.0)
+        .max(0.01);
     for (name, s) in &m.top_projects {
         let bar_w = ((s.cost / max_proj) * 24.0).round() as usize;
         lines.push(Line::from(vec![
             Span::styled(format!("  {:<26}", truncate_str(name, 26)), label),
-            Span::styled("━".repeat(bar_w), Style::default().fg(Color::Rgb(120, 180, 220))),
+            Span::styled(
+                "━".repeat(bar_w),
+                Style::default().fg(Color::Rgb(120, 180, 220)),
+            ),
             Span::raw(" "),
             Span::styled(fmt_cost(s.cost), val),
             Span::styled(format!("  {} sess", s.sessions), dim),
@@ -3861,9 +3997,30 @@ fn build_metrics_content(
     lines.push(Line::raw(""));
 
     let styles = MetricsStyles { dim, label, val };
-    render_bar_chart_section(&mut lines, "Tool usage", "tool calls", "tools", &m.by_tool, &styles);
-    render_bar_chart_section(&mut lines, "Shell commands", "shell commands", "commands", &m.by_shell, &styles);
-    render_bar_chart_section(&mut lines, "MCP servers", "MCP calls", "servers", &m.by_mcp, &styles);
+    render_bar_chart_section(
+        &mut lines,
+        "Tool usage",
+        "tool calls",
+        "tools",
+        &m.by_tool,
+        &styles,
+    );
+    render_bar_chart_section(
+        &mut lines,
+        "Shell commands",
+        "shell commands",
+        "commands",
+        &m.by_shell,
+        &styles,
+    );
+    render_bar_chart_section(
+        &mut lines,
+        "MCP servers",
+        "MCP calls",
+        "servers",
+        &m.by_mcp,
+        &styles,
+    );
 
     lines.push(section_header("Interruptions (Esc'd mid-tool-call)"));
     let i = &m.interruptions;
@@ -3872,7 +4029,10 @@ fn build_metrics_content(
     } else {
         lines.push(Line::from(vec![
             Span::styled("  Wasted ", label),
-            Span::styled(fmt_cost(i.total_wasted_cost), val.fg(Color::Rgb(220, 140, 140))),
+            Span::styled(
+                fmt_cost(i.total_wasted_cost),
+                val.fg(Color::Rgb(220, 140, 140)),
+            ),
             Span::styled("    Turns ", label),
             Span::styled(format!("{}", i.total_interrupted_turns), val),
             Span::styled("    Sessions ", label),
@@ -3884,7 +4044,10 @@ fn build_metrics_content(
             row_lines.push(lines.len());
             lines.push(Line::from(vec![
                 Span::styled(format!("{}{:<10}", marker, sid), sid_style),
-                Span::styled(format!("{:>8}", fmt_cost(entry.wasted_cost)), val.fg(Color::Rgb(220, 140, 140))),
+                Span::styled(
+                    format!("{:>8}", fmt_cost(entry.wasted_cost)),
+                    val.fg(Color::Rgb(220, 140, 140)),
+                ),
                 Span::styled(format!("  {:>3} orphan", entry.orphan_count), dim),
                 Span::raw("  "),
                 Span::styled(
@@ -3916,7 +4079,10 @@ fn build_metrics_content(
                     format!("{:>8} ctx", format_tokens(f.peak_ctx_tokens)),
                     val.fg(Color::Rgb(220, 180, 130)),
                 ),
-                Span::styled(format!("  {:>8}", fmt_cost(f.total_cost)), val.fg(Color::Green)),
+                Span::styled(
+                    format!("  {:>8}", fmt_cost(f.total_cost)),
+                    val.fg(Color::Green),
+                ),
                 Span::styled(
                     format!("  @ turn {}/{}", f.peak_turn_index, f.assistant_turns),
                     dim,
@@ -3940,7 +4106,10 @@ fn build_metrics_content(
         Span::styled("    Spikes ", label),
         Span::styled(format!("{}", g.findings.len()), val),
         Span::styled("    Cost in flagged sessions ", label),
-        Span::styled(fmt_cost(g.anomalous_cost), val.fg(Color::Rgb(220, 180, 130))),
+        Span::styled(
+            fmt_cost(g.anomalous_cost),
+            val.fg(Color::Rgb(220, 180, 130)),
+        ),
     ]));
     lines.push(Line::from(Span::styled(
         "  score = peak turn delta / median turn delta — flags one-shot bursts, not total growth",
@@ -3955,8 +4124,14 @@ fn build_metrics_content(
             row_lines.push(lines.len());
             lines.push(Line::from(vec![
                 Span::styled(format!("{}{:<10}", marker, sid), sid_style),
-                Span::styled(format!("{:>5.1}x", f.score), val.fg(Color::Rgb(220, 180, 130))),
-                Span::styled(format!("  {:>8}", fmt_cost(f.total_cost)), val.fg(Color::Green)),
+                Span::styled(
+                    format!("{:>5.1}x", f.score),
+                    val.fg(Color::Rgb(220, 180, 130)),
+                ),
+                Span::styled(
+                    format!("  {:>8}", fmt_cost(f.total_cost)),
+                    val.fg(Color::Green),
+                ),
                 Span::styled(
                     format!(
                         "  +{:>8} @ turn {}/{}",
@@ -4041,7 +4216,11 @@ fn render_bar_chart_section(
         }
         if rows.len() > TOOLS_DISPLAY_LIMIT {
             lines.push(Line::from(Span::styled(
-                format!("  … {} more {}", rows.len() - TOOLS_DISPLAY_LIMIT, overflow_noun),
+                format!(
+                    "  … {} more {}",
+                    rows.len() - TOOLS_DISPLAY_LIMIT,
+                    overflow_noun
+                ),
                 dim,
             )));
         }
@@ -4073,7 +4252,10 @@ fn selection_row_style(selected: bool) -> (&'static str, Style) {
     if selected {
         (
             "  ▸ ",
-            Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )
     } else {
         ("    ", Style::default().fg(Color::Cyan))
@@ -4130,10 +4312,7 @@ fn truncate_str(s: &str, w: usize) -> String {
 
 fn section_header(title: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            "▎ ",
-            Style::default().fg(Color::Rgb(120, 140, 180)),
-        ),
+        Span::styled("▎ ", Style::default().fg(Color::Rgb(120, 140, 180))),
         Span::styled(
             title.to_string(),
             Style::default()
@@ -4212,7 +4391,11 @@ mod result_popup_tests {
             root: PathBuf::from("/tmp/test"),
             created_at: now,
         };
-        let mut state = TaskState::new(project.id.clone(), project.root.clone(), "test prompt body".into());
+        let mut state = TaskState::new(
+            project.id.clone(),
+            project.root.clone(),
+            "test prompt body".into(),
+        );
         state.status = TaskStatus::Done;
         state.note = Some("PROOF-LINE: build is green".into());
         state.summary = Some("WHY this works: build green; popup shows evidence cards.".into());
@@ -4517,5 +4700,3 @@ index 0000001..0000002 100644
     }
 
 }
-
-

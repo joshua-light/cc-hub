@@ -1,3 +1,4 @@
+use crate::agent::AgentKind;
 use serde::Deserialize;
 use std::fmt;
 use std::path::PathBuf;
@@ -18,14 +19,9 @@ pub struct RawSession {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionState {
-    /// Active API calls — the agent is working.
     Processing,
-    /// Has conversation content, waiting for user input.
     WaitingForInput,
-    /// Fresh session with no conversation content yet.
     Idle,
-    /// Process is gone but the JSONL was modified within the inactive window.
-    /// Can be brought back with `cc-hub-new --resume <sid>`.
     Inactive,
 }
 
@@ -53,6 +49,8 @@ impl fmt::Display for SessionState {
 
 #[derive(Clone, Debug)]
 pub struct SessionInfo {
+    pub agent_id: String,
+    pub agent_kind: AgentKind,
     pub pid: u32,
     pub session_id: String,
     pub cwd: String,
@@ -62,41 +60,35 @@ pub struct SessionInfo {
     pub state: SessionState,
     pub last_user_message: Option<String>,
     pub summary: Option<String>,
-    /// 2-3 word Haiku-generated title, cached once per session_id by
-    /// [`crate::title`]. `None` until the background titler finishes (or if
-    /// it fails — UI falls back to `summary`/`last_user_message`).
     pub title: Option<String>,
-    /// True while a background Haiku call is in flight for this session.
-    /// Drives the "generating…" indicator in the card so the user can tell
-    /// an active titler from a session whose title is simply never going
-    /// to arrive (no summary, or resolution failed).
     pub titling: bool,
     pub model: Option<String>,
     pub git_branch: Option<String>,
     pub version: Option<String>,
     pub jsonl_path: Option<PathBuf>,
-    /// Name of the tmux session hosting this Claude process, if any. None
-    /// means the session is not running under tmux (focus falls back to
-    /// walking the pid's own ancestor chain to find a window).
     pub tmux_session: Option<String>,
-    /// The most recent unresolved assistant `tool_use` — the tool the agent
-    /// is currently running (Processing) or the blocking tool it's waiting on
-    /// user input for (WaitingForInput). None if no tool is in flight.
     pub current_tool: Option<crate::conversation::CurrentTool>,
-    /// True when the most recent assistant content block is a `thinking`
-    /// block (no follow-up tool_use/text has been written yet). Only
-    /// meaningful while the session is `Processing`.
     pub is_thinking: bool,
-    /// Live context-window utilisation in tokens — the size of the prompt
-    /// re-sent on the next turn (input + cache_read + cache_creation from
-    /// the most recent assistant message). None if no assistant message has
-    /// reported usage yet.
     pub context_tokens: Option<u64>,
 }
 
 impl SessionInfo {
     pub fn needs_attention(&self) -> bool {
         self.state == SessionState::WaitingForInput
+    }
+
+    pub fn agent_badge(&self) -> String {
+        if self.agent_id == "claude" {
+            return "Claude".into();
+        }
+        if self.agent_id == "pi" {
+            return "Pi".into();
+        }
+        let lower = self.agent_id.to_ascii_lowercase();
+        if self.agent_kind == AgentKind::Pi && lower.contains("codex") {
+            return "Pi/Codex".into();
+        }
+        self.agent_id.replace('-', " ")
     }
 }
 

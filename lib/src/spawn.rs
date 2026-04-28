@@ -1,48 +1,137 @@
-//! Spawn a new Claude session backed by a detached multiplexer session.
+//! Spawn agent sessions backed by detached multiplexer sessions.
 //!
 //! Detachment lets the hub inject prompts via `send-keys` without stealing
 //! focus, and the agent survives an accidentally-closed terminal. Users
-//! attach on demand via the hub UI. The command run in the pane is
-//! [`config::SpawnConfig::command`] — `cc-hub-new` by default.
+//! attach on demand via the hub UI.
 
+use crate::agent::{AgentConfig, AgentKind};
 use crate::config;
+use crate::pi_bridge;
 use crate::platform::mux;
+use crate::platform::terminal::shell_quote;
 #[cfg(not(windows))]
 use crate::platform::{paths, terminal};
 #[cfg(not(windows))]
 use log::info;
 use std::io;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(not(windows))]
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Spawn a new Claude session for `cwd`, returning the multiplexer session
-/// name. When `resume_id` is `Some`, the pane runs `<cmd> --resume <id>`
-/// instead of a fresh `<cmd>`.
+#[derive(Clone, Debug)]
+pub enum ResumeTarget {
+    SessionId(String),
+    SessionFile(PathBuf),
+}
+
+pub fn spawn_agent_session(
+    agent_id: &str,
+    cwd: &str,
+    resume: Option<ResumeTarget>,
+    initial_prompt: Option<&str>,
+    readonly_tools: bool,
+) -> io::Result<String> {
+    let agent = config::get()
+        .agent(agent_id)
+        .ok_or_else(|| io::Error::other(format!("unknown agent id: {}", agent_id)))?;
+    spawn_agent_session_with_config(&agent, cwd, resume, initial_prompt, readonly_tools)
+}
+
 pub fn spawn_claude_session(cwd: &str, resume_id: Option<&str>) -> io::Result<String> {
+    spawn_agent_session(
+        "claude",
+        cwd,
+        resume_id.map(|sid| ResumeTarget::SessionId(sid.to_string())),
+        None,
+        false,
+    )
+}
+
+pub fn spawn_agent_session_with_config(
+    agent: &AgentConfig,
+    cwd: &str,
+    resume: Option<ResumeTarget>,
+    initial_prompt: Option<&str>,
+    readonly_tools: bool,
+) -> io::Result<String> {
     let name = unique_session_name("cchub");
-    let base = config::get().spawn.command.as_str();
-    let cmd = match resume_id {
-        Some(sid) => format!("{} --resume {}", base, sid),
-        None => base.to_string(),
-    };
-    ensure_path_trusted(cwd)?;
+    let cmd = build_agent_command(agent, cwd, &name, resume, initial_prompt, readonly_tools)?;
+    if agent.kind == AgentKind::Claude {
+        ensure_path_trusted(cwd)?;
+    }
     mux::spawn_detached(&name, cwd, Some(&cmd))?;
     Ok(name)
 }
 
-/// Flip `hasTrustDialogAccepted` to `true` in `~/.claude.json` for `cwd`.
-/// Without this, claude blocks on a "trust this folder?" prompt the user
-/// never sees in a detached pane — the agent hangs, no session metadata is
-/// written, nothing surfaces in the hub.
-///
-/// Originally scoped to `$HOME` only (where users rarely start claude
-/// manually). Generalised to any path because the orchestrator layer spawns
-/// into fresh worktrees under `.cc-hub-wt/<task>-<name>` that are never
-/// pre-trusted, and into ad-hoc dirs (tempdirs, new-project scaffolds).
-/// The op is idempotent — paths already marked trusted return early.
+fn build_agent_command(
+    agent: &AgentConfig,
+    cwd: &str,
+    tmux_name: &str,
+    resume: Option<ResumeTarget>,
+    initial_prompt: Option<&str>,
+    readonly_tools: bool,
+) -> io::Result<String> {
+    let mut cmd = agent.command.clone();
+
+    match agent.kind {
+        AgentKind::Claude => match resume {
+            Some(ResumeTarget::SessionId(sid)) => {
+                cmd.push_str(" --resume ");
+                cmd.push_str(&shell_quote(&sid));
+            }
+            Some(ResumeTarget::SessionFile(path)) => {
+                return Err(io::Error::other(format!(
+                    "claude backend cannot resume by session file: {}",
+                    path.display()
+                )));
+            }
+            None => {}
+        },
+        AgentKind::Pi => {
+            if agent.use_bridge {
+                let bridge = pi_bridge::ensure_bridge_file()?;
+                cmd.push_str(" -e ");
+                cmd.push_str(&shell_quote(&bridge.to_string_lossy()));
+            }
+            if readonly_tools {
+                cmd.push_str(" --tools read,grep,find,ls");
+            }
+            match resume {
+                Some(ResumeTarget::SessionId(sid)) => {
+                    cmd.push_str(" --session ");
+                    cmd.push_str(&shell_quote(&sid));
+                }
+                Some(ResumeTarget::SessionFile(path)) => {
+                    cmd.push_str(" --session ");
+                    cmd.push_str(&shell_quote(&path.to_string_lossy()));
+                }
+                None => {}
+            }
+            if let Some(prompt) = initial_prompt {
+                cmd.push(' ');
+                cmd.push_str(&shell_quote(prompt));
+            }
+            if agent.use_bridge {
+                let heartbeat_dir = paths::pi_heartbeats_dir()
+                    .ok_or_else(|| io::Error::other("home dir unavailable for pi heartbeat dir"))?;
+                std::fs::create_dir_all(&heartbeat_dir)?;
+                cmd = format!(
+                    "CC_HUB_TMUX={} CC_HUB_AGENT_ID={} CC_HUB_HEARTBEAT_DIR={} {}",
+                    shell_quote(tmux_name),
+                    shell_quote(&agent.id),
+                    shell_quote(&heartbeat_dir.to_string_lossy()),
+                    cmd
+                );
+            }
+        }
+    }
+
+    let _ = cwd;
+    Ok(cmd)
+}
+
 fn ensure_path_trusted(cwd: &str) -> io::Result<()> {
     let Some(home) = dirs::home_dir() else {
         return Ok(());
@@ -97,40 +186,27 @@ fn ensure_path_trusted(cwd: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Spawn an ephemeral multiplexer session that runs an interactive shell in
-/// `cwd`. Pair with [`crate::tmux_pane::TmuxPaneView::spawn_owned`] so closing
-/// the popup tears the session down.
 pub fn spawn_shell_tmux_session(cwd: &str) -> io::Result<String> {
     let name = unique_session_name("cchub-sh");
     mux::spawn_detached(&name, cwd, None)?;
     Ok(name)
 }
 
-/// Spawn an ephemeral multiplexer session that runs `less` on `log_path`.
-/// `less +G -R` lands at the bottom (latest output) with ANSI colour
-/// rendered. Pair with [`crate::tmux_pane::TmuxPaneView::spawn_owned`].
 pub fn spawn_log_viewer_tmux_session(log_path: &Path) -> io::Result<String> {
     let name = unique_session_name("cchub-log");
-    let cwd = log_path
-        .parent()
-        .and_then(|p| p.to_str())
-        .unwrap_or(".");
+    let cwd = log_path.parent().and_then(|p| p.to_str()).unwrap_or(".");
     let quoted = format!("'{}'", log_path.to_string_lossy().replace('\'', "'\\''"));
     let cmd = format!("less +G -R -- {}", quoted);
     mux::spawn_detached(&name, cwd, Some(&cmd))?;
     Ok(name)
 }
 
-/// Open a new terminal window that attaches to an existing detached session.
-/// Used to recover a session whose terminal was closed — the agent kept
-/// running headlessly, this brings it back into view.
-///
-/// Unix-only today. Windows embeds sessions inside the hub via
-/// [`crate::tmux_pane`]; there's no separate terminal window to resurrect.
 #[cfg(not(windows))]
 pub fn attach_tmux_session(tmux_name: &str, cwd: &str) -> io::Result<String> {
     let launcher = terminal::pick().ok_or_else(|| {
-        io::Error::other("no terminal emulator found (set $TERMINAL or install kitty/foot/alacritty)")
+        io::Error::other(
+            "no terminal emulator found (set $TERMINAL or install kitty/foot/alacritty)",
+        )
     })?;
     let attach_argv = mux::attach_argv(tmux_name);
     let attach_argv_refs: Vec<&str> = attach_argv.iter().map(|s| s.as_str()).collect();
@@ -151,7 +227,6 @@ pub fn attach_tmux_session(tmux_name: &str, cwd: &str) -> io::Result<String> {
 
 #[cfg(windows)]
 pub fn attach_tmux_session(_tmux_name: &str, _cwd: &str) -> io::Result<String> {
-    // Windows path uses the in-TUI embed (tmux_pane) exclusively.
     Err(io::Error::other(
         "attach_tmux_session: not implemented on Windows (embed via TmuxPaneView instead)",
     ))

@@ -30,7 +30,12 @@ fn pane_attach_delivers_bytes() {
 
     let pty = native_pty_system();
     let pair = pty
-        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .expect("openpty");
 
     let argv = mux::attach_argv(&name);
@@ -41,7 +46,9 @@ fn pane_attach_delivers_bytes() {
     }
     cmd.env("TERM", "xterm-256color");
 
-    let child = Arc::new(Mutex::new(pair.slave.spawn_command(cmd).expect("spawn attach")));
+    let child = Arc::new(Mutex::new(
+        pair.slave.spawn_command(cmd).expect("spawn attach"),
+    ));
     drop(pair.slave);
     let mut reader = pair.master.try_clone_reader().expect("clone reader");
 

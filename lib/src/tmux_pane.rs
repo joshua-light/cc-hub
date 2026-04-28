@@ -205,7 +205,9 @@ impl TmuxPaneView {
             b |= 16;
         }
         let terminator = if release { 'm' } else { 'M' };
-        let Ok(mut w) = self.writer.lock() else { return };
+        let Ok(mut w) = self.writer.lock() else {
+            return;
+        };
         if let Err(e) = write!(w, "\x1b[<{};{};{}{}", b, x + 1, y + 1, terminator) {
             warn!("tmux_pane: mouse write failed: {}", e);
         } else {
@@ -218,7 +220,9 @@ impl TmuxPaneView {
         if bytes.is_empty() {
             return;
         }
-        let Ok(mut w) = self.writer.lock() else { return };
+        let Ok(mut w) = self.writer.lock() else {
+            return;
+        };
         if let Err(e) = w.write_all(&bytes) {
             warn!("tmux_pane: write failed: {}", e);
         } else {
@@ -245,7 +249,10 @@ impl Drop for TmuxPaneView {
         let _ = self.child.kill();
         if self.owns_session {
             if let Err(e) = crate::send::kill_tmux_session(&self.session_name) {
-                warn!("tmux_pane: kill-session {} failed: {}", self.session_name, e);
+                warn!(
+                    "tmux_pane: kill-session {} failed: {}",
+                    self.session_name, e
+                );
             }
         }
     }
@@ -350,9 +357,7 @@ fn mouse_button_code(kind: MouseEventKind) -> Option<(u32, bool)> {
         MouseEventKind::ScrollDown => Some((65, false)),
         // Plain motion and horizontal scroll would flood the pty and tmux
         // does nothing useful with them.
-        MouseEventKind::Moved
-        | MouseEventKind::ScrollLeft
-        | MouseEventKind::ScrollRight => None,
+        MouseEventKind::Moved | MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => None,
     }
 }
 

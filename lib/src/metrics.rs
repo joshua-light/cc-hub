@@ -10,6 +10,7 @@
 //! entry per `requestId`, redirecting via `message.id` when two
 //! `requestId`s share the same canonical API response.
 
+use crate::agent::AgentKind;
 use crate::config;
 use crate::conversation::parse_timestamp_ms;
 use crate::platform::paths;
@@ -308,6 +309,7 @@ struct AssistantCall {
     tokens: Tokens,
     timestamp_ms: u64,
     tool_uses: Vec<ToolUse>,
+    cost_override: Option<f64>,
 }
 
 struct ParsedSession {
@@ -322,7 +324,14 @@ struct ParsedSession {
     tool_result_ids: HashSet<String>,
 }
 
-fn parse_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSession> {
+fn parse_session_file(path: &Path, is_subagent: bool, kind: AgentKind) -> Option<ParsedSession> {
+    match kind {
+        AgentKind::Claude => parse_claude_session_file(path, is_subagent),
+        AgentKind::Pi => parse_pi_session_file(path),
+    }
+}
+
+fn parse_claude_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSession> {
     let file = File::open(path).ok()?;
     let reader = BufReader::new(file);
 
@@ -434,10 +443,7 @@ fn parse_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSession> {
             // Each line carries cumulative usage for the request — overwrite.
             let tokens = Tokens {
                 input: u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
-                output: u
-                    .get("output_tokens")
-                    .and_then(|x| x.as_u64())
-                    .unwrap_or(0),
+                output: u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
                 cache_read: u
                     .get("cache_read_input_tokens")
                     .and_then(|x| x.as_u64())
@@ -458,7 +464,10 @@ fn parse_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSession> {
         }
 
         // Tool uses live in message.content[] as blocks with type=tool_use.
-        if let Some(content) = inner.and_then(|m| m.get("content")).and_then(|c| c.as_array()) {
+        if let Some(content) = inner
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        {
             for block in content {
                 if block.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
                     continue;
@@ -511,6 +520,146 @@ fn parse_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSession> {
     })
 }
 
+fn parse_pi_session_file(path: &Path) -> Option<ParsedSession> {
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+
+    let mut session_id = path.file_stem()?.to_string_lossy().to_string();
+    let mut cwd: Option<String> = None;
+    let mut project: Option<String> = None;
+    let mut end_time_ms = 0u64;
+    let mut calls: Vec<AssistantCall> = Vec::new();
+    let mut tool_result_ids: HashSet<String> = HashSet::new();
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if let Some(ts) = v.get("timestamp").and_then(parse_timestamp_ms) {
+            end_time_ms = end_time_ms.max(ts);
+        }
+
+        match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+            "session" => {
+                if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
+                    session_id = id.to_string();
+                }
+                if let Some(c) = v.get("cwd").and_then(|x| x.as_str()) {
+                    cwd = Some(c.to_string());
+                    project = Some(project_name_from_cwd(c));
+                }
+            }
+            "message" => {
+                let Some(msg) = v.get("message") else {
+                    continue;
+                };
+                match msg.get("role").and_then(|r| r.as_str()) {
+                    Some("assistant") => {
+                        let usage = msg.get("usage");
+                        let tokens = Tokens {
+                            input: usage
+                                .and_then(|u| u.get("input"))
+                                .and_then(|x| x.as_u64())
+                                .unwrap_or(0),
+                            output: usage
+                                .and_then(|u| u.get("output"))
+                                .and_then(|x| x.as_u64())
+                                .unwrap_or(0),
+                            cache_read: usage
+                                .and_then(|u| u.get("cacheRead"))
+                                .and_then(|x| x.as_u64())
+                                .unwrap_or(0),
+                            cache_creation: usage
+                                .and_then(|u| u.get("cacheWrite"))
+                                .and_then(|x| x.as_u64())
+                                .unwrap_or(0),
+                        };
+                        let cost_override = usage
+                            .and_then(|u| u.get("cost"))
+                            .and_then(|c| c.get("total"))
+                            .and_then(|v| v.as_f64());
+                        let mut call = AssistantCall {
+                            model: msg
+                                .get("model")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            tokens,
+                            timestamp_ms: v
+                                .get("timestamp")
+                                .and_then(parse_timestamp_ms)
+                                .unwrap_or(0),
+                            tool_uses: Vec::new(),
+                            cost_override,
+                        };
+                        if let Some(content) = msg.get("content").and_then(|c| c.as_array()) {
+                            for block in content {
+                                if block.get("type").and_then(|t| t.as_str()) != Some("toolCall") {
+                                    continue;
+                                }
+                                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                                if name.is_empty() {
+                                    continue;
+                                }
+                                let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                                let bash_commands = if name == "bash" {
+                                    block
+                                        .get("arguments")
+                                        .and_then(|i| i.get("command"))
+                                        .and_then(|c| c.as_str())
+                                        .map(extract_bash_commands)
+                                        .unwrap_or_default()
+                                } else {
+                                    Vec::new()
+                                };
+                                call.tool_uses.push(ToolUse {
+                                    name: name.to_string(),
+                                    id: id.to_string(),
+                                    bash_commands,
+                                });
+                            }
+                        }
+                        if call.tokens.total() > 0 || !call.tool_uses.is_empty() {
+                            calls.push(call);
+                        }
+                    }
+                    Some("toolResult") => {
+                        if let Some(id) = msg.get("toolCallId").and_then(|i| i.as_str()) {
+                            tool_result_ids.insert(id.to_string());
+                        }
+                    }
+                    Some("user") | _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if calls.is_empty() {
+        return None;
+    }
+
+    Some(ParsedSession {
+        session_id,
+        project: project.unwrap_or_else(|| "unknown".to_string()),
+        cwd: cwd.unwrap_or_default(),
+        jsonl_path: path.to_path_buf(),
+        is_subagent: false,
+        end_time_ms,
+        calls,
+        tool_result_ids,
+    })
+}
+
 fn project_name_from_cwd(cwd: &str) -> String {
     Path::new(cwd)
         .file_name()
@@ -519,38 +668,34 @@ fn project_name_from_cwd(cwd: &str) -> String {
         .to_string()
 }
 
-fn discover_session_files() -> Vec<(PathBuf, bool)> {
-    let projects_dir = match paths::claude_home() {
-        Some(d) => d.join("projects"),
-        None => return Vec::new(),
-    };
-    let entries = match std::fs::read_dir(&projects_dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
-
+fn discover_session_files() -> Vec<(PathBuf, bool, AgentKind)> {
     let mut out = Vec::new();
-    for project in entries.flatten() {
-        let pdir = project.path();
-        if !pdir.is_dir() {
-            continue;
-        }
-        let inner = match std::fs::read_dir(&pdir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for child in inner.flatten() {
-            let p = child.path();
-            if p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                out.push((p, false));
-            } else if p.is_dir() {
-                let sub = p.join("subagents");
-                if sub.is_dir() {
-                    if let Ok(sa) = std::fs::read_dir(&sub) {
-                        for f in sa.flatten() {
-                            let fp = f.path();
-                            if fp.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                                out.push((fp, true));
+
+    if let Some(projects_dir) = paths::claude_home().map(|d| d.join("projects")) {
+        if let Ok(entries) = std::fs::read_dir(&projects_dir) {
+            for project in entries.flatten() {
+                let pdir = project.path();
+                if !pdir.is_dir() {
+                    continue;
+                }
+                let inner = match std::fs::read_dir(&pdir) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                for child in inner.flatten() {
+                    let p = child.path();
+                    if p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                        out.push((p, false, AgentKind::Claude));
+                    } else if p.is_dir() {
+                        let sub = p.join("subagents");
+                        if sub.is_dir() {
+                            if let Ok(sa) = std::fs::read_dir(&sub) {
+                                for f in sa.flatten() {
+                                    let fp = f.path();
+                                    if fp.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                                        out.push((fp, true, AgentKind::Claude));
+                                    }
+                                }
                             }
                         }
                     }
@@ -558,6 +703,27 @@ fn discover_session_files() -> Vec<(PathBuf, bool)> {
             }
         }
     }
+
+    if let Some(pi_sessions) = paths::pi_sessions_dir() {
+        if let Ok(projects) = std::fs::read_dir(&pi_sessions) {
+            for project in projects.flatten() {
+                let pdir = project.path();
+                if !pdir.is_dir() {
+                    continue;
+                }
+                let Ok(inner) = std::fs::read_dir(&pdir) else {
+                    continue;
+                };
+                for child in inner.flatten() {
+                    let p = child.path();
+                    if p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                        out.push((p, false, AgentKind::Pi));
+                    }
+                }
+            }
+        }
+    }
+
     out
 }
 
@@ -574,8 +740,8 @@ pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> Metr
     let total = files.len();
     on_progress(0, total);
     let mut sessions: Vec<ParsedSession> = Vec::with_capacity(total);
-    for (i, (p, is_sub)) in files.into_iter().enumerate() {
-        if let Some(s) = parse_session_file(&p, is_sub) {
+    for (i, (p, is_sub, kind)) in files.into_iter().enumerate() {
+        if let Some(s) = parse_session_file(&p, is_sub, kind) {
             sessions.push(s);
         }
         on_progress(i + 1, total);
@@ -608,7 +774,9 @@ pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> Metr
 
         for call in &s.calls {
             let p = pricing_for(&call.model);
-            let c = cost_of(&call.tokens, &p);
+            let c = call
+                .cost_override
+                .unwrap_or_else(|| cost_of(&call.tokens, &p));
             session_cost += c;
             session_tokens.add(&call.tokens);
 
@@ -692,22 +860,15 @@ pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> Metr
         // Build the per-turn context series once; both peak-context and
         // growth-scoring read from it. Sessions with zero timestamped calls
         // contribute nothing to either.
-        let mut series_calls: Vec<&AssistantCall> = s
-            .calls
-            .iter()
-            .filter(|c| c.timestamp_ms > 0)
-            .collect();
+        let mut series_calls: Vec<&AssistantCall> =
+            s.calls.iter().filter(|c| c.timestamp_ms > 0).collect();
         series_calls.sort_by_key(|c| c.timestamp_ms);
         let series: Vec<u64> = series_calls
             .iter()
             .map(|c| c.tokens.input + c.tokens.cache_read + c.tokens.cache_creation)
             .collect();
 
-        if let Some((peak_idx, &peak_ctx)) = series
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, v)| **v)
-        {
+        if let Some((peak_idx, &peak_ctx)) = series.iter().enumerate().max_by_key(|(_, v)| **v) {
             if peak_ctx > 0 {
                 let peak_ts = series_calls
                     .get(peak_idx)
@@ -795,10 +956,14 @@ pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> Metr
         }
     }
 
+    interruptions.by_session.sort_by(|a, b| {
+        b.wasted_cost
+            .partial_cmp(&a.wasted_cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     interruptions
         .by_session
-        .sort_by(|a, b| b.wasted_cost.partial_cmp(&a.wasted_cost).unwrap_or(std::cmp::Ordering::Equal));
-    interruptions.by_session.truncate(metrics_cfg.top_interruptions);
+        .truncate(metrics_cfg.top_interruptions);
 
     growth.findings.sort_by(|a, b| {
         let ka = a.score * a.total_cost;
@@ -832,7 +997,11 @@ pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> Metr
         }
     };
 
-    top_sessions.sort_by(|a, b| b.cost.partial_cmp(&a.cost).unwrap_or(std::cmp::Ordering::Equal));
+    top_sessions.sort_by(|a, b| {
+        b.cost
+            .partial_cmp(&a.cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let top_n: Vec<_> = top_sessions.iter().take(12).cloned().collect();
 
     let mut top_projects: Vec<(String, ProjectStats)> = by_project

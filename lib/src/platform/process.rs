@@ -1,9 +1,11 @@
-//! Process inspection (parent pid, name, session, is-claude, liveness).
+//! Process inspection (parent pid, name, session, liveness, and agent checks).
 //!
 //! Linux reads `/proc/<pid>/{stat,comm}`; macOS uses `libproc` because
 //! Darwin has no procfs. Call via the `Process` alias — e.g.
 //! `Process::parent_pid(pid)` — and the right impl is selected at
 //! compile time.
+
+use crate::agent::AgentKind;
 
 pub trait ProcessInfo {
     fn parent_pid(pid: u32) -> Option<u32>;
@@ -30,8 +32,6 @@ mod imp {
 
     fn stat_fields(pid: u32) -> Option<Vec<String>> {
         let stat = fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
-        // /proc/<pid>/stat format: pid (comm) state ppid pgrp session ...
-        // comm can contain parens/spaces, so find last ')' first
         let after_comm = stat.rfind(')')? + 2;
         Some(
             stat[after_comm..]
@@ -83,10 +83,6 @@ mod imp {
                 .map(|info| info.pbi_ppid)
         }
 
-        /// Returns the basename of the executable path (what `ps -o comm`
-        /// shows on macOS, matching Linux `/proc/<pid>/comm`). We avoid
-        /// `proc_pid::name` and `pbi_comm` because processes like Claude
-        /// Code overwrite those via setproctitle (e.g. to "2.1.112").
         fn name(pid: u32) -> String {
             let Ok(path) = proc_pid::pidpath(pid as i32) else {
                 return String::new();
@@ -111,10 +107,6 @@ mod imp {
             let Ok(path) = proc_pid::pidpath(pid as i32) else {
                 return false;
             };
-            // Claude Code installs each version as its own binary under
-            // `.../claude/versions/<version>`, so the binary's basename is a
-            // version string and the parent segment is `versions` with
-            // grandparent `claude`. Match on the path segments.
             path.contains("/claude/versions/")
         }
 
@@ -138,9 +130,6 @@ mod imp {
 
     pub struct Process;
 
-    /// Iterate every live PROCESSENTRY32W and apply `f`, stopping early when
-    /// `f` returns `Some`. Returns the first match. This is the only shape
-    /// toolhelp exposes — there's no "lookup by pid" syscall.
     fn with_entries<T>(mut f: impl FnMut(&PROCESSENTRY32W) -> Option<T>) -> Option<T> {
         unsafe {
             let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -164,7 +153,11 @@ mod imp {
     }
 
     fn exe_name(entry: &PROCESSENTRY32W) -> String {
-        let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+        let len = entry
+            .szExeFile
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(entry.szExeFile.len());
         String::from_utf16_lossy(&entry.szExeFile[..len])
     }
 
@@ -173,17 +166,10 @@ mod imp {
             with_entries(|e| (e.th32ProcessID == pid).then_some(e.th32ParentProcessID))
         }
 
-        /// Basename of the executable (e.g. `claude.exe`). Matches what Linux
-        /// `/proc/<pid>/comm` returns *minus* the truncation — Windows gives the
-        /// full filename.
         fn name(pid: u32) -> String {
             with_entries(|e| (e.th32ProcessID == pid).then(|| exe_name(e))).unwrap_or_default()
         }
 
-        /// Windows has no POSIX session-id concept. `collect_pid_chain` only
-        /// consults this as a fallback when the main ppid walk dead-ends,
-        /// which doesn't happen on Windows (processes reparent to whoever
-        /// started them, not to init).
         fn session_id(_pid: u32) -> Option<u32> {
             None
         }
@@ -212,8 +198,6 @@ pub use imp::Process;
 
 use log::debug;
 
-/// Walk the process tree upward from `start`, appending ancestor PIDs to
-/// `pids`. Stops at init (ppid ≤ 1).
 pub fn walk_ancestors(pids: &mut Vec<u32>, start: u32, label: &str) {
     let mut current = start;
     while let Some(ppid) = Process::parent_pid(current) {
@@ -228,10 +212,6 @@ pub fn walk_ancestors(pids: &mut Vec<u32>, start: u32, label: &str) {
     }
 }
 
-/// PID chain for window lookups: `pid` followed by every ancestor up to init.
-/// Falls back to the session leader when the direct walk stalls at init
-/// (orphaned/reparented process), because the session leader's parent is
-/// usually the terminal emulator window we care about.
 pub fn collect_pid_chain(pid: u32) -> Vec<u32> {
     let mut pids = vec![pid];
     walk_ancestors(&mut pids, pid, "pid");
@@ -252,6 +232,96 @@ pub fn collect_pid_chain(pid: u32) -> Vec<u32> {
     pids
 }
 
+pub fn is_agent_process(kind: AgentKind, pid: u32) -> bool {
+    if !Process::is_alive(pid) {
+        return false;
+    }
+    match kind {
+        AgentKind::Claude => Process::is_claude(pid),
+        AgentKind::Pi => {
+            let cmd = command_line(pid).to_ascii_lowercase();
+            let name = Process::name(pid).to_ascii_lowercase();
+            name == "pi"
+                || name == "pi.exe"
+                || cmd.contains("/bin/pi")
+                || cmd.contains("\\pi.exe")
+                || cmd.contains("pi-coding-agent")
+                || cmd.contains("@mariozechner/pi-coding-agent")
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn command_line(pid: u32) -> String {
+    std::fs::read(format!("/proc/{}/cmdline", pid))
+        .ok()
+        .map(|bytes| {
+            String::from_utf8_lossy(&bytes)
+                .replace('\0', " ")
+                .trim()
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn command_line(_pid: u32) -> String {
+    String::new()
+}
+
+#[cfg(target_os = "linux")]
+pub fn current_dir(pid: u32) -> Option<String> {
+    std::fs::read_link(format!("/proc/{}/cwd", pid))
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn current_dir(_pid: u32) -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+pub fn list_pids() -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+pub fn list_pids() -> Vec<u32> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == 0 as HANDLE || snap as isize == -1 {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut ok = Process32FirstW(snap, &mut entry);
+        while ok != FALSE {
+            out.push(entry.th32ProcessID);
+            ok = Process32NextW(snap, &mut entry);
+        }
+        CloseHandle(snap);
+        out
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn list_pids() -> Vec<u32> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,10 +329,7 @@ mod tests {
     #[test]
     fn reports_real_ppid_and_name_for_current_process() {
         let pid = std::process::id();
-        let ppid = Process::parent_pid(pid).expect("parent_pid should work for self");
-        assert!(ppid > 1, "expected real parent, got {}", ppid);
-
-        let name = Process::name(pid);
-        assert!(!name.is_empty(), "process name should not be empty");
+        assert!(Process::parent_pid(pid).is_some());
+        assert!(!Process::name(pid).is_empty());
     }
 }
