@@ -249,6 +249,16 @@ pub struct TaskState {
     /// back-compat with state files written before this field existed.
     #[serde(default)]
     pub lead_artifact: Option<usize>,
+    /// Version of the project that was shipped as a result of this task,
+    /// captured at the moment the orchestrator first declares completion
+    /// (Running → Review/Done/Failed). Read from the project's manifest
+    /// (Cargo.toml / package.json / pyproject.toml / VERSION) in the project
+    /// root, which by that point reflects any /bump commit the orchestrator
+    /// just landed. `None` if the project has no recognised manifest, or if
+    /// the task never transitioned out of Running. `serde(default)` for
+    /// back-compat with state.json files written before this field existed.
+    #[serde(default)]
+    pub shipped_version: Option<String>,
 }
 
 impl TaskState {
@@ -272,6 +282,7 @@ impl TaskState {
             artifacts: Vec::new(),
             todos: Vec::new(),
             lead_artifact: None,
+            shipped_version: None,
         }
     }
 
@@ -295,6 +306,7 @@ impl TaskState {
             artifacts: Vec::new(),
             todos: Vec::new(),
             lead_artifact: None,
+            shipped_version: None,
         }
     }
 
