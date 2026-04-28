@@ -2601,7 +2601,7 @@ fn render_contention_strip(
 }
 
 /// Horizontal strip of project "chips". Selected chip is bold/inverse with
-/// per-column counts (R·D·F). Cycled with `[` / `]`.
+/// per-column counts (P·R·Rv·D·F). Cycled with `[` / `]`.
 fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 {
         return;
@@ -2632,6 +2632,10 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
     spans.push(Span::styled(
         "  󰉋 ",
         Style::default().fg(Color::Rgb(150, 150, 170)).bg(Color::Rgb(20, 20, 28)),
+    ));
+    spans.push(Span::styled(
+        " P·R·Rv·D·F  ",
+        Style::default().fg(Color::Rgb(110, 110, 130)).bg(Color::Rgb(20, 20, 28)),
     ));
     for (idx, p) in snap.projects.iter().enumerate() {
         let tasks = snap.tasks.get(&p.id);

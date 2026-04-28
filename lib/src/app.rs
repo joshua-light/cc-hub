@@ -162,8 +162,9 @@ pub struct App {
     /// task selection within the project lives in [`Self::projects_task_sel`].
     pub projects_sel: usize,
     pub projects_task_sel: usize,
-    /// Kanban column cursor: 0=Running, 1=Done, 2=Failed. Drives which
-    /// column [`Self::projects_task_sel`] indexes into.
+    /// Kanban column cursor: 0=Planning, 1=Running, 2=Review, 3=Done,
+    /// 4=Failed. Drives which column [`Self::projects_task_sel`] indexes
+    /// into.
     pub projects_col: usize,
     /// True while the folder picker / prompt input flow is creating a
     /// new project task (vs. spawning a regular session). Used to route
