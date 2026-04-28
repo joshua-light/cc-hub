@@ -4,7 +4,6 @@ use crate::conversation::{StateExplanation, Verdict};
 use crate::metrics::{MetricsAnalysis, ModelStats, SessionSummary, ToolStats};
 use crate::models::{short_sid, SessionDetail, SessionInfo, SessionState};
 use crate::orchestrator::Artifact;
-use crate::reservations::{Phase, Reservation};
 use crate::usage::UsageInfo;
 use chrono::Duration as ChronoDuration;
 use chrono::{DateTime, Local, TimeZone};
@@ -1613,6 +1612,7 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     let (status_label, status_color) = match t.status {
         crate::orchestrator::TaskStatus::Running => ("running", Color::LightYellow),
         crate::orchestrator::TaskStatus::Review => ("review", Color::LightCyan),
+        crate::orchestrator::TaskStatus::Merging => ("merging", Color::LightMagenta),
         crate::orchestrator::TaskStatus::Done => ("done", Color::LightGreen),
         crate::orchestrator::TaskStatus::Failed => ("failed", Color::LightRed),
         crate::orchestrator::TaskStatus::Backlog => ("backlog", Color::Rgb(120, 140, 200)),
@@ -2781,82 +2781,16 @@ fn render_projects_body(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let contentions = app
-        .selected_project()
-        .map(|p| snap.contentions_for(&p.id))
-        .unwrap_or_default();
-
-    // Top: project chip strip (1 line) + spacer (1 line). Optional 1-line
-    // contention strip slots in below the chips so users can spot file-level
-    // conflicts without opening any task.
-    if contentions.is_empty() {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(2), Constraint::Min(0)])
-            .split(area);
-        render_project_chip_strip(frame, rows[0], app);
-        render_kanban_board(frame, rows[1], app);
-    } else {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(2),
-                Constraint::Length(1),
-                Constraint::Min(0),
-            ])
-            .split(area);
-        render_project_chip_strip(frame, rows[0], app);
-        render_contention_strip(frame, rows[1], &contentions);
-        render_kanban_board(frame, rows[2], app);
-    }
-}
-
-fn render_contention_strip(
-    frame: &mut Frame,
-    area: Rect,
-    contentions: &[crate::projects_scan::Contention],
-) {
-    if area.height == 0 || area.width < 8 || contentions.is_empty() {
-        return;
-    }
-    // Share the chip strip's bg so adjacent rows don't show a seam; the ⚠
-    // glyph and warning-yellow foreground carry the alert.
-    let band = Style::default().bg(BAND_BG);
-    frame.render_widget(Paragraph::new("").style(band), area);
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    spans.push(Span::styled(
-        format!("  ⚠ {} contention(s): ", contentions.len()),
-        band.fg(Color::Rgb(240, 190, 110))
-            .add_modifier(Modifier::BOLD),
-    ));
-    let max_inline = 2;
-    for (i, c) in contentions.iter().take(max_inline).enumerate() {
-        if i > 0 {
-            spans.push(Span::styled("   ", band));
-        }
-        let holder = crate::orchestrator::short_task_id(&c.holder_task);
-        let waiter = crate::orchestrator::short_task_id(&c.waiter_task);
-        let line = match c.overlapping_paths.as_slice() {
-            [] => format!("{} active ← {} (intended)", holder, waiter),
-            [only] => format!("{} active on {} ← {} (intended)", holder, only, waiter),
-            [first, rest @ ..] => format!(
-                "{} active on {} +{} ← {} (intended)",
-                holder,
-                first,
-                rest.len(),
-                waiter
-            ),
-        };
-        spans.push(Span::styled(line, band.fg(Color::Rgb(220, 200, 200))));
-    }
-    let extra = contentions.len().saturating_sub(max_inline);
-    if extra > 0 {
-        spans.push(Span::styled(
-            format!(" … +{} more", extra),
-            band.fg(Color::Rgb(180, 160, 160)),
-        ));
-    }
-    frame.render_widget(Paragraph::new(Line::from(spans)).style(band), area);
+    // Top: project chip strip (1 line) + spacer (1 line). The PR-flow
+    // design serialises merges through the project-level merge lock, so
+    // file-level contention strips no longer apply — at most one task is
+    // ever in the Merging column.
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
+        .split(area);
+    render_project_chip_strip(frame, rows[0], app);
+    render_kanban_board(frame, rows[1], app);
 }
 
 /// Horizontal strip of project "chips". Selected chip is bold/inverse with
@@ -2901,6 +2835,7 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
         let mut planning = 0usize;
         let mut running = 0usize;
         let mut review = 0usize;
+        let mut merging = 0usize;
         let mut done = 0usize;
         let mut failed = 0usize;
         if let Some(v) = tasks {
@@ -2914,6 +2849,7 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
                         }
                     }
                     crate::orchestrator::TaskStatus::Review => review += 1,
+                    crate::orchestrator::TaskStatus::Merging => merging += 1,
                     crate::orchestrator::TaskStatus::Done => done += 1,
                     crate::orchestrator::TaskStatus::Failed => failed += 1,
                     // Backlog tasks haven't started — they don't appear
@@ -2927,12 +2863,15 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
         }
         let selected = idx == app.projects_sel;
         let label = format!(" {} ", p.name);
-        // Compact P·R·Rv·D·F counts. Review squeezed in with `Rv` so the
-        // chip fits typical project names without wrapping.
-        let counts = format!(" {}·{}·{}·{}·{} ", planning, running, review, done, failed);
+        // Compact P·R·Rv·M·D·F counts. Review/Merging squeezed to two-letter
+        // labels in the column headers; here they're positional.
+        let counts = format!(
+            " {}·{}·{}·{}·{}·{} ",
+            planning, running, review, merging, done, failed
+        );
         let (chip_fg, chip_bg) = if selected {
             (Color::Black, Color::Rgb(190, 200, 230))
-        } else if planning + running > 0 {
+        } else if planning + running + merging > 0 {
             (Color::Rgb(220, 220, 235), Color::Rgb(40, 50, 70))
         } else {
             (Color::Rgb(150, 150, 165), Color::Rgb(30, 30, 40))
@@ -2944,7 +2883,7 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
         };
         let counts_fg = if selected {
             Color::Black
-        } else if planning + running + review > 0 {
+        } else if planning + running + review + merging > 0 {
             Color::Rgb(160, 220, 180)
         } else {
             Color::Rgb(120, 120, 140)
@@ -2991,25 +2930,27 @@ fn render_kanban_board(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(hint, area);
         return;
     }
-    // Five columns: Planning · Running · Review · Done · Failed.
+    // Six columns: Planning · Running · Review · Merging · Done · Failed.
     // Running takes the most space (it's where active rich cards live);
-    // Done is medium; Planning, Review, and Failed are sidebars — they
-    // hold transient or low-volume tasks. Ratio totals to 9.
+    // Done is medium; Planning, Review, Merging, and Failed are sidebars.
+    // Merging is project-wide-serialized, so at most one card lives in it
+    // at a time — narrow column suffices. Ratio totals to 10.
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Ratio(1, 9), // Planning
-            Constraint::Ratio(3, 9), // Running
-            Constraint::Ratio(2, 9), // Review
-            Constraint::Ratio(2, 9), // Done
-            Constraint::Ratio(1, 9), // Failed
+            Constraint::Ratio(1, 10), // Planning
+            Constraint::Ratio(3, 10), // Running
+            Constraint::Ratio(2, 10), // Review
+            Constraint::Ratio(1, 10), // Merging
+            Constraint::Ratio(2, 10), // Done
+            Constraint::Ratio(1, 10), // Failed
         ])
         .split(area);
 
     let sessions_by_tmux = app.sessions_by_tmux();
     let now_secs = now_ms() / 1000;
 
-    for col_idx in 0..5 {
+    for col_idx in 0..6 {
         render_kanban_column(
             frame,
             cols[col_idx],
@@ -3027,7 +2968,8 @@ fn kanban_column_meta(col: usize) -> (&'static str, &'static str, Color) {
         0 => ("Planning", "󰟶", Color::Rgb(170, 140, 210)),
         1 => ("Running", "󰑮", Color::LightYellow),
         2 => ("Review", "󱋲", Color::LightCyan),
-        3 => ("Done", "󰸞", Color::LightGreen),
+        3 => ("Merging", "", Color::LightMagenta),
+        4 => ("Done", "󰸞", Color::LightGreen),
         _ => ("Failed", "󰅚", Color::LightRed),
     }
 }
@@ -3112,9 +3054,6 @@ fn render_kanban_column(
             height: card_height,
         };
         let selected = col_focused && rel == sel;
-        let reservation = app
-            .projects
-            .reservation_for_task(&t.project_id, &t.task_id);
         let titling_in_flight = app.projects.is_titling(&t.task_id);
         if col_idx <= 1 {
             render_task_card_active(
@@ -3125,7 +3064,6 @@ fn render_kanban_column(
                 col_idx,
                 sessions_by_tmux,
                 now_secs,
-                reservation,
                 titling_in_flight,
             );
         } else {
@@ -3136,7 +3074,6 @@ fn render_kanban_column(
                 selected,
                 col_idx,
                 now_secs,
-                reservation,
                 titling_in_flight,
             );
         }
@@ -3374,7 +3311,6 @@ fn ctx_bar(pct: u8, width: usize) -> Vec<Span<'static>> {
 /// Sessions-style rich card for a Running task. Mirrors the layout of the
 /// Sessions grid card: bordered, multi-row, with status emoji, agent dots,
 /// merge glyph, ctx bar, and live tool/thinking line.
-#[allow(clippy::too_many_arguments)]
 fn render_task_card_active(
     frame: &mut Frame,
     area: Rect,
@@ -3383,7 +3319,6 @@ fn render_task_card_active(
     col_idx: usize,
     sessions_by_tmux: &std::collections::HashMap<&str, &SessionInfo>,
     now_secs: u64,
-    reservation: Option<&Reservation>,
     titling_in_flight: bool,
 ) {
     let sum = collect_agent_summary(t, sessions_by_tmux);
@@ -3404,14 +3339,9 @@ fn render_task_card_active(
     };
 
     let title_id = crate::orchestrator::short_task_id(&t.task_id);
-    // Reserve space for the reservation badge on the title row, so the
-    // prompt preview shrinks instead of pushing the badge off the right
-    // border. Badge is 0 chars when there's no reservation.
-    let badge_spans = reservation_badge_spans(reservation, area.width.saturating_sub(14) as usize);
-    let badge_w: usize = badge_spans.iter().map(|s| s.content.chars().count()).sum();
-    let prompt_max = (area.width as usize).saturating_sub(14 + badge_w);
+    let prompt_max = (area.width as usize).saturating_sub(14);
     let header_text = task_card_header_text(t, titling_in_flight, prompt_max);
-    let mut title_spans = vec![
+    let title_spans = vec![
         Span::styled(format!(" {} ", title_icon), Style::default().fg(accent)),
         Span::styled(
             format!("[{}] ", title_id),
@@ -3423,12 +3353,8 @@ fn render_task_card_active(
                 .fg(if selected { Color::White } else { Color::Gray })
                 .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
         ),
+        Span::raw(" "),
     ];
-    if !badge_spans.is_empty() {
-        title_spans.push(Span::raw(" "));
-        title_spans.extend(badge_spans);
-    }
-    title_spans.push(Span::raw(" "));
     let title = Line::from(title_spans);
 
     let block = Block::default()
@@ -3533,7 +3459,7 @@ fn render_task_card_active(
 
 /// Compact 3-line card for Done/Failed tasks. Dim border, single-line
 /// prompt, footer with age + summary preview + artifact/merge counts.
-/// `col_idx` is 1 (Done) or 2 (Failed) — controls accent color.
+/// `col_idx` is one of 2 (Review), 3 (Merging), 4 (Done), or 5 (Failed).
 fn render_task_card_collapsed(
     frame: &mut Frame,
     area: Rect,
@@ -3541,18 +3467,21 @@ fn render_task_card_collapsed(
     selected: bool,
     col_idx: usize,
     now_secs: u64,
-    reservation: Option<&Reservation>,
     titling_in_flight: bool,
 ) {
-    // Review (2) gets a cyan accent, Done (3) green, Failed (4) red. The
-    // dim-text color is used for the prompt preview when not selected.
+    // Review (2) cyan, Merging (3) magenta, Done (4) green, Failed (5) red.
     let (accent, dim_text, icon) = match col_idx {
         2 => (
             Color::LightCyan,
             Color::Rgb(140, 175, 185),
             "󱋲",
         ),
-        4 => (
+        3 => (
+            Color::LightMagenta,
+            Color::Rgb(180, 145, 195),
+            "",
+        ),
+        5 => (
             Color::LightRed,
             Color::Rgb(180, 130, 130),
             "󰅚",
@@ -3563,22 +3492,23 @@ fn render_task_card_collapsed(
             "󰸞",
         ),
     };
-    // Review cards: brighter border so they stand out — they need user
-    // attention. Done/Failed cards stay dim.
+    // Review and Merging cards: brighter border so they stand out — they
+    // need user attention or are actively mutating main. Done/Failed stay
+    // dim.
     let (border_type, border_color) = if selected {
         (BorderType::Double, Color::White)
     } else if col_idx == 2 {
         (BorderType::Rounded, Color::Rgb(110, 170, 180))
+    } else if col_idx == 3 {
+        (BorderType::Rounded, Color::Rgb(170, 130, 180))
     } else {
         (BorderType::Rounded, Color::Rgb(55, 60, 70))
     };
 
     let title_id = crate::orchestrator::short_task_id(&t.task_id);
-    let badge_spans = reservation_badge_spans(reservation, area.width.saturating_sub(14) as usize);
-    let badge_w: usize = badge_spans.iter().map(|s| s.content.chars().count()).sum();
-    let prompt_max = (area.width as usize).saturating_sub(14 + badge_w);
+    let prompt_max = (area.width as usize).saturating_sub(14);
     let header_text = task_card_header_text(t, titling_in_flight, prompt_max);
-    let mut title_spans = vec![
+    let title_spans = vec![
         Span::styled(format!(" {} ", icon), Style::default().fg(accent)),
         Span::styled(
             format!("[{}] ", title_id),
@@ -3590,12 +3520,8 @@ fn render_task_card_collapsed(
                 .fg(if selected { Color::White } else { dim_text })
                 .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
         ),
+        Span::raw(" "),
     ];
-    if !badge_spans.is_empty() {
-        title_spans.push(Span::raw(" "));
-        title_spans.extend(badge_spans);
-    }
-    title_spans.push(Span::raw(" "));
     let title = Line::from(title_spans);
 
     let block = Block::default()
@@ -3662,6 +3588,7 @@ fn render_task_card_collapsed(
 // the badge cell as blank/tofu. Set CC_HUB_ASCII_ICONS=1 (or true/yes) to
 // substitute ASCII fallbacks. Cached so per-frame badge rendering doesn't
 // hit `env::var`'s global lock.
+#[allow(dead_code)]
 fn ascii_icons() -> bool {
     static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
@@ -3669,65 +3596,6 @@ fn ascii_icons() -> bool {
             .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
             .unwrap_or(false)
     })
-}
-
-/// Compact badge for the card title row showing a live reservation. Format:
-/// `🔒 active <path1> <path2> +N` for `Active`, `⏳ intended …` for
-/// `Intended`. Returns an empty Vec when there's nothing to show or the
-/// caller has no width budget. Total span width is capped at `max_w` chars.
-fn reservation_badge_spans(reservation: Option<&Reservation>, max_w: usize) -> Vec<Span<'static>> {
-    let Some(r) = reservation else {
-        return Vec::new();
-    };
-    if max_w < 8 {
-        return Vec::new();
-    }
-    let (active_glyph, intended_glyph) = if ascii_icons() {
-        ("*", ">")
-    } else {
-        ("󰌾", "󰔟")
-    };
-    let (glyph, label, color) = match r.phase {
-        Phase::Active => (active_glyph, "active", Color::Rgb(240, 190, 90)),
-        Phase::Intended => (intended_glyph, "intended", Color::Rgb(120, 180, 200)),
-    };
-    // Reserve space for the glyph + space + label + leading space.
-    let prefix_w = glyph.chars().count() + 1 + label.len() + 1;
-    if max_w <= prefix_w {
-        return vec![Span::styled(
-            format!("{} {}", glyph, label),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        )];
-    }
-    let mut budget = max_w.saturating_sub(prefix_w);
-    let mut shown_paths: Vec<String> = Vec::new();
-    let mut shown = 0usize;
-    for p in r.paths.iter().take(2) {
-        // 1 char for the leading space.
-        let need = p.chars().count() + 1;
-        if need > budget {
-            break;
-        }
-        budget -= need;
-        shown_paths.push(p.clone());
-        shown += 1;
-    }
-    let remaining = r.paths.len().saturating_sub(shown);
-    let mut text = format!("{} {}", glyph, label);
-    for p in &shown_paths {
-        text.push(' ');
-        text.push_str(p);
-    }
-    if remaining > 0 {
-        let suffix = format!(" +{}", remaining);
-        if suffix.len() <= budget {
-            text.push_str(&suffix);
-        }
-    }
-    vec![Span::styled(
-        text,
-        Style::default().fg(color).add_modifier(Modifier::BOLD),
-    )]
 }
 
 fn task_card_header_text(
@@ -4382,7 +4250,6 @@ mod result_popup_tests {
             projects: vec![project],
             tasks,
             titling: std::collections::HashSet::new(),
-            reservations: HashMap::new(),
         };
         app.update_projects(snap);
         assert!(app.enter_projects_result(), "popup should open");
@@ -4596,7 +4463,6 @@ index 0000001..0000002 100644
             projects: vec![project],
             tasks,
             titling: std::collections::HashSet::new(),
-            reservations: HashMap::new(),
         };
         app.update_projects(snap);
         assert!(app.enter_projects_result(), "popup should open");
@@ -4650,99 +4516,6 @@ index 0000001..0000002 100644
         );
     }
 
-    #[test]
-    fn projects_body_renders_reservation_badge_and_contention_panel() {
-        use crate::orchestrator::{Worker, short_task_id};
-        use crate::reservations::{Phase, Reservation};
-
-        let now = crate::orchestrator::now_unix_secs();
-        let project = Project {
-            id: "p-resv".into(),
-            name: "resv".into(),
-            root: PathBuf::from("/tmp/resv"),
-            created_at: now,
-        };
-
-        // Two Running tasks, both with at least one worker so they land in
-        // the Running kanban column (which uses the active card renderer
-        // and thus exercises the badge plumbing).
-        let worker = Worker {
-            tmux_name: "cc-hub-w-1".into(),
-            cwd: project.root.clone(),
-            worktree: Some(project.root.to_string_lossy().into_owned()),
-            readonly: false,
-            spawned_at: now,
-        };
-        let mut task_a = TaskState::new(project.id.clone(), project.root.clone(), "task A prompt".into());
-        task_a.task_id = "t-aaaaaa111111".into();
-        task_a.status = TaskStatus::Running;
-        task_a.workers = vec![worker.clone()];
-        let mut task_b = TaskState::new(project.id.clone(), project.root.clone(), "task B prompt".into());
-        task_b.task_id = "t-bbbbbb222222".into();
-        task_b.status = TaskStatus::Running;
-        task_b.workers = vec![worker];
-
-        let resv_active = Reservation {
-            task_id: task_a.task_id.clone(),
-            worker_id: Some("cc-hub-w-1".into()),
-            phase: Phase::Active,
-            paths: vec!["lib/src/foo.rs".into()],
-            owner_session: "sess-a".into(),
-            created_at: now,
-            last_heartbeat: now,
-        };
-        let resv_intended = Reservation {
-            task_id: task_b.task_id.clone(),
-            worker_id: None,
-            phase: Phase::Intended,
-            paths: vec!["lib/src/foo.rs".into()],
-            owner_session: "sess-b".into(),
-            created_at: now,
-            last_heartbeat: now,
-        };
-
-        let mut tasks = HashMap::new();
-        tasks.insert(project.id.clone(), vec![std::sync::Arc::new(task_a.clone()), std::sync::Arc::new(task_b.clone())]);
-        let mut reservations = HashMap::new();
-        reservations.insert(project.id.clone(), vec![resv_active, resv_intended]);
-        let snap = ProjectsSnapshot {
-            projects: vec![project.clone()],
-            tasks,
-            titling: std::collections::HashSet::new(),
-            reservations,
-        };
-
-        let mut app = App::new();
-        app.update_projects(snap);
-        app.set_tab(crate::app::Tab::Projects);
-
-        let backend = TestBackend::new(120, 30);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|f| super::render_projects_body(f, f.area(), &app))
-            .expect("render");
-
-        let buf = terminal.backend().buffer().clone();
-        let dump = buffer_to_string(&buf);
-
-        assert!(
-            dump.contains("contention"),
-            "contention strip should appear\n{}",
-            dump
-        );
-        let short_a = short_task_id(&task_a.task_id);
-        assert!(
-            dump.contains(&short_a),
-            "contention strip should reference holder task id {}\n{}",
-            short_a,
-            dump
-        );
-        assert!(
-            dump.contains("active") && dump.contains("lib/src/foo.rs"),
-            "active reservation badge should render with its path\n{}",
-            dump
-        );
-    }
 }
 
 

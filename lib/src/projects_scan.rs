@@ -13,7 +13,6 @@
 //! `scan()` so deleted tasks don't linger.
 
 use crate::orchestrator::{self, Project, TaskState, TaskStatus};
-use crate::reservations::{self, Phase, Reservation};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
@@ -58,21 +57,6 @@ pub struct ProjectsSnapshot {
     /// the main loop before the snapshot is handed to the App so the UI
     /// can render a spinner without locking a shared mutex per frame.
     pub titling: HashSet<String>,
-    /// Live (non-stale) reservations keyed by project_id. Read once per
-    /// scan from `~/.cc-hub/projects/<id>/reservations.json` so card
-    /// rendering doesn't touch the filesystem.
-    pub reservations: HashMap<String, Vec<Reservation>>,
-}
-
-/// One pair of live reservations whose path sets overlap. Always ordered
-/// holder-first (the `Active` side); the waiter is whichever other live
-/// reservation collides on those paths. Surfaced in the projects body so
-/// the user can see at-a-glance which tasks are stepping on each other.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Contention {
-    pub holder_task: String,
-    pub waiter_task: String,
-    pub overlapping_paths: Vec<String>,
 }
 
 impl ProjectsSnapshot {
@@ -81,83 +65,11 @@ impl ProjectsSnapshot {
             projects: Vec::new(),
             tasks: HashMap::new(),
             titling: HashSet::new(),
-            reservations: HashMap::new(),
         }
     }
 
     pub fn is_titling(&self, task_id: &str) -> bool {
         self.titling.contains(task_id)
-    }
-
-    /// Best live reservation for a task — `Active` wins over `Intended` if
-    /// the task somehow has both (it shouldn't in normal flow, but a worker
-    /// upgrade-then-downgrade can leave both present briefly).
-    pub fn reservation_for_task(
-        &self,
-        project_id: &str,
-        task_id: &str,
-    ) -> Option<&Reservation> {
-        let list = self.reservations.get(project_id)?;
-        let mut best: Option<&Reservation> = None;
-        for r in list {
-            if r.task_id != task_id {
-                continue;
-            }
-            match (best, &r.phase) {
-                (None, _) => best = Some(r),
-                (Some(b), Phase::Active) if b.phase != Phase::Active => best = Some(r),
-                _ => {}
-            }
-        }
-        best
-    }
-
-    /// Pairs of overlapping live reservations within a project. Each
-    /// unordered pair appears exactly once, holder = the `Active` side,
-    /// waiter = whichever other reservation collides. Sorted for stable
-    /// rendering. O(N²) over reservations, which is fine — N is small.
-    pub fn contentions_for(&self, project_id: &str) -> Vec<Contention> {
-        let Some(list) = self.reservations.get(project_id) else {
-            return Vec::new();
-        };
-        let mut out: Vec<Contention> = Vec::new();
-        for (i, holder) in list.iter().enumerate() {
-            if holder.phase != Phase::Active {
-                continue;
-            }
-            for (j, other) in list.iter().enumerate() {
-                if i == j || holder.task_id == other.task_id {
-                    continue;
-                }
-                // For Active-vs-Active, only emit once: keep the lower
-                // index as holder. For Active-vs-Intended either order is
-                // fine because Intended is never a holder.
-                if other.phase == Phase::Active && j < i {
-                    continue;
-                }
-                let mut hits: Vec<String> = Vec::new();
-                for hp in &holder.paths {
-                    for op in &other.paths {
-                        if reservations::paths_overlap(hp, op) && !hits.contains(hp) {
-                            hits.push(hp.clone());
-                        }
-                    }
-                }
-                if !hits.is_empty() {
-                    out.push(Contention {
-                        holder_task: holder.task_id.clone(),
-                        waiter_task: other.task_id.clone(),
-                        overlapping_paths: hits,
-                    });
-                }
-            }
-        }
-        out.sort_by(|a, b| {
-            a.holder_task
-                .cmp(&b.holder_task)
-                .then(a.waiter_task.cmp(&b.waiter_task))
-        });
-        out
     }
 
     pub fn active_task_count(&self, project_id: &str) -> usize {
@@ -204,7 +116,6 @@ impl ProjectsSnapshot {
 pub fn scan() -> ProjectsSnapshot {
     let projects = orchestrator::load_projects().projects;
     let mut tasks: HashMap<String, Vec<Arc<TaskState>>> = HashMap::new();
-    let mut reservations_by_project: HashMap<String, Vec<Reservation>> = HashMap::new();
     let mut visited_all: HashSet<PathBuf> = HashSet::new();
 
     for p in &projects {
@@ -216,22 +127,6 @@ pub fn scan() -> ProjectsSnapshot {
         // hold a stable order across rescans — otherwise the cursor jiggles.
         list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(b.task_id.cmp(&a.task_id)));
         tasks.insert(p.id.clone(), list);
-        // NotFound is normal (project never declared reservations); other IO
-        // errors get logged so they don't disappear into Vec::new().
-        let live = match reservations::list(&p.id, false) {
-            Ok(v) => v,
-            Err(e) => {
-                if e.kind() != io::ErrorKind::NotFound {
-                    log::warn!(
-                        "projects_scan: reservations.list error for project {}: {}",
-                        p.id,
-                        e
-                    );
-                }
-                Vec::new()
-            }
-        };
-        reservations_by_project.insert(p.id.clone(), live);
     }
 
     // Evict cache entries for paths not seen this scan (deleted tasks,
@@ -245,7 +140,6 @@ pub fn scan() -> ProjectsSnapshot {
         projects,
         tasks,
         titling: HashSet::new(),
-        reservations: reservations_by_project,
     }
 }
 

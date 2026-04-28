@@ -11,7 +11,6 @@ use crate::usage::UsageInfo;
 use ratatui::text::Line;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub fn status_msg_ttl() -> Duration {
@@ -362,11 +361,11 @@ impl App {
         if self.projects_sel >= n {
             self.projects_sel = n - 1;
         }
-        if self.projects_col > 4 {
-            self.projects_col = 4;
+        if self.projects_col > 5 {
+            self.projects_col = 5;
         }
         if jump_if_empty && self.kanban_column_len(self.projects_col) == 0 {
-            for col in 0..5 {
+            for col in 0..6 {
                 if self.kanban_column_len(col) > 0 {
                     self.projects_col = col;
                     break;
@@ -411,9 +410,10 @@ impl App {
     }
 
     /// Move kanban cursor one column right (Planning → Running → Review
-    /// → Done → Failed). Clamps the row cursor to the new column's length.
+    /// → Merging → Done → Failed). Clamps the row cursor to the new
+    /// column's length.
     pub fn projects_col_right(&mut self) {
-        if self.projects_col < 4 {
+        if self.projects_col < 5 {
             self.projects_col += 1;
             self.projects_task_sel = 0;
         }
@@ -456,7 +456,8 @@ impl App {
                 0 => t.status == TaskStatus::Running && t.workers.is_empty(),
                 1 => t.status == TaskStatus::Running && !t.workers.is_empty(),
                 2 => t.status == TaskStatus::Review,
-                3 => t.status == TaskStatus::Done,
+                3 => t.status == TaskStatus::Merging,
+                4 => t.status == TaskStatus::Done,
                 _ => t.status == TaskStatus::Failed,
             })
             .map(|t| t.as_ref())
@@ -517,11 +518,13 @@ impl App {
         col.get(self.projects_task_sel).copied()
     }
 
-    /// Approve the focused Review task: persist `status = Done` and reflect
-    /// the change in the in-memory snapshot so the UI updates without
-    /// waiting for the next scan tick. No-op if the focused task isn't in
-    /// Review (the keybind is gated on the Review column anyway, this is
-    /// belt-and-braces for safety).
+    /// Approve the focused Review task's PR: flip `pr.review_state` to
+    /// `Approved` and snapshot the branch/base SHAs so `pr merge` can
+    /// detect whether main moved between approval and merge. The task
+    /// itself stays in Review until the orchestrator picks up the
+    /// approval and runs `pr merge` (which transitions to Merging).
+    /// Tmux sessions stay alive — they're torn down by `pr finalize`
+    /// after the merge actually lands.
     pub fn approve_review_task(&mut self) -> bool {
         use crate::orchestrator::TaskStatus;
         let Some(t) = self.selected_project_task() else { return false };
@@ -530,39 +533,41 @@ impl App {
         }
         let project_id = t.project_id.clone();
         let task_id = t.task_id.clone();
+        let project_root = t.project_root.clone();
 
-        let updated = match crate::orchestrator::update_task_state(&project_id, &task_id, |s| {
-            s.status = TaskStatus::Done;
-            s.updated_at = crate::orchestrator::now_unix_secs();
-        }) {
-            Ok(s) => s,
+        // Resolve the SHAs the user is approving — captured here rather
+        // than in `pr approve` so we don't need a subprocess.
+        let pr = match crate::pr::read_pr(&project_id, &task_id) {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                self.set_status("approve: no PR for this task".into());
+                return false;
+            }
             Err(e) => {
-                self.set_status(format!("approve failed: {}", e));
+                self.set_status(format!("approve: pr read failed: {}", e));
                 return false;
             }
         };
+        let branch_sha = git_rev_parse_short(&project_root, &pr.branch);
+        let base = crate::orchestrator::detect_main_branch(&project_root);
+        let base_sha = git_rev_parse_short(&project_root, &base);
 
-        // Mirror in the in-memory snapshot so the UI updates without
-        // waiting for the next scan tick.
-        if let Some(tasks) = self.projects.tasks.get_mut(&project_id) {
-            if let Some(t) = tasks.iter_mut().find(|t| t.task_id == task_id) {
-                let s = Arc::make_mut(t);
-                s.status = TaskStatus::Done;
-                s.updated_at = updated.updated_at;
-            }
+        if let Err(e) = crate::pr::update_pr(&project_id, &task_id, |p| {
+            p.review_state = crate::pr::ReviewState::Approved;
+            p.approved_at_branch_sha = branch_sha;
+            p.approved_at_base_sha = base_sha;
+        }) {
+            self.set_status(format!("approve failed: {}", e));
+            return false;
         }
 
-        // Now that the human has approved, tear down the orchestrator and
-        // worker tmux sessions — same cleanup the CLI runs when a task
-        // becomes Failed. Snapshot the orchestrator pane to a log file
-        // first so `f` (focus orchestrator terminal) keeps working
-        // post-cleanup.
-        crate::orchestrator::cleanup_task_sessions(&updated);
-
-        // Cursor was on the Review task we just promoted; clamp will pick
-        // the next item in Review (or jump to a non-empty column).
-        self.clamp_projects_cursor_jump_if_empty();
-        self.set_status(format!("approved {}", crate::orchestrator::short_task_id(&task_id)));
+        // Cursor stays on the same Review task; the orchestrator will
+        // pick up the approval and transition to Merging on its own.
+        self.set_status(format!(
+            "approved PR #{} for {}",
+            pr.id,
+            crate::orchestrator::short_task_id(&task_id)
+        ));
         true
     }
 
@@ -949,6 +954,7 @@ impl App {
         let status_label = match task.status {
             crate::orchestrator::TaskStatus::Running => "running",
             crate::orchestrator::TaskStatus::Review => "review",
+            crate::orchestrator::TaskStatus::Merging => "merging",
             crate::orchestrator::TaskStatus::Done => "done",
             crate::orchestrator::TaskStatus::Failed => "failed",
             crate::orchestrator::TaskStatus::Backlog => "backlog",
@@ -1448,6 +1454,14 @@ impl App {
         let t = self.selected_project_task()?;
         t.artifacts.get(self.result_artifact_sel)
     }
+}
+
+fn git_rev_parse_short(root: &std::path::Path, rev: &str) -> Option<String> {
+    let out = crate::orchestrator::run_git(root, &["rev-parse", rev]).ok()?;
+    if !out.status_ok {
+        return None;
+    }
+    Some(out.stdout.trim().to_string())
 }
 
 #[cfg(test)]
