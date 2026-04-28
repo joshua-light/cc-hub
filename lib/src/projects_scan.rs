@@ -5,16 +5,29 @@
 //! every task. Returns a flat snapshot the TUI can render directly without
 //! further IO.
 //!
-//! Cheap enough to call on each fs-watcher tick: typical project count is a
-//! handful, tasks per project rarely more than a few dozen, each state file
-//! is a few KB. We deliberately don't cache between scans — staleness is
-//! the failure mode that matters here, not redundant IO.
+//! Cheap enough to call on each fs-watcher tick: every state.json is still
+//! `stat()`-ed each scan so deletions and edits surface immediately, but
+//! read+parse is skipped when the cached entry's mtime matches — at
+//! ~10 projects × ~30 tasks the saved IO and JSON parsing dominates.
+//! Stale cache entries (paths not visited this scan) are evicted in
+//! `scan()` so deleted tasks don't linger.
 
 use crate::orchestrator::{self, Project, TaskState, TaskStatus};
 use crate::reservations::{self, Phase, Reservation};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
+
+/// Process-global mtime-keyed cache of parsed state.json files. Keyed by
+/// the absolute path of `state.json`; value is `(mtime, parsed)`. A scan
+/// stat()s every file each tick and only re-reads on mtime change.
+fn cache() -> &'static Mutex<HashMap<PathBuf, (SystemTime, TaskState)>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (SystemTime, TaskState)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// Where a tmux session sits in the orchestrator hierarchy. Computed by
 /// matching the session's tmux name against every TaskState in the latest
@@ -189,9 +202,11 @@ pub fn scan() -> ProjectsSnapshot {
     let projects = orchestrator::load_projects().projects;
     let mut tasks: HashMap<String, Vec<TaskState>> = HashMap::new();
     let mut reservations_by_project: HashMap<String, Vec<Reservation>> = HashMap::new();
+    let mut visited_all: HashSet<PathBuf> = HashSet::new();
 
     for p in &projects {
-        let mut list = load_tasks_for(&p.id);
+        let (mut list, visited) = load_tasks_for(&p.id);
+        visited_all.extend(visited);
         // Newest activity at the top, regardless of creation order.
         // Tie-break on task_id (which encodes a unix-nanos timestamp and is
         // lexicographically sortable) so two tasks reported in the same second
@@ -216,6 +231,14 @@ pub fn scan() -> ProjectsSnapshot {
         reservations_by_project.insert(p.id.clone(), live);
     }
 
+    // Drop cached entries for state.json paths we didn't see this scan
+    // (deleted tasks, removed projects). Scoped lock so we never hold it
+    // across IO.
+    {
+        let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
+        c.retain(|k, _| visited_all.contains(k));
+    }
+
     ProjectsSnapshot {
         projects,
         tasks,
@@ -224,12 +247,20 @@ pub fn scan() -> ProjectsSnapshot {
     }
 }
 
-fn load_tasks_for(project_id: &str) -> Vec<TaskState> {
+fn load_tasks_for(project_id: &str) -> (Vec<TaskState>, HashSet<PathBuf>) {
     let Some(dir) = orchestrator::project_state_dir(project_id) else {
-        return Vec::new();
+        return (Vec::new(), HashSet::new());
     };
     let tasks_dir = dir.join("tasks");
-    let entries = match fs::read_dir(&tasks_dir) {
+    load_tasks_from_dir(&tasks_dir)
+}
+
+/// Inner walk-and-parse, factored out so tests can drive it against an
+/// arbitrary tempdir without overriding `$HOME`. Returns (tasks, visited
+/// state.json paths). The visited set is the cache-invalidation truth:
+/// any cache entry not in this set across the full scan is stale.
+fn load_tasks_from_dir(tasks_dir: &Path) -> (Vec<TaskState>, HashSet<PathBuf>) {
+    let entries = match fs::read_dir(tasks_dir) {
         Ok(it) => it,
         Err(e) => {
             if e.kind() != io::ErrorKind::NotFound {
@@ -239,10 +270,11 @@ fn load_tasks_for(project_id: &str) -> Vec<TaskState> {
                     e
                 );
             }
-            return Vec::new();
+            return (Vec::new(), HashSet::new());
         }
     };
     let mut out = Vec::new();
+    let mut visited = HashSet::new();
     for entry in entries {
         let entry = match entry {
             Ok(e) => e,
@@ -256,12 +288,57 @@ fn load_tasks_for(project_id: &str) -> Vec<TaskState> {
             }
         };
         let path = entry.path().join("state.json");
-        if !path.is_file() {
+        let meta = match fs::metadata(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                if e.kind() != io::ErrorKind::NotFound {
+                    log::warn!(
+                        "projects_scan: stat error at {}: {}",
+                        path.display(),
+                        e
+                    );
+                }
+                continue;
+            }
+        };
+        if !meta.is_file() {
             continue;
         }
+        let mtime = match meta.modified() {
+            Ok(m) => m,
+            Err(e) => {
+                log::warn!(
+                    "projects_scan: mtime unavailable at {}: {}",
+                    path.display(),
+                    e
+                );
+                continue;
+            }
+        };
+        visited.insert(path.clone());
+
+        // Cache hit: clone the parsed state and skip read+parse. Drop the
+        // lock before the next iteration so other threads (or the
+        // invalidation pass at end-of-scan) aren't blocked across IO.
+        {
+            let c = cache().lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((cached_mtime, state)) = c.get(&path) {
+                if *cached_mtime == mtime {
+                    out.push(state.clone());
+                    continue;
+                }
+            }
+        }
+
         match fs::read_to_string(&path) {
             Ok(raw) => match serde_json::from_str::<TaskState>(&raw) {
-                Ok(state) => out.push(state),
+                Ok(state) => {
+                    {
+                        let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
+                        c.insert(path.clone(), (mtime, state.clone()));
+                    }
+                    out.push(state);
+                }
                 Err(e) => log::warn!(
                     "projects_scan: parse error at {}: {}",
                     path.display(),
@@ -275,5 +352,54 @@ fn load_tasks_for(project_id: &str) -> Vec<TaskState> {
             ),
         }
     }
-    out
+    (out, visited)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn write_state(path: &Path, prompt: &str, updated_at: i64) {
+        let json = format!(
+            r#"{{
+                "task_id": "t-1",
+                "project_id": "p-1",
+                "project_root": "/tmp/p-1",
+                "status": "running",
+                "prompt": "{}",
+                "created_at": 1,
+                "updated_at": {}
+            }}"#,
+            prompt, updated_at
+        );
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, json).unwrap();
+    }
+
+    #[test]
+    fn cache_returns_fresh_value_after_mtime_change() {
+        let dir = tempdir().unwrap();
+        let tasks_dir = dir.path().to_path_buf();
+        let state_path = tasks_dir.join("t-1").join("state.json");
+
+        write_state(&state_path, "first", 100);
+        let (list, visited) = load_tasks_from_dir(&tasks_dir);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].prompt, "first");
+        assert!(visited.contains(&state_path));
+
+        // Second call without modification — cache hit, same value.
+        let (list, _) = load_tasks_from_dir(&tasks_dir);
+        assert_eq!(list[0].prompt, "first");
+
+        // Bump mtime past filesystem resolution (ext4 is ns, but be safe
+        // for slower mtime-granularity filesystems if anyone runs the
+        // test elsewhere) and rewrite. Cache entry must be replaced.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_state(&state_path, "second", 200);
+        let (list, _) = load_tasks_from_dir(&tasks_dir);
+        assert_eq!(list[0].prompt, "second");
+        assert_eq!(list[0].updated_at, 200);
+    }
 }
