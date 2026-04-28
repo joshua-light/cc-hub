@@ -6,6 +6,7 @@
 //! "no version found" rather than propagated.
 
 use std::fs;
+use std::io;
 use std::path::Path;
 
 /// Detect the currently-shipped version of a project rooted at `root`, by
@@ -27,32 +28,20 @@ use std::path::Path;
 /// through to `package.json`, since a Rust project shouldn't suddenly look
 /// like a Node project just because the workspace root is missing.
 pub fn detect(root: &Path) -> Option<String> {
-    let cargo = root.join("Cargo.toml");
-    if cargo.is_file() {
-        return read_cargo_version(&cargo);
+    if let Some(doc) = read_toml(&root.join("Cargo.toml")) {
+        return read_cargo_version(&root.join("Cargo.toml"), &doc);
     }
-
-    let pkg = root.join("package.json");
-    if pkg.is_file() {
-        if let Some(v) = read_package_json_version(&pkg) {
+    if let Some(doc) = read_json(&root.join("package.json")) {
+        return clean(doc.get("version")?.as_str()?);
+    }
+    if let Some(doc) = read_toml(&root.join("pyproject.toml")) {
+        if let Some(v) = read_pyproject_version(&doc) {
             return Some(v);
         }
     }
-
-    let pyproject = root.join("pyproject.toml");
-    if pyproject.is_file() {
-        if let Some(v) = read_pyproject_version(&pyproject) {
-            return Some(v);
-        }
+    if let Some(raw) = try_read(&root.join("VERSION")) {
+        return raw.lines().map(str::trim).find(|l| !l.is_empty()).and_then(clean);
     }
-
-    let version_file = root.join("VERSION");
-    if version_file.is_file() {
-        if let Some(v) = read_plain_version_file(&version_file) {
-            return Some(v);
-        }
-    }
-
     None
 }
 
@@ -61,29 +50,39 @@ fn clean(s: &str) -> Option<String> {
     if t.is_empty() { None } else { Some(t.to_string()) }
 }
 
-fn read_cargo_version(path: &Path) -> Option<String> {
-    let raw = match fs::read_to_string(path) {
-        Ok(s) => s,
+/// Read a file as a String, returning `None` for both "not present" and any
+/// other I/O error. NotFound is silent (the caller's whole point is "is this
+/// kind of manifest here?"); other errors log at debug.
+fn try_read(path: &Path) -> Option<String> {
+    match fs::read_to_string(path) {
+        Ok(s) => Some(s),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => {
             log::debug!("version::detect: read {}: {}", path.display(), e);
-            return None;
+            None
         }
-    };
-    let doc: toml::Value = match toml::from_str(&raw) {
-        Ok(v) => v,
-        Err(e) => {
-            log::debug!("version::detect: parse {}: {}", path.display(), e);
-            return None;
-        }
-    };
+    }
+}
 
-    let pkg = doc.get("package")?;
-    let ver = pkg.get("version")?;
+fn read_toml(path: &Path) -> Option<toml::Value> {
+    let raw = try_read(path)?;
+    toml::from_str(&raw)
+        .map_err(|e| log::debug!("version::detect: parse {}: {}", path.display(), e))
+        .ok()
+}
 
+fn read_json(path: &Path) -> Option<serde_json::Value> {
+    let raw = try_read(path)?;
+    serde_json::from_str(&raw)
+        .map_err(|e| log::debug!("version::detect: parse {}: {}", path.display(), e))
+        .ok()
+}
+
+fn read_cargo_version(path: &Path, doc: &toml::Value) -> Option<String> {
+    let ver = doc.get("package")?.get("version")?;
     if let Some(s) = ver.as_str() {
         return clean(s);
     }
-
     // Workspace inheritance: `version = { workspace = true }` (or `version.workspace = true`).
     // Walk up parent dirs looking for a Cargo.toml with [workspace.package.version].
     if ver
@@ -94,7 +93,6 @@ fn read_cargo_version(path: &Path) -> Option<String> {
     {
         return resolve_workspace_version(path);
     }
-
     None
 }
 
@@ -103,9 +101,14 @@ fn resolve_workspace_version(member_manifest: &Path) -> Option<String> {
     // sit above member crates.
     let mut dir = member_manifest.parent()?.parent();
     while let Some(d) = dir {
-        let candidate = d.join("Cargo.toml");
-        if candidate.is_file() {
-            if let Some(v) = read_workspace_package_version(&candidate) {
+        if let Some(doc) = read_toml(&d.join("Cargo.toml")) {
+            if let Some(v) = doc
+                .get("workspace")
+                .and_then(|w| w.get("package"))
+                .and_then(|p| p.get("version"))
+                .and_then(|v| v.as_str())
+                .and_then(clean)
+            {
                 return Some(v);
             }
         }
@@ -114,89 +117,20 @@ fn resolve_workspace_version(member_manifest: &Path) -> Option<String> {
     None
 }
 
-fn read_workspace_package_version(path: &Path) -> Option<String> {
-    let raw = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            log::debug!("version::detect: read workspace {}: {}", path.display(), e);
-            return None;
-        }
-    };
-    let doc: toml::Value = match toml::from_str(&raw) {
-        Ok(v) => v,
-        Err(e) => {
-            log::debug!("version::detect: parse workspace {}: {}", path.display(), e);
-            return None;
-        }
-    };
-    let v = doc
-        .get("workspace")?
-        .get("package")?
-        .get("version")?
-        .as_str()?;
-    clean(v)
-}
-
-fn read_package_json_version(path: &Path) -> Option<String> {
-    let raw = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            log::debug!("version::detect: read {}: {}", path.display(), e);
-            return None;
-        }
-    };
-    let doc: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(e) => {
-            log::debug!("version::detect: parse {}: {}", path.display(), e);
-            return None;
-        }
-    };
-    clean(doc.get("version")?.as_str()?)
-}
-
-fn read_pyproject_version(path: &Path) -> Option<String> {
-    let raw = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            log::debug!("version::detect: read {}: {}", path.display(), e);
-            return None;
-        }
-    };
-    let doc: toml::Value = match toml::from_str(&raw) {
-        Ok(v) => v,
-        Err(e) => {
-            log::debug!("version::detect: parse {}: {}", path.display(), e);
-            return None;
-        }
-    };
-    if let Some(v) = doc.get("project").and_then(|p| p.get("version")).and_then(|v| v.as_str()) {
-        if let Some(c) = clean(v) {
-            return Some(c);
-        }
+fn read_pyproject_version(doc: &toml::Value) -> Option<String> {
+    if let Some(c) = doc
+        .get("project")
+        .and_then(|p| p.get("version"))
+        .and_then(|v| v.as_str())
+        .and_then(clean)
+    {
+        return Some(c);
     }
-    if let Some(v) = doc
-        .get("tool")
+    doc.get("tool")
         .and_then(|t| t.get("poetry"))
         .and_then(|p| p.get("version"))
         .and_then(|v| v.as_str())
-    {
-        if let Some(c) = clean(v) {
-            return Some(c);
-        }
-    }
-    None
-}
-
-fn read_plain_version_file(path: &Path) -> Option<String> {
-    let raw = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            log::debug!("version::detect: read {}: {}", path.display(), e);
-            return None;
-        }
-    };
-    raw.lines().map(str::trim).find(|l| !l.is_empty()).and_then(clean)
+        .and_then(clean)
 }
 
 #[cfg(test)]

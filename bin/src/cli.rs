@@ -676,10 +676,9 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         (other, _) => other,
     };
 
-    let prev_status_for_closure = prev_status.clone();
-    let effective_status_for_closure = effective_status.clone();
+    let was_running = prev_status.as_ref() == Some(&TaskStatus::Running);
     let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
-        if let Some(st) = effective_status_for_closure.clone() {
+        if let Some(st) = effective_status {
             s.status = st;
         }
         if let Some(note) = f.note.clone() {
@@ -692,7 +691,7 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         // out of Running. By this point the orchestrator's post-merge /bump
         // has already landed on the project's main branch, so the manifest
         // at `project_root` reflects the version that was just shipped.
-        let leaving_running = matches!(prev_status_for_closure, Some(TaskStatus::Running))
+        let leaving_running = was_running
             && matches!(
                 s.status,
                 TaskStatus::Review | TaskStatus::Done | TaskStatus::Failed

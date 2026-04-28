@@ -1396,10 +1396,7 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     ];
     if let Some(v) = t.shipped_version.as_deref().filter(|s| !s.is_empty()) {
         header_spans.push(Span::raw("  "));
-        header_spans.push(Span::styled(
-            format!("v{}", v.trim_start_matches('v')),
-            Style::default().fg(Color::Rgb(150, 200, 165)),
-        ));
+        header_spans.push(shipped_version_span(v));
     }
     header_spans.push(Span::raw("  "));
     header_spans.push(Span::styled(
@@ -3368,10 +3365,7 @@ fn render_task_card_collapsed(
     if let Some(v) = t.shipped_version.as_deref().filter(|s| !s.is_empty()) {
         lines.push(Line::from(vec![
             Span::styled("󰓹 ", Style::default().fg(Color::Rgb(110, 120, 135))),
-            Span::styled(
-                format!("v{}", v.trim_start_matches('v')),
-                Style::default().fg(Color::Rgb(150, 200, 165)),
-            ),
+            shipped_version_span(v),
         ]));
     }
 
@@ -3493,6 +3487,15 @@ fn format_age(secs: u64) -> String {
     } else {
         format!("{}d ago", secs / 86400)
     }
+}
+
+/// Styled `vX.Y.Z` span for the shipped-version display. Idempotent on the
+/// `v` prefix so `0.1` and `v0.1` both render as `v0.1`.
+fn shipped_version_span(v: &str) -> Span<'static> {
+    Span::styled(
+        format!("v{}", v.trim_start_matches('v')),
+        Style::default().fg(Color::Rgb(150, 200, 165)),
+    )
 }
 
 fn render_metrics_body(frame: &mut Frame, area: Rect, app: &App) {
