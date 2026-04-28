@@ -14,6 +14,7 @@ use crate::orchestrator::{self, Project, TaskState, TaskStatus};
 use crate::reservations::{self, Phase, Reservation};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io;
 
 /// Where a tmux session sits in the orchestrator hierarchy. Computed by
 /// matching the session's tmux name against every TaskState in the latest
@@ -193,9 +194,22 @@ pub fn scan() -> ProjectsSnapshot {
         // hold a stable order across rescans — otherwise the cursor jiggles.
         list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(b.task_id.cmp(&a.task_id)));
         tasks.insert(p.id.clone(), list);
-        // Reservations file may not exist yet for projects that have never
-        // declared any — swallow IO errors and treat as empty.
-        let live = reservations::list(&p.id, false).unwrap_or_default();
+        // Reservations file legitimately may not exist yet for projects
+        // that have never declared any (NotFound is silent); any other IO
+        // error is logged so it doesn't disappear into Vec::new().
+        let live = match reservations::list(&p.id, false) {
+            Ok(v) => v,
+            Err(e) => {
+                if e.kind() != io::ErrorKind::NotFound {
+                    log::warn!(
+                        "projects_scan: reservations.list error for project {}: {}",
+                        p.id,
+                        e
+                    );
+                }
+                Vec::new()
+            }
+        };
         reservations_by_project.insert(p.id.clone(), live);
     }
 
@@ -214,10 +228,30 @@ fn load_tasks_for(project_id: &str) -> Vec<TaskState> {
     let tasks_dir = dir.join("tasks");
     let entries = match fs::read_dir(&tasks_dir) {
         Ok(it) => it,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            if e.kind() != io::ErrorKind::NotFound {
+                log::warn!(
+                    "projects_scan: read_dir error at {}: {}",
+                    tasks_dir.display(),
+                    e
+                );
+            }
+            return Vec::new();
+        }
     };
     let mut out = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                log::warn!(
+                    "projects_scan: dir entry error at {}: {}",
+                    tasks_dir.display(),
+                    e
+                );
+                continue;
+            }
+        };
         let path = entry.path().join("state.json");
         if !path.is_file() {
             continue;
