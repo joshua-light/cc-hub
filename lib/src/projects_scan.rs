@@ -18,14 +18,17 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 /// Process-global mtime-keyed cache of parsed state.json files. Keyed by
 /// the absolute path of `state.json`; value is `(mtime, parsed)`. A scan
-/// stat()s every file each tick and only re-reads on mtime change.
-fn cache() -> &'static Mutex<HashMap<PathBuf, (SystemTime, TaskState)>> {
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (SystemTime, TaskState)>>> = OnceLock::new();
+/// stat()s every file each tick and only re-reads on mtime change. The
+/// parsed value is `Arc`-wrapped so cache hits hand out a cheap clone
+/// instead of copying the whole TaskState (Vec<Worker>, prompt strings,
+/// merge/artifact lists) per scan.
+fn cache() -> &'static Mutex<HashMap<PathBuf, (SystemTime, Arc<TaskState>)>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (SystemTime, Arc<TaskState>)>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -50,7 +53,7 @@ pub struct ProjectsSnapshot {
     pub projects: Vec<Project>,
     /// Tasks for each project_id, sorted newest-first by `updated_at` so
     /// the UI shows the most recently active task at the top.
-    pub tasks: HashMap<String, Vec<TaskState>>,
+    pub tasks: HashMap<String, Vec<Arc<TaskState>>>,
     /// Task ids whose Haiku titler is in flight right now. Populated in
     /// the main loop before the snapshot is handed to the App so the UI
     /// can render a spinner without locking a shared mutex per frame.
@@ -200,7 +203,7 @@ impl ProjectsSnapshot {
 
 pub fn scan() -> ProjectsSnapshot {
     let projects = orchestrator::load_projects().projects;
-    let mut tasks: HashMap<String, Vec<TaskState>> = HashMap::new();
+    let mut tasks: HashMap<String, Vec<Arc<TaskState>>> = HashMap::new();
     let mut reservations_by_project: HashMap<String, Vec<Reservation>> = HashMap::new();
     let mut visited_all: HashSet<PathBuf> = HashSet::new();
 
@@ -246,7 +249,7 @@ pub fn scan() -> ProjectsSnapshot {
     }
 }
 
-fn load_tasks_for(project_id: &str) -> (Vec<TaskState>, HashSet<PathBuf>) {
+fn load_tasks_for(project_id: &str) -> (Vec<Arc<TaskState>>, HashSet<PathBuf>) {
     let Some(dir) = orchestrator::project_state_dir(project_id) else {
         return (Vec::new(), HashSet::new());
     };
@@ -257,7 +260,7 @@ fn load_tasks_for(project_id: &str) -> (Vec<TaskState>, HashSet<PathBuf>) {
 /// Walk-and-parse keyed off an explicit `tasks_dir` so tests can drive it
 /// against a tempdir. The visited set is the cache-invalidation truth:
 /// any cache entry not in it across the full scan gets evicted.
-fn load_tasks_from_dir(tasks_dir: &Path) -> (Vec<TaskState>, HashSet<PathBuf>) {
+fn load_tasks_from_dir(tasks_dir: &Path) -> (Vec<Arc<TaskState>>, HashSet<PathBuf>) {
     let entries = match fs::read_dir(tasks_dir) {
         Ok(it) => it,
         Err(e) => {
@@ -321,7 +324,7 @@ fn load_tasks_from_dir(tasks_dir: &Path) -> (Vec<TaskState>, HashSet<PathBuf>) {
             let c = cache().lock().unwrap_or_else(|e| e.into_inner());
             if let Some((cached_mtime, state)) = c.get(&path) {
                 if *cached_mtime == mtime {
-                    out.push(state.clone());
+                    out.push(Arc::clone(state));
                     continue;
                 }
             }
@@ -330,11 +333,12 @@ fn load_tasks_from_dir(tasks_dir: &Path) -> (Vec<TaskState>, HashSet<PathBuf>) {
         match fs::read_to_string(&path) {
             Ok(raw) => match serde_json::from_str::<TaskState>(&raw) {
                 Ok(state) => {
+                    let arc = Arc::new(state);
                     {
                         let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
-                        c.insert(path.clone(), (mtime, state.clone()));
+                        c.insert(path.clone(), (mtime, Arc::clone(&arc)));
                     }
-                    out.push(state);
+                    out.push(arc);
                 }
                 Err(e) => log::warn!(
                     "projects_scan: parse error at {}: {}",

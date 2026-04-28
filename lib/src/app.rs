@@ -441,6 +441,7 @@ impl App {
                 3 => t.status == TaskStatus::Done,
                 _ => t.status == TaskStatus::Failed,
             })
+            .map(|t| t.as_ref())
             .collect()
     }
 
@@ -463,6 +464,7 @@ impl App {
         tasks
             .iter()
             .filter(|t| t.status == TaskStatus::Backlog)
+            .map(|t| t.as_ref())
             .collect()
     }
 
@@ -526,8 +528,9 @@ impl App {
         // waiting for the next scan tick.
         if let Some(tasks) = self.projects.tasks.get_mut(&project_id) {
             if let Some(t) = tasks.iter_mut().find(|t| t.task_id == task_id) {
-                t.status = TaskStatus::Done;
-                t.updated_at = updated.updated_at;
+                let s = std::sync::Arc::make_mut(t);
+                s.status = TaskStatus::Done;
+                s.updated_at = updated.updated_at;
             }
         }
 
