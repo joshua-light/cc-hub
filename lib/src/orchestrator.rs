@@ -254,6 +254,16 @@ pub struct TaskState {
     /// `[backlog].ttl_secs`. `None` means never triaged.
     #[serde(default)]
     pub triaged_at: Option<i64>,
+    /// Version of the project that was shipped as a result of this task,
+    /// captured at the moment the orchestrator first declares completion
+    /// (Running → Review/Done/Failed). Read from the project's manifest
+    /// (Cargo.toml / package.json / pyproject.toml / VERSION) in the project
+    /// root, which by that point reflects any /bump commit the orchestrator
+    /// just landed. `None` if the project has no recognised manifest, or if
+    /// the task never transitioned out of Running. `serde(default)` for
+    /// back-compat with state.json files written before this field existed.
+    #[serde(default)]
+    pub shipped_version: Option<String>,
 }
 
 impl TaskState {
@@ -278,6 +288,7 @@ impl TaskState {
             todos: Vec::new(),
             lead_artifact: None,
             triaged_at: None,
+            shipped_version: None,
         }
     }
 
@@ -302,6 +313,7 @@ impl TaskState {
             todos: Vec::new(),
             lead_artifact: None,
             triaged_at: None,
+            shipped_version: None,
         }
     }
 
