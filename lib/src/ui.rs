@@ -415,7 +415,7 @@ fn render_tmux_pane(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     };
 
-    let title = format!(" tmux: {} ", pane.session_name);
+    let title = format!(" tmux · {} ", pane.session_name);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1361,7 +1361,7 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     };
     let title = match t.title.as_deref().filter(|s| !s.is_empty()) {
         Some(name) => format!(
-            " Result · {} — {} ",
+            " Result · {} · {} ",
             crate::orchestrator::short_task_id(&t.task_id),
             name,
         ),
@@ -1634,7 +1634,7 @@ fn render_state_debug(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let title = format!(
-        " Why is {} (PID {}) in state \"{}\"? ",
+        " Why · {} · PID {} · state {} ",
         info.project_name, info.pid, exp.final_state
     );
     let block = popup_block(Span::styled(
@@ -2568,14 +2568,16 @@ fn render_contention_strip(
     if area.height == 0 || area.width < 8 || contentions.is_empty() {
         return;
     }
-    let band = Style::default().bg(Color::Rgb(40, 25, 25));
+    // Share the chip strip's bg so adjacent rows don't show a seam; the ⚠
+    // glyph and warning-yellow foreground carry the alert.
+    let band = Style::default().bg(Color::Rgb(20, 20, 28));
     frame.render_widget(Paragraph::new("").style(band), area);
     let mut spans: Vec<Span<'static>> = Vec::new();
     spans.push(Span::styled(
         format!("  ⚠ {} contention(s): ", contentions.len()),
         Style::default()
             .fg(Color::Rgb(240, 190, 110))
-            .bg(Color::Rgb(40, 25, 25))
+            .bg(Color::Rgb(20, 20, 28))
             .add_modifier(Modifier::BOLD),
     ));
     let max_inline = 2;
@@ -2585,12 +2587,20 @@ fn render_contention_strip(
         }
         let holder = crate::orchestrator::short_task_id(&c.holder_task);
         let waiter = crate::orchestrator::short_task_id(&c.waiter_task);
-        let path = c.overlapping_paths.first().cloned().unwrap_or_default();
+        let path = if c.overlapping_paths.len() > 1 {
+            format!(
+                "{} +{}",
+                c.overlapping_paths[0],
+                c.overlapping_paths.len() - 1
+            )
+        } else {
+            c.overlapping_paths.first().cloned().unwrap_or_default()
+        };
         spans.push(Span::styled(
             format!("{} active on {} ← {} (intended)", holder, path, waiter),
             Style::default()
                 .fg(Color::Rgb(220, 200, 200))
-                .bg(Color::Rgb(40, 25, 25)),
+                .bg(Color::Rgb(20, 20, 28)),
         ));
     }
     let extra = contentions.len().saturating_sub(max_inline);
@@ -2599,7 +2609,7 @@ fn render_contention_strip(
             format!(" … +{} more", extra),
             Style::default()
                 .fg(Color::Rgb(180, 160, 160))
-                .bg(Color::Rgb(40, 25, 25)),
+                .bg(Color::Rgb(20, 20, 28)),
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)).style(band), area);
@@ -2709,12 +2719,14 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
 
     if let (Some(row), Some(p)) = (path_row, app.selected_project()) {
         let root = p.root.display().to_string();
-        let max = (row.width as usize).saturating_sub(4);
+        let max = (row.width as usize).saturating_sub(5);
         let root = if root.chars().count() > max {
             let cut = root.chars().count().saturating_sub(max - 1);
             format!("    …{}", root.chars().skip(cut).collect::<String>())
         } else {
-            format!("    {}", root)
+            // Reserve the ellipsis cell so content starts in the same column
+            // whether or not the path is truncated.
+            format!("     {}", root)
         };
         let line = Line::from(Span::styled(
             root,
@@ -2728,6 +2740,11 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
 
 fn render_kanban_board(frame: &mut Frame, area: Rect, app: &App) {
     if area.height < 3 || area.width < 30 {
+        let hint = Paragraph::new("(terminal too narrow — resize or switch to Sessions)")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::Rgb(140, 140, 160)))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(hint, area);
         return;
     }
     // Five columns: Planning · Running · Review · Done · Failed.
@@ -3397,6 +3414,15 @@ fn render_task_card_collapsed(
     frame.render_widget(para, inner);
 }
 
+// Runtime opt-out for Nerd-Font glyphs: terminals without a Nerd Font render
+// the badge cell as blank/tofu. Set CC_HUB_ASCII_ICONS=1 (or true/yes) to
+// substitute ASCII fallbacks.
+fn ascii_icons() -> bool {
+    std::env::var("CC_HUB_ASCII_ICONS")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
 /// Compact badge for the card title row showing a live reservation. Format:
 /// `🔒 active <path1> <path2> +N` for `Active`, `⏳ intended …` for
 /// `Intended`. Returns an empty Vec when there's nothing to show or the
@@ -3408,9 +3434,18 @@ fn reservation_badge_spans(reservation: Option<&Reservation>, max_w: usize) -> V
     if max_w < 8 {
         return Vec::new();
     }
+    let ascii = ascii_icons();
     let (glyph, label, color) = match r.phase {
-        Phase::Active => ("󰌾", "active", Color::Rgb(240, 190, 90)),
-        Phase::Intended => ("󰔟", "intended", Color::Rgb(120, 180, 200)),
+        Phase::Active => (
+            if ascii { "*" } else { "󰌾" },
+            "active",
+            Color::Rgb(240, 190, 90),
+        ),
+        Phase::Intended => (
+            if ascii { ">" } else { "󰔟" },
+            "intended",
+            Color::Rgb(120, 180, 200),
+        ),
     };
     // Reserve space for the glyph + space + label + leading space.
     let prefix_w = glyph.chars().count() + 1 + label.len() + 1;
