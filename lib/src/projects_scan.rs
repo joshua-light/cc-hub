@@ -194,9 +194,8 @@ pub fn scan() -> ProjectsSnapshot {
         // hold a stable order across rescans — otherwise the cursor jiggles.
         list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(b.task_id.cmp(&a.task_id)));
         tasks.insert(p.id.clone(), list);
-        // Reservations file legitimately may not exist yet for projects
-        // that have never declared any (NotFound is silent); any other IO
-        // error is logged so it doesn't disappear into Vec::new().
+        // NotFound is normal (project never declared reservations); other IO
+        // errors get logged so they don't disappear into Vec::new().
         let live = match reservations::list(&p.id, false) {
             Ok(v) => v,
             Err(e) => {
