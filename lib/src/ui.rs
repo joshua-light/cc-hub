@@ -1087,6 +1087,7 @@ enum CardKind {
     Image,
     Video,
     Text,
+    Diff,
     Url,
     Fallback,
 }
@@ -1094,6 +1095,7 @@ enum CardKind {
 /// Body height (excluding the 1-line caption header) for a given card kind.
 const CARD_IMAGE_BODY_H: u16 = 10;
 const CARD_TEXT_BODY_H: u16 = 12;
+const CARD_DIFF_BODY_H: u16 = 14;
 const CARD_VIDEO_BODY_H: u16 = 2;
 const CARD_URL_BODY_H: u16 = 2;
 const CARD_FALLBACK_BODY_H: u16 = 1;
@@ -1117,13 +1119,15 @@ fn classify_artifact(a: &Artifact) -> CardKind {
     match kind.as_str() {
         "screenshot" | "image" | "photo" => return CardKind::Image,
         "video" => return CardKind::Video,
-        "log" | "build" | "test" | "diff" | "text" | "output" => return CardKind::Text,
+        "diff" | "patch" => return CardKind::Diff,
+        "log" | "build" | "test" | "text" | "output" => return CardKind::Text,
         _ => {}
     }
     match ext.as_str() {
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => CardKind::Image,
         "mp4" | "mov" | "webm" | "mkv" => CardKind::Video,
-        "log" | "txt" | "md" | "diff" | "patch" | "json" | "yaml" | "yml" => CardKind::Text,
+        "diff" | "patch" => CardKind::Diff,
+        "log" | "txt" | "md" | "json" | "yaml" | "yml" => CardKind::Text,
         _ => CardKind::Fallback,
     }
 }
@@ -1132,6 +1136,7 @@ fn card_body_height(kind: CardKind) -> u16 {
     match kind {
         CardKind::Image => CARD_IMAGE_BODY_H,
         CardKind::Text => CARD_TEXT_BODY_H,
+        CardKind::Diff => CARD_DIFF_BODY_H,
         CardKind::Video => CARD_VIDEO_BODY_H,
         CardKind::Url => CARD_URL_BODY_H,
         CardKind::Fallback => CARD_FALLBACK_BODY_H,
@@ -1167,18 +1172,6 @@ fn read_text_excerpt(path: &Path, max_bytes: usize) -> Option<(Vec<String>, usiz
     let head_lines: Vec<String> = head.lines().map(|s| s.to_string()).collect();
     let truncated = total_lines.saturating_sub(head_lines.len());
     Some((head_lines, truncated))
-}
-
-fn diff_line_style(line: &str) -> Style {
-    if line.starts_with("+++") || line.starts_with("---") || line.starts_with("@@") {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-    } else if line.starts_with('+') {
-        Style::default().fg(Color::LightGreen)
-    } else if line.starts_with('-') {
-        Style::default().fg(Color::LightRed)
-    } else {
-        Style::default().fg(Color::Gray)
-    }
 }
 
 fn evidence_card_header(a: &Artifact, selected: bool, is_lead: bool) -> Line<'static> {
@@ -1220,13 +1213,6 @@ fn render_text_card_body(frame: &mut Frame, area: Rect, a: &Artifact, max_bytes:
         return;
     }
     let path = Path::new(&a.path);
-    let kind_lower = a.kind.to_ascii_lowercase();
-    let ext_lower = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_default();
-    let is_diff = kind_lower == "diff" || ext_lower == "diff" || ext_lower == "patch";
     let lines: Vec<Line<'static>> = match read_text_excerpt(path, max_bytes) {
         None => match std::fs::metadata(path) {
             Ok(_) => vec![Line::from(Span::styled(
@@ -1246,12 +1232,10 @@ fn render_text_card_body(frame: &mut Frame, area: Rect, a: &Artifact, max_bytes:
             let mut out: Vec<Line<'static>> = content
                 .into_iter()
                 .map(|s| {
-                    let style = if is_diff {
-                        diff_line_style(&s)
-                    } else {
-                        Style::default().fg(Color::Gray)
-                    };
-                    Line::from(Span::styled(format!("  {}", s), style))
+                    Line::from(Span::styled(
+                        format!("  {}", s),
+                        Style::default().fg(Color::Gray),
+                    ))
                 })
                 .collect();
             if truncated > 0 {
@@ -1264,6 +1248,280 @@ fn render_text_card_body(frame: &mut Frame, area: Rect, a: &Artifact, max_bytes:
         }
     };
     let p = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(p, area);
+}
+
+const DIFF_ADDED_BG: Color = Color::Rgb(34, 92, 43);
+const DIFF_REMOVED_BG: Color = Color::Rgb(122, 41, 54);
+const DIFF_ADDED_FG: Color = Color::Rgb(180, 235, 190);
+const DIFF_REMOVED_FG: Color = Color::Rgb(245, 195, 200);
+const DIFF_GUTTER_FG: Color = Color::Rgb(120, 120, 130);
+const DIFF_CONTEXT_FG: Color = Color::Rgb(160, 160, 170);
+const DIFF_HEADER_FG: Color = Color::Rgb(140, 180, 230);
+
+#[derive(Clone, Copy)]
+enum DiffRowKind {
+    Added,
+    Removed,
+    Context,
+}
+
+fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
+    let mut parts = line.split_whitespace();
+    parts.next()?;
+    let old = parts.next()?.strip_prefix('-')?;
+    let new = parts.next()?.strip_prefix('+')?;
+    let old_start: u32 = old.split(',').next()?.parse().ok()?;
+    let new_start: u32 = new.split(',').next()?.parse().ok()?;
+    Some((old_start, new_start))
+}
+
+fn truncate_to_width(s: &str, max: usize) -> (String, usize) {
+    if max == 0 {
+        return (String::new(), 0);
+    }
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return (s.to_string(), chars.len());
+    }
+    let take = max.saturating_sub(1);
+    let mut out: String = chars.iter().take(take).collect();
+    out.push('…');
+    (out, take + 1)
+}
+
+fn diff_row(
+    area_width: u16,
+    old: Option<u32>,
+    new: Option<u32>,
+    marker: char,
+    content: &str,
+    kind: DiffRowKind,
+) -> Line<'static> {
+    let (bg_opt, content_fg) = match kind {
+        DiffRowKind::Added => (Some(DIFF_ADDED_BG), DIFF_ADDED_FG),
+        DiffRowKind::Removed => (Some(DIFF_REMOVED_BG), DIFF_REMOVED_FG),
+        DiffRowKind::Context => (None, DIFF_CONTEXT_FG),
+    };
+    let base = match bg_opt {
+        Some(b) => Style::default().bg(b),
+        None => Style::default(),
+    };
+    let old_str = old
+        .map(|n| format!("{:>3}", n))
+        .unwrap_or_else(|| "   ".to_string());
+    let new_str = new
+        .map(|n| format!("{:>3}", n))
+        .unwrap_or_else(|| "   ".to_string());
+
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
+    spans.push(Span::styled(old_str, base.fg(DIFF_GUTTER_FG)));
+    spans.push(Span::styled(" ", base));
+    spans.push(Span::styled(new_str, base.fg(DIFF_GUTTER_FG)));
+    spans.push(Span::styled(" ", base));
+    spans.push(Span::styled(marker.to_string(), base.fg(content_fg)));
+    spans.push(Span::styled("  ", base));
+
+    let used_cols: usize = 11;
+    let avail = (area_width as usize).saturating_sub(used_cols);
+    let normalized = content.replace('\t', "    ");
+    let (body, body_w) = truncate_to_width(&normalized, avail);
+
+    let mut content_style = base.fg(content_fg);
+    if matches!(kind, DiffRowKind::Context) {
+        content_style = content_style.add_modifier(Modifier::DIM);
+    }
+    spans.push(Span::styled(body, content_style));
+
+    if matches!(kind, DiffRowKind::Added | DiffRowKind::Removed) {
+        let pad = avail.saturating_sub(body_w);
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), base));
+        }
+    }
+    Line::from(spans)
+}
+
+fn diff_separator_row() -> Line<'static> {
+    Line::from(vec![
+        Span::raw("       "),
+        Span::styled(
+            "...",
+            Style::default()
+                .fg(DIFF_GUTTER_FG)
+                .add_modifier(Modifier::DIM),
+        ),
+    ])
+}
+
+fn is_diff_meta_line(s: &str) -> bool {
+    s.starts_with("diff --git")
+        || s.starts_with("index ")
+        || s.starts_with("--- ")
+        || s.starts_with("+++ ")
+        || s.starts_with("\\ No newline")
+        || s.starts_with("similarity index")
+        || s.starts_with("dissimilarity index")
+        || s.starts_with("rename from")
+        || s.starts_with("rename to")
+        || s.starts_with("copy from")
+        || s.starts_with("copy to")
+        || s.starts_with("new file mode")
+        || s.starts_with("deleted file mode")
+        || s.starts_with("old mode")
+        || s.starts_with("new mode")
+        || s.starts_with("Binary files")
+        || s.starts_with("GIT binary patch")
+}
+
+fn build_diff_lines(
+    content: Vec<String>,
+    truncated: usize,
+    body_h: u16,
+    area_width: u16,
+) -> Vec<Line<'static>> {
+    let truncated_indicator = truncated > 0;
+    let max_rows = (body_h as usize).saturating_sub(if truncated_indicator { 1 } else { 0 });
+
+    let mut header_path: Option<String> = None;
+    let mut added: u32 = 0;
+    let mut removed: u32 = 0;
+    for raw in &content {
+        if header_path.is_none() {
+            if let Some(rest) = raw.strip_prefix("+++ b/") {
+                header_path = Some(rest.to_string());
+            } else if let Some(rest) = raw.strip_prefix("+++ ") {
+                if !rest.is_empty() && rest != "/dev/null" {
+                    header_path = Some(rest.to_string());
+                }
+            }
+        }
+        if raw.starts_with("+++") || raw.starts_with("---") || raw.starts_with("@@") {
+            continue;
+        }
+        if raw.starts_with('+') {
+            added += 1;
+        } else if raw.starts_with('-') {
+            removed += 1;
+        }
+    }
+
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    if let Some(p) = &header_path {
+        rows.push(Line::from(Span::styled(
+            p.clone(),
+            Style::default()
+                .fg(DIFF_HEADER_FG)
+                .add_modifier(Modifier::BOLD),
+        )));
+        rows.push(Line::from(Span::styled(
+            format!("Added {} lines, removed {} lines", added, removed),
+            Style::default()
+                .fg(DIFF_GUTTER_FG)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    let mut old_line: u32 = 0;
+    let mut new_line: u32 = 0;
+    let mut first_hunk = true;
+
+    for raw in content.into_iter() {
+        if is_diff_meta_line(&raw) {
+            continue;
+        }
+        if raw.starts_with("@@") {
+            if let Some((o, n)) = parse_hunk_header(&raw) {
+                old_line = o;
+                new_line = n;
+            }
+            if !first_hunk {
+                rows.push(diff_separator_row());
+            }
+            first_hunk = false;
+            continue;
+        }
+        if let Some(body) = raw.strip_prefix('+') {
+            rows.push(diff_row(area_width, None, Some(new_line), '+', body, DiffRowKind::Added));
+            new_line += 1;
+        } else if let Some(body) = raw.strip_prefix('-') {
+            rows.push(diff_row(area_width, Some(old_line), None, '-', body, DiffRowKind::Removed));
+            old_line += 1;
+        } else if let Some(body) = raw.strip_prefix(' ') {
+            rows.push(diff_row(
+                area_width,
+                Some(old_line),
+                Some(new_line),
+                ' ',
+                body,
+                DiffRowKind::Context,
+            ));
+            old_line += 1;
+            new_line += 1;
+        } else if raw.is_empty() {
+            rows.push(diff_row(
+                area_width,
+                Some(old_line),
+                Some(new_line),
+                ' ',
+                "",
+                DiffRowKind::Context,
+            ));
+            old_line += 1;
+            new_line += 1;
+        } else {
+            rows.push(diff_row(
+                area_width,
+                Some(old_line),
+                Some(new_line),
+                ' ',
+                &raw,
+                DiffRowKind::Context,
+            ));
+            old_line += 1;
+            new_line += 1;
+        }
+    }
+
+    if rows.len() > max_rows {
+        rows.truncate(max_rows);
+    }
+    if truncated_indicator {
+        rows.push(Line::from(Span::styled(
+            format!(
+                "  … (truncated, {} more line{})",
+                truncated,
+                if truncated == 1 { "" } else { "s" }
+            ),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )));
+    }
+    rows
+}
+
+fn render_diff_card_body(frame: &mut Frame, area: Rect, a: &Artifact, max_bytes: usize) {
+    if area.height == 0 {
+        return;
+    }
+    let path = Path::new(&a.path);
+    let lines: Vec<Line<'static>> = match read_text_excerpt(path, max_bytes) {
+        None => match std::fs::metadata(path) {
+            Ok(_) => vec![Line::from(Span::styled(
+                "  (binary file — open externally with `o`)",
+                Style::default().fg(Color::DarkGray),
+            ))],
+            Err(_) => vec![Line::from(Span::styled(
+                format!("  (cannot read {})", path.display()),
+                Style::default().fg(Color::Rgb(220, 100, 100)),
+            ))],
+        },
+        Some((content, truncated)) => {
+            build_diff_lines(content, truncated, area.height, area.width)
+        }
+    };
+    let p = Paragraph::new(lines);
     frame.render_widget(p, area);
 }
 
@@ -1632,6 +1890,11 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
                 let expanded = app.result_artifact_expanded && art_idx == app.result_artifact_sel;
                 let max_bytes = if expanded { 64 * 1024 } else { 8 * 1024 };
                 render_text_card_body(frame, body_rect, a, max_bytes);
+            }
+            CardKind::Diff => {
+                let expanded = app.result_artifact_expanded && art_idx == app.result_artifact_sel;
+                let max_bytes = if expanded { 64 * 1024 } else { 8 * 1024 };
+                render_diff_card_body(frame, body_rect, a, max_bytes);
             }
             CardKind::Video => render_video_card_body(frame, body_rect, a),
             CardKind::Url => render_url_card_body(frame, body_rect, a),
@@ -4215,6 +4478,199 @@ mod result_popup_tests {
             y_note < y_lead_body && y_lead_body < y_url && y_url < y_summary,
             "expected order note({}) < lead({}) < url({}) < summary({})\n{}",
             y_note, y_lead_body, y_url, y_summary, dump,
+        );
+    }
+
+    fn buffer_to_ansi(buf: &Buffer) -> String {
+        use ratatui::style::Color;
+        fn fg(c: Color) -> String {
+            match c {
+                Color::Reset => "\x1b[39m".into(),
+                Color::Rgb(r, g, b) => format!("\x1b[38;2;{};{};{}m", r, g, b),
+                Color::Indexed(i) => format!("\x1b[38;5;{}m", i),
+                Color::Black => "\x1b[30m".into(),
+                Color::Red => "\x1b[31m".into(),
+                Color::Green => "\x1b[32m".into(),
+                Color::Yellow => "\x1b[33m".into(),
+                Color::Blue => "\x1b[34m".into(),
+                Color::Magenta => "\x1b[35m".into(),
+                Color::Cyan => "\x1b[36m".into(),
+                Color::Gray => "\x1b[37m".into(),
+                Color::DarkGray => "\x1b[90m".into(),
+                Color::LightRed => "\x1b[91m".into(),
+                Color::LightGreen => "\x1b[92m".into(),
+                Color::LightYellow => "\x1b[93m".into(),
+                Color::LightBlue => "\x1b[94m".into(),
+                Color::LightMagenta => "\x1b[95m".into(),
+                Color::LightCyan => "\x1b[96m".into(),
+                Color::White => "\x1b[97m".into(),
+            }
+        }
+        fn bg(c: Color) -> String {
+            match c {
+                Color::Reset => "\x1b[49m".into(),
+                Color::Rgb(r, g, b) => format!("\x1b[48;2;{};{};{}m", r, g, b),
+                Color::Indexed(i) => format!("\x1b[48;5;{}m", i),
+                Color::Black => "\x1b[40m".into(),
+                Color::Red => "\x1b[41m".into(),
+                Color::Green => "\x1b[42m".into(),
+                Color::Yellow => "\x1b[43m".into(),
+                Color::Blue => "\x1b[44m".into(),
+                Color::Magenta => "\x1b[45m".into(),
+                Color::Cyan => "\x1b[46m".into(),
+                Color::Gray => "\x1b[47m".into(),
+                Color::DarkGray => "\x1b[100m".into(),
+                Color::LightRed => "\x1b[101m".into(),
+                Color::LightGreen => "\x1b[102m".into(),
+                Color::LightYellow => "\x1b[103m".into(),
+                Color::LightBlue => "\x1b[104m".into(),
+                Color::LightMagenta => "\x1b[105m".into(),
+                Color::LightCyan => "\x1b[106m".into(),
+                Color::White => "\x1b[107m".into(),
+            }
+        }
+        let mut out = String::new();
+        for y in 0..buf.area().height {
+            let mut last_fg = Color::Reset;
+            let mut last_bg = Color::Reset;
+            out.push_str("\x1b[0m");
+            for x in 0..buf.area().width {
+                let c = &buf[(x, y)];
+                if c.fg != last_fg {
+                    out.push_str(&fg(c.fg));
+                    last_fg = c.fg;
+                }
+                if c.bg != last_bg {
+                    out.push_str(&bg(c.bg));
+                    last_bg = c.bg;
+                }
+                out.push_str(c.symbol());
+            }
+            out.push_str("\x1b[0m\n");
+        }
+        out
+    }
+
+    fn buffer_bg_map(buf: &Buffer) -> String {
+        let mut out = String::new();
+        for y in 0..buf.area().height {
+            for x in 0..buf.area().width {
+                let c = &buf[(x, y)];
+                let m = match c.bg {
+                    ratatui::style::Color::Rgb(34, 92, 43) => '+',
+                    ratatui::style::Color::Rgb(122, 41, 54) => '-',
+                    ratatui::style::Color::Reset => '.',
+                    _ => '?',
+                };
+                out.push(m);
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn diff_artifact_renders_with_claude_style_backgrounds() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let patch_path = tmp.path().join("sample.patch");
+        let patch = "\
+diff --git a/lib/src/ui.rs b/lib/src/ui.rs
+index 0000001..0000002 100644
+--- a/lib/src/ui.rs
++++ b/lib/src/ui.rs
+@@ -42,3 +42,5 @@ fn render_status() {
+     let mut spans = Vec::new();
+-    spans.push(span_dim(&state.title));
++    spans.push(span_bold(&state.title));
++    if let Some(badge) = &state.badge {
++        spans.push(span_subtle(badge));
++    }
+     Line::from(spans)
+@@ -101,3 +103,3 @@ fn render_bar() {
+     let bar = renderer.bar();
+-    bar.draw(area);
++    bar.draw_with_offset(area, offset);
+     Ok(())
+";
+        std::fs::write(&patch_path, patch).unwrap();
+        std::fs::copy(&patch_path, "/tmp/cchub-diff-sample.patch").ok();
+
+        let now = crate::orchestrator::now_unix_secs();
+        let project = Project {
+            id: "p-diff".into(),
+            name: "diff".into(),
+            root: PathBuf::from("/tmp/diff"),
+            created_at: now,
+        };
+        let mut state = TaskState::new(project.id.clone(), project.root.clone(), "diff prompt".into());
+        state.status = TaskStatus::Done;
+        state.summary = Some("WHY: diff renderer matches Claude Code style.".into());
+        state.artifacts = vec![Artifact {
+            kind: "diff".into(),
+            path: patch_path.to_string_lossy().into_owned(),
+            original: patch_path.to_string_lossy().into_owned(),
+            caption: Some("ui.rs: structured diff".into()),
+            added_at: now,
+        }];
+
+        let mut app = App::new();
+        let mut tasks = HashMap::new();
+        tasks.insert(project.id.clone(), vec![std::sync::Arc::new(state)]);
+        let snap = ProjectsSnapshot {
+            projects: vec![project],
+            tasks,
+            titling: std::collections::HashSet::new(),
+            reservations: HashMap::new(),
+        };
+        app.update_projects(snap);
+        assert!(app.enter_projects_result(), "popup should open");
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| super::render_projects_result(f, f.area(), &mut app))
+            .expect("render");
+
+        let buf = terminal.backend().buffer().clone();
+        let plain = buffer_to_string(&buf);
+        let ansi = buffer_to_ansi(&buf);
+        let bg_map = buffer_bg_map(&buf);
+        let combined = format!(
+            "--- plain ---\n{}\n--- ansi (cat with -R) ---\n{}\n--- bg map (+ added, - removed, . none) ---\n{}",
+            plain, ansi, bg_map
+        );
+        std::fs::write("/tmp/cchub-diff-render.txt", &combined).expect("dump write");
+
+        assert!(plain.contains("Result"), "should render Result title\n{}", plain);
+        assert!(
+            plain.contains("lib/src/ui.rs"),
+            "diff per-file header path should be visible\n{}",
+            plain
+        );
+        assert!(
+            plain.contains("Added") && plain.contains("removed"),
+            "diff header counts line should be visible\n{}",
+            plain
+        );
+        assert!(
+            !plain.contains("@@ -"),
+            "raw @@ hunk header should be suppressed\n{}",
+            plain
+        );
+        assert!(
+            bg_map.contains('+'),
+            "added rows should paint the diffAdded bg across cells\n{}",
+            bg_map
+        );
+        assert!(
+            bg_map.contains('-'),
+            "removed rows should paint the diffRemoved bg across cells\n{}",
+            bg_map
+        );
+        assert!(
+            bg_map.contains("..."),
+            "hunk separator marker should render in dim gray\n{}",
+            plain
         );
     }
 
