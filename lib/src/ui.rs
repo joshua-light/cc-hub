@@ -1138,6 +1138,14 @@ fn card_body_height(kind: CardKind) -> u16 {
     }
 }
 
+fn lead_card_body_height(kind: CardKind) -> u16 {
+    match kind {
+        CardKind::Image => CARD_IMAGE_LEAD_BODY_H,
+        CardKind::Text => CARD_TEXT_LEAD_BODY_H,
+        _ => card_body_height(kind),
+    }
+}
+
 /// Reads up to 8 KiB of `path` as lossy UTF-8 and splits into lines. Returns
 /// `None` for binary files (>5 % non-text bytes in the leading 1 KiB) so the
 /// caller can show "(binary file)" rather than dumping garbage at the user.
@@ -1438,19 +1446,12 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
         header_lines.push(Line::raw(""));
     }
 
-    // ── Render order: lead artifact first, then the rest in original order
+    // Lead artifact renders first; the rest follow in original order.
     let lead_idx = t.lead_artifact.filter(|&i| i < t.artifacts.len());
-    let mut render_order: Vec<usize> = Vec::with_capacity(t.artifacts.len());
-    if let Some(l) = lead_idx {
-        render_order.push(l);
-        for i in 0..t.artifacts.len() {
-            if i != l {
-                render_order.push(i);
-            }
-        }
-    } else {
-        render_order.extend(0..t.artifacts.len());
-    }
+    let render_order: Vec<usize> = lead_idx
+        .into_iter()
+        .chain((0..t.artifacts.len()).filter(|i| Some(*i) != lead_idx))
+        .collect();
 
     // ── Layout & scrolling ────────────────────────────────────────────────
     let header_h = header_lines.len() as u16;
@@ -1466,18 +1467,11 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     } else {
         0
     };
-    // (artifact_idx, kind, body_h, is_lead) keyed by render position.
-    let mut card_meta: Vec<(usize, CardKind, u16, bool)> = Vec::with_capacity(render_order.len());
+    let mut card_meta: Vec<(usize, CardKind, u16)> = Vec::with_capacity(render_order.len());
     for &art_idx in &render_order {
-        let a = &t.artifacts[art_idx];
-        let kind = classify_artifact(a);
-        let is_lead = lead_idx == Some(art_idx);
-        let default_h = if is_lead {
-            match kind {
-                CardKind::Image => CARD_IMAGE_LEAD_BODY_H,
-                CardKind::Text => CARD_TEXT_LEAD_BODY_H,
-                _ => card_body_height(kind),
-            }
+        let kind = classify_artifact(&t.artifacts[art_idx]);
+        let default_h = if lead_idx == Some(art_idx) {
+            lead_card_body_height(kind)
         } else {
             card_body_height(kind)
         };
@@ -1486,12 +1480,12 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
         } else {
             default_h
         };
-        card_meta.push((art_idx, kind, h, is_lead));
+        card_meta.push((art_idx, kind, h));
     }
 
     let mut canvas_card_tops: Vec<u16> = Vec::with_capacity(card_meta.len());
     let mut next_y = header_h;
-    for (_, _, body, _) in &card_meta {
+    for (_, _, body) in &card_meta {
         canvas_card_tops.push(next_y);
         // Card = header(1) + body + spacer(1).
         next_y = next_y.saturating_add(1 + body + 1);
@@ -1500,8 +1494,6 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
         next_y = next_y.saturating_add(1); // "(no artifacts)" line
     }
 
-    // Summary appendix at the very bottom, behind a single muted lowercase
-    // label. Skipped entirely when the orchestrator hasn't produced one.
     let summary_lines: Vec<Line<'static>> = match t
         .summary
         .as_deref()
@@ -1537,7 +1529,8 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
             .position(|&i| i == sel_art_idx)
             .unwrap_or(0);
         let sel_top = canvas_card_tops[sel_render_pos];
-        let sel_h = 1 + card_meta[sel_render_pos].2 + 1;
+        let (_, _, sel_body) = card_meta[sel_render_pos];
+        let sel_h = 1 + sel_body + 1;
         if sel_top < app.result_scroll {
             app.result_scroll = sel_top;
         } else if sel_top + sel_h > app.result_scroll + body_h {
@@ -1550,10 +1543,9 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     }
     let scroll = app.result_scroll;
 
-    // Build the canvas: header → cards (header + body placeholders + spacer)
-    // → summary appendix. Image / text card bodies are overlaid by widgets in
-    // the second pass below; the placeholder rows just keep the y-offsets
-    // honest for the Paragraph's vertical scroll.
+    // The placeholder blank rows below each card header keep y-offsets honest
+    // for the Paragraph's vertical scroll; per-card widgets paint over them in
+    // the second pass.
     let mut canvas_lines: Vec<Line<'static>> = Vec::with_capacity(total_canvas_h as usize);
     canvas_lines.extend(header_lines);
     if t.artifacts.is_empty() {
@@ -1562,9 +1554,10 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
             Style::default().fg(Color::DarkGray),
         )));
     } else {
-        for &(art_idx, _, body, is_lead) in &card_meta {
+        for &(art_idx, _, body) in &card_meta {
             let a = &t.artifacts[art_idx];
             let selected = art_idx == app.result_artifact_sel;
+            let is_lead = lead_idx == Some(art_idx);
             canvas_lines.push(evidence_card_header(a, selected, is_lead));
             for _ in 0..body {
                 canvas_lines.push(Line::raw(""));
@@ -1579,7 +1572,7 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_widget(canvas_para, body_area);
 
     // Per-card widgets, painted on top of the placeholder rows.
-    for (rp, &(art_idx, kind, body, _)) in card_meta.iter().enumerate() {
+    for (rp, &(art_idx, kind, body)) in card_meta.iter().enumerate() {
         let a = &t.artifacts[art_idx];
         let card_top_canvas = canvas_card_tops[rp];
         let body_top_canvas = card_top_canvas + 1;
