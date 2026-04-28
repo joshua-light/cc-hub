@@ -1386,19 +1386,27 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
 
     // ── Header: status badge + prompt excerpt ──────────────────────────────
     let mut header_lines: Vec<Line<'static>> = Vec::new();
-    header_lines.push(Line::from(vec![
+    let mut header_spans = vec![
         Span::styled(
             format!("[{}]", status_label),
             Style::default().fg(status_color).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(age, Style::default().fg(Color::Rgb(160, 160, 180))),
-        Span::raw("  "),
-        Span::styled(
-            format!("({} artifact{})", t.artifacts.len(), if t.artifacts.len() == 1 { "" } else { "s" }),
-            Style::default().fg(Color::Rgb(150, 130, 200)),
-        ),
-    ]));
+    ];
+    if let Some(v) = t.shipped_version.as_deref().filter(|s| !s.is_empty()) {
+        header_spans.push(Span::raw("  "));
+        header_spans.push(Span::styled(
+            format!("v{}", v.trim_start_matches('v')),
+            Style::default().fg(Color::Rgb(150, 200, 165)),
+        ));
+    }
+    header_spans.push(Span::raw("  "));
+    header_spans.push(Span::styled(
+        format!("({} artifact{})", t.artifacts.len(), if t.artifacts.len() == 1 { "" } else { "s" }),
+        Style::default().fg(Color::Rgb(150, 130, 200)),
+    ));
+    header_lines.push(Line::from(header_spans));
     header_lines.push(Line::raw(""));
     header_lines.push(Line::from(Span::styled(
         "Prompt",
@@ -3355,6 +3363,15 @@ fn render_task_card_collapsed(
         lines.push(Line::from(vec![
             Span::styled("󰍡 ", Style::default().fg(Color::Rgb(110, 120, 135))),
             Span::styled(summary_text, Style::default().fg(Color::Rgb(160, 165, 175))),
+        ]));
+    }
+    if let Some(v) = t.shipped_version.as_deref().filter(|s| !s.is_empty()) {
+        lines.push(Line::from(vec![
+            Span::styled("󰓹 ", Style::default().fg(Color::Rgb(110, 120, 135))),
+            Span::styled(
+                format!("v{}", v.trim_start_matches('v')),
+                Style::default().fg(Color::Rgb(150, 200, 165)),
+            ),
         ]));
     }
 
