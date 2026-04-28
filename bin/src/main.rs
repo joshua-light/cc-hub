@@ -1,6 +1,6 @@
 use cc_hub_lib::{
     app, clipboard, config, conversation, focus, gh, live_view, metrics, models, platform,
-    projects_scan, scanner, send, spawn, title, tmux_pane, ui, usage, watcher,
+    projects_scan, scanner, send, spawn, title, tmux_pane, triage, ui, usage, watcher,
 };
 
 use app::{App, Tab, View};
@@ -274,6 +274,10 @@ enum ScanMsg {
         result: Result<String, String>,
     },
     Projects(projects_scan::ProjectsSnapshot),
+    BacklogTriage {
+        promotion: Option<triage::Promotion>,
+        status: Option<String>,
+    },
 }
 
 /// Spawn the OS-default opener for `path` and detach immediately. URLs work
@@ -483,6 +487,37 @@ async fn run(
             }
         }
     });
+
+    // Background backlog triage. Off unless [backlog].enabled — the tick
+    // spawns a Claude subprocess and we don't want to surprise users with
+    // billed calls.
+    if config::get().backlog.enabled {
+        let triage_tx = scan_tx.clone();
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(config::get().backlog.interval());
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let outcome = match tokio::task::spawn_blocking(triage::tick).await {
+                    Ok(o) => o,
+                    Err(e) => {
+                        log::warn!("triage: spawn_blocking joined with error: {}", e);
+                        continue;
+                    }
+                };
+                if outcome.promotion.is_none() && outcome.status.is_none() {
+                    continue;
+                }
+                let _ = triage_tx
+                    .send(ScanMsg::BacklogTriage {
+                        promotion: outcome.promotion,
+                        status: outcome.status,
+                    })
+                    .await;
+            }
+        });
+    }
 
     // Fallback timer catches PID deaths (not a filesystem event) and events
     // missed when a watched dir is rotated or recreated. Its initial tick
@@ -1449,6 +1484,24 @@ async fn run(
                         Err(e) => format!("gh create failed: {}", e),
                     };
                     app.set_status(status);
+                }
+                ScanMsg::BacklogTriage { promotion, status } => {
+                    if let Some(p) = promotion {
+                        // Mirrors the user-driven backlog-start path: if a
+                        // dispatch is already queued, surface a status note
+                        // rather than clobbering it.
+                        if app.has_pending_dispatch() {
+                            app.set_status(format!(
+                                "triage: promotion ready [{}] but a dispatch is already queued — orchestrator may be slow to start",
+                                p.tmux
+                            ));
+                        } else {
+                            app.queue_pending_dispatch(p.tmux, p.orchestrator_prompt);
+                        }
+                    }
+                    if let Some(s) = status {
+                        app.set_status(s);
+                    }
                 }
             }
         }

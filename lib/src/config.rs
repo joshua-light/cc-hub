@@ -21,6 +21,7 @@ pub struct Config {
     pub scan: ScanConfig,
     pub ui: UiConfig,
     pub metrics: MetricsConfig,
+    pub backlog: BacklogConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -192,6 +193,46 @@ impl Default for MetricsConfig {
     }
 }
 
+/// Background backlog triage. Off by default — burns Claude calls on a
+/// recurring tick. When enabled, every `interval_secs` cc-hub asks a
+/// short Claude session whether each pending backlog task is ready to
+/// promote to Running, and starts the chosen task automatically.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BacklogConfig {
+    pub enabled: bool,
+    /// Model passed to `--model` for the triage call. Defaults to
+    /// `sonnet` — Haiku tends to over-promote and the call is rare.
+    pub model: String,
+    pub interval_secs: u64,
+    pub run_timeout_secs: u64,
+    /// How long a triage decision sticks before the task becomes
+    /// eligible again. Bounds the worst-case rate of Claude calls per
+    /// dormant task to one per `ttl_secs`.
+    pub ttl_secs: u64,
+}
+
+impl BacklogConfig {
+    pub fn interval(&self) -> Duration {
+        Duration::from_secs(self.interval_secs)
+    }
+    pub fn run_timeout(&self) -> Duration {
+        Duration::from_secs(self.run_timeout_secs)
+    }
+}
+
+impl Default for BacklogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: "sonnet".into(),
+            interval_secs: 8,
+            run_timeout_secs: 120,
+            ttl_secs: 300,
+        }
+    }
+}
+
 pub fn get() -> &'static Config {
     static CFG: OnceLock<Config> = OnceLock::new();
     CFG.get_or_init(load)
@@ -301,6 +342,13 @@ mod tests {
             top_interruptions = 5
             top_growth_findings = 5
             top_peak_context_findings = 5
+
+            [backlog]
+            enabled = true
+            model = "haiku"
+            interval_secs = 30
+            run_timeout_secs = 60
+            ttl_secs = 600
         "#;
         let cfg: Config = toml::from_str(src).unwrap();
         assert_eq!(cfg.spawn.command, "my-claude");
@@ -310,5 +358,8 @@ mod tests {
         assert_eq!(cfg.scan.fs_fallback_interval_secs, 5);
         assert_eq!(cfg.ui.cell_width, 50);
         assert_eq!(cfg.metrics.growth_threshold, 4.5);
+        assert!(cfg.backlog.enabled);
+        assert_eq!(cfg.backlog.model, "haiku");
+        assert_eq!(cfg.backlog.ttl_secs, 600);
     }
 }

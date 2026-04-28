@@ -18,6 +18,7 @@ pub mod send;
 pub mod spawn;
 pub mod title;
 pub mod tmux_pane;
+pub mod triage;
 pub mod ui;
 pub mod usage;
 pub mod watcher;

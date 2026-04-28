@@ -2316,7 +2316,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         let keybinds: &str = match app.view {
             View::Grid => match app.current_tab {
-                Tab::Projects => "tab:next  j/k:project  J/K:task  enter:focus orch  f:agent terminal  n:new task  N:register project  b:backlog  r:result  x:delete task  X:remove project  q:quit",
+                Tab::Projects => "tab:next  H/L:project  h/l:col  j/k:task  enter:focus orch  f:agent terminal  space:approve  n:new task  N:register project  b:backlog  r:result  x:delete task  X:remove project  q:quit",
                 Tab::Sessions => "tab:next  h/j/k/l:nav  n:new  N:new in…  i:info  D:why?  enter/f:focus/resume  o:shell  x:close  H:inactive  W:workers  q:quit",
                 Tab::Metrics => "tab:next  j/k:select  enter:view transcript  r:refresh  q:quit",
             },
@@ -2515,7 +2515,7 @@ fn render_projects_body(frame: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::DarkGray),
             ),
             Span::styled(
-                "Press N to pick a folder and start a task.",
+                "Press N to register a folder, then n to start a task.",
                 Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
             ),
         ]))
