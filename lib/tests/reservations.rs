@@ -338,7 +338,7 @@ fn refresh_heartbeat_updates_last_heartbeat() {
     let path = home.path().join("projects/p/reservations.json");
     let mut file: reservations::ReservationsFile =
         serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    let before = orchestrator::now_unix_secs() - 100;
+    let before = orchestrator::now_unix_secs() - (RESERVATION_TTL_SECS / 4 + 10);
     for r in file.reservations.iter_mut() {
         r.last_heartbeat = before;
     }
