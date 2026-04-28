@@ -4057,7 +4057,7 @@ mod result_popup_tests {
 
         let mut app = App::new();
         let mut tasks = HashMap::new();
-        tasks.insert(project.id.clone(), vec![state]);
+        tasks.insert(project.id.clone(), vec![std::sync::Arc::new(state)]);
         let snap = ProjectsSnapshot {
             projects: vec![project],
             tasks,
@@ -4165,7 +4165,7 @@ mod result_popup_tests {
         };
 
         let mut tasks = HashMap::new();
-        tasks.insert(project.id.clone(), vec![task_a.clone(), task_b.clone()]);
+        tasks.insert(project.id.clone(), vec![std::sync::Arc::new(task_a.clone()), std::sync::Arc::new(task_b.clone())]);
         let mut reservations = HashMap::new();
         reservations.insert(project.id.clone(), vec![resv_active, resv_intended]);
         let snap = ProjectsSnapshot {

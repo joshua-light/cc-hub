@@ -60,6 +60,7 @@ pub fn tick() -> TickOutcome {
                 None => true,
                 Some(at) => now.saturating_sub(at) >= ttl,
             })
+            .map(|t| t.as_ref())
             .collect();
         if eligible.is_empty() {
             None
