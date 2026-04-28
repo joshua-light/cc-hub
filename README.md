@@ -259,7 +259,7 @@ start them.
 | `Space` | Approve the focused Review task → Done |
 | `r` | Open the Result popup (artifacts + summary) for the focused task |
 | `b` | Open the Backlog popup (`s`/`Enter` starts the selected backlog task) |
-| `n` | New task in the current project (prompt input) |
+| `n` | New task in the current project (prompt input — `Tab` cycles the orchestrator agent when more than one is configured) |
 | `N` | Folder picker → register a project, then prompt for a task |
 | `x` | Delete the selected task (kills its orchestrator, removes state) |
 | `X` | Remove the focused project from the hub (does not delete the repo) |
