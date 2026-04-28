@@ -69,6 +69,10 @@ impl ProjectsSnapshot {
         }
     }
 
+    pub fn is_titling(&self, task_id: &str) -> bool {
+        self.titling.contains(task_id)
+    }
+
     /// Best live reservation for a task — `Active` wins over `Intended` if
     /// the task somehow has both (it shouldn't in normal flow, but a worker
     /// upgrade-then-downgrade can leave both present briefly).

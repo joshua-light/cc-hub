@@ -2845,7 +2845,7 @@ fn render_kanban_column(
         let reservation = app
             .projects
             .reservation_for_task(&t.project_id, &t.task_id);
-        let titling_in_flight = app.projects.titling.contains(&t.task_id);
+        let titling_in_flight = app.projects.is_titling(&t.task_id);
         if col_idx <= 1 {
             render_task_card_active(
                 frame,
@@ -3140,11 +3140,7 @@ fn render_task_card_active(
     let badge_spans = reservation_badge_spans(reservation, area.width.saturating_sub(14) as usize);
     let badge_w: usize = badge_spans.iter().map(|s| s.content.chars().count()).sum();
     let prompt_max = (area.width as usize).saturating_sub(14 + badge_w);
-    let header_text = match t.title.as_deref().filter(|s| !s.is_empty()) {
-        Some(name) => first_line_preview(name, prompt_max),
-        None if titling_in_flight => first_line_preview("✎ …", prompt_max),
-        None => first_line_preview(&t.prompt, prompt_max),
-    };
+    let header_text = task_card_header_text(t, titling_in_flight, prompt_max);
     let mut title_spans = vec![
         Span::styled(format!(" {} ", title_icon), Style::default().fg(accent)),
         Span::styled(
@@ -3311,11 +3307,7 @@ fn render_task_card_collapsed(
     let badge_spans = reservation_badge_spans(reservation, area.width.saturating_sub(14) as usize);
     let badge_w: usize = badge_spans.iter().map(|s| s.content.chars().count()).sum();
     let prompt_max = (area.width as usize).saturating_sub(14 + badge_w);
-    let header_text = match t.title.as_deref().filter(|s| !s.is_empty()) {
-        Some(name) => first_line_preview(name, prompt_max),
-        None if titling_in_flight => first_line_preview("✎ …", prompt_max),
-        None => first_line_preview(&t.prompt, prompt_max),
-    };
+    let header_text = task_card_header_text(t, titling_in_flight, prompt_max);
     let mut title_spans = vec![
         Span::styled(format!(" {} ", icon), Style::default().fg(accent)),
         Span::styled(
@@ -3442,6 +3434,18 @@ fn reservation_badge_spans(reservation: Option<&Reservation>, max_w: usize) -> V
         text,
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     )]
+}
+
+fn task_card_header_text(
+    t: &crate::orchestrator::TaskState,
+    titling_in_flight: bool,
+    prompt_max: usize,
+) -> String {
+    match t.title.as_deref().filter(|s| !s.is_empty()) {
+        Some(name) => first_line_preview(name, prompt_max),
+        None if titling_in_flight => first_line_preview("✎ …", prompt_max),
+        None => first_line_preview(&t.prompt, prompt_max),
+    }
 }
 
 fn first_line_preview(text: &str, max: usize) -> String {
