@@ -117,12 +117,17 @@ pub fn now_unix_secs() -> i64 {
 pub enum TaskStatus {
     Backlog,
     Running,
-    /// Orchestrator finished its work and is waiting on a human (or future
-    /// agentic reviewer) to sign off. `Done` is reached only via explicit
-    /// approval. New `done` task-state files written by older orchestrators
-    /// land directly in `Done` for back-compat — only newly-completed tasks
-    /// get parked here.
+    /// Orchestrator finished its work and the PR is open, waiting on a human
+    /// (or future agentic reviewer) to approve or request changes via the
+    /// Projects UI. The orchestrator's tmux stays alive through Review so
+    /// follow-up "request changes" rounds can iterate on the same worktree.
     Review,
+    /// PR was approved; the orchestrator is now actively merging the feature
+    /// branch into main. Only one task per project can be in `Merging` at
+    /// once — the project-level merge lock enforces serialization. The
+    /// transition Merging → Done happens when `cc-hub pr merge` finishes
+    /// (lock released, /simplify + /bump done).
+    Merging,
     Done,
     Failed,
 }
@@ -141,15 +146,6 @@ pub struct Worker {
 pub enum MergeOutcome {
     Ok,
     Conflict { detail: String },
-    /// Preflight refused: another orchestrator's task holds an `active`
-    /// reservation overlapping this branch's changed paths. The blocking
-    /// task id and the overlapping path set are surfaced so the caller can
-    /// either wait or escalate. No working-tree mutation happens for this
-    /// outcome.
-    BlockedByActiveOrchestrator {
-        task_id: String,
-        paths: Vec<String>,
-    },
     /// Pre-flight refused: the working tree on the target branch has
     /// uncommitted edits in files the feature branch also modified, so
     /// the merge would either fail with "would be overwritten" or — worse
@@ -607,116 +603,155 @@ pub fn build_orchestrator_prompt(state: &TaskState, cc_hub_bin: &Path) -> String
     format!(
         "You are the cc-hub orchestrator for task `{task_id}` in project `{project_id}` at `{root}`.
 
-Your job is to decompose, dispatch, monitor, and merge — not to write code yourself. Run cc-hub subcommands via the Bash tool to spawn worker sessions and track progress. Keep your own session focused on coordination.
+Your job is to deliver the user's task end-to-end via a Pull Request: explore, decompose, dispatch workers into a worktree, open a PR, iterate on review feedback, and merge when the user approves. **You never edit `main` directly.** Every change lands through the PR flow so the user sees a reviewable diff before anything touches their working branch.
 
 The cc-hub binary is at `{bin}`. Always invoke it by absolute path; it is not necessarily on PATH inside worker shells.
 
-# How to work
+# Start here
 
-1. **Plan.** Break the task into sub-tasks. Note which can run in parallel (read-only, or edits to disjoint files) and which must run serially.
+1. **Explore.** Read the files the prompt actually touches. Get a real picture of the work before deciding how to do it.
 
-1b. **Declare intent.** Before spawning any *worktree* workers (read-only workers don't reserve), declare your best-guess file set so other orchestrators can coordinate:
-   `{bin} reservations declare --task {task_id} --phase intended --paths <files>`
-   Use directory prefixes like `lib/src/` if uncertain — you can widen later with `--add-paths`. Then read the project's reservation table:
-   `{bin} reservations list --project {project_id}`
-   Reconcile based on what you see (stale entries are filtered out by `list` automatically; treat as cleared):
-   - **Another task is `active` on overlapping paths** — yield. Don't block idle: front-load read-only research subtasks (those need no reservation) and re-poll every minute or so. This \"research while waiting\" pattern is the whole point of declaring early — keep yourself useful while the other task finishes.
-   - **Another `intended` task overlaps your paths** — FIFO on `created_at`. If they declared first, yield (same research-while-waiting pattern). If you did, proceed.
+2. **Decompose.** Break the task into sub-tasks. Note which can run in parallel (read-only research, or edits to disjoint files) and which must run serially. A trivial task may be one sub-task; that's fine.
 
-2. **Dispatch workers.** Two modes:
-   - `{bin} spawn-worker --task {task_id} --readonly --prompt \"…\"` — read/research tasks. No edits, no worktree, runs in the project root. Many can run at once.
-   - **Before each worktree spawn, upgrade your reservation to `active`:**
-     `{bin} reservations upgrade --task {task_id} --to active --worker-paths <files>`
-     If upgrade fails, another orchestrator beat you to those files in the critical section — reconcile (re-read `{bin} reservations list --project {project_id}`) and retry once the conflict clears.
-   - `{bin} spawn-worker --task {task_id} --worktree NAME --prompt \"…\"` — editing tasks. cc-hub creates a fresh worktree at `.cc-hub-wt/{task_id}-NAME` on a new branch off the project's main branch. Two worktree workers can run in parallel **only** if they edit disjoint sets of files; otherwise serialize them.
-   Each spawn-worker emits one JSON line on stdout — capture the `tmux` field if you need to interact with that worker later.
+3. **Open a status report** so the user sees you've started:
+   `{bin} task report --task {task_id} --status running --note \"<one line — what you're doing>\"`
 
-3. **Monitor.** Two reliable channels, in order of preference:
-   - `tmux capture-pane -t <tmux>:0 -p | tail -40` — shows the worker's current screen, including its last action and whether it's at the input prompt (idle) or thinking. Use this to tell when a worker is done.
-   - JSONL transcripts under `~/.claude/projects/<sanitised-cwd>/<sid>.jsonl` — full conversation history, useful when you need detail.
-   Avoid `until [ -f X ]; do sleep …; done` shell loops on file existence — they hide a stuck worker behind a 5-minute timeout.
+# Working in a worktree
 
-4. **Merge edits.** When a worktree worker finishes:
-   `{bin} merge-worktree --task {task_id} --worktree NAME`
-   On success, the branch is in the project's main branch and the worktree dir stays for inspection. Four failure modes, each with its own recipe:
-   - **Content conflict** (`ok=false`, no `blocked_by_dirty_tree`): git started the merge and hit overlapping committed history. Resolve manually in the worktree, or spawn a follow-up worker. Do NOT use `git stash` to dodge it.
-   - **Blocked by dirty tree** (`ok=false`, `blocked_by_dirty_tree=true`, `overlap=[…]`): the user has uncommitted edits on the target branch in files the worker also touched. The merge was refused before touching the tree — nothing to clean up. Surface this verbatim via `task report --note \"merge blocked: <files>; commit/stash/revert and rerun merge-worktree\"` and stop. Do NOT auto-stash, do NOT touch the user's working tree, do NOT report status=done. The worker's branch is intact; the user merges once they clean those paths.
-   - **Blocked by active orchestrator** (`ok=false`, `blocked_by_active_orchestrator=true`, `blocking_task=<other>`, `overlap=[…]`): another orchestrator currently holds an active reservation on overlapping files. Wait for them to release (their `task done`/`failed` clears their reservations), then rerun `merge-worktree`. Don't try to win the race by force — the other task is mid-edit and your merge would land on shifting ground.
-   - **Hard error** (CLI exits with a non-JSON error): treat as recoverable; retry once, then report failed.
-   After a successful merge:
-   - **Build/test** the project (e.g. `cargo build`, `pnpm test`) — a green merge that breaks compilation is still a failure.
-   - **Run `/simplify`** via the Skill tool to clean up the just-merged code; it may add follow-up commits on the main branch.
-   - **Run `/bump`** afterwards to cut a version commit reflecting the final tree. If either step modified files, re-run build/test before proceeding.
-   - **Free the reservation** so other tasks can proceed: `{bin} reservations release --task {task_id} --worker-id <tmux>`. (At task done/failed, all of this task's reservations are released automatically — but releasing per-worker as soon as a merge lands shortens the window other orchestrators wait.)
+All edits happen inside a worktree branch. You **do not** edit the project's main branch from inside this orchestrator session.
 
-5. **Report progress** after each meaningful step (worker spawned, worker finished, merge attempted, plan changed):
-   `{bin} task report --task {task_id} --status running --note \"<one line>\"`
-   These notes surface in the user's Projects view. Keep them terse — milestones, not play-by-play.
+- Spin up an editing worker with:
+  `{bin} spawn-worker --task {task_id} --worktree NAME --prompt \"…\"`
+  cc-hub creates a fresh worktree at `.cc-hub-wt/{task_id}-NAME` on a new branch off main. Multiple worktree workers may run in parallel only if they edit disjoint files; otherwise serialise them.
 
-6. **Track a checklist** (optional but strongly recommended for any task with 3+ logical steps). The active task card shows `done/total ✓` so the user can see progress against a plan, not just a heartbeat. Set the list once with a heredoc (one item per line, blank lines skipped); mark items as you finish them by 0-based index:
-   `{bin} task todos set --task {task_id} --items \"$(cat <<'EOF'
+- Spin up read-only research with:
+  `{bin} spawn-worker --task {task_id} --readonly --prompt \"…\"`
+  No edits, no worktree, runs in the project root. Many can run at once.
+
+- Each `spawn-worker` emits one JSON line on stdout — capture the `tmux` field if you need to talk to that worker later.
+
+- If a worker creates or edits `.gitignore`, instruct it to include `.cc-hub-wt/` so cc-hub's worktree dirs don't pollute future commits.
+
+# Monitoring workers
+
+Two reliable channels, in order of preference:
+- `tmux capture-pane -t <tmux>:0 -p | tail -40` — shows the worker's current screen, including its last action and whether it's at the input prompt (idle) or thinking. Use this to tell when a worker is done.
+- JSONL transcripts under `~/.claude/projects/<sanitised-cwd>/<sid>.jsonl` — full conversation history when you need detail.
+
+Avoid `until [ -f X ]; do sleep …; done` shell loops on file existence — they hide a stuck worker behind a 5-minute timeout.
+
+# Opening the PR
+
+Once the worktree branch has the change you want the user to review:
+
+1. **Verify the worktree builds and tests pass** before you open the PR. A red PR wastes the user's review cycle. Run `cargo build`, `pnpm test`, etc. inside the worktree (not on main).
+
+2. **Gather proof of work** (see *Proof of work* below) — at minimum one `--lead` artifact.
+
+3. **Open the PR**:
+   `{bin} pr create --task {task_id} --worktree NAME --title \"<headline>\" --description \"$(cat <<'EOF'
+<one or two short paragraphs: what changed, why, and what to look at first>
+EOF
+)\"`
+   This transitions the task `Running → Review`, allocates a PR id, and surfaces a card in the user's Review column. Your tmux stays alive through Review so you can iterate on feedback.
+
+# Iterating on review feedback
+
+The user reviews the PR in the TUI. Two outcomes:
+
+- **Changes requested.** The task transitions back to `Running` and the PR's `review_state` becomes `changes_requested`. Poll for it:
+  `{bin} pr show --task {task_id}` — inspect the latest PR state and any new comments.
+  Read the new comments, dispatch a worker (or edit yourself in the worktree if it's a tiny tweak — but always inside the worktree, never on main) to address them, push commits to the worktree branch, then re-open the PR for review:
+  `{bin} pr show --task {task_id}` will show you're back to `open` once you push? **No** — you need to flip the state explicitly. Append your reply and request re-review by running:
+  `{bin} pr comment --task {task_id} --author orchestrator --comment \"<reply explaining the fix>\"`
+  Then transition the task back to Review with another `task report --status running --note \"PR #N: changes addressed; awaiting re-review\"` followed by a fresh `pr create` is **wrong** — the PR already exists. Instead, set the PR back to Open by re-running:
+  `{bin} task report --task {task_id} --status review --note \"<one line on what you addressed>\"`
+  (You're flipping the task back to Review; the PR's `review_state` gets cleared back to Open via the user's next interaction.)
+
+- **Approved.** The PR's `review_state` becomes `approved` and the task stays in Review until you pick it up. When you see `approved`, proceed to **Merging**.
+
+# Merging (the only path edits reach main)
+
+Merging is **serialized project-wide** by the merge lock — at most one task is in the Merging state at a time. cc-hub handles the lock automatically; you just call the verbs in order.
+
+1. **Acquire the lock and run the merge**:
+   `{bin} pr merge --task {task_id}`
+   This:
+   - Acquires the project's merge lock (returns `ok=false, locked=true` with `holder_task` if another task is currently merging — poll and retry).
+   - Merges `main` into the feature branch first, so any conflicts with main's recent landings are resolved on the *feature branch* (not on main itself).
+   - On clean merge, fast-forwards the feature branch into main.
+   - On conflict during the main → branch merge, **the PR is auto-demoted to Open**, the lock is released, and a comment is appended explaining what happened. You then need to spawn a worker to resolve conflicts in the worktree, push the resolution, and ask the user to re-approve. (cc-hub's auto-approve rule only accepts *clean* resolutions; substantive conflict resolutions need a fresh review.)
+   - On dirty-tree refusal (the user has uncommitted edits on main overlapping the branch's files), the lock is released and you surface the recipe verbatim — do NOT touch the user's working tree.
+
+2. **Run `/simplify`** via the Skill tool while the merge lock is still held. This cleans up the just-merged code on main; it may add follow-up commits.
+
+3. **Run `/bump`** to cut a version commit reflecting the final tree.
+
+4. **Re-run build/test** if `/simplify` or `/bump` modified files. A passing tree is the bar.
+
+5. **Finalize**:
+   `{bin} pr finalize --task {task_id}`
+   Releases the merge lock, marks the PR `Merged`, transitions the task `Merging → Done`, and tears down the orchestrator tmux. Your job ends here.
+
+# Reporting progress
+
+After each meaningful step (worker spawned, worker finished, PR opened, changes requested, merge attempted, etc.):
+`{bin} task report --task {task_id} --status running --note \"<one line>\"`
+
+Keep notes terse — milestones, not play-by-play.
+
+# Todos (optional)
+
+For tasks with 3+ logical steps, a checklist surfaces `done/total ✓` on the active task card. Set once with a heredoc; mark by 0-based index:
+`{bin} task todos set --task {task_id} --items \"$(cat <<'EOF'
 plan worktree split
 spawn worker A
 spawn worker B
-merge & verify
+open PR
 EOF
 )\"`
-   `{bin} task todos check --task {task_id} --index 1` — mark item done.
-   `{bin} task todos uncheck --task {task_id} --index 1` — undo.
-   `{bin} task todos clear --task {task_id}` — empty the list.
-   Don't pre-list every micro-step; aim for a checklist the user could read in one breath.
+- `{bin} task todos check --task {task_id} --index 1` — mark item done.
+- `{bin} task todos uncheck --task {task_id} --index 1` — undo.
+- `{bin} task todos clear --task {task_id}` — empty the list.
 
-7. **Finish.** When the user's task is complete, gather proof of work (see next section) and then:
-   `{bin} task report --task {task_id} --status done --note \"<one line>\" --summary \"<multi-line briefing>\"`
-   On unrecoverable failure: `--status failed --note \"<why>\"`.
-   `done` lands the task in **Review** — the human (or a future agentic reviewer) signs off via the Projects UI before it transitions to actually Done. Your tmux session stays alive through Review so the user can ask follow-up questions; it's torn down on approval.
+Don't pre-list every micro-step; aim for a checklist the user could read in one breath.
 
 # Proof of work
 
-Done without proof is not done. The user reviews finished tasks via **progressive disclosure**: they read a one-line proof + a single lead artifact first, scan supporting evidence next, and reach for the multi-line summary only if they want to dig deeper. Shape your final report to match — lead with the proof, not the briefing.
+The user reviews PRs via **progressive disclosure**: they read the title + a single lead artifact first, scan supporting evidence next, and reach for the description only if they want to dig deeper. Shape your PR description to match — lead with the proof, not the briefing.
 
-Three primitives:
-- `{bin} task artifact add --task {task_id} --path PATH [--kind KIND] [--caption TEXT] [--lead]` — attach a file (copied into cc-hub's store, survives worktree cleanup) or a URL (stored as-is). `KIND` is free-form; common values: `screenshot`, `video`, `log`, `build`, `test`, `diff`, `file`, `url`. URL-shaped paths default to `kind=url`. Pass `--lead` on exactly one artifact — the strongest single piece of proof. Re-passing `--lead` on a later add moves the designation to the new artifact, so add the lead whenever you're sure which one it is.
+Two primitives:
+- `{bin} task artifact add --task {task_id} --path PATH [--kind KIND] [--caption TEXT] [--lead]` — attach a file (copied into cc-hub's store, survives worktree cleanup) or a URL (stored as-is). `KIND` is free-form; common values: `screenshot`, `video`, `log`, `build`, `test`, `diff`, `file`, `url`. URL-shaped paths default to `kind=url`. Pass `--lead` on exactly one artifact — the strongest single piece of proof. Re-passing `--lead` on a later add moves the designation.
 - `{bin} task artifact list --task {task_id}` — review what's already attached, including which one is the current lead.
 
 What counts as proof, and which to lead, by change type:
-- **Web / UI** — screenshot or short screen recording of the rendered feature. Lead with the screenshot/recording. For regression fixes, attach before *and* after; lead the after.
+- **Web / UI** — screenshot or short screen recording. Lead the screenshot/recording. For regression fixes, attach before *and* after; lead the after.
 - **CLI / library / backend** — terminal recording (asciinema if available) or captured command output (`--kind log`). Lead the recording, or the log if no recording is feasible.
 - **Tests / CI / build** — the build log file, or a URL to the CI run (`--kind url`). Lead the green run.
-- **Refactors (no behavioural change)** — a `diff` artifact summarising the change plus a `log` showing build + tests still pass. Lead the log (it's the \"still works\" proof).
-- **Bug fixes** — a log showing the repro failing before and passing after the fix, OR a regression test added in the same change (mention its path in the summary). Lead the after-log, or the new test file.
+- **Refactors (no behavioural change)** — a `diff` artifact plus a `log` showing build + tests still pass. Lead the log (it's the \"still works\" proof).
+- **Bug fixes** — a log showing the repro failing before and passing after, OR a regression test added in the same change. Lead the after-log, or the new test file.
 
-On the final `task report --status done` call:
-- `--note \"<headline proof>\"` — one line, present tense, declares the outcome and points at the lead. Examples: \"login redirects to /home; see screenshot\", \"import streams 2 GB CSV at 50 MB/s; see asciinema\". **Not** \"completed login flow\", \"task done\", or any status-update phrasing — the note is the proof.
-- `--summary` — **optional appendix**, kept short. Cover only what the note + lead can't: key files changed (a few — not exhaustive) and what was deliberately out of scope. Don't restate the work — the user already read the note. Skip `--summary` entirely if there's nothing the lead artifact and note don't already convey.
-
-Use a heredoc so summary newlines survive the shell:
-`{bin} task report --task {task_id} --status done --note \"<headline proof>\" --summary \"$(cat <<'EOF'
-<short appendix — files changed, out-of-scope>
-EOF
-)\"`
+The PR's `--description` is a short appendix: cover only what the title + lead artifact don't already convey (key files changed, what was deliberately out of scope). The title plus the lead artifact should communicate the **headline proof** on their own.
 
 # Queuing follow-up work
 
-If during this task you identify substantive follow-up work — a separate problem the user will likely want addressed but that's out of scope here — create a Backlog task for it instead of expanding scope or losing the idea:
-
+If you spot substantive follow-up work — a separate problem out of scope here — create a Backlog task instead of expanding scope:
 `{bin} task create --backlog --prompt \"<scoped prompt for the follow-up>\" [--project-id ID]`
 
-This writes a new task with status `backlog` and does NOT spawn an orchestrator. The user reviews backlog tasks from the Projects view and starts them manually when ready. Use it for: research findings that suggest a separate cleanup, bugs noticed but not in scope, refactors a worker recommended, etc. Keep the prompt self-contained — the future orchestrator won't have your context.
+Writes a new task with status `backlog`; does NOT spawn an orchestrator. The user reviews and starts it manually. Keep the prompt self-contained — the future orchestrator won't have your context.
 
 # Rules
 
+- **Never edit `main` directly.** All changes flow worktree → PR → user-approved merge. The merge lock is the only thing that mutates main, and only `pr merge` acquires it.
 - Don't ask the user clarifying questions. If the task is ambiguous, pick the most reasonable interpretation and note your assumption in the first status report.
-- Don't implement yourself unless the task is genuinely tiny (a few lines in one file) and faster to do than to dispatch.
 - Each worktree owns its files. Don't run two parallel worktree workers whose files overlap.
-- If a worker creates or edits `.gitignore`, instruct it to include `.cc-hub-wt/` so cc-hub's worktree dirs don't pollute future commits.
-- The user can micro-manage from the Sessions view; you don't need to surface every detail in reports — just milestones.
+- On unrecoverable failure: `{bin} task report --task {task_id} --status failed --note \"<why>\"`.
 
 # Your task
 
 {prompt}
 
-Begin by writing your decomposition plan as the first `{bin} task report` call, then start dispatching.",
+Begin by exploring the relevant files, then open with your first `{bin} task report`. Spin up worktree workers as needed, open the PR when ready, iterate on feedback, and merge once approved.",
         task_id = task_id,
         project_id = project_id,
         root = project_root.display(),
@@ -952,20 +987,16 @@ pub fn branch_changed_paths(
         .collect())
 }
 
-/// Merge `<branch>` into `<main>` from the project root. Performs two
-/// pre-flight checks before any tree mutation:
+/// Merge `<branch>` into `<main>` from the project root. Performs one
+/// pre-flight check before any tree mutation: if any uncommitted
+/// working-tree change overlaps a file the feature branch also modified,
+/// returns [`MergeOutcome::BlockedByDirtyTree`]. `overlap` lists the
+/// repo-relative paths the user must commit, stash, or revert before
+/// retrying.
 ///
-/// 1. Consults the project's reservations file. If another task holds an
-///    `active` reservation overlapping the branch's changed paths, returns
-///    [`MergeOutcome::BlockedByActiveOrchestrator`]. `current_task_id` is
-///    excluded so a task never blocks on itself. Reservations are
-///    advisory — if the side file is unreadable we degrade silently
-///    rather than blocking a merge that would otherwise succeed.
-///
-/// 2. If any uncommitted working-tree change overlaps a file the feature
-///    branch also modified, returns [`MergeOutcome::BlockedByDirtyTree`].
-///    `overlap` lists the repo-relative paths the user must commit,
-///    stash, or revert before retrying.
+/// Cross-orchestrator serialization is enforced one level up by the
+/// project-wide merge lock (`merge_lock` module) — `pr merge` acquires it
+/// before invoking this function.
 ///
 /// Returns [`MergeOutcome::Conflict`] for the classical content-conflict
 /// case where git started the merge and hit overlapping edits in
@@ -976,50 +1007,15 @@ pub fn branch_changed_paths(
 /// markers in source files, broke the build, and shifted resolution onto
 /// the user without warning. Refusing up front is safer; the user's
 /// recipe is one git command (`git stash`, `git commit`, or
-/// `git checkout --`) followed by re-running `merge-worktree`.
+/// `git checkout --`) followed by re-running the merge.
 pub fn merge_branch(
     project_root: &Path,
     main_branch: &str,
     feature_branch: &str,
-    project_id: &str,
-    current_task_id: &str,
 ) -> io::Result<(MergeOutcome, String, String)> {
-    // Compute branch's changed-paths once for both preflight checks.
     let changed = branch_changed_paths(project_root, main_branch, feature_branch)?;
 
-    // Preflight 1: cross-orchestrator reservation check. Done before we
-    // mutate the working tree (`git checkout main`) so a merge that
-    // can't proceed leaves no trace.
-    if !changed.is_empty() {
-        match crate::reservations::overlapping_active(
-            project_id,
-            current_task_id,
-            &changed,
-        ) {
-            Ok(blockers) => {
-                if let Some((blocking_task, paths)) = blockers.into_iter().next() {
-                    return Ok((
-                        MergeOutcome::BlockedByActiveOrchestrator {
-                            task_id: blocking_task,
-                            paths,
-                        },
-                        String::new(),
-                        String::new(),
-                    ));
-                }
-            }
-            Err(e) => {
-                // Reservations are advisory — degrade to current behaviour
-                // rather than blocking a merge on an unreadable side file.
-                log::warn!(
-                    "merge_branch: reservations check failed (degrading to no-check): {}",
-                    e
-                );
-            }
-        }
-    }
-
-    // Preflight 2: refuse if dirty tree overlaps the branch's file set.
+    // Preflight: refuse if dirty tree overlaps the branch's file set.
     // BTreeSet so the overlap list is stable for tests.
     let dirty: std::collections::BTreeSet<String> =
         dirty_paths(project_root)?.into_iter().collect();
@@ -1069,12 +1065,7 @@ pub fn merge_branch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Tests that mutate `$HOME` to redirect `cc_hub_home()` at a tempdir
-    // would otherwise race each other (HOME is process-global). Hold this
-    // mutex for the duration of any such test.
-    static HOME_TEST_LOCK: Mutex<()> = Mutex::new(());
+    use crate::test_util::HOME_TEST_LOCK;
 
     #[test]
     fn project_id_is_stable_and_sanitised() {
@@ -1254,6 +1245,16 @@ mod tests {
     }
 
     #[test]
+    fn task_status_merging_serialises_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&TaskStatus::Merging).unwrap(),
+            "\"merging\""
+        );
+        let parsed: TaskStatus = serde_json::from_str("\"merging\"").unwrap();
+        assert_eq!(parsed, TaskStatus::Merging);
+    }
+
+    #[test]
     fn backlog_task_round_trips_through_serde() {
         let s = TaskState::new_backlog(
             "myproj".into(),
@@ -1298,7 +1299,10 @@ mod tests {
             "user prompt missing"
         );
 
-        // Binary path appears in every primitive.
+        // PR-flow primitives — every command the orchestrator is expected
+        // to invoke must appear in the prompt with the absolute binary path
+        // pre-substituted. If any of these drift, the orchestrator's Bash
+        // shell would have to guess the path (a real failure mode).
         let bin_s = bin.display().to_string();
         let expected_primitives = [
             format!(
@@ -1309,10 +1313,10 @@ mod tests {
                 "{} spawn-worker --task {} --worktree",
                 bin_s, state.task_id
             ),
-            format!(
-                "{} merge-worktree --task {} --worktree",
-                bin_s, state.task_id
-            ),
+            format!("{} pr create --task {}", bin_s, state.task_id),
+            format!("{} pr show --task {}", bin_s, state.task_id),
+            format!("{} pr merge --task {}", bin_s, state.task_id),
+            format!("{} pr finalize --task {}", bin_s, state.task_id),
             format!("{} task report --task {}", bin_s, state.task_id),
         ];
         for cmd in &expected_primitives {
@@ -1325,17 +1329,39 @@ mod tests {
             p.contains("clarifying"),
             "missing 'don't ask clarifying questions' rule"
         );
-        // Worktree-gitignore guidance — caught the one shortcoming from
-        // the first end-to-end run.
         assert!(
             p.contains(".cc-hub-wt/"),
             "missing .cc-hub-wt/ gitignore guidance"
         );
-        // Monitor channel guidance — replaces the 5-min `until` loop
-        // pattern that the orchestrator picked up first time.
         assert!(
             p.contains("tmux capture-pane"),
             "missing capture-pane monitor guidance"
+        );
+
+        // Core PR-flow framing. The orchestrator must *never* edit main
+        // directly — every change flows through a worktree branch and a PR.
+        assert!(
+            p.contains("Pull Request") || p.contains("PR"),
+            "missing PR-flow framing"
+        );
+        assert!(
+            p.contains("Never edit `main` directly")
+                || p.contains("never edit `main` directly")
+                || p.contains("You **do not** edit"),
+            "missing 'never edit main directly' rule"
+        );
+        assert!(
+            p.contains("merge lock"),
+            "missing merge-lock framing — the prompt must explain that merges \
+             are serialized project-wide"
+        );
+        assert!(
+            p.contains("Merging"),
+            "missing Merging state reference"
+        );
+        assert!(
+            p.contains("auto-demoted") || p.contains("auto-approve"),
+            "missing auto-approve / auto-demote conflict-resolution policy"
         );
 
         // Proof-of-work guidance — done isn't done without evidence.
@@ -1351,55 +1377,41 @@ mod tests {
             "missing artifact-add primitive in proof-of-work section"
         );
         assert!(
-            p.contains("--summary"),
-            "missing --summary guidance for final report"
-        );
-        // Progressive-disclosure framing — the note is the proof, not a
-        // status update; exactly one artifact must be flagged --lead.
-        assert!(
             p.contains("--lead"),
             "missing --lead guidance in proof-of-work section"
         );
         assert!(
             p.contains("headline proof"),
-            "missing headline-proof framing for --note"
+            "missing headline-proof framing"
         );
 
-        // Reservations lifecycle — declare/upgrade/list/release must all be
-        // referenced so the orchestrator coordinates with peers per the
-        // soft-reservations design.
-        for verb in ["declare", "upgrade", "list", "release"] {
-            assert!(
-                p.contains(&format!("reservations {}", verb)),
-                "missing `reservations {}` reference in prompt",
-                verb
-            );
-        }
-        assert!(
-            p.contains("research while waiting"),
-            "missing 'research while waiting' framing — orchestrator should \
-             front-load read-only subtasks while yielded, not block idle"
-        );
-        assert!(
-            p.contains("blocked_by_active_orchestrator"),
-            "missing fourth merge-failure recipe (blocked by active orchestrator)"
-        );
-        // The recipe must reference the actual JSON fields the merge CLI
-        // emits (cli.rs:455-465: blocked_by_active_orchestrator + blocking_task
-        // + overlap), otherwise an orchestrator following the recipe will
-        // grep for a non-existent `task_id` field and silently fall through.
-        assert!(
-            p.contains("blocking_task"),
-            "fourth merge-failure recipe must name the `blocking_task` JSON \
-             field emitted by the merge-worktree CLI, not a different one"
-        );
-        // Post-merge automation: each completed task should land on a green,
+        // Post-merge automation: each completed task lands on a green,
         // simplified, version-stamped main.
         for skill in ["/simplify", "/bump"] {
             assert!(
                 p.contains(skill),
                 "missing post-merge `{}` step in prompt",
                 skill
+            );
+        }
+
+        // Old-flow words that *must* be absent — the prompt rewrite is the
+        // only place that referenced these, and leaving them in would
+        // teach orchestrators verbs that no longer exist as CLI subcommands.
+        for forbidden in [
+            "merge-worktree",
+            "reservations declare",
+            "reservations upgrade",
+            "reservations list",
+            "reservations release",
+            "blocked_by_active_orchestrator",
+        ] {
+            assert!(
+                !p.contains(forbidden),
+                "prompt still references removed concept `{}` — \
+                 this is the PR-flow rewrite; reservations and \
+                 merge-worktree are gone",
+                forbidden
             );
         }
     }

@@ -7,12 +7,22 @@ pub mod focus;
 pub mod folder_picker;
 pub mod gh;
 pub mod live_view;
+pub mod merge_lock;
 pub mod metrics;
 pub mod models;
 pub mod orchestrator;
-pub mod platform;
-pub mod reservations;
+pub mod pr;
 pub mod projects_scan;
+
+#[cfg(test)]
+pub(crate) mod test_util {
+    //! Shared `$HOME`-mutating test mutex. Several modules' tests redirect
+    //! `$HOME` at a tempdir to exercise filesystem helpers; without a
+    //! cross-module lock they race on the global env var.
+    use std::sync::Mutex;
+    pub static HOME_TEST_LOCK: Mutex<()> = Mutex::new(());
+}
+pub mod platform;
 pub mod scanner;
 pub mod send;
 pub mod spawn;

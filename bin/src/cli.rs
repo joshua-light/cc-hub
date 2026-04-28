@@ -41,7 +41,7 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
         "merge-worktree" => Some(handle(merge_worktree(rest))),
         "task" => Some(handle(task_subcommand(rest))),
         "orchestrate" => Some(handle(orchestrate_subcommand(rest))),
-        "reservations" => Some(handle(reservations_subcommand(rest))),
+        "pr" => Some(handle(pr_subcommand(rest))),
         _ => None,
     }
 }
@@ -97,19 +97,12 @@ struct Flags {
     wait_secs: Option<u64>,
     dry_run: bool,
     backlog: bool,
-    /// `reservations` verbs. Multi-value flags: each greedily consumes
-    /// subsequent argv entries until the next `--flag` token, mirroring
-    /// `gh issue list --label foo bar`. Only used by the `reservations`
-    /// subcommand; harmless if other commands ignore them.
-    paths: Vec<String>,
-    add_paths: Vec<String>,
-    worker_paths: Vec<String>,
-    until_clear: Vec<String>,
-    worker_id: Option<String>,
-    phase: Option<String>,
-    to: Option<String>,
-    timeout_secs: Option<u64>,
-    include_stale: bool,
+    /// PR-flow flags. `--title` / `--description` for `pr create`,
+    /// `--comment` + `--author` for `pr request-changes` / `pr comment`.
+    title: Option<String>,
+    description: Option<String>,
+    comment: Option<String>,
+    author: Option<String>,
 }
 
 fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
@@ -181,37 +174,17 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
                 f.backlog = true;
                 i += 1;
             }
-            "--paths" => {
-                f.paths = consume_multi(args, &mut i);
+            "--title" => {
+                f.title = Some(next_value(args, &mut i, "--title")?);
             }
-            "--add-paths" => {
-                f.add_paths = consume_multi(args, &mut i);
+            "--description" => {
+                f.description = Some(next_value(args, &mut i, "--description")?);
             }
-            "--worker-paths" => {
-                f.worker_paths = consume_multi(args, &mut i);
+            "--comment" => {
+                f.comment = Some(next_value(args, &mut i, "--comment")?);
             }
-            "--until-clear" => {
-                f.until_clear = consume_multi(args, &mut i);
-            }
-            "--worker-id" => {
-                f.worker_id = Some(next_value(args, &mut i, "--worker-id")?);
-            }
-            "--phase" => {
-                f.phase = Some(next_value(args, &mut i, "--phase")?);
-            }
-            "--to" => {
-                f.to = Some(next_value(args, &mut i, "--to")?);
-            }
-            "--timeout" => {
-                let v = next_value(args, &mut i, "--timeout")?;
-                f.timeout_secs = Some(
-                    v.parse()
-                        .map_err(|e| CliError::Usage(format!("--timeout: {}", e)))?,
-                );
-            }
-            "--include-stale" => {
-                f.include_stale = true;
-                i += 1;
+            "--author" => {
+                f.author = Some(next_value(args, &mut i, "--author")?);
             }
             other => {
                 return Err(CliError::Usage(format!("unknown flag: {}", other)));
@@ -219,22 +192,6 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
         }
     }
     Ok(f)
-}
-
-/// Consume the multi-value tail of a flag like `--paths a b c`. Stops on
-/// the next `--flag` token or end-of-argv. The caller's index lands on the
-/// next flag, just like `next_value`.
-fn consume_multi(args: &[String], i: &mut usize) -> Vec<String> {
-    *i += 1;
-    let mut out = Vec::new();
-    while let Some(arg) = args.get(*i) {
-        if arg.starts_with("--") {
-            break;
-        }
-        out.push(arg.clone());
-        *i += 1;
-    }
-    out
 }
 
 fn next_value(args: &[String], i: &mut usize, name: &str) -> Result<String, CliError> {
@@ -422,17 +379,13 @@ fn merge_worktree(args: &[String]) -> Result<(), CliError> {
     let main = orchestrator::detect_main_branch(&project_root);
 
     let (outcome, stdout, stderr) =
-        orchestrator::merge_branch(&project_root, &main, &branch, &project_id, &task_id)
+        orchestrator::merge_branch(&project_root, &main, &branch)
             .map_err(|e| CliError::Other(format!("merge: {}", e)))?;
 
-    // Don't persist a MergeRecord for either pre-flight refusal — the
-    // merge never started, so recording it as "attempted" would mislead
-    // the Projects view. Conflict/Ok still get recorded as before.
-    let is_preflight_block = matches!(
-        outcome,
-        MergeOutcome::BlockedByActiveOrchestrator { .. }
-            | MergeOutcome::BlockedByDirtyTree { .. }
-    );
+    // Don't persist a MergeRecord for the dirty-tree pre-flight refusal —
+    // the merge never started, so recording it as "attempted" would
+    // mislead the Projects view. Conflict/Ok still get recorded.
+    let is_preflight_block = matches!(outcome, MergeOutcome::BlockedByDirtyTree { .. });
     if !is_preflight_block {
         let record = MergeRecord {
             worktree: worktree_name.clone(),
@@ -452,17 +405,6 @@ fn merge_worktree(args: &[String]) -> Result<(), CliError> {
         "stdout": stdout,
         "stderr": stderr,
     });
-    if let MergeOutcome::BlockedByActiveOrchestrator { task_id: blocking, paths } = &outcome {
-        payload["blocked_by_active_orchestrator"] = serde_json::Value::Bool(true);
-        payload["blocking_task"] = serde_json::Value::String(blocking.clone());
-        payload["overlap"] = serde_json::Value::Array(
-            paths.iter().cloned().map(serde_json::Value::String).collect(),
-        );
-        payload["recipe"] = serde_json::Value::String(format!(
-            "Wait for task {} to release its active reservation, then re-run cc-hub merge-worktree.",
-            blocking
-        ));
-    }
     if let MergeOutcome::BlockedByDirtyTree { overlap } = &outcome {
         payload["blocked_by_dirty_tree"] = serde_json::json!(true);
         payload["overlap"] = serde_json::json!(overlap);
@@ -477,12 +419,6 @@ fn merge_worktree(args: &[String]) -> Result<(), CliError> {
         MergeOutcome::Conflict { .. } => Err(CliError::Other(
             "merge produced conflicts; resolve in the worktree or main".into(),
         )),
-        MergeOutcome::BlockedByActiveOrchestrator { task_id: blocking, .. } => Err(
-            CliError::Other(format!(
-                "blocked by active reservation held by task {}",
-                blocking
-            )),
-        ),
         MergeOutcome::BlockedByDirtyTree { overlap } => Err(CliError::Other(format!(
             "merge blocked: working tree on `{}` has uncommitted edits in {} file(s) the branch also modified ({}); commit/stash/revert and retry",
             main,
@@ -633,12 +569,13 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         None => None,
         Some("running") => Some(TaskStatus::Running),
         Some("review") => Some(TaskStatus::Review),
+        Some("merging") => Some(TaskStatus::Merging),
         Some("done") => Some(TaskStatus::Done),
         Some("failed") => Some(TaskStatus::Failed),
         Some("backlog") => Some(TaskStatus::Backlog),
         Some(other) => {
             return Err(CliError::Usage(format!(
-                "--status must be running|review|done|failed|backlog (got {})",
+                "--status must be running|review|merging|done|failed|backlog (got {})",
                 other
             )));
         }
@@ -697,16 +634,6 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         && prev_status.as_ref() != Some(&state.status);
     if became_terminal {
         orchestrator::cleanup_task_sessions(&state);
-    }
-
-    // Heartbeat refresh: every `task report` keeps the task's reservations
-    // alive (see reservations::RESERVATION_TTL_SECS). Failures here must
-    // never break task report — log and move on.
-    if let Err(e) = cc_hub_lib::reservations::refresh_heartbeat(&project_id, &task_id) {
-        log::debug!(
-            "task report heartbeat: refresh failed for {}/{}: {}",
-            project_id, task_id, e
-        );
     }
 
     print_json(&serde_json::json!({
@@ -1035,262 +962,527 @@ fn task_create(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-// ─── reservations ────────────────────────────────────────────────────────
 
-fn reservations_subcommand(args: &[String]) -> Result<(), CliError> {
+// ─── pr ──────────────────────────────────────────────────────────────────
+//
+// PR-flow primitives. The orchestrator opens a PR with `pr create`, the user
+// reviews in the TUI (or via `pr approve` / `pr request-changes` from the
+// CLI), and merging is serialized through the per-project merge lock:
+//
+//   pr create   → task: Running → Review,  PR: (new, Open)
+//   pr request-changes → task: Review → Running, PR: ChangesRequested
+//   pr approve  → PR: Open|ChangesRequested → Approved (task stays Review)
+//   pr merge    → acquires merge.lock, merges main → branch then branch →
+//                 main; lock stays held; task: Review → Merging
+//   pr finalize → releases merge.lock; task: Merging → Done; PR: Merged
+//
+// `pr show` is a read-only convenience for inspection / scripting.
+
+fn pr_subcommand(args: &[String]) -> Result<(), CliError> {
     let (verb, rest) = args.split_first().ok_or_else(|| {
         CliError::Usage(
-            "reservations <verb>: missing verb (try `declare`, `upgrade`, `downgrade`, `release`, `list`, or `wait`)"
-                .into(),
+            "pr <verb>: missing verb (try `create`, `show`, `approve`, `request-changes`, `comment`, `merge`, `finalize`)".into(),
         )
     })?;
     match verb.as_str() {
-        "declare" => reservations_declare(rest),
-        "upgrade" => reservations_upgrade(rest),
-        "downgrade" => reservations_downgrade(rest),
-        "release" => reservations_release(rest),
-        "list" => reservations_list(rest),
-        "wait" => reservations_wait(rest),
+        "create" => pr_create(rest),
+        "show" => pr_show(rest),
+        "approve" => pr_approve(rest),
+        "request-changes" => pr_request_changes(rest),
+        "comment" => pr_comment(rest),
+        "merge" => pr_merge(rest),
+        "finalize" => pr_finalize(rest),
         other => Err(CliError::Usage(format!(
-            "unknown reservations verb: {} (try `declare`, `upgrade`, `downgrade`, `release`, `list`, or `wait`)",
+            "unknown pr verb: {} (try `create`, `show`, `approve`, `request-changes`, `comment`, `merge`, `finalize`)",
             other
         ))),
     }
 }
 
-fn owner_session_from_env() -> String {
-    std::env::var("CCHUB_ORCHESTRATOR_SESSION").unwrap_or_default()
-}
-
-fn reservation_to_json(r: &cc_hub_lib::reservations::Reservation) -> serde_json::Value {
+fn pr_to_json(pr: &cc_hub_lib::pr::PullRequest) -> serde_json::Value {
     serde_json::json!({
-        "task_id": r.task_id,
-        "worker_id": r.worker_id,
-        "phase": match r.phase {
-            cc_hub_lib::reservations::Phase::Intended => "intended",
-            cc_hub_lib::reservations::Phase::Active => "active",
+        "id": pr.id,
+        "task_id": pr.task_id,
+        "project_id": pr.project_id,
+        "branch": pr.branch,
+        "base": pr.base,
+        "title": pr.title,
+        "description": pr.description,
+        "review_state": match pr.review_state {
+            cc_hub_lib::pr::ReviewState::Open => "open",
+            cc_hub_lib::pr::ReviewState::ChangesRequested => "changes_requested",
+            cc_hub_lib::pr::ReviewState::Approved => "approved",
+            cc_hub_lib::pr::ReviewState::Merged => "merged",
+            cc_hub_lib::pr::ReviewState::Closed => "closed",
         },
-        "paths": r.paths,
-        "owner_session": r.owner_session,
-        "created_at": r.created_at,
-        "last_heartbeat": r.last_heartbeat,
+        "comments": pr.comments,
+        "approved_at_branch_sha": pr.approved_at_branch_sha,
+        "approved_at_base_sha": pr.approved_at_base_sha,
+        "created_at": pr.created_at,
+        "updated_at": pr.updated_at,
     })
 }
 
-fn conflicts_to_json(blockers: &[(String, Vec<String>)]) -> serde_json::Value {
-    serde_json::Value::Array(
-        blockers
-            .iter()
-            .map(|(t, p)| {
-                serde_json::json!({
-                    "task_id": t,
-                    "paths": p,
-                })
-            })
-            .collect(),
-    )
+fn pr_create(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+    let worktree_name = f
+        .worktree
+        .clone()
+        .ok_or_else(|| CliError::Usage("--worktree NAME is required".into()))?;
+    let title = f
+        .title
+        .clone()
+        .ok_or_else(|| CliError::Usage("--title is required".into()))?;
+    let description = f.description.clone().unwrap_or_default();
+
+    let state = orchestrator::read_task_state(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
+
+    if cc_hub_lib::pr::read_pr(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
+        .is_some()
+    {
+        return Err(CliError::Other(
+            "a PR already exists for this task; use `pr show` to inspect".into(),
+        ));
+    }
+
+    let branch = orchestrator::worktree_branch(&task_id, &worktree_name);
+    let base = orchestrator::detect_main_branch(&state.project_root);
+
+    let pr = cc_hub_lib::pr::create_pr(&state, branch, base, title, description)
+        .map_err(|e| CliError::Other(format!("create pr: {}", e)))?;
+
+    // PR open → task transitions Running → Review. The orchestrator's
+    // tmux stays alive so it can iterate when the user requests changes.
+    orchestrator::update_task_state(&project_id, &task_id, |s| {
+        s.status = TaskStatus::Review;
+        s.note = Some(format!("PR #{}: {}", pr.id, pr.title));
+    })
+    .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
+
+    print_json(&serde_json::json!({
+        "ok": true,
+        "pr": pr_to_json(&pr),
+    }));
+    Ok(())
 }
 
-fn reservations_declare(args: &[String]) -> Result<(), CliError> {
+fn pr_show(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+    let pr = cc_hub_lib::pr::read_pr(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
+        .ok_or_else(|| CliError::Other("no PR for this task".into()))?;
+    print_json(&serde_json::json!({
+        "ok": true,
+        "pr": pr_to_json(&pr),
+    }));
+    Ok(())
+}
+
+fn pr_approve(args: &[String]) -> Result<(), CliError> {
     let f = parse_flags(args)?;
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
 
-    // `--paths` replaces the existing intended entry's paths;
-    // `--add-paths` merges into them. Mixing both is rejected — the
-    // call-site always knows whether it's seeding or widening.
-    let (paths, replace) = match (f.paths.is_empty(), f.add_paths.is_empty()) {
-        (true, true) => {
-            return Err(CliError::Usage(
-                "--paths or --add-paths is required".into(),
-            ));
-        }
-        (false, true) => (f.paths.clone(), true),
-        (true, false) => (f.add_paths.clone(), false),
-        (false, false) => {
-            return Err(CliError::Usage(
-                "pass --paths OR --add-paths, not both".into(),
-            ));
+    let state = orchestrator::read_task_state(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
+    let project_root = state.project_root.clone();
+
+    let pr_branch = cc_hub_lib::pr::read_pr(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
+        .ok_or_else(|| CliError::Other("no PR for this task".into()))?
+        .branch
+        .clone();
+    let base_branch = orchestrator::detect_main_branch(&project_root);
+
+    // Snapshot SHAs at approval — used by `pr merge` to detect whether
+    // main moved before the merge fired (auto-approve heuristic).
+    let branch_sha = git_rev_parse(&project_root, &pr_branch).ok();
+    let base_sha = git_rev_parse(&project_root, &base_branch).ok();
+
+    let pr = cc_hub_lib::pr::update_pr(&project_id, &task_id, |p| {
+        p.review_state = cc_hub_lib::pr::ReviewState::Approved;
+        p.approved_at_branch_sha = branch_sha;
+        p.approved_at_base_sha = base_sha;
+    })
+    .map_err(|e| CliError::Other(format!("update pr: {}", e)))?;
+
+    print_json(&serde_json::json!({
+        "ok": true,
+        "pr": pr_to_json(&pr),
+    }));
+    Ok(())
+}
+
+fn pr_request_changes(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+    let comment = f
+        .comment
+        .clone()
+        .ok_or_else(|| CliError::Usage("--comment is required".into()))?;
+    let author = f.author.clone().unwrap_or_else(|| "user".into());
+
+    let now = orchestrator::now_unix_secs();
+    let pr = cc_hub_lib::pr::update_pr(&project_id, &task_id, |p| {
+        p.review_state = cc_hub_lib::pr::ReviewState::ChangesRequested;
+        p.comments.push(cc_hub_lib::pr::Comment {
+            author: author.clone(),
+            at: now,
+            body: comment.clone(),
+        });
+    })
+    .map_err(|e| CliError::Other(format!("update pr: {}", e)))?;
+
+    // Changes requested → task goes back to Running so the orchestrator
+    // can iterate. Its tmux is still alive (Review keeps it alive).
+    orchestrator::update_task_state(&project_id, &task_id, |s| {
+        s.status = TaskStatus::Running;
+        s.note = Some(format!("PR #{}: changes requested", pr.id));
+    })
+    .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
+
+    print_json(&serde_json::json!({
+        "ok": true,
+        "pr": pr_to_json(&pr),
+    }));
+    Ok(())
+}
+
+fn pr_comment(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+    let body = f
+        .comment
+        .clone()
+        .ok_or_else(|| CliError::Usage("--comment is required".into()))?;
+    let author = f.author.clone().unwrap_or_else(|| "orchestrator".into());
+
+    let now = orchestrator::now_unix_secs();
+    let pr = cc_hub_lib::pr::update_pr(&project_id, &task_id, |p| {
+        p.comments.push(cc_hub_lib::pr::Comment {
+            author: author.clone(),
+            at: now,
+            body: body.clone(),
+        });
+    })
+    .map_err(|e| CliError::Other(format!("update pr: {}", e)))?;
+
+    print_json(&serde_json::json!({
+        "ok": true,
+        "pr": pr_to_json(&pr),
+    }));
+    Ok(())
+}
+
+fn pr_merge(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+
+    let state = orchestrator::read_task_state(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
+    let project_root = state.project_root.clone();
+    let pr = cc_hub_lib::pr::read_pr(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
+        .ok_or_else(|| CliError::Other("no PR for this task".into()))?;
+
+    if pr.review_state != cc_hub_lib::pr::ReviewState::Approved {
+        return Err(CliError::Other(format!(
+            "PR is not approved (state: {:?}); approve it first via the TUI or `cc-hub pr approve`",
+            pr.review_state
+        )));
+    }
+
+    // Acquire the project-wide merge lock. Held across the entire merging
+    // phase — released by `pr finalize` after /simplify and /bump.
+    let acquire = cc_hub_lib::merge_lock::acquire(
+        &project_id,
+        &task_id,
+        state.orchestrator_tmux.as_deref(),
+    )
+    .map_err(|e| CliError::Other(format!("acquire merge lock: {}", e)))?;
+    if let cc_hub_lib::merge_lock::AcquireOutcome::Held(holder) = acquire {
+        print_json(&serde_json::json!({
+            "ok": false,
+            "locked": true,
+            "holder_task": holder.task_id,
+            "since": holder.acquired_at,
+            "recipe": "Another task currently holds the merge lock. Poll until clear (re-run `cc-hub pr merge`) or wait for it to release.",
+        }));
+        return Err(CliError::Other(format!(
+            "merge lock held by task {}",
+            holder.task_id
+        )));
+    }
+
+    // Step 1: bring main into the feature branch so the conflict
+    // resolution happens on the feature branch (where the worker can
+    // re-resolve cleanly), not on main itself.
+    let worktree_path = match resolve_worktree_path(&state, &pr.branch) {
+        Some(p) => p,
+        None => {
+            return Err(CliError::Other(format!(
+                "could not resolve worktree path for branch {} \
+                 (no Worker record matches; was the worktree removed?)",
+                pr.branch
+            )));
         }
     };
 
-    if let Some(phase) = f.phase.as_deref() {
-        if phase != "intended" {
-            return Err(CliError::Usage(
-                "declare only supports --phase intended".into(),
+    let merge_into_feature = orchestrator::run_git(
+        &worktree_path,
+        &[
+            "merge",
+            "--no-ff",
+            "-m",
+            &format!("cc-hub: merge {} into {}", pr.base, pr.branch),
+            &pr.base,
+        ],
+    )
+    .map_err(|e| CliError::Other(format!("git merge {} into branch: {}", pr.base, e)))?;
+
+    if !merge_into_feature.status_ok {
+        // Conflicts merging main into the feature branch. By the
+        // PR-flow design's auto-approve rule (only *clean* resolutions
+        // skip re-review), conflicts demote the PR back to Open: the
+        // user must re-approve once the orchestrator commits the
+        // resolution, since the diff they previously approved no
+        // longer matches what would land. The merge lock is released
+        // so other tasks can proceed in the meantime.
+        let conflicting = git_conflicting_paths(&worktree_path).unwrap_or_default();
+
+        // Abort the in-progress merge so the worktree returns to a
+        // clean state — the orchestrator will re-merge main once the
+        // user re-approves. We don't surface abort failures: if abort
+        // itself fails, the orchestrator can recover manually.
+        let _ = orchestrator::run_git(&worktree_path, &["merge", "--abort"]);
+
+        let comment_body = format!(
+            "Auto-demoted to Open: merging `{}` into the feature branch produced conflicts in {} \
+             file(s) ({}). cc-hub's auto-approve rule only accepts clean resolutions; resolve in \
+             the worktree, push the resolution commit, then ask the reviewer to re-approve.",
+            pr.base,
+            conflicting.len(),
+            conflicting.join(", "),
+        );
+        let now = orchestrator::now_unix_secs();
+        let _ = cc_hub_lib::pr::update_pr(&project_id, &task_id, |p| {
+            p.review_state = cc_hub_lib::pr::ReviewState::Open;
+            p.approved_at_branch_sha = None;
+            p.approved_at_base_sha = None;
+            p.comments.push(cc_hub_lib::pr::Comment {
+                author: "cc-hub".into(),
+                at: now,
+                body: comment_body.clone(),
+            });
+        });
+        let _ = orchestrator::update_task_state(&project_id, &task_id, |s| {
+            s.status = TaskStatus::Review;
+            s.note = Some(format!(
+                "PR #{}: conflicts during merge — re-review required",
+                pr.id
             ));
-        }
-    }
+        });
+        let _ = cc_hub_lib::merge_lock::release(&project_id, &task_id);
 
-    let owner = owner_session_from_env();
-    let entry = cc_hub_lib::reservations::declare(
-        &project_id,
-        &task_id,
-        &paths,
-        &owner,
-        replace,
-    )
-    .map_err(|e| CliError::Other(format!("declare: {}", e)))?;
-
-    // Surface conflicts the orchestrator might want to react to. This is a
-    // soft signal — declare always succeeds — so callers can choose to wait
-    // or proceed with research subtasks. Look at all paths the entry holds,
-    // not just the just-declared subset.
-    let blockers = cc_hub_lib::reservations::overlapping_active(
-        &project_id,
-        &task_id,
-        &entry.paths,
-    )
-    .unwrap_or_default();
-
-    print_json(&serde_json::json!({
-        "ok": true,
-        "reservation": reservation_to_json(&entry),
-        "conflicts": conflicts_to_json(&blockers),
-    }));
-    Ok(())
-}
-
-fn reservations_upgrade(args: &[String]) -> Result<(), CliError> {
-    let f = parse_flags(args)?;
-    let task_id = require_task(&f)?;
-    let project_id = resolve_project_id(&f)?;
-
-    if f.to.as_deref() != Some("active") {
-        return Err(CliError::Usage("upgrade requires --to active".into()));
-    }
-    let worker_id = f
-        .worker_id
-        .clone()
-        .ok_or_else(|| CliError::Usage("--worker-id is required".into()))?;
-    if f.worker_paths.is_empty() {
-        return Err(CliError::Usage(
-            "--worker-paths is required (one or more paths)".into(),
+        print_json(&serde_json::json!({
+            "ok": false,
+            "phase": "merge_main_into_branch",
+            "demoted_to": "open",
+            "conflicting_paths": conflicting,
+            "stdout": merge_into_feature.stdout,
+            "stderr": merge_into_feature.stderr,
+            "recipe": "Resolve conflicts in the worktree, commit the resolution, then ask the reviewer to re-approve before re-running `cc-hub pr merge`. The merge lock has been released.",
+        }));
+        return Err(CliError::Other(
+            "conflict merging main into the feature branch — PR demoted to Open".into(),
         ));
     }
 
-    let outcome = cc_hub_lib::reservations::upgrade_to_active(
-        &project_id,
-        &task_id,
-        &worker_id,
-        &f.worker_paths,
-    )
-    .map_err(|e| CliError::Other(format!("upgrade: {}", e)))?;
-
-    match outcome {
-        cc_hub_lib::reservations::UpgradeOutcome::Ok(r) => {
-            print_json(&serde_json::json!({
-                "ok": true,
-                "reservation": reservation_to_json(&r),
-                "conflicts": serde_json::Value::Array(vec![]),
-            }));
-            Ok(())
-        }
-        cc_hub_lib::reservations::UpgradeOutcome::Conflict { task_id: blocking, paths } => {
-            print_json(&serde_json::json!({
-                "ok": false,
-                "conflicts": conflicts_to_json(&[(blocking.clone(), paths.clone())]),
-                "recipe": format!(
-                    "Wait for task {} to release its active reservation, then re-run upgrade.",
-                    blocking
-                ),
-            }));
-            Err(CliError::Other(format!(
-                "upgrade blocked by active reservation held by task {}",
-                blocking
-            )))
-        }
-    }
-}
-
-fn reservations_downgrade(args: &[String]) -> Result<(), CliError> {
-    let f = parse_flags(args)?;
-    let task_id = require_task(&f)?;
-    let project_id = resolve_project_id(&f)?;
-
-    cc_hub_lib::reservations::downgrade(&project_id, &task_id, f.worker_id.as_deref())
-        .map_err(|e| CliError::Other(format!("downgrade: {}", e)))?;
-
-    print_json(&serde_json::json!({
-        "ok": true,
-        "task_id": task_id,
-        "project_id": project_id,
-        "worker_id": f.worker_id,
-    }));
-    Ok(())
-}
-
-fn reservations_release(args: &[String]) -> Result<(), CliError> {
-    let f = parse_flags(args)?;
-    let task_id = require_task(&f)?;
-    let project_id = resolve_project_id(&f)?;
-
-    cc_hub_lib::reservations::release(&project_id, &task_id, f.worker_id.as_deref())
-        .map_err(|e| CliError::Other(format!("release: {}", e)))?;
-
-    print_json(&serde_json::json!({
-        "ok": true,
-        "task_id": task_id,
-        "project_id": project_id,
-        "worker_id": f.worker_id,
-    }));
-    Ok(())
-}
-
-fn reservations_list(args: &[String]) -> Result<(), CliError> {
-    let f = parse_flags(args)?;
-    let project_id = resolve_project_id(&f)?;
-
-    let entries = cc_hub_lib::reservations::list(&project_id, f.include_stale)
-        .map_err(|e| CliError::Other(format!("list: {}", e)))?;
-    let arr: Vec<serde_json::Value> =
-        entries.iter().map(reservation_to_json).collect();
-    print_json(&serde_json::Value::Array(arr));
-    Ok(())
-}
-
-const WAIT_POLL_INTERVAL_SECS: u64 = 5;
-const WAIT_DEFAULT_TIMEOUT_SECS: u64 = 600;
-
-fn reservations_wait(args: &[String]) -> Result<(), CliError> {
-    let f = parse_flags(args)?;
-    let task_id = require_task(&f)?;
-    let project_id = resolve_project_id(&f)?;
-    if f.until_clear.is_empty() {
-        return Err(CliError::Usage(
-            "--until-clear is required (one or more paths)".into(),
+    // Step 2: dirty-tree preflight on main. Distinct from cross-task
+    // conflicts (which the merge lock already handles) — this catches
+    // the user's local uncommitted edits.
+    let changed = orchestrator::branch_changed_paths(&project_root, &pr.base, &pr.branch)
+        .map_err(|e| CliError::Other(format!("diff branch: {}", e)))?;
+    let dirty: std::collections::BTreeSet<String> =
+        orchestrator::dirty_paths(&project_root)
+            .map_err(|e| CliError::Other(format!("git status: {}", e)))?
+            .into_iter()
+            .collect();
+    let branch_files: std::collections::BTreeSet<String> = changed.iter().cloned().collect();
+    let overlap: Vec<String> = dirty.intersection(&branch_files).cloned().collect();
+    if !overlap.is_empty() {
+        // Release the lock so other tasks can merge while the user
+        // cleans up their working tree. The PR remains Approved; the
+        // orchestrator simply re-runs `pr merge` once the user has
+        // committed/stashed/reverted.
+        let _ = cc_hub_lib::merge_lock::release(&project_id, &task_id);
+        print_json(&serde_json::json!({
+            "ok": false,
+            "phase": "preflight",
+            "blocked_by_dirty_tree": true,
+            "overlap": overlap,
+            "recipe": "Commit, stash, or revert the listed paths on the target branch, then re-run `cc-hub pr merge`. The merge lock has been released.",
+        }));
+        return Err(CliError::Other(
+            "merge blocked: working tree on target branch has overlapping uncommitted edits"
+                .into(),
         ));
     }
-    let timeout = f.timeout_secs.unwrap_or(WAIT_DEFAULT_TIMEOUT_SECS);
-    let started = Instant::now();
-    let deadline = started + Duration::from_secs(timeout);
 
-    loop {
-        let blockers = cc_hub_lib::reservations::overlapping_active(
-            &project_id,
-            &task_id,
-            &f.until_clear,
-        )
-        .unwrap_or_default();
-        if blockers.is_empty() {
-            print_json(&serde_json::json!({
-                "ok": true,
-                "waited_secs": started.elapsed().as_secs(),
-            }));
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            print_json(&serde_json::json!({
-                "ok": false,
-                "timed_out": true,
-                "blockers": conflicts_to_json(&blockers),
-            }));
-            return Err(CliError::Other(format!(
-                "timed out after {}s waiting for reservations to clear",
-                timeout
-            )));
-        }
-        std::thread::sleep(Duration::from_secs(WAIT_POLL_INTERVAL_SECS));
+    // Step 3: merge feature branch into main. Should be conflict-free
+    // since we already merged main into the branch in step 1.
+    let checkout = orchestrator::run_git(&project_root, &["checkout", &pr.base])
+        .map_err(|e| CliError::Other(format!("git checkout: {}", e)))?;
+    if !checkout.status_ok {
+        return Err(CliError::Other(format!(
+            "git checkout {} failed: {}",
+            pr.base,
+            checkout.stderr.trim()
+        )));
     }
+    let msg = format!("cc-hub: merge {} into {} (PR #{})", pr.branch, pr.base, pr.id);
+    let merge_into_main = orchestrator::run_git(
+        &project_root,
+        &["merge", "--no-ff", "-m", &msg, &pr.branch],
+    )
+    .map_err(|e| CliError::Other(format!("git merge: {}", e)))?;
+
+    if !merge_into_main.status_ok {
+        // Should be rare given step 1, but possible if main moved
+        // concurrently inside the lock window (it shouldn't, since
+        // the lock serialises merges). Abort to leave main clean,
+        // release the lock, and surface to the orchestrator.
+        let conflicting = git_conflicting_paths(&project_root).unwrap_or_default();
+        let _ = orchestrator::run_git(&project_root, &["merge", "--abort"]);
+        let _ = cc_hub_lib::merge_lock::release(&project_id, &task_id);
+        print_json(&serde_json::json!({
+            "ok": false,
+            "phase": "merge_branch_into_main",
+            "conflicting_paths": conflicting,
+            "stdout": merge_into_main.stdout,
+            "stderr": merge_into_main.stderr,
+            "recipe": "Unexpected conflict merging into main (the merge lock should have prevented this — investigate before retrying).",
+        }));
+        return Err(CliError::Other("conflict merging into main".into()));
+    }
+
+    // Transition task to Merging. /simplify and /bump still need to run;
+    // `pr finalize` flips to Done afterwards.
+    orchestrator::update_task_state(&project_id, &task_id, |s| {
+        s.status = TaskStatus::Merging;
+        s.note = Some(format!("PR #{}: merged; running /simplify + /bump", pr.id));
+        s.merges.push(MergeRecord {
+            worktree: pr
+                .branch
+                .strip_prefix(&format!("cc-hub/{}-", task_id))
+                .unwrap_or(&pr.branch)
+                .to_string(),
+            at: orchestrator::now_unix_secs(),
+            outcome: MergeOutcome::Ok,
+        });
+    })
+    .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
+
+    print_json(&serde_json::json!({
+        "ok": true,
+        "phase": "merged",
+        "branch": pr.branch,
+        "base": pr.base,
+        "stdout": merge_into_main.stdout,
+        "next": "Run /simplify, then /bump, then `cc-hub pr finalize --task <id>` to release the merge lock and mark the task done.",
+    }));
+    Ok(())
+}
+
+fn pr_finalize(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+
+    cc_hub_lib::pr::update_pr(&project_id, &task_id, |p| {
+        p.review_state = cc_hub_lib::pr::ReviewState::Merged;
+    })
+    .map_err(|e| CliError::Other(format!("update pr: {}", e)))?;
+
+    let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
+        s.status = TaskStatus::Done;
+    })
+    .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
+
+    let released = cc_hub_lib::merge_lock::release(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("release merge lock: {}", e)))?;
+
+    // Cleanup the orchestrator tmux now that the task is fully done.
+    orchestrator::cleanup_task_sessions(&state);
+
+    print_json(&serde_json::json!({
+        "ok": true,
+        "released": released,
+        "task_id": task_id,
+        "status": "done",
+    }));
+    Ok(())
+}
+
+fn git_rev_parse(root: &std::path::Path, rev: &str) -> Result<String, String> {
+    let out = orchestrator::run_git(root, &["rev-parse", rev])
+        .map_err(|e| format!("git rev-parse: {}", e))?;
+    if !out.status_ok {
+        return Err(format!("git rev-parse {} failed: {}", rev, out.stderr.trim()));
+    }
+    Ok(out.stdout.trim().to_string())
+}
+
+/// `git diff --name-only --diff-filter=U` lists files with unresolved
+/// conflicts. Repo-relative paths.
+fn git_conflicting_paths(root: &std::path::Path) -> Result<Vec<String>, String> {
+    let out = orchestrator::run_git(
+        root,
+        &["diff", "--name-only", "--diff-filter=U", "-z"],
+    )
+    .map_err(|e| format!("git diff (conflicts): {}", e))?;
+    if !out.status_ok {
+        return Err(format!(
+            "git diff failed: {}",
+            out.stderr.trim()
+        ));
+    }
+    Ok(out
+        .stdout
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Locate the worktree directory for `branch` by checking the task's
+/// recorded workers. Falls back to the conventional `<root>/.cc-hub-wt/`
+/// path layout if no Worker record matches.
+fn resolve_worktree_path(
+    state: &TaskState,
+    branch: &str,
+) -> Option<PathBuf> {
+    for w in &state.workers {
+        if let Some(name) = &w.worktree {
+            let expected_branch = orchestrator::worktree_branch(&state.task_id, name);
+            if expected_branch == branch {
+                return Some(w.cwd.clone());
+            }
+        }
+    }
+    // Fallback: parse the branch name (cc-hub/<task>-<name>) and rebuild.
+    let stripped = branch.strip_prefix("cc-hub/")?;
+    let prefix = format!("{}-", state.task_id);
+    let name = stripped.strip_prefix(&prefix)?;
+    Some(orchestrator::worktree_path(&state.project_root, &state.task_id, name))
 }
 
