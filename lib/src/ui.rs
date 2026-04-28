@@ -14,6 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use ratatui_image::StatefulImage;
+use std::borrow::Cow;
 use std::path::Path;
 
 /// Shared dark band background painted by the tab strip, project chip strip,
@@ -1239,16 +1240,26 @@ fn render_text_card_body(frame: &mut Frame, area: Rect, a: &Artifact, max_bytes:
                 })
                 .collect();
             if truncated > 0 {
-                out.push(Line::from(Span::styled(
-                    format!("  … (truncated, {} more line{})", truncated, if truncated == 1 { "" } else { "s" }),
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-                )));
+                out.push(truncated_footer(truncated));
             }
             out
         }
     };
     let p = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(p, area);
+}
+
+fn truncated_footer(n: usize) -> Line<'static> {
+    Line::from(Span::styled(
+        format!(
+            "  … (truncated, {} more line{})",
+            n,
+            if n == 1 { "" } else { "s" }
+        ),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    ))
 }
 
 const DIFF_ADDED_BG: Color = Color::Rgb(34, 92, 43);
@@ -1259,11 +1270,31 @@ const DIFF_GUTTER_FG: Color = Color::Rgb(120, 120, 130);
 const DIFF_CONTEXT_FG: Color = Color::Rgb(160, 160, 170);
 const DIFF_HEADER_FG: Color = Color::Rgb(140, 180, 230);
 
+// `{old:>3} {new:>3} {marker} ` + 1-cell margin = 11 used cols.
+const DIFF_GUTTER_W: usize = 11;
+
 #[derive(Clone, Copy)]
 enum DiffRowKind {
     Added,
     Removed,
     Context,
+}
+
+impl DiffRowKind {
+    fn marker(self) -> &'static str {
+        match self {
+            DiffRowKind::Added => "+",
+            DiffRowKind::Removed => "-",
+            DiffRowKind::Context => " ",
+        }
+    }
+    fn palette(self) -> (Option<Color>, Color) {
+        match self {
+            DiffRowKind::Added => (Some(DIFF_ADDED_BG), DIFF_ADDED_FG),
+            DiffRowKind::Removed => (Some(DIFF_REMOVED_BG), DIFF_REMOVED_FG),
+            DiffRowKind::Context => (None, DIFF_CONTEXT_FG),
+        }
+    }
 }
 
 fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
@@ -1276,56 +1307,36 @@ fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
     Some((old_start, new_start))
 }
 
-fn truncate_to_width(s: &str, max: usize) -> (String, usize) {
-    if max == 0 {
-        return (String::new(), 0);
-    }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        return (s.to_string(), chars.len());
-    }
-    let take = max.saturating_sub(1);
-    let mut out: String = chars.iter().take(take).collect();
-    out.push('…');
-    (out, take + 1)
-}
-
 fn diff_row(
     area_width: u16,
     old: Option<u32>,
     new: Option<u32>,
-    marker: char,
     content: &str,
     kind: DiffRowKind,
 ) -> Line<'static> {
-    let (bg_opt, content_fg) = match kind {
-        DiffRowKind::Added => (Some(DIFF_ADDED_BG), DIFF_ADDED_FG),
-        DiffRowKind::Removed => (Some(DIFF_REMOVED_BG), DIFF_REMOVED_FG),
-        DiffRowKind::Context => (None, DIFF_CONTEXT_FG),
-    };
+    let (bg_opt, content_fg) = kind.palette();
     let base = match bg_opt {
         Some(b) => Style::default().bg(b),
         None => Style::default(),
     };
-    let old_str = old
-        .map(|n| format!("{:>3}", n))
-        .unwrap_or_else(|| "   ".to_string());
-    let new_str = new
-        .map(|n| format!("{:>3}", n))
-        .unwrap_or_else(|| "   ".to_string());
+    let fmt_num = |n: Option<u32>| n.map_or_else(|| "   ".to_string(), |v| format!("{:>3}", v));
 
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
-    spans.push(Span::styled(old_str, base.fg(DIFF_GUTTER_FG)));
+    spans.push(Span::styled(fmt_num(old), base.fg(DIFF_GUTTER_FG)));
     spans.push(Span::styled(" ", base));
-    spans.push(Span::styled(new_str, base.fg(DIFF_GUTTER_FG)));
+    spans.push(Span::styled(fmt_num(new), base.fg(DIFF_GUTTER_FG)));
     spans.push(Span::styled(" ", base));
-    spans.push(Span::styled(marker.to_string(), base.fg(content_fg)));
+    spans.push(Span::styled(kind.marker(), base.fg(content_fg)));
     spans.push(Span::styled("  ", base));
 
-    let used_cols: usize = 11;
-    let avail = (area_width as usize).saturating_sub(used_cols);
-    let normalized = content.replace('\t', "    ");
-    let (body, body_w) = truncate_to_width(&normalized, avail);
+    let avail = (area_width as usize).saturating_sub(DIFF_GUTTER_W);
+    let normalized: Cow<'_, str> = if content.contains('\t') {
+        Cow::Owned(content.replace('\t', "    "))
+    } else {
+        Cow::Borrowed(content)
+    };
+    let body = truncate_str(&normalized, avail);
+    let body_w = body.chars().count();
 
     let mut content_style = base.fg(content_fg);
     if matches!(kind, DiffRowKind::Context) {
@@ -1344,7 +1355,7 @@ fn diff_row(
 
 fn diff_separator_row() -> Line<'static> {
     Line::from(vec![
-        Span::raw("       "),
+        Span::raw(" ".repeat(DIFF_GUTTER_W.saturating_sub(3))),
         Span::styled(
             "...",
             Style::default()
@@ -1382,11 +1393,19 @@ fn build_diff_lines(
 ) -> Vec<Line<'static>> {
     let truncated_indicator = truncated > 0;
     let max_rows = (body_h as usize).saturating_sub(if truncated_indicator { 1 } else { 0 });
+    // Reserve space for a possible 2-row header (path + counts) so we don't
+    // push body rows that would later be truncated past the visible area.
+    let body_budget = max_rows.saturating_sub(2);
 
     let mut header_path: Option<String> = None;
     let mut added: u32 = 0;
     let mut removed: u32 = 0;
-    for raw in &content {
+    let mut body_rows: Vec<Line<'static>> = Vec::new();
+    let mut old_line: u32 = 0;
+    let mut new_line: u32 = 0;
+    let mut first_hunk = true;
+
+    for raw in content.into_iter() {
         if header_path.is_none() {
             if let Some(rest) = raw.strip_prefix("+++ b/") {
                 header_path = Some(rest.to_string());
@@ -1396,20 +1415,47 @@ fn build_diff_lines(
                 }
             }
         }
-        if raw.starts_with("+++") || raw.starts_with("---") || raw.starts_with("@@") {
+        if is_diff_meta_line(&raw) {
             continue;
         }
-        if raw.starts_with('+') {
-            added += 1;
-        } else if raw.starts_with('-') {
-            removed += 1;
+        if raw.starts_with("@@") {
+            if let Some((o, n)) = parse_hunk_header(&raw) {
+                old_line = o;
+                new_line = n;
+            }
+            if !first_hunk && body_rows.len() < body_budget {
+                body_rows.push(diff_separator_row());
+            }
+            first_hunk = false;
+            continue;
         }
+        let (kind, body, bump_old, bump_new) = match raw.as_bytes().first() {
+            Some(b'+') => (DiffRowKind::Added, &raw[1..], 0, 1),
+            Some(b'-') => (DiffRowKind::Removed, &raw[1..], 1, 0),
+            Some(b' ') => (DiffRowKind::Context, &raw[1..], 1, 1),
+            _ => (DiffRowKind::Context, raw.as_str(), 1, 1),
+        };
+        match kind {
+            DiffRowKind::Added => added += 1,
+            DiffRowKind::Removed => removed += 1,
+            DiffRowKind::Context => {}
+        }
+        if body_rows.len() < body_budget {
+            let (old_n, new_n) = match kind {
+                DiffRowKind::Added => (None, Some(new_line)),
+                DiffRowKind::Removed => (Some(old_line), None),
+                DiffRowKind::Context => (Some(old_line), Some(new_line)),
+            };
+            body_rows.push(diff_row(area_width, old_n, new_n, body, kind));
+        }
+        old_line += bump_old;
+        new_line += bump_new;
     }
 
-    let mut rows: Vec<Line<'static>> = Vec::new();
-    if let Some(p) = &header_path {
+    let mut rows: Vec<Line<'static>> = Vec::with_capacity(body_rows.len() + 3);
+    if let Some(p) = header_path {
         rows.push(Line::from(Span::styled(
-            p.clone(),
+            p,
             Style::default()
                 .fg(DIFF_HEADER_FG)
                 .add_modifier(Modifier::BOLD),
@@ -1421,82 +1467,12 @@ fn build_diff_lines(
                 .add_modifier(Modifier::BOLD),
         )));
     }
-
-    let mut old_line: u32 = 0;
-    let mut new_line: u32 = 0;
-    let mut first_hunk = true;
-
-    for raw in content.into_iter() {
-        if is_diff_meta_line(&raw) {
-            continue;
-        }
-        if raw.starts_with("@@") {
-            if let Some((o, n)) = parse_hunk_header(&raw) {
-                old_line = o;
-                new_line = n;
-            }
-            if !first_hunk {
-                rows.push(diff_separator_row());
-            }
-            first_hunk = false;
-            continue;
-        }
-        if let Some(body) = raw.strip_prefix('+') {
-            rows.push(diff_row(area_width, None, Some(new_line), '+', body, DiffRowKind::Added));
-            new_line += 1;
-        } else if let Some(body) = raw.strip_prefix('-') {
-            rows.push(diff_row(area_width, Some(old_line), None, '-', body, DiffRowKind::Removed));
-            old_line += 1;
-        } else if let Some(body) = raw.strip_prefix(' ') {
-            rows.push(diff_row(
-                area_width,
-                Some(old_line),
-                Some(new_line),
-                ' ',
-                body,
-                DiffRowKind::Context,
-            ));
-            old_line += 1;
-            new_line += 1;
-        } else if raw.is_empty() {
-            rows.push(diff_row(
-                area_width,
-                Some(old_line),
-                Some(new_line),
-                ' ',
-                "",
-                DiffRowKind::Context,
-            ));
-            old_line += 1;
-            new_line += 1;
-        } else {
-            rows.push(diff_row(
-                area_width,
-                Some(old_line),
-                Some(new_line),
-                ' ',
-                &raw,
-                DiffRowKind::Context,
-            ));
-            old_line += 1;
-            new_line += 1;
-        }
-    }
-
+    rows.extend(body_rows);
     if rows.len() > max_rows {
         rows.truncate(max_rows);
     }
     if truncated_indicator {
-        rows.push(Line::from(Span::styled(
-            format!(
-                "  … (truncated, {} more line{})",
-                truncated,
-                if truncated == 1 { "" } else { "s" }
-            ),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
-        )));
+        rows.push(truncated_footer(truncated));
     }
     rows
 }
