@@ -16,6 +16,11 @@ use ratatui::Frame;
 use ratatui_image::StatefulImage;
 use std::path::Path;
 
+/// Shared dark band background painted by the tab strip, project chip strip,
+/// and contention strip — keeping these identical avoids a visible seam when
+/// rows abut.
+const BAND_BG: Color = Color::Rgb(20, 20, 28);
+
 fn cell_height() -> u16 {
     config::get().ui.cell_height.max(1)
 }
@@ -71,8 +76,7 @@ fn render_tab_strip(frame: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 {
         return;
     }
-    let band_bg = Color::Rgb(20, 20, 28);
-    let bg = Style::default().bg(band_bg);
+    let bg = Style::default().bg(BAND_BG);
 
     // Paint the full band (top padding + tabs row + bottom padding) so the
     // background colour reads as a continuous header strip.
@@ -104,7 +108,7 @@ fn render_tab_strip(frame: &mut Frame, area: Rect, app: &App) {
     }
     spans.push(Span::styled(
         "   ⇥ next tab",
-        Style::default().fg(Color::Rgb(80, 80, 95)).bg(band_bg),
+        Style::default().fg(Color::Rgb(80, 80, 95)).bg(BAND_BG),
     ));
 
     // Tabs go on the visual middle row (or first row if the band is shorter).
@@ -2570,14 +2574,12 @@ fn render_contention_strip(
     }
     // Share the chip strip's bg so adjacent rows don't show a seam; the ⚠
     // glyph and warning-yellow foreground carry the alert.
-    let band = Style::default().bg(Color::Rgb(20, 20, 28));
+    let band = Style::default().bg(BAND_BG);
     frame.render_widget(Paragraph::new("").style(band), area);
     let mut spans: Vec<Span<'static>> = Vec::new();
     spans.push(Span::styled(
         format!("  ⚠ {} contention(s): ", contentions.len()),
-        Style::default()
-            .fg(Color::Rgb(240, 190, 110))
-            .bg(Color::Rgb(20, 20, 28))
+        band.fg(Color::Rgb(240, 190, 110))
             .add_modifier(Modifier::BOLD),
     ));
     let max_inline = 2;
@@ -2587,29 +2589,24 @@ fn render_contention_strip(
         }
         let holder = crate::orchestrator::short_task_id(&c.holder_task);
         let waiter = crate::orchestrator::short_task_id(&c.waiter_task);
-        let path = if c.overlapping_paths.len() > 1 {
-            format!(
-                "{} +{}",
-                c.overlapping_paths[0],
-                c.overlapping_paths.len() - 1
-            )
-        } else {
-            c.overlapping_paths.first().cloned().unwrap_or_default()
+        let line = match c.overlapping_paths.as_slice() {
+            [] => format!("{} active ← {} (intended)", holder, waiter),
+            [only] => format!("{} active on {} ← {} (intended)", holder, only, waiter),
+            [first, rest @ ..] => format!(
+                "{} active on {} +{} ← {} (intended)",
+                holder,
+                first,
+                rest.len(),
+                waiter
+            ),
         };
-        spans.push(Span::styled(
-            format!("{} active on {} ← {} (intended)", holder, path, waiter),
-            Style::default()
-                .fg(Color::Rgb(220, 200, 200))
-                .bg(Color::Rgb(20, 20, 28)),
-        ));
+        spans.push(Span::styled(line, band.fg(Color::Rgb(220, 200, 200))));
     }
     let extra = contentions.len().saturating_sub(max_inline);
     if extra > 0 {
         spans.push(Span::styled(
             format!(" … +{} more", extra),
-            Style::default()
-                .fg(Color::Rgb(180, 160, 160))
-                .bg(Color::Rgb(20, 20, 28)),
+            band.fg(Color::Rgb(180, 160, 160)),
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)).style(band), area);
@@ -2622,7 +2619,7 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     // Background band so the strip reads as a header even on dark themes.
-    let band = Style::default().bg(Color::Rgb(20, 20, 28));
+    let band = Style::default().bg(BAND_BG);
     frame.render_widget(Paragraph::new("").style(band), area);
 
     let chip_row = Rect {
@@ -2646,11 +2643,11 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(snap.projects.len() * 4 + 2);
     spans.push(Span::styled(
         "  󰉋 ",
-        Style::default().fg(Color::Rgb(150, 150, 170)).bg(Color::Rgb(20, 20, 28)),
+        Style::default().fg(Color::Rgb(150, 150, 170)).bg(BAND_BG),
     ));
     spans.push(Span::styled(
         " P·R·Rv·D·F  ",
-        Style::default().fg(Color::Rgb(110, 110, 130)).bg(Color::Rgb(20, 20, 28)),
+        Style::default().fg(Color::Rgb(110, 110, 130)).bg(BAND_BG),
     ));
     for (idx, p) in snap.projects.iter().enumerate() {
         let tasks = snap.tasks.get(&p.id);
@@ -2719,20 +2716,20 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
 
     if let (Some(row), Some(p)) = (path_row, app.selected_project()) {
         let root = p.root.display().to_string();
+        // The 5-cell prefix ("    …" when truncated, 5 spaces otherwise) keeps
+        // the path aligned in the same column either way.
         let max = (row.width as usize).saturating_sub(5);
         let root = if root.chars().count() > max {
-            let cut = root.chars().count().saturating_sub(max - 1);
+            let cut = root.chars().count().saturating_sub(max);
             format!("    …{}", root.chars().skip(cut).collect::<String>())
         } else {
-            // Reserve the ellipsis cell so content starts in the same column
-            // whether or not the path is truncated.
             format!("     {}", root)
         };
         let line = Line::from(Span::styled(
             root,
             Style::default()
                 .fg(Color::Rgb(110, 110, 130))
-                .bg(Color::Rgb(20, 20, 28)),
+                .bg(BAND_BG),
         ));
         frame.render_widget(Paragraph::new(line).style(band), row);
     }
@@ -3416,11 +3413,15 @@ fn render_task_card_collapsed(
 
 // Runtime opt-out for Nerd-Font glyphs: terminals without a Nerd Font render
 // the badge cell as blank/tofu. Set CC_HUB_ASCII_ICONS=1 (or true/yes) to
-// substitute ASCII fallbacks.
+// substitute ASCII fallbacks. Cached so per-frame badge rendering doesn't
+// hit `env::var`'s global lock.
 fn ascii_icons() -> bool {
-    std::env::var("CC_HUB_ASCII_ICONS")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("CC_HUB_ASCII_ICONS")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+    })
 }
 
 /// Compact badge for the card title row showing a live reservation. Format:
@@ -3434,18 +3435,14 @@ fn reservation_badge_spans(reservation: Option<&Reservation>, max_w: usize) -> V
     if max_w < 8 {
         return Vec::new();
     }
-    let ascii = ascii_icons();
+    let (active_glyph, intended_glyph) = if ascii_icons() {
+        ("*", ">")
+    } else {
+        ("󰌾", "󰔟")
+    };
     let (glyph, label, color) = match r.phase {
-        Phase::Active => (
-            if ascii { "*" } else { "󰌾" },
-            "active",
-            Color::Rgb(240, 190, 90),
-        ),
-        Phase::Intended => (
-            if ascii { ">" } else { "󰔟" },
-            "intended",
-            Color::Rgb(120, 180, 200),
-        ),
+        Phase::Active => (active_glyph, "active", Color::Rgb(240, 190, 90)),
+        Phase::Intended => (intended_glyph, "intended", Color::Rgb(120, 180, 200)),
     };
     // Reserve space for the glyph + space + label + leading space.
     let prefix_w = glyph.chars().count() + 1 + label.len() + 1;
