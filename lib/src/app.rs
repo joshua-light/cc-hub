@@ -389,12 +389,10 @@ impl App {
             return;
         }
         self.projects_sel = (self.projects_sel + 1).min(self.projects.projects.len() - 1);
-        self.projects_task_sel = 0;
     }
 
     pub fn projects_move_up(&mut self) {
         self.projects_sel = self.projects_sel.saturating_sub(1);
-        self.projects_task_sel = 0;
     }
 
     /// Move cursor down within the current kanban column.
