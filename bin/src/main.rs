@@ -856,6 +856,15 @@ async fn run(
                             }
                         }
                     }
+                    (View::Grid, KeyCode::Char('c')) if on_projects => {
+                        match app.selected_project_task().map(|t| t.task_id.clone()) {
+                            None => app.set_status("no task selected".into()),
+                            Some(task_id) => match clipboard::copy(&task_id) {
+                                Ok(()) => app.set_status(format!("copied task id: {}", task_id)),
+                                Err(e) => app.set_status(format!("copy failed: {}", e)),
+                            },
+                        }
+                    }
                     (View::Grid, KeyCode::Char('N')) if on_projects => {
                         // Register a project (folder picker), no task spawn.
                         // Use `n` to start a task on an existing project.
@@ -1071,6 +1080,8 @@ async fn run(
                                 if matches!(app.view, View::Backlog) {
                                     app.close_backlog();
                                 }
+                                app.pending_focus_task_id = Some(state.task_id.clone());
+                                app.pending_focus_budget = 5;
                             }
                             Err(e) => {
                                 log::warn!("project task: start backlog failed: {}", e);
