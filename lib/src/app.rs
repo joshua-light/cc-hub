@@ -640,7 +640,9 @@ impl App {
         }
 
         let pr_id = pr.id;
-        let lock_holder = crate::merge_lock::current_holder(&project_id).ok().flatten();
+        let lock_holder = crate::merge_lock::current_holder(&project_id)
+            .ok()
+            .flatten();
         let queued_behind = lock_holder
             .as_ref()
             .filter(|h| h.task_id != task_id)
@@ -1743,8 +1745,7 @@ mod tests {
         assert_eq!(app.approve_review_task(), ApproveOutcome::PrApproved);
 
         // Reload and verify status transitioned.
-        let reloaded =
-            crate::orchestrator::read_task_state("p-app", "t-app").expect("read");
+        let reloaded = crate::orchestrator::read_task_state("p-app", "t-app").expect("read");
         assert_eq!(reloaded.status, TaskStatus::Merging);
         let pr_after = crate::pr::read_pr("p-app", "t-app")
             .expect("read pr")
@@ -1779,8 +1780,7 @@ mod tests {
 
         assert_eq!(app.approve_review_task(), ApproveOutcome::DoneNoPr);
 
-        let reloaded =
-            crate::orchestrator::read_task_state("p-noPR", "t-noPR").expect("read");
+        let reloaded = crate::orchestrator::read_task_state("p-noPR", "t-noPR").expect("read");
         assert_eq!(reloaded.status, TaskStatus::Done);
         assert!(crate::pr::read_pr("p-noPR", "t-noPR")
             .expect("read pr")
