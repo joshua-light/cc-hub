@@ -1266,7 +1266,13 @@ fn evidence_card_header(a: &Artifact, selected: bool, is_lead: bool) -> Line<'st
     Line::from(spans)
 }
 
-fn render_text_card_body(frame: &mut Frame, area: Rect, a: &Artifact, max_bytes: usize) {
+fn render_text_card_body(
+    frame: &mut Frame,
+    area: Rect,
+    a: &Artifact,
+    max_bytes: usize,
+    scroll_lines: usize,
+) {
     if area.height == 0 {
         return;
     }
@@ -1282,14 +1288,15 @@ fn render_text_card_body(frame: &mut Frame, area: Rect, a: &Artifact, max_bytes:
                 Style::default().fg(Color::Rgb(220, 100, 100)),
             ))],
         },
-        Some((mut content, truncated)) => {
+        Some((content, truncated)) => {
+            let start = scroll_lines.min(content.len());
+            let hidden_below =
+                content.len().saturating_sub(start + area.height as usize) + truncated;
             let body_rows =
-                (area.height as usize).saturating_sub(if truncated > 0 { 1 } else { 0 });
-            if content.len() > body_rows {
-                content.truncate(body_rows);
-            }
-            let mut out: Vec<Line<'static>> = content
-                .into_iter()
+                (area.height as usize).saturating_sub(if hidden_below > 0 { 1 } else { 0 });
+            let end = (start + body_rows).min(content.len());
+            let mut out: Vec<Line<'static>> = content[start..end]
+                .iter()
                 .map(|s| {
                     Line::from(Span::styled(
                         format!("  {}", s),
@@ -1297,8 +1304,8 @@ fn render_text_card_body(frame: &mut Frame, area: Rect, a: &Artifact, max_bytes:
                     ))
                 })
                 .collect();
-            if truncated > 0 {
-                out.push(truncated_footer(truncated));
+            if hidden_below > 0 {
+                out.push(truncated_footer(hidden_below));
             }
             out
         }
@@ -1318,6 +1325,23 @@ fn truncated_footer(n: usize) -> Line<'static> {
             .fg(Color::DarkGray)
             .add_modifier(Modifier::ITALIC),
     ))
+}
+
+fn artifact_preview_total_lines(
+    a: &Artifact,
+    kind: CardKind,
+    max_bytes: usize,
+    area_width: u16,
+) -> Option<usize> {
+    let path = Path::new(&a.path);
+    match kind {
+        CardKind::Text => read_text_excerpt(path, max_bytes)
+            .map(|(content, truncated)| content.len() + usize::from(truncated > 0)),
+        CardKind::Diff => read_text_excerpt(path, max_bytes).map(|(content, truncated)| {
+            build_diff_lines(content, area_width).len() + usize::from(truncated > 0)
+        }),
+        _ => None,
+    }
 }
 
 const DIFF_ADDED_BG: Color = Color::Rgb(34, 92, 43);
@@ -1443,18 +1467,7 @@ fn is_diff_meta_line(s: &str) -> bool {
         || s.starts_with("GIT binary patch")
 }
 
-fn build_diff_lines(
-    content: Vec<String>,
-    truncated: usize,
-    body_h: u16,
-    area_width: u16,
-) -> Vec<Line<'static>> {
-    let truncated_indicator = truncated > 0;
-    let max_rows = (body_h as usize).saturating_sub(if truncated_indicator { 1 } else { 0 });
-    // Reserve space for a possible 2-row header (path + counts) so we don't
-    // push body rows that would later be truncated past the visible area.
-    let body_budget = max_rows.saturating_sub(2);
-
+fn build_diff_lines(content: Vec<String>, area_width: u16) -> Vec<Line<'static>> {
     let mut header_path: Option<String> = None;
     let mut added: u32 = 0;
     let mut removed: u32 = 0;
@@ -1481,7 +1494,7 @@ fn build_diff_lines(
                 old_line = o;
                 new_line = n;
             }
-            if !first_hunk && body_rows.len() < body_budget {
+            if !first_hunk {
                 body_rows.push(diff_separator_row());
             }
             first_hunk = false;
@@ -1498,14 +1511,12 @@ fn build_diff_lines(
             DiffRowKind::Removed => removed += 1,
             DiffRowKind::Context => {}
         }
-        if body_rows.len() < body_budget {
-            let (old_n, new_n) = match kind {
-                DiffRowKind::Added => (None, Some(new_line)),
-                DiffRowKind::Removed => (Some(old_line), None),
-                DiffRowKind::Context => (Some(old_line), Some(new_line)),
-            };
-            body_rows.push(diff_row(area_width, old_n, new_n, body, kind));
-        }
+        let (old_n, new_n) = match kind {
+            DiffRowKind::Added => (None, Some(new_line)),
+            DiffRowKind::Removed => (Some(old_line), None),
+            DiffRowKind::Context => (Some(old_line), Some(new_line)),
+        };
+        body_rows.push(diff_row(area_width, old_n, new_n, body, kind));
         old_line += bump_old;
         new_line += bump_new;
     }
@@ -1526,16 +1537,16 @@ fn build_diff_lines(
         )));
     }
     rows.extend(body_rows);
-    if rows.len() > max_rows {
-        rows.truncate(max_rows);
-    }
-    if truncated_indicator {
-        rows.push(truncated_footer(truncated));
-    }
     rows
 }
 
-fn render_diff_card_body(frame: &mut Frame, area: Rect, a: &Artifact, max_bytes: usize) {
+fn render_diff_card_body(
+    frame: &mut Frame,
+    area: Rect,
+    a: &Artifact,
+    max_bytes: usize,
+    scroll_lines: usize,
+) {
     if area.height == 0 {
         return;
     }
@@ -1551,7 +1562,20 @@ fn render_diff_card_body(frame: &mut Frame, area: Rect, a: &Artifact, max_bytes:
                 Style::default().fg(Color::Rgb(220, 100, 100)),
             ))],
         },
-        Some((content, truncated)) => build_diff_lines(content, truncated, area.height, area.width),
+        Some((content, truncated)) => {
+            let all_rows = build_diff_lines(content, area.width);
+            let start = scroll_lines.min(all_rows.len());
+            let hidden_below =
+                all_rows.len().saturating_sub(start + area.height as usize) + truncated;
+            let body_rows =
+                (area.height as usize).saturating_sub(if hidden_below > 0 { 1 } else { 0 });
+            let end = (start + body_rows).min(all_rows.len());
+            let mut visible = all_rows[start..end].to_vec();
+            if hidden_below > 0 {
+                visible.push(truncated_footer(hidden_below));
+            }
+            visible
+        }
     };
     let p = Paragraph::new(lines);
     frame.render_widget(p, area);
@@ -1824,6 +1848,20 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     next_y = next_y.saturating_add(summary_h);
     let total_canvas_h = next_y;
 
+    let expanded_scroll_budget = if app.result_artifact_expanded {
+        card_meta
+            .iter()
+            .find(|(art_idx, _, _)| *art_idx == app.result_artifact_sel)
+            .and_then(|(art_idx, kind, body)| {
+                let max_bytes = 64 * 1024;
+                artifact_preview_total_lines(&t.artifacts[*art_idx], *kind, max_bytes, inner.width)
+                    .map(|total| total.saturating_sub(*body as usize).min(u16::MAX as usize) as u16)
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
     // Auto-scroll so the selected card stays on-screen.
     if !t.artifacts.is_empty() && body_h > 0 {
         let sel_art_idx = app.result_artifact_sel.min(t.artifacts.len() - 1);
@@ -1840,7 +1878,8 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
             app.result_scroll = sel_top + sel_h - body_h;
         }
     }
-    let max_scroll = total_canvas_h.saturating_sub(body_h);
+    let base_max_scroll = total_canvas_h.saturating_sub(body_h);
+    let max_scroll = base_max_scroll.saturating_add(expanded_scroll_budget);
     if app.result_scroll > max_scroll {
         app.result_scroll = max_scroll;
     }
@@ -1898,6 +1937,13 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
             body_area.width.saturating_sub(2),
             visible_h,
         );
+        let clipped_scroll = if body_screen_top < view_top {
+            (view_top - body_screen_top) as usize
+        } else {
+            0
+        };
+        let overscroll_lines = scroll.saturating_sub(base_max_scroll) as usize;
+        let body_scroll_lines = clipped_scroll.saturating_add(overscroll_lines);
         match kind {
             CardKind::Image => {
                 // Kitty/sixel/iterm2 protocols write pixel data tied to a fixed
@@ -1934,12 +1980,12 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
             CardKind::Text => {
                 let expanded = app.result_artifact_expanded && art_idx == app.result_artifact_sel;
                 let max_bytes = if expanded { 64 * 1024 } else { 8 * 1024 };
-                render_text_card_body(frame, body_rect, a, max_bytes);
+                render_text_card_body(frame, body_rect, a, max_bytes, body_scroll_lines);
             }
             CardKind::Diff => {
                 let expanded = app.result_artifact_expanded && art_idx == app.result_artifact_sel;
                 let max_bytes = if expanded { 64 * 1024 } else { 8 * 1024 };
-                render_diff_card_body(frame, body_rect, a, max_bytes);
+                render_diff_card_body(frame, body_rect, a, max_bytes, body_scroll_lines);
             }
             CardKind::Video => render_video_card_body(frame, body_rect, a),
             CardKind::Url => render_url_card_body(frame, body_rect, a),
@@ -4351,6 +4397,80 @@ mod result_popup_tests {
             }
         }
         None
+    }
+
+    #[test]
+    fn expanded_text_artifact_scrolls_with_popup_scroll() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let doc_path = tmp.path().join("tour.md");
+        let body = (1..=80)
+            .map(|n| format!("line {:02}", n))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&doc_path, body).unwrap();
+
+        let now = crate::orchestrator::now_unix_secs();
+        let project = Project {
+            id: "p-scroll".into(),
+            name: "scroll".into(),
+            root: PathBuf::from("/tmp/scroll"),
+            created_at: now,
+        };
+        let mut state = TaskState::new(
+            project.id.clone(),
+            project.root.clone(),
+            "scroll prompt".into(),
+        );
+        state.status = TaskStatus::Done;
+        state.note = Some("headline".into());
+        state.artifacts = vec![Artifact {
+            kind: "file".into(),
+            path: doc_path.to_string_lossy().into_owned(),
+            original: doc_path.to_string_lossy().into_owned(),
+            caption: Some("long doc".into()),
+            added_at: now,
+        }];
+        state.lead_artifact = Some(0);
+
+        let mut app = App::new();
+        let mut tasks = HashMap::new();
+        tasks.insert(project.id.clone(), vec![std::sync::Arc::new(state)]);
+        let snap = ProjectsSnapshot {
+            projects: vec![project],
+            tasks,
+            titling: std::collections::HashSet::new(),
+        };
+        app.update_projects(snap);
+        assert!(app.enter_projects_result(), "popup should open");
+        app.result_artifact_expanded = true;
+
+        let backend = TestBackend::new(100, 28);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| super::render_projects_result(f, f.area(), &mut app))
+            .expect("render");
+        let first = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            first.contains("line 01"),
+            "top of doc should be visible\n{}",
+            first
+        );
+
+        app.result_scroll_by(30);
+        terminal
+            .draw(|f| super::render_projects_result(f, f.area(), &mut app))
+            .expect("render");
+        let second = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            second.contains("line 16") || second.contains("line 17"),
+            "scrolling should reveal later lines of the text artifact\n{}",
+            second
+        );
+        assert!(
+            !second.contains("line 01"),
+            "once scrolled down, the preview should not stay pinned to the first line\n{}",
+            second
+        );
     }
 
     #[test]
