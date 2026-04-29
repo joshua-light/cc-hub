@@ -476,45 +476,31 @@ fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
     // removal, project-task deletion, and session close. Project-delete
     // wins precedence because it's the most destructive — if both somehow
     // got staged we want to show the user the bigger blast radius.
-    let (title, display, action_label, action_color) =
-        if let Some(pending) = &app.pending_project_delete {
-            (
-                " Delete project? ",
-                pending.display.clone(),
-                "delete",
-                Color::Red,
-            )
-        } else if let Some(pending) = &app.pending_task_delete {
-            (
-                " Delete task? ",
-                pending.display.clone(),
-                "delete",
-                Color::Red,
-            )
-        } else if let Some(pending) = &app.pending_close {
-            (
-                " Close terminal? ",
-                pending.display.clone(),
-                "close",
-                Color::Red,
-            )
-        } else {
-            return;
-        };
+    let (title, display) = if let Some(pending) = &app.pending_project_delete {
+        (" Delete project? ", pending.display.clone())
+    } else if let Some(pending) = &app.pending_task_delete {
+        (" Delete task? ", pending.display.clone())
+    } else if let Some(pending) = &app.pending_close {
+        (" Close terminal? ", pending.display.clone())
+    } else {
+        return;
+    };
+    let action_color = Color::Red;
 
-    let popup = centered_fixed(area, 72, 7);
+    let popup = centered_fixed(area, 72, 5);
     frame.render_widget(Clear, popup);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(Style::default().fg(action_color))
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(action_color)
-                .add_modifier(Modifier::BOLD),
-        ));
+    let block = popup_block(Span::styled(
+        title,
+        Style::default()
+            .fg(action_color)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .border_style(Style::default().fg(action_color))
+    .title_bottom(Span::styled(
+        " [Y]es · [N]o · Esc cancel ",
+        Style::default().fg(Color::DarkGray),
+    ));
 
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
@@ -531,26 +517,6 @@ fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
             ),
         ]),
         Line::raw(""),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                "[y]",
-                Style::default()
-                    .fg(action_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" {}   ", action_label),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(
-                "[n/esc]",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
-        ]),
     ];
 
     frame.render_widget(Paragraph::new(lines), inner);
@@ -2705,7 +2671,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         let keybinds: &str = match app.view {
             View::Grid => match app.current_tab {
-                Tab::Projects => "tab:next  H/L:project  h/l:col  j/k:task  enter:focus orch  f:agent terminal/resurrect  space:approve  n:new task  N:register project  b:backlog  r:result  x:delete task  X:remove project  q:quit",
+                Tab::Projects => "tab:next  H/L:project  h/l:col  j/k:task  enter:focus orch  f:agent terminal/resurrect  space:approve  n:new task  N:register project  b:backlog  r:result  c:copy id  x:delete task  X:remove project  q:quit",
                 Tab::Sessions => "tab:next  h/j/k/l:nav  n:new  N:new in…  i:info  D:why?  enter/f:focus/resume  o:shell  x:close  H:inactive  W:workers  q:quit",
                 Tab::Metrics => "tab:next  j/k:select  enter:view transcript  r:refresh  q:quit",
             },
@@ -2913,7 +2879,8 @@ fn render_projects_body(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// Horizontal strip of project "chips". Selected chip is bold/inverse with
-/// per-column counts (P·R·Rv·D·F). Cycled with `[` / `]`.
+/// per-column counts (P·R·Rv·M·D·F). Cycled with `[` / `]`.
+/// A trailing amber 󰒲N is shown only when backlog > 0.
 fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 {
         return;
@@ -2946,7 +2913,7 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
         Style::default().fg(Color::Rgb(150, 150, 170)).bg(BAND_BG),
     ));
     spans.push(Span::styled(
-        " P·R·Rv·D·F  ",
+        " P·R·Rv·M·D·F  ",
         Style::default().fg(Color::Rgb(110, 110, 130)).bg(BAND_BG),
     ));
     for (idx, p) in snap.projects.iter().enumerate() {
@@ -2957,6 +2924,7 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
         let mut merging = 0usize;
         let mut done = 0usize;
         let mut failed = 0usize;
+        let mut backlog = 0usize;
         if let Some(v) = tasks {
             for t in v {
                 match t.status {
@@ -2971,12 +2939,7 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
                     crate::orchestrator::TaskStatus::Merging => merging += 1,
                     crate::orchestrator::TaskStatus::Done => done += 1,
                     crate::orchestrator::TaskStatus::Failed => failed += 1,
-                    // Backlog tasks haven't started — they don't appear
-                    // on the kanban (which starts at Planning) nor in the
-                    // chip-strip running totals. Counted-but-not-shown
-                    // would mislead; the project chip already conveys
-                    // "no active work" via colour when planning+running=0.
-                    crate::orchestrator::TaskStatus::Backlog => {}
+                    crate::orchestrator::TaskStatus::Backlog => backlog += 1,
                 }
             }
         }
@@ -3022,6 +2985,17 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
             counts,
             Style::default().fg(counts_fg).bg(counts_bg),
         ));
+        if backlog > 0 {
+            let (bl_fg, bl_bg) = if selected {
+                (Color::Black, Color::Rgb(200, 160, 80))
+            } else {
+                (Color::Rgb(220, 175, 95), Color::Rgb(50, 40, 22))
+            };
+            spans.push(Span::styled(
+                format!(" 󰒲 {} ", backlog),
+                Style::default().fg(bl_fg).bg(bl_bg),
+            ));
+        }
         spans.push(Span::styled(" ", band));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)).style(band), chip_row);
