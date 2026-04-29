@@ -2913,7 +2913,7 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
         Style::default().fg(Color::Rgb(150, 150, 170)).bg(BAND_BG),
     ));
     spans.push(Span::styled(
-        " P·R·Rv·D·F  ",
+        " P·R·Rv·M·D·F  ",
         Style::default().fg(Color::Rgb(110, 110, 130)).bg(BAND_BG),
     ));
     for (idx, p) in snap.projects.iter().enumerate() {
@@ -2939,7 +2939,6 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
                     crate::orchestrator::TaskStatus::Merging => merging += 1,
                     crate::orchestrator::TaskStatus::Done => done += 1,
                     crate::orchestrator::TaskStatus::Failed => failed += 1,
-                    // Backlog is rendered as a separate trailing amber token, not mixed into kanban counts.
                     crate::orchestrator::TaskStatus::Backlog => backlog += 1,
                 }
             }
