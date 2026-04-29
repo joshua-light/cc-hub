@@ -389,10 +389,17 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
 
     let tasks = app.backlog_tasks();
     if tasks.is_empty() {
-        let empty = Paragraph::new(Line::from(Span::styled(
-            "No backlog tasks for this project.",
-            Style::default().fg(Color::DarkGray),
-        )))
+        let empty = Paragraph::new(vec![
+            Line::from(Span::styled(
+                "No backlog tasks for this project.",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "Queue one with: cc-hub task create --backlog --prompt \"…\"",
+                Style::default().fg(Color::Rgb(80, 80, 90)),
+            )),
+        ])
         .alignment(Alignment::Center);
         frame.render_widget(empty, inner);
         return;
