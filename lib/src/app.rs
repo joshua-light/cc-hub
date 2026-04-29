@@ -329,14 +329,7 @@ impl App {
         }
         // If the task is gone, fall through and let clamp handle the row.
         if let Some(task_id) = prev_task_id {
-            for col in 0..=4 {
-                let tasks = self.kanban_column_tasks(col);
-                if let Some(row) = tasks.iter().position(|t| t.task_id == task_id) {
-                    self.projects_col = col;
-                    self.projects_task_sel = row;
-                    break;
-                }
-            }
+            self.focus_task(&task_id);
         }
         // Jump-if-empty only on the very first load — once the user is in the
         // tab, an empty focused column means they explicitly navigated there
@@ -1540,7 +1533,7 @@ impl App {
     }
 }
 
-fn kanban_col_name(col: usize) -> &'static str {
+pub fn kanban_col_name(col: usize) -> &'static str {
     match col {
         0 => "Planning",
         1 => "Running",

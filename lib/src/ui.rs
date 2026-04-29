@@ -3062,14 +3062,15 @@ fn render_kanban_board(frame: &mut Frame, area: Rect, app: &App) {
 
 fn kanban_column_meta(col: usize) -> (&'static str, &'static str, Color) {
     // (label, status icon, accent color). Indices match `kanban_column_tasks`.
-    match col {
-        0 => ("Planning", "󰟶", Color::Rgb(170, 140, 210)),
-        1 => ("Running", "󰑮", Color::LightYellow),
-        2 => ("Review", "󱋲", Color::LightCyan),
-        3 => ("Merging", "", Color::LightMagenta),
-        4 => ("Done", "󰸞", Color::LightGreen),
-        _ => ("Failed", "󰅚", Color::LightRed),
-    }
+    let (icon, accent) = match col {
+        0 => ("󰟶", Color::Rgb(170, 140, 210)),
+        1 => ("󰑮", Color::LightYellow),
+        2 => ("󱋲", Color::LightCyan),
+        3 => ("", Color::LightMagenta),
+        4 => ("󰸞", Color::LightGreen),
+        _ => ("󰅚", Color::LightRed),
+    };
+    (crate::app::kanban_col_name(col), icon, accent)
 }
 
 fn render_kanban_column(
