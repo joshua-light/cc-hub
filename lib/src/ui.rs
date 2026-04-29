@@ -278,9 +278,7 @@ fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
             .projects_pending_cwd
             .clone()
             .unwrap_or_else(|| "?".into());
-        let agent = app
-            .pending_agent_label()
-            .unwrap_or_else(|| "?".into());
+        let agent = app.pending_agent_label().unwrap_or_else(|| "?".into());
         (
             " New project task ",
             format!(" → {} orchestrator in {} ", agent, cwd),
@@ -1553,9 +1551,7 @@ fn render_diff_card_body(frame: &mut Frame, area: Rect, a: &Artifact, max_bytes:
                 Style::default().fg(Color::Rgb(220, 100, 100)),
             ))],
         },
-        Some((content, truncated)) => {
-            build_diff_lines(content, truncated, area.height, area.width)
-        }
+        Some((content, truncated)) => build_diff_lines(content, truncated, area.height, area.width),
     };
     let p = Paragraph::new(lines);
     frame.render_widget(p, area);
@@ -1907,8 +1903,7 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
                 // Kitty/sixel/iterm2 protocols write pixel data tied to a fixed
                 // rect; partially-clipped rects leave terminal residue when the
                 // popup scrolls. Only render when fully visible.
-                let fully_visible =
-                    body_screen_top >= view_top && body_screen_bot <= view_bot;
+                let fully_visible = body_screen_top >= view_top && body_screen_bot <= view_bot;
                 if !fully_visible {
                     render_image_placeholder(frame, body_rect, "[image hidden — scroll to view]");
                     continue;
@@ -3574,26 +3569,10 @@ fn render_task_card_collapsed(
 ) {
     // Review (2) cyan, Merging (3) magenta, Done (4) green, Failed (5) red.
     let (accent, dim_text, icon) = match col_idx {
-        2 => (
-            Color::LightCyan,
-            Color::Rgb(140, 175, 185),
-            "󱋲",
-        ),
-        3 => (
-            Color::LightMagenta,
-            Color::Rgb(180, 145, 195),
-            "",
-        ),
-        5 => (
-            Color::LightRed,
-            Color::Rgb(180, 130, 130),
-            "󰅚",
-        ),
-        _ => (
-            Color::LightGreen,
-            Color::Rgb(140, 160, 145),
-            "󰸞",
-        ),
+        2 => (Color::LightCyan, Color::Rgb(140, 175, 185), "󱋲"),
+        3 => (Color::LightMagenta, Color::Rgb(180, 145, 195), ""),
+        5 => (Color::LightRed, Color::Rgb(180, 130, 130), "󰅚"),
+        _ => (Color::LightGreen, Color::Rgb(140, 160, 145), "󰸞"),
     };
     // Review and Merging cards: brighter border so they stand out — they
     // need user attention or are actively mutating main. Done/Failed stay
@@ -4503,7 +4482,11 @@ mod result_popup_tests {
         assert!(
             y_note < y_lead_body && y_lead_body < y_url && y_url < y_summary,
             "expected order note({}) < lead({}) < url({}) < summary({})\n{}",
-            y_note, y_lead_body, y_url, y_summary, dump,
+            y_note,
+            y_lead_body,
+            y_url,
+            y_summary,
+            dump,
         );
     }
 
@@ -4628,7 +4611,11 @@ index 0000001..0000002 100644
             root: PathBuf::from("/tmp/diff"),
             created_at: now,
         };
-        let mut state = TaskState::new(project.id.clone(), project.root.clone(), "diff prompt".into());
+        let mut state = TaskState::new(
+            project.id.clone(),
+            project.root.clone(),
+            "diff prompt".into(),
+        );
         state.status = TaskStatus::Done;
         state.summary = Some("WHY: diff renderer matches Claude Code style.".into());
         state.artifacts = vec![Artifact {
@@ -4666,7 +4653,11 @@ index 0000001..0000002 100644
         );
         std::fs::write("/tmp/cchub-diff-render.txt", &combined).expect("dump write");
 
-        assert!(plain.contains("Result"), "should render Result title\n{}", plain);
+        assert!(
+            plain.contains("Result"),
+            "should render Result title\n{}",
+            plain
+        );
         assert!(
             plain.contains("lib/src/ui.rs"),
             "diff per-file header path should be visible\n{}",
@@ -4698,5 +4689,4 @@ index 0000001..0000002 100644
             plain
         );
     }
-
 }
