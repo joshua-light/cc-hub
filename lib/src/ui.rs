@@ -4794,3 +4794,103 @@ index 0000001..0000002 100644
         );
     }
 }
+
+#[cfg(test)]
+mod kanban_card_tests {
+    use crate::orchestrator::{TaskState, TaskStatus, TodoItem};
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::Terminal;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn buffer_to_string(buf: &Buffer) -> String {
+        let mut out = String::new();
+        for y in 0..buf.area().height {
+            for x in 0..buf.area().width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn task_with_todos(status: TaskStatus, done: usize, total: usize) -> TaskState {
+        let mut t = TaskState::new("p".into(), PathBuf::from("/tmp/p"), "prompt".into());
+        t.status = status;
+        t.title = Some("test card".into());
+        t.todos = (0..total)
+            .map(|i| TodoItem {
+                text: format!("step {}", i),
+                done: i < done,
+            })
+            .collect();
+        t
+    }
+
+    #[test]
+    fn collapsed_card_shows_todos_badge() {
+        let t = task_with_todos(TaskStatus::Review, 2, 4);
+        let backend = TestBackend::new(40, 6);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_collapsed(f, f.area(), &t, false, 2, 1_000_000_000, false)
+            })
+            .expect("render");
+        let plain = buffer_to_string(terminal.backend().buffer());
+        std::fs::write("/tmp/cchub-card-collapsed-todos.txt", &plain).expect("dump");
+        assert!(
+            plain.contains("2/4"),
+            "collapsed card should show 2/4 badge:\n{}",
+            plain
+        );
+    }
+
+    #[test]
+    fn collapsed_card_omits_badge_when_no_todos() {
+        let t = task_with_todos(TaskStatus::Review, 0, 0);
+        let backend = TestBackend::new(40, 6);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_collapsed(f, f.area(), &t, false, 2, 1_000_000_000, false)
+            })
+            .expect("render");
+        let plain = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            !plain.contains("☑"),
+            "no todos => no badge:\n{}",
+            plain
+        );
+    }
+
+    #[test]
+    fn active_card_shows_todos_badge() {
+        let t = task_with_todos(TaskStatus::Running, 2, 4);
+        let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
+        let backend = TestBackend::new(60, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_active(
+                    f,
+                    f.area(),
+                    &t,
+                    false,
+                    1,
+                    &sessions,
+                    1_000_000_000,
+                    false,
+                )
+            })
+            .expect("render");
+        let plain = buffer_to_string(terminal.backend().buffer());
+        std::fs::write("/tmp/cchub-card-active-todos.txt", &plain).expect("dump");
+        assert!(
+            plain.contains("2/4"),
+            "active card should show 2/4 badge:\n{}",
+            plain
+        );
+    }
+}
