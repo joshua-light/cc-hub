@@ -371,7 +371,7 @@ impl App {
     /// column index. Returns None if not found in any column (or if no
     /// project is selected).
     pub fn focus_task(&mut self, task_id: &str) -> Option<usize> {
-        for col in 0..6 {
+        for col in 0..5 {
             let tasks = self.kanban_column_tasks(col);
             if let Some(row) = tasks.iter().position(|t| t.task_id == task_id) {
                 self.projects_col = col;
