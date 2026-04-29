@@ -32,6 +32,24 @@ pub enum View {
     Backlog,
 }
 
+/// Outcome of pressing Space on a focused Projects-tab task. The caller
+/// uses this to decide whether to show the generic "nothing to approve"
+/// toast and whether to notify the orchestrator tmux to continue the
+/// merge flow. Specific failure/success messaging is handled inside
+/// `approve_review_task` via `set_status`; the caller only acts on the
+/// variant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ApproveOutcome {
+    /// No focused Review task — caller should show the generic toast.
+    NotReviewTask,
+    /// PR was approved; caller should ping the live orchestrator tmux.
+    PrApproved,
+    /// Review task without a PR was transitioned to Done; status set.
+    DoneNoPr,
+    /// Approve attempted but failed; specific reason already in status.
+    Failed,
+}
+
 /// Overlay on top of [`View::FolderPicker`] that prompts for a new GitHub
 /// repo name. `cwd` is captured at open time so the run target can't drift
 /// if the picker is reloaded while the input is active.
@@ -516,20 +534,25 @@ impl App {
         col.get(self.projects_task_sel).copied()
     }
 
-    /// Approve the focused Review task's PR: flip `pr.review_state` to
-    /// `Approved` and snapshot the branch/base SHAs so `pr merge` can
-    /// detect whether main moved between approval and merge. The task
-    /// itself stays in Review until the orchestrator receives the
-    /// approval prompt and runs `pr merge` (which transitions to Merging).
-    /// Tmux sessions stay alive — they're torn down by `pr finalize`
-    /// after the merge actually lands.
-    pub fn approve_review_task(&mut self) -> bool {
+    /// Approve the focused Review task. If the task has a PR, flip
+    /// `pr.review_state` to `Approved` and snapshot the branch/base SHAs
+    /// so `pr merge` can detect whether main moved between approval and
+    /// merge; the task stays in Review until the orchestrator receives
+    /// the approval prompt and runs `pr merge` (which transitions to
+    /// Merging) — tmux sessions stay alive and are torn down by `pr
+    /// finalize` after the merge lands. If the task has no PR (a
+    /// research/queueing task delivered via `task report --status done`,
+    /// auto-routed into Review), transition it directly to `Done` and
+    /// tear down the orchestrator tmux. The returned [`ApproveOutcome`]
+    /// tells the caller whether to show the generic "nothing to approve"
+    /// toast and whether to ping the live orchestrator tmux.
+    pub fn approve_review_task(&mut self) -> ApproveOutcome {
         use crate::orchestrator::TaskStatus;
         let Some(t) = self.selected_project_task() else {
-            return false;
+            return ApproveOutcome::NotReviewTask;
         };
         if t.status != TaskStatus::Review {
-            return false;
+            return ApproveOutcome::NotReviewTask;
         }
         let project_id = t.project_id.clone();
         let task_id = t.task_id.clone();
@@ -540,12 +563,26 @@ impl App {
         let pr = match crate::pr::read_pr(&project_id, &task_id) {
             Ok(Some(p)) => p,
             Ok(None) => {
-                self.set_status("approve: no PR for this task".into());
-                return false;
+                match crate::orchestrator::update_task_state(&project_id, &task_id, |s| {
+                    s.status = TaskStatus::Done;
+                }) {
+                    Ok(state) => {
+                        crate::orchestrator::cleanup_task_sessions(&state);
+                        self.set_status(format!(
+                            "approved PR-less task {} → Done",
+                            crate::orchestrator::short_task_id(&task_id)
+                        ));
+                        return ApproveOutcome::DoneNoPr;
+                    }
+                    Err(e) => {
+                        self.set_status(format!("approve failed: {}", e));
+                        return ApproveOutcome::Failed;
+                    }
+                }
             }
             Err(e) => {
                 self.set_status(format!("approve: pr read failed: {}", e));
-                return false;
+                return ApproveOutcome::Failed;
             }
         };
         let branch_sha = git_rev_parse_short(&project_root, &pr.branch);
@@ -558,7 +595,7 @@ impl App {
             p.approved_at_base_sha = base_sha;
         }) {
             self.set_status(format!("approve failed: {}", e));
-            return false;
+            return ApproveOutcome::Failed;
         }
 
         // Cursor stays on the same Review task; the caller is responsible
@@ -569,7 +606,7 @@ impl App {
             pr.id,
             crate::orchestrator::short_task_id(&task_id)
         ));
-        true
+        ApproveOutcome::PrApproved
     }
 
     /// `tmux_session_name → SessionInfo` over the latest scan. Built fresh
