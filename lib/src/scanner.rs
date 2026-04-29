@@ -601,7 +601,7 @@ fn scan_orphan_jsonls(
     (out, total_in_window)
 }
 
-fn scan_claude_sessions() -> Vec<SessionInfo> {
+fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
     let raw_sessions = read_raw_sessions();
     let clears = read_clears_from_history();
     // Derive claimed session IDs from the sessions we already read,
@@ -633,10 +633,6 @@ fn scan_claude_sessions() -> Vec<SessionInfo> {
     // Snapshot tmux once per scan so we can tag each session with its hosting
     // tmux session name (if any) without reshelling per pid.
     let tmux_panes = crate::send::tmux_panes();
-
-    // Titles are cheap to load and don't change within a scan — read once and
-    // hand a reference to every site that builds a SessionInfo.
-    let titles = crate::title::load();
 
     let inactive_window_secs = config::get().inactive.window_secs;
     let mut sessions: Vec<SessionInfo> = raw_sessions
@@ -843,8 +839,11 @@ pub fn find_orchestrator_session(
 pub fn scan_sessions() -> Vec<SessionInfo> {
     let enabled = config::get().enabled_agent_kinds();
     let mut sessions = Vec::new();
+    // Titles are cheap to load and don't change within a scan — read once and
+    // hand a reference to every site that builds a SessionInfo.
+    let titles = crate::title::load();
     if enabled.contains(&AgentKind::Claude) {
-        sessions.extend(scan_claude_sessions());
+        sessions.extend(scan_claude_sessions(&titles));
     }
     if enabled.contains(&AgentKind::Pi) {
         let pi_agents: Vec<_> = config::get()
@@ -852,7 +851,7 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
             .into_values()
             .filter(|a| a.kind == AgentKind::Pi)
             .collect();
-        sessions.extend(pi_scanner::scan(&pi_agents));
+        sessions.extend(pi_scanner::scan(&pi_agents, &titles));
     }
     sessions.sort_by(|a, b| {
         a.state

@@ -232,6 +232,25 @@ pub fn collect_pid_chain(pid: u32) -> Vec<u32> {
     pids
 }
 
+/// Pure detector for Pi-agent invocations from `comm` + `cmdline`. Both
+/// inputs must be lowercased. Exact-basename match on the first cmdline
+/// argument prevents `/usr/bin/pipewire` from substring-matching `/bin/pi`.
+fn matches_pi_command(name: &str, cmd: &str) -> bool {
+    if name == "pi" || name == "pi.exe" {
+        return true;
+    }
+    let exe_basename = cmd
+        .split_whitespace()
+        .next()
+        .and_then(|first| std::path::Path::new(first).file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    if exe_basename == "pi" || exe_basename == "pi.exe" {
+        return true;
+    }
+    cmd.contains("pi-coding-agent") || cmd.contains("@mariozechner/pi-coding-agent")
+}
+
 pub fn is_agent_process(kind: AgentKind, pid: u32) -> bool {
     if !Process::is_alive(pid) {
         return false;
@@ -241,12 +260,7 @@ pub fn is_agent_process(kind: AgentKind, pid: u32) -> bool {
         AgentKind::Pi => {
             let cmd = command_line(pid).to_ascii_lowercase();
             let name = Process::name(pid).to_ascii_lowercase();
-            name == "pi"
-                || name == "pi.exe"
-                || cmd.contains("/bin/pi")
-                || cmd.contains("\\pi.exe")
-                || cmd.contains("pi-coding-agent")
-                || cmd.contains("@mariozechner/pi-coding-agent")
+            matches_pi_command(&name, &cmd)
         }
     }
 }
@@ -331,5 +345,34 @@ mod tests {
         let pid = std::process::id();
         assert!(Process::parent_pid(pid).is_some());
         assert!(!Process::name(pid).is_empty());
+    }
+
+    #[test]
+    fn pi_detector_matches_real_pi_invocations() {
+        assert!(matches_pi_command("pi", ""));
+        assert!(matches_pi_command("pi.exe", ""));
+        assert!(matches_pi_command(
+            "node",
+            "/usr/local/bin/pi --provider openai-codex --model gpt-5.4"
+        ));
+        assert!(matches_pi_command(
+            "node",
+            "node /home/u/.npm/_npx/abc/node_modules/pi-coding-agent/dist/cli.js"
+        ));
+        assert!(matches_pi_command(
+            "node",
+            "node /home/u/.npm/_npx/abc/node_modules/@mariozechner/pi-coding-agent/cli.js"
+        ));
+    }
+
+    #[test]
+    fn pi_detector_rejects_pipewire() {
+        // Regression: `/usr/bin/pipewire` once substring-matched `/bin/pi`.
+        assert!(!matches_pi_command("pipewire", "/usr/bin/pipewire"));
+        assert!(!matches_pi_command(
+            "pipewire-pulse",
+            "/usr/bin/pipewire-pulse"
+        ));
+        assert!(!matches_pi_command("ping", "/usr/bin/ping 8.8.8.8"));
     }
 }

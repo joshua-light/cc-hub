@@ -295,7 +295,10 @@ fn scan_inactive_sessions(
     out
 }
 
-pub fn scan(agents: &[AgentConfig]) -> Vec<SessionInfo> {
+pub fn scan(
+    agents: &[AgentConfig],
+    titles: &HashMap<String, String>,
+) -> Vec<SessionInfo> {
     let mut sessions = scan_live_heartbeats(agents);
     let claimed_paths: HashSet<PathBuf> = sessions
         .iter()
@@ -315,6 +318,12 @@ pub fn scan(agents: &[AgentConfig]) -> Vec<SessionInfo> {
         .filter_map(|s| s.jsonl_path.clone())
         .collect();
     sessions.extend(scan_inactive_sessions(agents, &claimed_paths));
+
+    for session in sessions.iter_mut() {
+        if session.title.is_none() {
+            session.title = titles.get(&session.session_id).cloned();
+        }
+    }
     sessions
 }
 
