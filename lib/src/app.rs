@@ -162,8 +162,8 @@ pub struct App {
     /// task selection within the project lives in [`Self::projects_task_sel`].
     pub projects_sel: usize,
     pub projects_task_sel: usize,
-    /// Kanban column cursor: 0=Planning, 1=Running, 2=Review, 3=Done,
-    /// 4=Failed. Drives which column [`Self::projects_task_sel`] indexes
+    /// Kanban column cursor: 0=Planning, 1=Running, 2=Review, 3=Merging,
+    /// 4=Done. Drives which column [`Self::projects_task_sel`] indexes
     /// into.
     pub projects_col: usize,
     /// True while the folder picker / prompt input flow is creating a
@@ -405,11 +405,11 @@ impl App {
         if self.projects_sel >= n {
             self.projects_sel = n - 1;
         }
-        if self.projects_col > 5 {
-            self.projects_col = 5;
+        if self.projects_col > 4 {
+            self.projects_col = 4;
         }
         if jump_if_empty && self.kanban_column_len(self.projects_col) == 0 {
-            for col in 0..6 {
+            for col in 0..5 {
                 if self.kanban_column_len(col) > 0 {
                     self.projects_col = col;
                     break;
@@ -450,10 +450,10 @@ impl App {
     }
 
     /// Move kanban cursor one column right (Planning → Running → Review
-    /// → Merging → Done → Failed). Clamps the row cursor to the new
+    /// → Merging → Done). Clamps the row cursor to the new
     /// column's length.
     pub fn projects_col_right(&mut self) {
-        if self.projects_col < 5 {
+        if self.projects_col < 4 {
             self.projects_col += 1;
             self.projects_task_sel = 0;
         }
@@ -474,9 +474,9 @@ impl App {
     /// kanban column. Columns are derived from `TaskStatus` + worker
     /// presence: a Running task with no workers is in "Planning"
     /// (orchestrator is still decomposing); Running + workers is true
-    /// Running; Review/Done/Failed map straight from status.
+    /// Running; Review/Merging/Done map straight from status.
     ///
-    /// Indices: 0=Planning, 1=Running, 2=Review, 3=Done, 4=Failed.
+    /// Indices: 0=Planning, 1=Running, 2=Review, 3=Merging, 4=Done.
     /// Order matches the underlying `tasks` Vec (already sorted
     /// newest-first by the orchestrator).
     pub fn kanban_column_tasks(&self, col: usize) -> Vec<&crate::orchestrator::TaskState> {
@@ -494,8 +494,7 @@ impl App {
                 1 => t.status == TaskStatus::Running && !t.workers.is_empty(),
                 2 => t.status == TaskStatus::Review,
                 3 => t.status == TaskStatus::Merging,
-                4 => t.status == TaskStatus::Done,
-                _ => t.status == TaskStatus::Failed,
+                _ => t.status == TaskStatus::Done,
             })
             .map(|t| t.as_ref())
             .collect()
@@ -1076,7 +1075,6 @@ impl App {
             crate::orchestrator::TaskStatus::Review => "review",
             crate::orchestrator::TaskStatus::Merging => "merging",
             crate::orchestrator::TaskStatus::Done => "done",
-            crate::orchestrator::TaskStatus::Failed => "failed",
             crate::orchestrator::TaskStatus::Backlog => "backlog",
         };
         let display = format!(
@@ -1573,8 +1571,7 @@ pub fn kanban_col_name(col: usize) -> &'static str {
         1 => "Running",
         2 => "Review",
         3 => "Merging",
-        4 => "Done",
-        _ => "Failed",
+        _ => "Done",
     }
 }
 

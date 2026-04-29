@@ -244,7 +244,7 @@ Metrics**.
 ### Projects tab
 
 The Projects tab is laid out as a horizontal strip of project chips above a
-five-column kanban: **Planning · Running · Review · Done · Failed**. Backlog
+five-column kanban: **Planning · Running · Review · Merging · Done**. Backlog
 tasks live off the kanban — open the Backlog popup with `b` to view and
 start them. A project's chip surfaces a small amber `󰒲 N` token after the
 kanban counts when that project has `N` queued backlog tasks, so you have a

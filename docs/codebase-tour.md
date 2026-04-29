@@ -102,7 +102,7 @@ matching its tmux name against `ProjectsSnapshot::roles_by_tmux`.
 - **`orchestrator.rs`** — schema + on-disk helpers for the Projects layer.
   See the module docstring at `lib/src/orchestrator.rs:1`. Owns:
   - `Project` (registered directory) + `TaskState` (one task)
-  - `TaskStatus`: `Backlog → Running → Review → Merging → Done | Failed`
+  - `TaskStatus`: `Backlog → Running → Review → Merging → Done`
   - `Worker`, `Artifact`, `TodoItem`, `MergeRecord`
   - File layout: `~/.cc-hub/projects.toml` (registry) and
     `~/.cc-hub/projects/<pid>/tasks/<tid>/state.json` (per-task)

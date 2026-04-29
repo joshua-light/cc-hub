@@ -138,7 +138,6 @@ pub enum TaskStatus {
     /// (lock released, /simplify + /bump done).
     Merging,
     Done,
-    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -273,7 +272,7 @@ pub struct TaskState {
     pub triaged_at: Option<i64>,
     /// Version of the project that was shipped as a result of this task,
     /// captured at the moment the orchestrator first declares completion
-    /// (Running → Review/Done/Failed). Read from the project's manifest
+    /// (Running → Review/Done). Read from the project's manifest
     /// (Cargo.toml / package.json / pyproject.toml / VERSION) in the project
     /// root, which by that point reflects any /bump commit the orchestrator
     /// just landed. `None` if the project has no recognised manifest, or if
@@ -823,7 +822,7 @@ Writes a new task with status `backlog`; does NOT spawn an orchestrator. The use
 - **Never edit `main` directly.** All changes flow worktree → PR → user-approved merge. The merge lock is the only thing that mutates main, and only `pr merge` acquires it.
 - Don't ask the user clarifying questions. If the task is ambiguous, pick the most reasonable interpretation and note your assumption in the first status report.
 - Each worktree owns its files. Don't run two parallel worktree workers whose files overlap.
-- On unrecoverable failure: `{bin} task report --task {task_id} --status failed --note \"<why>\"`.
+- If you hit an unrecoverable issue, leave a note via `{bin} task report --task {task_id} --note \"<why>\"` and stop — the user will pick it up from the kanban.
 
 # Your task
 
@@ -1374,8 +1373,6 @@ mod tests {
     fn task_status_serialises_lowercase() {
         let s = serde_json::to_string(&TaskStatus::Running).unwrap();
         assert_eq!(s, "\"running\"");
-        let f = serde_json::to_string(&TaskStatus::Failed).unwrap();
-        assert_eq!(f, "\"failed\"");
     }
 
     #[test]

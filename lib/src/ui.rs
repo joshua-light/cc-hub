@@ -1672,7 +1672,6 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
         crate::orchestrator::TaskStatus::Review => ("review", Color::LightCyan),
         crate::orchestrator::TaskStatus::Merging => ("merging", Color::LightMagenta),
         crate::orchestrator::TaskStatus::Done => ("done", Color::LightGreen),
-        crate::orchestrator::TaskStatus::Failed => ("failed", Color::LightRed),
         crate::orchestrator::TaskStatus::Backlog => ("backlog", Color::Rgb(120, 140, 200)),
     };
     let title = match t.title.as_deref().filter(|s| !s.is_empty()) {
@@ -2920,7 +2919,7 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
         Style::default().fg(Color::Rgb(150, 150, 170)).bg(BAND_BG),
     ));
     spans.push(Span::styled(
-        " P·R·Rv·M·D·F  ",
+        " P·R·Rv·M·D  ",
         Style::default().fg(Color::Rgb(110, 110, 130)).bg(BAND_BG),
     ));
     for (idx, p) in snap.projects.iter().enumerate() {
@@ -2930,7 +2929,6 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
         let mut review = 0usize;
         let mut merging = 0usize;
         let mut done = 0usize;
-        let mut failed = 0usize;
         let mut backlog = 0usize;
         if let Some(v) = tasks {
             for t in v {
@@ -2945,18 +2943,17 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
                     crate::orchestrator::TaskStatus::Review => review += 1,
                     crate::orchestrator::TaskStatus::Merging => merging += 1,
                     crate::orchestrator::TaskStatus::Done => done += 1,
-                    crate::orchestrator::TaskStatus::Failed => failed += 1,
                     crate::orchestrator::TaskStatus::Backlog => backlog += 1,
                 }
             }
         }
         let selected = idx == app.projects_sel;
         let label = format!(" {} ", p.name);
-        // Compact P·R·Rv·M·D·F counts. Review/Merging squeezed to two-letter
+        // Compact P·R·Rv·M·D counts. Review/Merging squeezed to two-letter
         // labels in the column headers; here they're positional.
         let counts = format!(
-            " {}·{}·{}·{}·{}·{} ",
-            planning, running, review, merging, done, failed
+            " {}·{}·{}·{}·{} ",
+            planning, running, review, merging, done
         );
         let (chip_fg, chip_bg) = if selected {
             (Color::Black, Color::Rgb(190, 200, 230))
@@ -3035,27 +3032,26 @@ fn render_kanban_board(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(hint, area);
         return;
     }
-    // Six columns: Planning · Running · Review · Merging · Done · Failed.
-    // Running takes the most space (it's where active rich cards live);
-    // Done is medium; Planning, Review, Merging, and Failed are sidebars.
+    // Five columns: Planning · Running · Review · Merging · Done.
+    // Running takes the most space; Planning, Review, Merging, and Done are
+    // roughly equal.
     // Merging is project-wide-serialized, so at most one card lives in it
-    // at a time — narrow column suffices. Ratio totals to 10.
+    // at a time — narrow column suffices. Ratio totals to 11.
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Ratio(1, 10), // Planning
-            Constraint::Ratio(3, 10), // Running
-            Constraint::Ratio(2, 10), // Review
-            Constraint::Ratio(1, 10), // Merging
-            Constraint::Ratio(2, 10), // Done
-            Constraint::Ratio(1, 10), // Failed
+            Constraint::Ratio(2, 11), // Planning
+            Constraint::Ratio(3, 11), // Running
+            Constraint::Ratio(2, 11), // Review
+            Constraint::Ratio(2, 11), // Merging
+            Constraint::Ratio(2, 11), // Done
         ])
         .split(area);
 
     let sessions_by_tmux = app.sessions_by_tmux();
     let now_secs = now_ms() / 1000;
 
-    for col_idx in 0..6 {
+    for col_idx in 0..5 {
         render_kanban_column(
             frame,
             cols[col_idx],
@@ -3074,8 +3070,7 @@ fn kanban_column_meta(col: usize) -> (&'static str, &'static str, Color) {
         1 => ("󰑮", Color::LightYellow),
         2 => ("󱋲", Color::LightCyan),
         3 => ("", Color::LightMagenta),
-        4 => ("󰸞", Color::LightGreen),
-        _ => ("󰅚", Color::LightRed),
+        _ => ("󰸞", Color::LightGreen),
     };
     (crate::app::kanban_col_name(col), icon, accent)
 }
@@ -3147,7 +3142,7 @@ fn render_kanban_column(
     }
 
     // Planning + Running show tall rich cards (orchestrator is alive,
-    // there's live state to display); Review/Done/Failed get compact
+    // there's live state to display); Review/Merging/Done get compact
     // 3-line cards since they're terminal states from the UI's POV.
     let card_height: u16 = if col_idx <= 1 { 8 } else { 4 };
     let gap: u16 = 1;
@@ -3610,9 +3605,9 @@ fn render_task_card_active(
     frame.render_widget(para, inner);
 }
 
-/// Compact 3-line card for Done/Failed tasks. Dim border, single-line
+/// Compact 3-line card for Review/Merging/Done tasks. Dim border, single-line
 /// prompt, footer with age + summary preview + artifact/merge counts.
-/// `col_idx` is one of 2 (Review), 3 (Merging), 4 (Done), or 5 (Failed).
+/// `col_idx` is one of 2 (Review), 3 (Merging), or 4 (Done).
 /// `lock_holder` is the merge-lock holder's task_id for this project, only
 /// supplied for col_idx == 3; a Merging card whose id differs from the
 /// holder is "queued" and renders with a muted border/icon to make it
@@ -3627,18 +3622,17 @@ fn render_task_card_collapsed(
     titling_in_flight: bool,
     lock_holder: Option<&str>,
 ) {
-    // Review (2) cyan, Merging (3) magenta, Done (4) green, Failed (5) red.
+    // Review (2) cyan, Merging (3) magenta, Done (4) green.
     let (accent, dim_text, icon) = match col_idx {
         2 => (Color::LightCyan, Color::Rgb(140, 175, 185), "󱋲"),
         3 => (Color::LightMagenta, Color::Rgb(180, 145, 195), ""),
-        5 => (Color::LightRed, Color::Rgb(180, 130, 130), "󰅚"),
         _ => (Color::LightGreen, Color::Rgb(140, 160, 145), "󰸞"),
     };
     let queued = col_idx == 3
         && lock_holder.is_some_and(|h| h != t.task_id);
     // Review and Merging cards: brighter border so they stand out — they
-    // need user attention or are actively mutating main. Done/Failed stay
-    // dim. A queued Merging card uses a muted gray instead of the bright
+    // need user attention or are actively mutating main. Done stays dim.
+    // A queued Merging card uses a muted gray instead of the bright
     // magenta — approved, but waiting behind another merge.
     let (border_type, border_color) = if selected {
         (BorderType::Double, Color::White)
