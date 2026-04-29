@@ -476,33 +476,31 @@ fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
     // removal, project-task deletion, and session close. Project-delete
     // wins precedence because it's the most destructive — if both somehow
     // got staged we want to show the user the bigger blast radius.
-    let (title, display, action_color) = if let Some(pending) = &app.pending_project_delete {
-        (" Delete project? ", pending.display.clone(), Color::Red)
+    let (title, display) = if let Some(pending) = &app.pending_project_delete {
+        (" Delete project? ", pending.display.clone())
     } else if let Some(pending) = &app.pending_task_delete {
-        (" Delete task? ", pending.display.clone(), Color::Red)
+        (" Delete task? ", pending.display.clone())
     } else if let Some(pending) = &app.pending_close {
-        (" Close terminal? ", pending.display.clone(), Color::Red)
+        (" Close terminal? ", pending.display.clone())
     } else {
         return;
     };
+    let action_color = Color::Red;
 
     let popup = centered_fixed(area, 72, 5);
     frame.render_widget(Clear, popup);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(Style::default().fg(action_color))
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(action_color)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            " [Y]es · [N]o · Esc cancel ",
-            Style::default().fg(Color::DarkGray),
-        ));
+    let block = popup_block(Span::styled(
+        title,
+        Style::default()
+            .fg(action_color)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .border_style(Style::default().fg(action_color))
+    .title_bottom(Span::styled(
+        " [Y]es · [N]o · Esc cancel ",
+        Style::default().fg(Color::DarkGray),
+    ));
 
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
