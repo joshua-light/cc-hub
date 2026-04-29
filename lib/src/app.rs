@@ -32,6 +32,24 @@ pub enum View {
     Backlog,
 }
 
+/// Outcome of pressing Space on a focused Projects-tab task. The caller
+/// uses this to decide whether to show the generic "nothing to approve"
+/// toast and whether to notify the orchestrator tmux to continue the
+/// merge flow. Specific failure/success messaging is handled inside
+/// `approve_review_task` via `set_status`; the caller only acts on the
+/// variant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ApproveOutcome {
+    /// No focused Review task — caller should show the generic toast.
+    NotReviewTask,
+    /// PR was approved; caller should ping the live orchestrator tmux.
+    PrApproved,
+    /// Review task without a PR was transitioned to Done; status set.
+    DoneNoPr,
+    /// Approve attempted but failed; specific reason already in status.
+    Failed,
+}
+
 /// Overlay on top of [`View::FolderPicker`] that prompts for a new GitHub
 /// repo name. `cwd` is captured at open time so the run target can't drift
 /// if the picker is reloaded while the input is active.
@@ -554,22 +572,28 @@ impl App {
         col.get(self.projects_task_sel).copied()
     }
 
-    /// Approve the focused Review task's PR: flip `pr.review_state` to
-    /// `Approved`, snapshot the branch/base SHAs so `pr merge` can detect
-    /// whether main moved between approval and merge, and transition the
-    /// task to `Merging` so the card moves to the Merging column. If
-    /// another task in the same project currently holds the merge lock,
-    /// the task still moves — the renderer paints a queued border in
-    /// muted gray so the user sees approval landed even though the actual
-    /// merge waits its turn. Tmux sessions stay alive; they're torn down
-    /// by `pr finalize` after the merge lands.
-    pub fn approve_review_task(&mut self) -> bool {
+    /// Approve the focused Review task. If the task has a PR, flip
+    /// `pr.review_state` to `Approved`, snapshot the branch/base SHAs so
+    /// `pr merge` can detect whether main moved between approval and
+    /// merge, and transition the task to `Merging` so the card moves to
+    /// the Merging column. If another task in the same project currently
+    /// holds the merge lock, the task still moves — the renderer paints
+    /// a queued border in muted gray so the user sees approval landed
+    /// even though the actual merge waits its turn. Tmux sessions stay
+    /// alive; they're torn down by `pr finalize` after the merge lands.
+    /// If the task has no PR (a research/queueing task delivered via
+    /// `task report --status done`, auto-routed into Review), transition
+    /// it directly to `Done` and tear down the orchestrator tmux. The
+    /// returned [`ApproveOutcome`] tells the caller whether to show the
+    /// generic "nothing to approve" toast and whether to ping the live
+    /// orchestrator tmux.
+    pub fn approve_review_task(&mut self) -> ApproveOutcome {
         use crate::orchestrator::TaskStatus;
         let Some(t) = self.selected_project_task() else {
-            return false;
+            return ApproveOutcome::NotReviewTask;
         };
         if t.status != TaskStatus::Review {
-            return false;
+            return ApproveOutcome::NotReviewTask;
         }
         let project_id = t.project_id.clone();
         let task_id = t.task_id.clone();
@@ -580,12 +604,26 @@ impl App {
         let pr = match crate::pr::read_pr(&project_id, &task_id) {
             Ok(Some(p)) => p,
             Ok(None) => {
-                self.set_status("approve: no PR for this task".into());
-                return false;
+                match crate::orchestrator::update_task_state(&project_id, &task_id, |s| {
+                    s.status = TaskStatus::Done;
+                }) {
+                    Ok(state) => {
+                        crate::orchestrator::cleanup_task_sessions(&state);
+                        self.set_status(format!(
+                            "approved PR-less task {} → Done",
+                            crate::orchestrator::short_task_id(&task_id)
+                        ));
+                        return ApproveOutcome::DoneNoPr;
+                    }
+                    Err(e) => {
+                        self.set_status(format!("approve failed: {}", e));
+                        return ApproveOutcome::Failed;
+                    }
+                }
             }
             Err(e) => {
                 self.set_status(format!("approve: pr read failed: {}", e));
-                return false;
+                return ApproveOutcome::Failed;
             }
         };
         let branch_sha = git_rev_parse_short(&project_root, &pr.branch);
@@ -598,7 +636,7 @@ impl App {
             p.approved_at_base_sha = base_sha;
         }) {
             self.set_status(format!("approve failed: {}", e));
-            return false;
+            return ApproveOutcome::Failed;
         }
 
         let pr_id = pr.id;
@@ -619,7 +657,7 @@ impl App {
             });
         }) {
             self.set_status(format!("approve: state update failed: {}", e));
-            return false;
+            return ApproveOutcome::Failed;
         }
 
         // Cursor stays on the same task; it's now in the Merging column.
@@ -638,7 +676,7 @@ impl App {
                 crate::orchestrator::short_task_id(&task_id),
             ),
         });
-        true
+        ApproveOutcome::PrApproved
     }
 
     /// `tmux_session_name → SessionInfo` over the latest scan. Built fresh
@@ -1702,7 +1740,7 @@ mod tests {
         // Cursor lands on the Review task (col 2, row 0).
         assert_eq!(app.projects_col, 2);
 
-        assert!(app.approve_review_task());
+        assert_eq!(app.approve_review_task(), ApproveOutcome::PrApproved);
 
         // Reload and verify status transitioned.
         let reloaded =
@@ -1712,6 +1750,41 @@ mod tests {
             .expect("read pr")
             .expect("present");
         assert_eq!(pr_after.review_state, crate::pr::ReviewState::Approved);
+
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn approve_review_pr_less_task_transitions_to_done() {
+        use crate::test_util::HOME_TEST_LOCK;
+        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let p = project("p-noPR");
+        let mut t = task("p-noPR", "t-noPR", TaskStatus::Review, false);
+        t.project_root = home.path().join("repo");
+        std::fs::create_dir_all(&t.project_root).unwrap();
+        crate::orchestrator::write_task_state(&t).expect("write task");
+        // Deliberately do NOT write a pr.json — this is the PR-less case.
+
+        let mut app = App::new();
+        app.current_tab = Tab::Projects;
+        app.update_projects(snapshot(p, vec![t]));
+        assert_eq!(app.projects_col, 2);
+
+        assert_eq!(app.approve_review_task(), ApproveOutcome::DoneNoPr);
+
+        let reloaded =
+            crate::orchestrator::read_task_state("p-noPR", "t-noPR").expect("read");
+        assert_eq!(reloaded.status, TaskStatus::Done);
+        assert!(crate::pr::read_pr("p-noPR", "t-noPR")
+            .expect("read pr")
+            .is_none());
 
         match prev {
             Some(v) => std::env::set_var("HOME", v),
