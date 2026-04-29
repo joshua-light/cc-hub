@@ -994,9 +994,11 @@ impl App {
     /// step doesn't have to re-load state.json.
     pub fn enter_confirm_task_delete(&mut self) {
         let Some(p) = self.selected_project().cloned() else {
+            self.set_status("no project selected".into());
             return;
         };
         let Some(task) = self.selected_project_task().cloned() else {
+            self.set_status("no task selected — focus a task on the kanban first".into());
             return;
         };
         let status_label = match task.status {
@@ -1032,6 +1034,7 @@ impl App {
     /// count in the prompt so the user sees how much state they're nuking.
     pub fn enter_confirm_project_delete(&mut self) {
         let Some(p) = self.selected_project().cloned() else {
+            self.set_status("no project selected".into());
             return;
         };
         let n = self.projects.tasks.get(&p.id).map(|v| v.len()).unwrap_or(0);

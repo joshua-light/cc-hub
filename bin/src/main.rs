@@ -887,6 +887,10 @@ async fn run(
                                     }
                                 }
                             }
+                        } else {
+                            app.set_status(
+                                "no task selected — focus a task on the kanban first".into(),
+                            );
                         }
                     }
                     (View::Grid, KeyCode::Char('f')) if on_projects => {
@@ -991,6 +995,10 @@ async fn run(
                             } else {
                                 app.set_status("no orchestrator log available".into());
                             }
+                        } else {
+                            app.set_status(
+                                "no task selected — focus a task on the kanban first".into(),
+                            );
                         }
                     }
                     (View::Grid, KeyCode::Char('x')) if on_projects => {
