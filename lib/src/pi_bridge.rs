@@ -24,88 +24,88 @@ pub struct Heartbeat {
     pub updated_at: u64,
 }
 
-const BRIDGE_SOURCE: &str = r#"import type { ExtensionAPI } from \"@mariozechner/pi-coding-agent\";
-import { mkdir, writeFile } from \"node:fs/promises\";
-import { dirname, join } from \"node:path\";
+const BRIDGE_SOURCE: &str = r#"import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
-type State = \"idle\" | \"processing\";
+type State = "idle" | "processing";
 
 function latestModelFromEntries(entries: any[]): string | undefined {
-\tfor (let i = entries.length - 1; i >= 0; i--) {
-\t\tconst entry = entries[i];
-\t\tif (entry?.type === \"model_change\") {
-\t\t\tconst provider = typeof entry.provider === \"string\" ? entry.provider : undefined;
-\t\t\tconst modelId = typeof entry.modelId === \"string\" ? entry.modelId : undefined;
-\t\t\tif (provider && modelId) return `${provider}/${modelId}`;
-\t\t}
-\t\tif (entry?.type === \"message\" && entry.message?.role === \"assistant\") {
-\t\t\tconst provider = typeof entry.message.provider === \"string\" ? entry.message.provider : undefined;
-\t\t\tconst model = typeof entry.message.model === \"string\" ? entry.message.model : undefined;
-\t\t\tif (provider && model) return `${provider}/${model}`;
-\t\t\tif (model) return model;
-\t\t}
-\t}
-\treturn undefined;
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i];
+		if (entry?.type === "model_change") {
+			const provider = typeof entry.provider === "string" ? entry.provider : undefined;
+			const modelId = typeof entry.modelId === "string" ? entry.modelId : undefined;
+			if (provider && modelId) return `${provider}/${modelId}`;
+		}
+		if (entry?.type === "message" && entry.message?.role === "assistant") {
+			const provider = typeof entry.message.provider === "string" ? entry.message.provider : undefined;
+			const model = typeof entry.message.model === "string" ? entry.message.model : undefined;
+			if (provider && model) return `${provider}/${model}`;
+			if (model) return model;
+		}
+	}
+	return undefined;
 }
 
 export default function (pi: ExtensionAPI) {
-\tconst heartbeatDir = process.env.CC_HUB_HEARTBEAT_DIR;
-\tconst tmux = process.env.CC_HUB_TMUX;
-\tconst agent = process.env.CC_HUB_AGENT_ID ?? \"pi\";
-\tif (!heartbeatDir || !tmux) return;
+	const heartbeatDir = process.env.CC_HUB_HEARTBEAT_DIR;
+	const tmux = process.env.CC_HUB_TMUX;
+	const agent = process.env.CC_HUB_AGENT_ID ?? "pi";
+	if (!heartbeatDir || !tmux) return;
 
-\tconst heartbeatPath = join(heartbeatDir, `${tmux}.json`);
-\tlet state: State = \"idle\";
-\tlet model = process.env.CC_HUB_MODEL;
+	const heartbeatPath = join(heartbeatDir, `${tmux}.json`);
+	let state: State = "idle";
+	let model = process.env.CC_HUB_MODEL;
 
-\tconst writeHeartbeat = async (ctx: any) => {
-\t\tconst sessionFile = ctx.sessionManager.getSessionFile();
-\t\tconst sessionId = ctx.sessionManager.getSessionId();
-\t\tif (!model) model = latestModelFromEntries(ctx.sessionManager.getEntries());
-\t\tconst payload = {
-\t\t\tagent,
-\t\t\tpid: process.pid,
-\t\t\ttmux,
-\t\t\tcwd: ctx.cwd,
-\t\t\tsessionFile,
-\t\t\tsessionId,
-\t\t\tstate,
-\t\t\tmodel,
-\t\t\tupdatedAt: Date.now(),
-\t\t};
-\t\tawait mkdir(dirname(heartbeatPath), { recursive: true });
-\t\tawait writeFile(heartbeatPath, JSON.stringify(payload), \"utf8\");
-\t};
+	const writeHeartbeat = async (ctx: any) => {
+		const sessionFile = ctx.sessionManager.getSessionFile();
+		const sessionId = ctx.sessionManager.getSessionId();
+		if (!model) model = latestModelFromEntries(ctx.sessionManager.getEntries());
+		const payload = {
+			agent,
+			pid: process.pid,
+			tmux,
+			cwd: ctx.cwd,
+			sessionFile,
+			sessionId,
+			state,
+			model,
+			updatedAt: Date.now(),
+		};
+		await mkdir(dirname(heartbeatPath), { recursive: true });
+		await writeFile(heartbeatPath, JSON.stringify(payload), "utf8");
+	};
 
-\tpi.on(\"session_start\", async (_event, ctx) => {
-\t\tstate = \"idle\";
-\t\tawait writeHeartbeat(ctx);
-\t});
+	pi.on("session_start", async (_event, ctx) => {
+		state = "idle";
+		await writeHeartbeat(ctx);
+	});
 
-\tpi.on(\"model_select\", async (event, ctx) => {
-\t\tmodel = `${event.model.provider}/${event.model.id}`;
-\t\tawait writeHeartbeat(ctx);
-\t});
+	pi.on("model_select", async (event, ctx) => {
+		model = `${event.model.provider}/${event.model.id}`;
+		await writeHeartbeat(ctx);
+	});
 
-\tpi.on(\"agent_start\", async (_event, ctx) => {
-\t\tstate = \"processing\";
-\t\tawait writeHeartbeat(ctx);
-\t});
+	pi.on("agent_start", async (_event, ctx) => {
+		state = "processing";
+		await writeHeartbeat(ctx);
+	});
 
-\tpi.on(\"tool_execution_start\", async (_event, ctx) => {
-\t\tstate = \"processing\";
-\t\tawait writeHeartbeat(ctx);
-\t});
+	pi.on("tool_execution_start", async (_event, ctx) => {
+		state = "processing";
+		await writeHeartbeat(ctx);
+	});
 
-\tpi.on(\"agent_end\", async (_event, ctx) => {
-\t\tstate = \"idle\";
-\t\tawait writeHeartbeat(ctx);
-\t});
+	pi.on("agent_end", async (_event, ctx) => {
+		state = "idle";
+		await writeHeartbeat(ctx);
+	});
 
-\tpi.on(\"session_shutdown\", async (_event, ctx) => {
-\t\tstate = \"idle\";
-\t\tawait writeHeartbeat(ctx);
-\t});
+	pi.on("session_shutdown", async (_event, ctx) => {
+		state = "idle";
+		await writeHeartbeat(ctx);
+	});
 }
 "#;
 

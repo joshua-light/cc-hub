@@ -116,7 +116,6 @@ use_bridge = true
 
 [projects]
 default_orchestrator_agent = "claude"
-default_worker_agent = "pi-codex"
 default_session_agent = "claude"
 
 [title]
