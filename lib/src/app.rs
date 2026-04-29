@@ -32,6 +32,24 @@ pub enum View {
     Backlog,
 }
 
+/// Outcome of pressing Space on a focused Projects-tab task. The caller
+/// uses this to decide whether to show the generic "nothing to approve"
+/// toast and whether to notify the orchestrator tmux to continue the
+/// merge flow. Specific failure/success messaging is handled inside
+/// `approve_review_task` via `set_status`; the caller only acts on the
+/// variant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ApproveOutcome {
+    /// No focused Review task — caller should show the generic toast.
+    NotReviewTask,
+    /// PR was approved; caller should ping the live orchestrator tmux.
+    PrApproved,
+    /// Review task without a PR was transitioned to Done; status set.
+    DoneNoPr,
+    /// Approve attempted but failed; specific reason already in status.
+    Failed,
+}
+
 /// Overlay on top of [`View::FolderPicker`] that prompts for a new GitHub
 /// repo name. `cwd` is captured at open time so the run target can't drift
 /// if the picker is reloaded while the input is active.
@@ -162,8 +180,8 @@ pub struct App {
     /// task selection within the project lives in [`Self::projects_task_sel`].
     pub projects_sel: usize,
     pub projects_task_sel: usize,
-    /// Kanban column cursor: 0=Planning, 1=Running, 2=Review, 3=Done,
-    /// 4=Failed. Drives which column [`Self::projects_task_sel`] indexes
+    /// Kanban column cursor: 0=Planning, 1=Running, 2=Review, 3=Merging,
+    /// 4=Done. Drives which column [`Self::projects_task_sel`] indexes
     /// into.
     pub projects_col: usize,
     /// True while the folder picker / prompt input flow is creating a
@@ -217,6 +235,16 @@ pub struct App {
     /// Paths whose decode failed once — never retry, since decoding the same
     /// bytes will keep failing and we'd burn CPU on every redraw.
     pub artifact_image_failed: HashSet<String>,
+    /// Task id we want the kanban cursor to jump to once the next
+    /// ProjectsSnapshot includes it. Set when the user starts a Backlog
+    /// task; cleared in update_projects once focus has moved (or when
+    /// the budget below runs out).
+    pub pending_focus_task_id: Option<String>,
+    /// Snapshot ticks remaining to find pending_focus_task_id before we
+    /// give up with a soft toast. Started at 5 — the fs-watcher-driven
+    /// scan typically lands within one tick, but the periodic 2s ticker
+    /// can interleave, so allow a few attempts.
+    pub pending_focus_budget: u8,
 }
 
 impl App {
@@ -275,6 +303,8 @@ impl App {
             image_picker: None,
             artifact_images: HashMap::new(),
             artifact_image_failed: HashSet::new(),
+            pending_focus_task_id: None,
+            pending_focus_budget: 0,
         }
     }
 
@@ -317,14 +347,7 @@ impl App {
         }
         // If the task is gone, fall through and let clamp handle the row.
         if let Some(task_id) = prev_task_id {
-            for col in 0..=4 {
-                let tasks = self.kanban_column_tasks(col);
-                if let Some(row) = tasks.iter().position(|t| t.task_id == task_id) {
-                    self.projects_col = col;
-                    self.projects_task_sel = row;
-                    break;
-                }
-            }
+            self.focus_task(&task_id);
         }
         // Jump-if-empty only on the very first load — once the user is in the
         // tab, an empty focused column means they explicitly navigated there
@@ -335,10 +358,46 @@ impl App {
         } else {
             self.clamp_projects_cursor();
         }
+        if let Some(task_id) = self.pending_focus_task_id.clone() {
+            if let Some(col) = self.focus_task(&task_id) {
+                self.set_status(format!(
+                    "started {} — focus moved to {}",
+                    crate::orchestrator::short_task_id(&task_id),
+                    kanban_col_name(col),
+                ));
+                self.pending_focus_task_id = None;
+                self.pending_focus_budget = 0;
+            } else {
+                self.pending_focus_budget = self.pending_focus_budget.saturating_sub(1);
+                if self.pending_focus_budget == 0 {
+                    self.set_status(format!(
+                        "started {} — orchestrator booting; cursor unchanged",
+                        crate::orchestrator::short_task_id(&task_id),
+                    ));
+                    self.pending_focus_task_id = None;
+                }
+            }
+        }
         // Newly-discovered orchestrator/worker tmux names need to disappear
         // from the Sessions view immediately; without this the hide flag
         // would only take effect on the next session scan.
         self.rebuild_groups();
+    }
+
+    /// Search the focused project's kanban columns for `task_id`. If found,
+    /// move `projects_col` / `projects_task_sel` onto it and return the
+    /// column index. Returns None if not found in any column (or if no
+    /// project is selected).
+    pub fn focus_task(&mut self, task_id: &str) -> Option<usize> {
+        for col in 0..5 {
+            let tasks = self.kanban_column_tasks(col);
+            if let Some(row) = tasks.iter().position(|t| t.task_id == task_id) {
+                self.projects_col = col;
+                self.projects_task_sel = row;
+                return Some(col);
+            }
+        }
+        None
     }
 
     fn clamp_projects_cursor(&mut self) {
@@ -364,11 +423,11 @@ impl App {
         if self.projects_sel >= n {
             self.projects_sel = n - 1;
         }
-        if self.projects_col > 5 {
-            self.projects_col = 5;
+        if self.projects_col > 4 {
+            self.projects_col = 4;
         }
         if jump_if_empty && self.kanban_column_len(self.projects_col) == 0 {
-            for col in 0..6 {
+            for col in 0..5 {
                 if self.kanban_column_len(col) > 0 {
                     self.projects_col = col;
                     break;
@@ -389,12 +448,10 @@ impl App {
             return;
         }
         self.projects_sel = (self.projects_sel + 1).min(self.projects.projects.len() - 1);
-        self.projects_task_sel = 0;
     }
 
     pub fn projects_move_up(&mut self) {
         self.projects_sel = self.projects_sel.saturating_sub(1);
-        self.projects_task_sel = 0;
     }
 
     /// Move cursor down within the current kanban column.
@@ -411,10 +468,10 @@ impl App {
     }
 
     /// Move kanban cursor one column right (Planning → Running → Review
-    /// → Merging → Done → Failed). Clamps the row cursor to the new
+    /// → Merging → Done). Clamps the row cursor to the new
     /// column's length.
     pub fn projects_col_right(&mut self) {
-        if self.projects_col < 5 {
+        if self.projects_col < 4 {
             self.projects_col += 1;
             self.projects_task_sel = 0;
         }
@@ -435,9 +492,9 @@ impl App {
     /// kanban column. Columns are derived from `TaskStatus` + worker
     /// presence: a Running task with no workers is in "Planning"
     /// (orchestrator is still decomposing); Running + workers is true
-    /// Running; Review/Done/Failed map straight from status.
+    /// Running; Review/Merging/Done map straight from status.
     ///
-    /// Indices: 0=Planning, 1=Running, 2=Review, 3=Done, 4=Failed.
+    /// Indices: 0=Planning, 1=Running, 2=Review, 3=Merging, 4=Done.
     /// Order matches the underlying `tasks` Vec (already sorted
     /// newest-first by the orchestrator).
     pub fn kanban_column_tasks(&self, col: usize) -> Vec<&crate::orchestrator::TaskState> {
@@ -455,8 +512,7 @@ impl App {
                 1 => t.status == TaskStatus::Running && !t.workers.is_empty(),
                 2 => t.status == TaskStatus::Review,
                 3 => t.status == TaskStatus::Merging,
-                4 => t.status == TaskStatus::Done,
-                _ => t.status == TaskStatus::Failed,
+                _ => t.status == TaskStatus::Done,
             })
             .map(|t| t.as_ref())
             .collect()
@@ -516,20 +572,28 @@ impl App {
         col.get(self.projects_task_sel).copied()
     }
 
-    /// Approve the focused Review task's PR: flip `pr.review_state` to
-    /// `Approved` and snapshot the branch/base SHAs so `pr merge` can
-    /// detect whether main moved between approval and merge. The task
-    /// itself stays in Review until the orchestrator receives the
-    /// approval prompt and runs `pr merge` (which transitions to Merging).
-    /// Tmux sessions stay alive — they're torn down by `pr finalize`
-    /// after the merge actually lands.
-    pub fn approve_review_task(&mut self) -> bool {
+    /// Approve the focused Review task. If the task has a PR, flip
+    /// `pr.review_state` to `Approved`, snapshot the branch/base SHAs so
+    /// `pr merge` can detect whether main moved between approval and
+    /// merge, and transition the task to `Merging` so the card moves to
+    /// the Merging column. If another task in the same project currently
+    /// holds the merge lock, the task still moves — the renderer paints
+    /// a queued border in muted gray so the user sees approval landed
+    /// even though the actual merge waits its turn. Tmux sessions stay
+    /// alive; they're torn down by `pr finalize` after the merge lands.
+    /// If the task has no PR (a research/queueing task delivered via
+    /// `task report --status done`, auto-routed into Review), transition
+    /// it directly to `Done` and tear down the orchestrator tmux. The
+    /// returned [`ApproveOutcome`] tells the caller whether to show the
+    /// generic "nothing to approve" toast and whether to ping the live
+    /// orchestrator tmux.
+    pub fn approve_review_task(&mut self) -> ApproveOutcome {
         use crate::orchestrator::TaskStatus;
         let Some(t) = self.selected_project_task() else {
-            return false;
+            return ApproveOutcome::NotReviewTask;
         };
         if t.status != TaskStatus::Review {
-            return false;
+            return ApproveOutcome::NotReviewTask;
         }
         let project_id = t.project_id.clone();
         let task_id = t.task_id.clone();
@@ -540,12 +604,26 @@ impl App {
         let pr = match crate::pr::read_pr(&project_id, &task_id) {
             Ok(Some(p)) => p,
             Ok(None) => {
-                self.set_status("approve: no PR for this task".into());
-                return false;
+                match crate::orchestrator::update_task_state(&project_id, &task_id, |s| {
+                    s.status = TaskStatus::Done;
+                }) {
+                    Ok(state) => {
+                        crate::orchestrator::cleanup_task_sessions(&state);
+                        self.set_status(format!(
+                            "approved PR-less task {} → Done",
+                            crate::orchestrator::short_task_id(&task_id)
+                        ));
+                        return ApproveOutcome::DoneNoPr;
+                    }
+                    Err(e) => {
+                        self.set_status(format!("approve failed: {}", e));
+                        return ApproveOutcome::Failed;
+                    }
+                }
             }
             Err(e) => {
                 self.set_status(format!("approve: pr read failed: {}", e));
-                return false;
+                return ApproveOutcome::Failed;
             }
         };
         let branch_sha = git_rev_parse_short(&project_root, &pr.branch);
@@ -558,18 +636,49 @@ impl App {
             p.approved_at_base_sha = base_sha;
         }) {
             self.set_status(format!("approve failed: {}", e));
-            return false;
+            return ApproveOutcome::Failed;
         }
 
-        // Cursor stays on the same Review task; the caller is responsible
-        // for notifying the live orchestrator tmux to continue the merge
-        // flow.
-        self.set_status(format!(
-            "approved PR #{} for {}",
-            pr.id,
-            crate::orchestrator::short_task_id(&task_id)
-        ));
-        true
+        let pr_id = pr.id;
+        let lock_holder = crate::merge_lock::current_holder(&project_id)
+            .ok()
+            .flatten();
+        let queued_behind = lock_holder
+            .as_ref()
+            .filter(|h| h.task_id != task_id)
+            .map(|h| h.task_id.clone());
+        if let Err(e) = crate::orchestrator::update_task_state(&project_id, &task_id, |s| {
+            s.status = TaskStatus::Merging;
+            s.note = Some(match &queued_behind {
+                Some(other) => format!(
+                    "PR #{}: approved; queued behind {}",
+                    pr_id,
+                    crate::orchestrator::short_task_id(other),
+                ),
+                None => format!("PR #{}: approved; merging", pr_id),
+            });
+        }) {
+            self.set_status(format!("approve: state update failed: {}", e));
+            return ApproveOutcome::Failed;
+        }
+
+        // Cursor stays on the same task; it's now in the Merging column.
+        // The caller is responsible for notifying the live orchestrator
+        // tmux to continue the merge flow.
+        self.set_status(match &queued_behind {
+            Some(other) => format!(
+                "approved PR #{} for {} — queued behind {}",
+                pr.id,
+                crate::orchestrator::short_task_id(&task_id),
+                crate::orchestrator::short_task_id(other),
+            ),
+            None => format!(
+                "approved PR #{} for {}",
+                pr.id,
+                crate::orchestrator::short_task_id(&task_id),
+            ),
+        });
+        ApproveOutcome::PrApproved
     }
 
     /// `tmux_session_name → SessionInfo` over the latest scan. Built fresh
@@ -994,9 +1103,11 @@ impl App {
     /// step doesn't have to re-load state.json.
     pub fn enter_confirm_task_delete(&mut self) {
         let Some(p) = self.selected_project().cloned() else {
+            self.set_status("no project selected".into());
             return;
         };
         let Some(task) = self.selected_project_task().cloned() else {
+            self.set_status("no task selected — focus a task on the kanban first".into());
             return;
         };
         let status_label = match task.status {
@@ -1004,7 +1115,6 @@ impl App {
             crate::orchestrator::TaskStatus::Review => "review",
             crate::orchestrator::TaskStatus::Merging => "merging",
             crate::orchestrator::TaskStatus::Done => "done",
-            crate::orchestrator::TaskStatus::Failed => "failed",
             crate::orchestrator::TaskStatus::Backlog => "backlog",
         };
         let display = format!(
@@ -1032,6 +1142,7 @@ impl App {
     /// count in the prompt so the user sees how much state they're nuking.
     pub fn enter_confirm_project_delete(&mut self) {
         let Some(p) = self.selected_project().cloned() else {
+            self.set_status("no project selected".into());
             return;
         };
         let n = self.projects.tasks.get(&p.id).map(|v| v.len()).unwrap_or(0);
@@ -1494,6 +1605,16 @@ impl App {
     }
 }
 
+pub fn kanban_col_name(col: usize) -> &'static str {
+    match col {
+        0 => "Planning",
+        1 => "Running",
+        2 => "Review",
+        3 => "Merging",
+        _ => "Done",
+    }
+}
+
 fn git_rev_parse_short(root: &std::path::Path, rev: &str) -> Option<String> {
     let out = crate::orchestrator::run_git(root, &["rev-parse", rev]).ok()?;
     if !out.status_ok {
@@ -1584,6 +1705,94 @@ mod tests {
     }
 
     #[test]
+    fn approve_review_transitions_task_to_merging() {
+        use crate::test_util::HOME_TEST_LOCK;
+        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let p = project("p-app");
+        let mut t = task("p-app", "t-app", TaskStatus::Review, false);
+        t.project_root = home.path().join("repo");
+        std::fs::create_dir_all(&t.project_root).unwrap();
+        crate::orchestrator::write_task_state(&t).expect("write task");
+
+        // Hand-write a PR record so approve_review_task() can read it.
+        let pr = crate::pr::PullRequest {
+            id: 7,
+            task_id: "t-app".into(),
+            project_id: "p-app".into(),
+            branch: "cc-hub/t-app-feat".into(),
+            base: "main".into(),
+            title: "x".into(),
+            description: "x".into(),
+            review_state: crate::pr::ReviewState::Open,
+            comments: vec![],
+            approved_at_branch_sha: None,
+            approved_at_base_sha: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        crate::pr::write_pr(&pr).expect("write pr");
+
+        let mut app = App::new();
+        app.current_tab = Tab::Projects;
+        app.update_projects(snapshot(p, vec![t]));
+        // Cursor lands on the Review task (col 2, row 0).
+        assert_eq!(app.projects_col, 2);
+
+        assert_eq!(app.approve_review_task(), ApproveOutcome::PrApproved);
+
+        // Reload and verify status transitioned.
+        let reloaded = crate::orchestrator::read_task_state("p-app", "t-app").expect("read");
+        assert_eq!(reloaded.status, TaskStatus::Merging);
+        let pr_after = crate::pr::read_pr("p-app", "t-app")
+            .expect("read pr")
+            .expect("present");
+        assert_eq!(pr_after.review_state, crate::pr::ReviewState::Approved);
+
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn approve_review_pr_less_task_transitions_to_done() {
+        use crate::test_util::HOME_TEST_LOCK;
+        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let p = project("p-noPR");
+        let mut t = task("p-noPR", "t-noPR", TaskStatus::Review, false);
+        t.project_root = home.path().join("repo");
+        std::fs::create_dir_all(&t.project_root).unwrap();
+        crate::orchestrator::write_task_state(&t).expect("write task");
+        // Deliberately do NOT write a pr.json — this is the PR-less case.
+
+        let mut app = App::new();
+        app.current_tab = Tab::Projects;
+        app.update_projects(snapshot(p, vec![t]));
+        assert_eq!(app.projects_col, 2);
+
+        assert_eq!(app.approve_review_task(), ApproveOutcome::DoneNoPr);
+
+        let reloaded = crate::orchestrator::read_task_state("p-noPR", "t-noPR").expect("read");
+        assert_eq!(reloaded.status, TaskStatus::Done);
+        assert!(crate::pr::read_pr("p-noPR", "t-noPR")
+            .expect("read pr")
+            .is_none());
+
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
     fn projects_cursor_clamps_when_task_disappears() {
         let mut app = App::new();
         app.current_tab = Tab::Projects;
@@ -1606,5 +1815,46 @@ mod tests {
             "column should stay where it was when task disappears",
         );
         assert_eq!(app.projects_task_sel, 0, "row should clamp to 0");
+    }
+
+    #[test]
+    fn pending_focus_jumps_to_planning_when_task_appears() {
+        let mut app = App::new();
+        app.current_tab = Tab::Projects;
+        let p = project("p-1");
+        // Initial snapshot: empty (the task hasn't been written yet from
+        // the orchestrator's POV, or is still in Backlog).
+        app.update_projects(snapshot(p.clone(), Vec::new()));
+        app.pending_focus_task_id = Some("t-new".to_string());
+        app.pending_focus_budget = 5;
+        // New snapshot: task appears as Running with no workers → Planning column.
+        app.update_projects(snapshot(
+            p,
+            vec![task("p-1", "t-new", TaskStatus::Running, false)],
+        ));
+        assert_eq!(app.projects_col, 0, "cursor should land on Planning");
+        assert_eq!(app.projects_task_sel, 0);
+        assert!(
+            app.pending_focus_task_id.is_none(),
+            "pending should clear after success"
+        );
+    }
+
+    #[test]
+    fn pending_focus_budget_runs_out_when_task_never_arrives() {
+        let mut app = App::new();
+        app.current_tab = Tab::Projects;
+        let p = project("p-1");
+        app.update_projects(snapshot(p.clone(), Vec::new()));
+        app.pending_focus_task_id = Some("t-ghost".to_string());
+        app.pending_focus_budget = 2;
+        // Two empty snapshots → budget exhausted, pending cleared.
+        app.update_projects(snapshot(p.clone(), Vec::new()));
+        assert!(app.pending_focus_task_id.is_some(), "still pending after 1");
+        app.update_projects(snapshot(p, Vec::new()));
+        assert!(
+            app.pending_focus_task_id.is_none(),
+            "cleared after budget=0"
+        );
     }
 }

@@ -13,6 +13,7 @@
 //! `scan()` so deleted tasks don't linger.
 
 use crate::agent::AgentKind;
+use crate::merge_lock::{self, MergeLock};
 use crate::orchestrator::{self, Project, TaskState, TaskStatus};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -65,6 +66,12 @@ pub struct ProjectsSnapshot {
     /// the main loop before the snapshot is handed to the App so the UI
     /// can render a spinner without locking a shared mutex per frame.
     pub titling: HashSet<String>,
+    /// Current merge-lock holder per project_id. Populated each scan tick so
+    /// the renderer can gray out the border of Merging-column cards that are
+    /// queued behind another task's in-flight merge. `None` means no live
+    /// holder for that project. Stale-lock detection is left to acquire(); the
+    /// renderer treats whatever `current_holder` returns as the truth.
+    pub merge_lock_holders: HashMap<String, Option<MergeLock>>,
 }
 
 impl ProjectsSnapshot {
@@ -73,6 +80,7 @@ impl ProjectsSnapshot {
             projects: Vec::new(),
             tasks: HashMap::new(),
             titling: HashSet::new(),
+            merge_lock_holders: HashMap::new(),
         }
     }
 
@@ -126,6 +134,7 @@ impl ProjectsSnapshot {
 pub fn scan() -> ProjectsSnapshot {
     let projects = orchestrator::load_projects().projects;
     let mut tasks: HashMap<String, Vec<Arc<TaskState>>> = HashMap::new();
+    let mut merge_lock_holders: HashMap<String, Option<MergeLock>> = HashMap::new();
     let mut visited_all: HashSet<PathBuf> = HashSet::new();
 
     for p in &projects {
@@ -141,6 +150,9 @@ pub fn scan() -> ProjectsSnapshot {
                 .then(b.task_id.cmp(&a.task_id))
         });
         tasks.insert(p.id.clone(), list);
+        // IO errors are render-side-noise: treat as no holder so a transient
+        // glitch doesn't paint every Merging card with the queued style.
+        merge_lock_holders.insert(p.id.clone(), merge_lock::current_holder(&p.id).unwrap_or(None));
     }
 
     // Evict cache entries for paths not seen this scan (deleted tasks,
@@ -154,6 +166,7 @@ pub fn scan() -> ProjectsSnapshot {
         projects,
         tasks,
         titling: HashSet::new(),
+        merge_lock_holders,
     }
 }
 

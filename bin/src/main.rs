@@ -739,73 +739,75 @@ async fn run(
                         app.projects_move_up();
                     }
                     (View::Grid, KeyCode::Char(' ')) if on_projects => {
-                        // Approve the focused Review task's PR, but keep the
-                        // task in Review; then ping the live orchestrator tmux
-                        // so it can continue the merge flow.
+                        use cc_hub_lib::app::ApproveOutcome;
                         let target = app.selected_project_task().cloned();
-                        if !app.approve_review_task() {
-                            app.set_status("nothing to approve (focus a Review task)".into());
-                        } else if let Some(task) = target {
-                            let Some(tmux_name) = task.orchestrator_tmux.clone() else {
-                                app.set_status(format!(
-                                    "approved {} but task has no orchestrator tmux to notify",
-                                    cc_hub_lib::orchestrator::short_task_id(&task.task_id)
-                                ));
-                                continue;
-                            };
-                            if !send::tmux_session_exists(&tmux_name) {
-                                app.set_status(format!(
-                                    "approved {} but orchestrator [{}] is not live",
-                                    cc_hub_lib::orchestrator::short_task_id(&task.task_id),
-                                    tmux_name
-                                ));
-                                continue;
+                        match app.approve_review_task() {
+                            ApproveOutcome::NotReviewTask => {
+                                app.set_status("nothing to approve (focus a Review task)".into());
                             }
-                            let prompt = match std::env::current_exe() {
-                                Ok(bin) => cc_hub_lib::orchestrator::build_review_approval_prompt(
-                                    &task.task_id,
-                                    &bin,
-                                ),
-                                Err(e) => {
-                                    log::warn!(
-                                        "approve: current_exe failed while building notify prompt: {}",
-                                        e
-                                    );
-                                    cc_hub_lib::orchestrator::build_review_approval_prompt(
-                                        &task.task_id,
-                                        std::path::Path::new("cc-hub"),
-                                    )
+                            ApproveOutcome::DoneNoPr | ApproveOutcome::Failed => {}
+                            ApproveOutcome::PrApproved => {
+                                let Some(task) = target else { continue };
+                                let short = cc_hub_lib::orchestrator::short_task_id(&task.task_id);
+                                let Some(tmux_name) = task.orchestrator_tmux.clone() else {
+                                    app.set_status(format!(
+                                        "approved {} but task has no orchestrator tmux to notify",
+                                        short
+                                    ));
+                                    continue;
+                                };
+                                if !send::tmux_session_exists(&tmux_name) {
+                                    app.set_status(format!(
+                                        "approved {} but orchestrator [{}] is not live",
+                                        short, tmux_name
+                                    ));
+                                    continue;
                                 }
-                            };
-                            if send::pane_ready_for_input(&tmux_name) {
-                                let status = match send::send_prompt(&tmux_name, &prompt) {
-                                    Ok(()) => format!(
-                                        "approved {} and notified orchestrator [{}] to continue merge flow",
-                                        cc_hub_lib::orchestrator::short_task_id(&task.task_id),
-                                        tmux_name
-                                    ),
+                                let prompt = match std::env::current_exe() {
+                                    Ok(bin) => {
+                                        cc_hub_lib::orchestrator::build_review_approval_prompt(
+                                            &task.task_id,
+                                            &bin,
+                                        )
+                                    }
                                     Err(e) => {
-                                        log::warn!("approve: send_prompt failed: {}", e);
-                                        format!(
-                                            "approved {} but orchestrator notify failed: {}",
-                                            cc_hub_lib::orchestrator::short_task_id(&task.task_id),
+                                        log::warn!(
+                                            "approve: current_exe failed while building notify prompt: {}",
                                             e
+                                        );
+                                        cc_hub_lib::orchestrator::build_review_approval_prompt(
+                                            &task.task_id,
+                                            std::path::Path::new("cc-hub"),
                                         )
                                     }
                                 };
-                                app.set_status(status);
-                            } else if app.has_pending_dispatch() {
-                                app.set_status(format!(
-                                    "approved {} but a dispatch is already queued — orchestrator notify not queued",
-                                    cc_hub_lib::orchestrator::short_task_id(&task.task_id)
-                                ));
-                            } else {
-                                app.queue_pending_dispatch(tmux_name.clone(), prompt);
-                                app.set_status(format!(
-                                    "approved {} — queued notify for orchestrator [{}] when idle",
-                                    cc_hub_lib::orchestrator::short_task_id(&task.task_id),
-                                    tmux_name
-                                ));
+                                if send::pane_ready_for_input(&tmux_name) {
+                                    let status = match send::send_prompt(&tmux_name, &prompt) {
+                                        Ok(()) => format!(
+                                            "approved {} and notified orchestrator [{}] to continue merge flow",
+                                            short, tmux_name
+                                        ),
+                                        Err(e) => {
+                                            log::warn!("approve: send_prompt failed: {}", e);
+                                            format!(
+                                                "approved {} but orchestrator notify failed: {}",
+                                                short, e
+                                            )
+                                        }
+                                    };
+                                    app.set_status(status);
+                                } else if app.has_pending_dispatch() {
+                                    app.set_status(format!(
+                                        "approved {} but a dispatch is already queued — orchestrator notify not queued",
+                                        short
+                                    ));
+                                } else {
+                                    app.queue_pending_dispatch(tmux_name.clone(), prompt);
+                                    app.set_status(format!(
+                                        "approved {} — queued notify for orchestrator [{}] when idle",
+                                        short, tmux_name
+                                    ));
+                                }
                             }
                         }
                     }
@@ -856,6 +858,15 @@ async fn run(
                             }
                         }
                     }
+                    (View::Grid, KeyCode::Char('c')) if on_projects => {
+                        match app.selected_project_task().map(|t| t.task_id.clone()) {
+                            None => app.set_status("no task selected".into()),
+                            Some(task_id) => match clipboard::copy(&task_id) {
+                                Ok(()) => app.set_status(format!("copied task id: {}", task_id)),
+                                Err(e) => app.set_status(format!("copy failed: {}", e)),
+                            },
+                        }
+                    }
                     (View::Grid, KeyCode::Char('N')) if on_projects => {
                         // Register a project (folder picker), no task spawn.
                         // Use `n` to start a task on an existing project.
@@ -887,6 +898,10 @@ async fn run(
                                     }
                                 }
                             }
+                        } else {
+                            app.set_status(
+                                "no task selected — focus a task on the kanban first".into(),
+                            );
                         }
                     }
                     (View::Grid, KeyCode::Char('f')) if on_projects => {
@@ -991,6 +1006,10 @@ async fn run(
                             } else {
                                 app.set_status("no orchestrator log available".into());
                             }
+                        } else {
+                            app.set_status(
+                                "no task selected — focus a task on the kanban first".into(),
+                            );
                         }
                     }
                     (View::Grid, KeyCode::Char('x')) if on_projects => {
@@ -1063,6 +1082,8 @@ async fn run(
                                 if matches!(app.view, View::Backlog) {
                                     app.close_backlog();
                                 }
+                                app.pending_focus_task_id = Some(state.task_id.clone());
+                                app.pending_focus_budget = 5;
                             }
                             Err(e) => {
                                 log::warn!("project task: start backlog failed: {}", e);
