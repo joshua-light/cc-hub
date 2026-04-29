@@ -2681,7 +2681,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         let keybinds: &str = match app.view {
             View::Grid => match app.current_tab {
-                Tab::Projects => "tab:next  H/L:project  h/l:col  j/k:task  enter:focus orch  f:agent terminal/resurrect  space:approve  n:new task  N:register project  b:backlog  r:result  c:copy id  x:delete task  X:remove project  q:quit",
+                Tab::Projects => "tab:next  H/L:project  h/l:col  j/k:task  enter:focus orch  f:agent terminal/resurrect  n:new task  N:register project  b:backlog  r:result  c:copy id  x:delete task  X:remove project  q:quit",
                 Tab::Sessions => "tab:next  h/j/k/l:nav  n:new  N:new in…  i:info  D:why?  enter/f:focus/resume  o:shell  x:close  H:inactive  W:workers  q:quit",
                 Tab::Metrics => "tab:next  j/k:select  enter:view transcript  r:refresh  q:quit",
             },
@@ -2700,6 +2700,27 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             format!(" {} ", keybinds),
             Style::default().fg(Color::DarkGray),
         ));
+        if let View::Grid = app.view {
+            let space_verb = match app.current_tab {
+                Tab::Projects => Some("approve "),
+                Tab::Sessions => Some("ack "),
+                Tab::Metrics => None,
+            };
+            if let Some(verb) = space_verb {
+                spans.push(Span::styled(
+                    "Space ",
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    verb,
+                    Style::default()
+                        .fg(Color::LightCyan)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
     }
 
     // Pending dispatch indicator — visible when a freshly-spawned session
