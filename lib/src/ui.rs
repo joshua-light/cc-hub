@@ -3556,6 +3556,13 @@ fn render_task_card_active(
             Style::default().fg(Color::Rgb(180, 160, 220)),
         ));
     }
+    if !t.todos.is_empty() {
+        let done = t.todos.iter().filter(|i| i.done).count();
+        row3.push(Span::styled(
+            format!("   ☑ {}/{}", done, t.todos.len()),
+            Style::default().fg(Color::Rgb(180, 180, 200)),
+        ));
+    }
     let left_w: usize = row3.iter().map(|s| s.content.chars().count()).sum();
     let pct = sum.max_ctx_pct;
     let ctx_label = format!("  󰍛 {}% ", pct);
@@ -3708,6 +3715,15 @@ fn render_task_card_collapsed(
         footer.push(Span::styled(
             format!("󰉂 {}", arts),
             Style::default().fg(Color::Rgb(160, 145, 195)),
+        ));
+    }
+    if !t.todos.is_empty() {
+        let done = t.todos.iter().filter(|i| i.done).count();
+        let total = t.todos.len();
+        footer.push(Span::raw("   "));
+        footer.push(Span::styled(
+            format!("☑ {}/{}", done, total),
+            Style::default().fg(Color::Rgb(140, 145, 160)),
         ));
     }
     lines.push(Line::from(footer));
