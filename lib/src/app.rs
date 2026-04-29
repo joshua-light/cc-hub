@@ -515,12 +515,17 @@ impl App {
     }
 
     /// Approve the focused Review task's PR: flip `pr.review_state` to
-    /// `Approved` and snapshot the branch/base SHAs so `pr merge` can
-    /// detect whether main moved between approval and merge. The task
-    /// itself stays in Review until the orchestrator receives the
-    /// approval prompt and runs `pr merge` (which transitions to Merging).
-    /// Tmux sessions stay alive — they're torn down by `pr finalize`
-    /// after the merge actually lands.
+    /// `Approved`, snapshot the branch/base SHAs so `pr merge` can detect
+    /// whether main moved between approval and merge, and transition the
+    /// task to `Merging` immediately so the card moves to the Merging
+    /// column. If another task in the same project currently holds the
+    /// merge lock, the task still moves — the renderer paints a queued
+    /// border in muted gray so the user sees approval landed even though
+    /// the actual merge waits its turn. The orchestrator's `pr merge`
+    /// gates on `pr.review_state == Approved`, so transitioning early
+    /// doesn't disturb the merge flow; on conflict it auto-demotes back
+    /// to Review (existing behavior preserved). Tmux sessions stay alive
+    /// — they're torn down by `pr finalize` after the merge actually lands.
     pub fn approve_review_task(&mut self) -> bool {
         use crate::orchestrator::TaskStatus;
         let Some(t) = self.selected_project_task() else {
@@ -559,14 +564,43 @@ impl App {
             return false;
         }
 
-        // Cursor stays on the same Review task; the caller is responsible
-        // for notifying the live orchestrator tmux to continue the merge
-        // flow.
-        self.set_status(format!(
-            "approved PR #{} for {}",
-            pr.id,
-            crate::orchestrator::short_task_id(&task_id)
-        ));
+        let pr_id = pr.id;
+        let lock_holder = crate::merge_lock::current_holder(&project_id).ok().flatten();
+        let queued_behind = lock_holder
+            .as_ref()
+            .filter(|h| h.task_id != task_id)
+            .map(|h| h.task_id.clone());
+        if let Err(e) = crate::orchestrator::update_task_state(&project_id, &task_id, |s| {
+            s.status = TaskStatus::Merging;
+            s.note = Some(match &queued_behind {
+                Some(other) => format!(
+                    "PR #{}: approved; queued behind {}",
+                    pr_id,
+                    crate::orchestrator::short_task_id(other),
+                ),
+                None => format!("PR #{}: approved; merging", pr_id),
+            });
+        }) {
+            self.set_status(format!("approve: state update failed: {}", e));
+            return false;
+        }
+
+        // Cursor stays on the same task; it's now in the Merging column.
+        // The caller is responsible for notifying the live orchestrator
+        // tmux to continue the merge flow.
+        self.set_status(match &queued_behind {
+            Some(other) => format!(
+                "approved PR #{} for {} — queued behind {}",
+                pr.id,
+                crate::orchestrator::short_task_id(&task_id),
+                crate::orchestrator::short_task_id(other),
+            ),
+            None => format!(
+                "approved PR #{} for {}",
+                pr.id,
+                crate::orchestrator::short_task_id(&task_id),
+            ),
+        });
         true
     }
 
@@ -1579,6 +1613,61 @@ mod tests {
             Some("t-1".to_string()),
             "selected task should still be t-1",
         );
+    }
+
+    #[test]
+    fn approve_review_transitions_task_to_merging() {
+        use crate::test_util::HOME_TEST_LOCK;
+        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let p = project("p-app");
+        let mut t = task("p-app", "t-app", TaskStatus::Review, false);
+        t.project_root = home.path().join("repo");
+        std::fs::create_dir_all(&t.project_root).unwrap();
+        crate::orchestrator::write_task_state(&t).expect("write task");
+
+        // Hand-write a PR record so approve_review_task() can read it.
+        let pr = crate::pr::PullRequest {
+            id: 7,
+            task_id: "t-app".into(),
+            project_id: "p-app".into(),
+            branch: "cc-hub/t-app-feat".into(),
+            base: "main".into(),
+            title: "x".into(),
+            description: "x".into(),
+            review_state: crate::pr::ReviewState::Open,
+            comments: vec![],
+            approved_at_branch_sha: None,
+            approved_at_base_sha: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        crate::pr::write_pr(&pr).expect("write pr");
+
+        let mut app = App::new();
+        app.current_tab = Tab::Projects;
+        app.update_projects(snapshot(p, vec![t]));
+        // Cursor lands on the Review task (col 2, row 0).
+        assert_eq!(app.projects_col, 2);
+
+        assert!(app.approve_review_task());
+
+        // Reload and verify status transitioned.
+        let reloaded =
+            crate::orchestrator::read_task_state("p-app", "t-app").expect("read");
+        assert_eq!(reloaded.status, TaskStatus::Merging);
+        let pr_after = crate::pr::read_pr("p-app", "t-app")
+            .expect("read pr")
+            .expect("present");
+        assert_eq!(pr_after.review_state, crate::pr::ReviewState::Approved);
+
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     #[test]

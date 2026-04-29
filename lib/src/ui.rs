@@ -3084,6 +3084,16 @@ fn render_kanban_column(
     let tasks = app.kanban_column_tasks(col_idx);
     let count = tasks.len();
     let col_focused = app.projects_col == col_idx;
+    // Only the Merging column needs the lock-holder lookup — collapsed
+    // cards in other columns ignore it.
+    let merging_holder_id: Option<&str> = if col_idx == 3 {
+        app.selected_project()
+            .and_then(|p| app.projects.merge_lock_holders.get(&p.id))
+            .and_then(|h| h.as_ref())
+            .map(|h| h.task_id.as_str())
+    } else {
+        None
+    };
 
     // Column border. Focused column gets the accent color + Double border so
     // it stands out without changing the layout.
@@ -3178,6 +3188,7 @@ fn render_kanban_column(
                 col_idx,
                 now_secs,
                 titling_in_flight,
+                merging_holder_id,
             );
         }
         y = y.saturating_add(card_height + gap);
@@ -3585,6 +3596,10 @@ fn render_task_card_active(
 /// Compact 3-line card for Done/Failed tasks. Dim border, single-line
 /// prompt, footer with age + summary preview + artifact/merge counts.
 /// `col_idx` is one of 2 (Review), 3 (Merging), 4 (Done), or 5 (Failed).
+/// `lock_holder` is the merge-lock holder's task_id for this project, only
+/// supplied for col_idx == 3; a Merging card whose id differs from the
+/// holder is "queued" and renders with a muted border/icon to make it
+/// visually obvious that approval landed but the merge is waiting.
 fn render_task_card_collapsed(
     frame: &mut Frame,
     area: Rect,
@@ -3593,6 +3608,7 @@ fn render_task_card_collapsed(
     col_idx: usize,
     now_secs: u64,
     titling_in_flight: bool,
+    lock_holder: Option<&str>,
 ) {
     // Review (2) cyan, Merging (3) magenta, Done (4) green, Failed (5) red.
     let (accent, dim_text, icon) = match col_idx {
@@ -3601,24 +3617,32 @@ fn render_task_card_collapsed(
         5 => (Color::LightRed, Color::Rgb(180, 130, 130), "󰅚"),
         _ => (Color::LightGreen, Color::Rgb(140, 160, 145), "󰸞"),
     };
+    let queued = col_idx == 3
+        && lock_holder.is_some_and(|h| h != t.task_id);
     // Review and Merging cards: brighter border so they stand out — they
     // need user attention or are actively mutating main. Done/Failed stay
-    // dim.
+    // dim. A queued Merging card uses a muted gray instead of the bright
+    // magenta — approved, but waiting behind another merge.
     let (border_type, border_color) = if selected {
         (BorderType::Double, Color::White)
     } else if col_idx == 2 {
         (BorderType::Rounded, Color::Rgb(110, 170, 180))
     } else if col_idx == 3 {
-        (BorderType::Rounded, Color::Rgb(170, 130, 180))
+        if queued {
+            (BorderType::Rounded, Color::Rgb(95, 100, 115))
+        } else {
+            (BorderType::Rounded, Color::Rgb(170, 130, 180))
+        }
     } else {
         (BorderType::Rounded, Color::Rgb(55, 60, 70))
     };
+    let icon_accent = if queued { Color::Rgb(135, 135, 155) } else { accent };
 
     let title_id = crate::orchestrator::short_task_id(&t.task_id);
     let prompt_max = (area.width as usize).saturating_sub(14);
     let header_text = task_card_header_text(t, titling_in_flight, prompt_max);
     let title_spans = vec![
-        Span::styled(format!(" {} ", icon), Style::default().fg(accent)),
+        Span::styled(format!(" {} ", icon), Style::default().fg(icon_accent)),
         Span::styled(
             format!("[{}] ", title_id),
             Style::default().fg(Color::Rgb(120, 130, 150)),
@@ -4429,6 +4453,7 @@ mod result_popup_tests {
             projects: vec![project],
             tasks,
             titling: std::collections::HashSet::new(),
+            merge_lock_holders: std::collections::HashMap::new(),
         };
         app.update_projects(snap);
         assert!(app.enter_projects_result(), "popup should open");
@@ -4522,6 +4547,7 @@ mod result_popup_tests {
             projects: vec![project],
             tasks,
             titling: std::collections::HashSet::new(),
+            merge_lock_holders: std::collections::HashMap::new(),
         };
         app.update_projects(snap);
         assert!(app.enter_projects_result(), "popup should open");
@@ -4743,6 +4769,7 @@ index 0000001..0000002 100644
             projects: vec![project],
             tasks,
             titling: std::collections::HashSet::new(),
+            merge_lock_holders: std::collections::HashMap::new(),
         };
         app.update_projects(snap);
         assert!(app.enter_projects_result(), "popup should open");
@@ -4841,7 +4868,16 @@ mod kanban_card_tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|f| {
-                super::render_task_card_collapsed(f, f.area(), &t, false, 2, 1_000_000_000, false)
+                super::render_task_card_collapsed(
+                    f,
+                    f.area(),
+                    &t,
+                    false,
+                    2,
+                    1_000_000_000,
+                    false,
+                    None,
+                )
             })
             .expect("render");
         let plain = buffer_to_string(terminal.backend().buffer());
@@ -4860,7 +4896,16 @@ mod kanban_card_tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|f| {
-                super::render_task_card_collapsed(f, f.area(), &t, false, 2, 1_000_000_000, false)
+                super::render_task_card_collapsed(
+                    f,
+                    f.area(),
+                    &t,
+                    false,
+                    2,
+                    1_000_000_000,
+                    false,
+                    None,
+                )
             })
             .expect("render");
         let plain = buffer_to_string(terminal.backend().buffer());
