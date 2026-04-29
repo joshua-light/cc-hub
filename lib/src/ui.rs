@@ -2022,6 +2022,10 @@ fn render_state_debug(frame: &mut Frame, area: Rect, app: &App) {
         Style::default()
             .fg(state_color(&exp.final_state))
             .add_modifier(Modifier::BOLD),
+    ))
+    .title_bottom(Span::styled(
+        " j/k scroll · esc/q close ",
+        Style::default().fg(Color::DarkGray),
     ));
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
