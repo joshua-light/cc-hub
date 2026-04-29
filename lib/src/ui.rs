@@ -2700,26 +2700,24 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             format!(" {} ", keybinds),
             Style::default().fg(Color::DarkGray),
         ));
-        if let View::Grid = app.view {
-            let space_verb = match app.current_tab {
-                Tab::Projects => Some("approve "),
-                Tab::Sessions => Some("ack "),
-                Tab::Metrics => None,
-            };
-            if let Some(verb) = space_verb {
-                spans.push(Span::styled(
-                    "Space ",
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::styled(
-                    verb,
-                    Style::default()
-                        .fg(Color::LightCyan)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            }
+        let space_verb = match (&app.view, app.current_tab) {
+            (View::Grid, Tab::Projects) => Some("approve "),
+            (View::Grid, Tab::Sessions) => Some("ack "),
+            _ => None,
+        };
+        if let Some(verb) = space_verb {
+            spans.push(Span::styled(
+                "Space ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                verb,
+                Style::default()
+                    .fg(Color::LightCyan)
+                    .add_modifier(Modifier::BOLD),
+            ));
         }
     }
 
