@@ -389,10 +389,17 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
 
     let tasks = app.backlog_tasks();
     if tasks.is_empty() {
-        let empty = Paragraph::new(Line::from(Span::styled(
-            "No backlog tasks for this project.",
-            Style::default().fg(Color::DarkGray),
-        )))
+        let empty = Paragraph::new(vec![
+            Line::from(Span::styled(
+                "No backlog tasks for this project.",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "Queue one with: cc-hub task create --backlog --prompt \"…\"",
+                Style::default().fg(Color::Rgb(80, 80, 90)),
+            )),
+        ])
         .alignment(Alignment::Center);
         frame.render_widget(empty, inner);
         return;
@@ -3062,14 +3069,15 @@ fn render_kanban_board(frame: &mut Frame, area: Rect, app: &App) {
 
 fn kanban_column_meta(col: usize) -> (&'static str, &'static str, Color) {
     // (label, status icon, accent color). Indices match `kanban_column_tasks`.
-    match col {
-        0 => ("Planning", "󰟶", Color::Rgb(170, 140, 210)),
-        1 => ("Running", "󰑮", Color::LightYellow),
-        2 => ("Review", "󱋲", Color::LightCyan),
-        3 => ("Merging", "", Color::LightMagenta),
-        4 => ("Done", "󰸞", Color::LightGreen),
-        _ => ("Failed", "󰅚", Color::LightRed),
-    }
+    let (icon, accent) = match col {
+        0 => ("󰟶", Color::Rgb(170, 140, 210)),
+        1 => ("󰑮", Color::LightYellow),
+        2 => ("󱋲", Color::LightCyan),
+        3 => ("", Color::LightMagenta),
+        4 => ("󰸞", Color::LightGreen),
+        _ => ("󰅚", Color::LightRed),
+    };
+    (crate::app::kanban_col_name(col), icon, accent)
 }
 
 fn render_kanban_column(
@@ -3432,6 +3440,16 @@ fn ctx_bar(pct: u8, width: usize) -> Vec<Span<'static>> {
     out
 }
 
+/// `(done, total)` if the task has a checklist, else `None`. Both card
+/// renderers use this to decide whether to draw the `☑ M/N` badge.
+fn todos_progress(t: &crate::orchestrator::TaskState) -> Option<(usize, usize)> {
+    if t.todos.is_empty() {
+        return None;
+    }
+    let done = t.todos.iter().filter(|i| i.done).count();
+    Some((done, t.todos.len()))
+}
+
 /// Sessions-style rich card for a Running task. Mirrors the layout of the
 /// Sessions grid card: bordered, multi-row, with status emoji, agent dots,
 /// merge glyph, ctx bar, and live tool/thinking line.
@@ -3541,10 +3559,9 @@ fn render_task_card_active(
             Style::default().fg(Color::Rgb(180, 160, 220)),
         ));
     }
-    if !t.todos.is_empty() {
-        let done = t.todos.iter().filter(|i| i.done).count();
+    if let Some((done, total)) = todos_progress(t) {
         row3.push(Span::styled(
-            format!("   ☑ {}/{}", done, t.todos.len()),
+            format!("   ☑ {}/{}", done, total),
             Style::default().fg(Color::Rgb(180, 180, 200)),
         ));
     }
@@ -3715,9 +3732,7 @@ fn render_task_card_collapsed(
             Style::default().fg(Color::Rgb(160, 145, 195)),
         ));
     }
-    if !t.todos.is_empty() {
-        let done = t.todos.iter().filter(|i| i.done).count();
-        let total = t.todos.len();
+    if let Some((done, total)) = todos_progress(t) {
         footer.push(Span::raw("   "));
         footer.push(Span::styled(
             format!("☑ {}/{}", done, total),
@@ -4375,7 +4390,20 @@ fn model_color(model: &str) -> Color {
 }
 
 #[cfg(test)]
+fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
+    let mut out = String::new();
+    for y in 0..buf.area().height {
+        for x in 0..buf.area().width {
+            out.push_str(buf[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    out
+}
+
+#[cfg(test)]
 mod result_popup_tests {
+    use super::buffer_to_string;
     use crate::app::App;
     use crate::orchestrator::{Artifact, Project, TaskState, TaskStatus};
     use crate::projects_scan::ProjectsSnapshot;
@@ -4384,17 +4412,6 @@ mod result_popup_tests {
     use ratatui::Terminal;
     use std::collections::HashMap;
     use std::path::PathBuf;
-
-    fn buffer_to_string(buf: &Buffer) -> String {
-        let mut out = String::new();
-        for y in 0..buf.area().height {
-            for x in 0..buf.area().width {
-                out.push_str(buf[(x, y)].symbol());
-            }
-            out.push('\n');
-        }
-        out
-    }
 
     /// Returns the y-coordinate of the first row that contains `needle`, or
     /// `None` when the substring is missing. Used to assert the proof-first
@@ -4830,23 +4847,12 @@ index 0000001..0000002 100644
 
 #[cfg(test)]
 mod kanban_card_tests {
+    use super::buffer_to_string;
     use crate::orchestrator::{TaskState, TaskStatus, TodoItem};
     use ratatui::backend::TestBackend;
-    use ratatui::buffer::Buffer;
     use ratatui::Terminal;
     use std::collections::HashMap;
     use std::path::PathBuf;
-
-    fn buffer_to_string(buf: &Buffer) -> String {
-        let mut out = String::new();
-        for y in 0..buf.area().height {
-            for x in 0..buf.area().width {
-                out.push_str(buf[(x, y)].symbol());
-            }
-            out.push('\n');
-        }
-        out
-    }
 
     fn task_with_todos(status: TaskStatus, done: usize, total: usize) -> TaskState {
         let mut t = TaskState::new("p".into(), PathBuf::from("/tmp/p"), "prompt".into());

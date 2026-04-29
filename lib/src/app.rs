@@ -217,6 +217,16 @@ pub struct App {
     /// Paths whose decode failed once — never retry, since decoding the same
     /// bytes will keep failing and we'd burn CPU on every redraw.
     pub artifact_image_failed: HashSet<String>,
+    /// Task id we want the kanban cursor to jump to once the next
+    /// ProjectsSnapshot includes it. Set when the user starts a Backlog
+    /// task; cleared in update_projects once focus has moved (or when
+    /// the budget below runs out).
+    pub pending_focus_task_id: Option<String>,
+    /// Snapshot ticks remaining to find pending_focus_task_id before we
+    /// give up with a soft toast. Started at 5 — the fs-watcher-driven
+    /// scan typically lands within one tick, but the periodic 2s ticker
+    /// can interleave, so allow a few attempts.
+    pub pending_focus_budget: u8,
 }
 
 impl App {
@@ -275,6 +285,8 @@ impl App {
             image_picker: None,
             artifact_images: HashMap::new(),
             artifact_image_failed: HashSet::new(),
+            pending_focus_task_id: None,
+            pending_focus_budget: 0,
         }
     }
 
@@ -317,14 +329,7 @@ impl App {
         }
         // If the task is gone, fall through and let clamp handle the row.
         if let Some(task_id) = prev_task_id {
-            for col in 0..=4 {
-                let tasks = self.kanban_column_tasks(col);
-                if let Some(row) = tasks.iter().position(|t| t.task_id == task_id) {
-                    self.projects_col = col;
-                    self.projects_task_sel = row;
-                    break;
-                }
-            }
+            self.focus_task(&task_id);
         }
         // Jump-if-empty only on the very first load — once the user is in the
         // tab, an empty focused column means they explicitly navigated there
@@ -335,10 +340,46 @@ impl App {
         } else {
             self.clamp_projects_cursor();
         }
+        if let Some(task_id) = self.pending_focus_task_id.clone() {
+            if let Some(col) = self.focus_task(&task_id) {
+                self.set_status(format!(
+                    "started {} — focus moved to {}",
+                    crate::orchestrator::short_task_id(&task_id),
+                    kanban_col_name(col),
+                ));
+                self.pending_focus_task_id = None;
+                self.pending_focus_budget = 0;
+            } else {
+                self.pending_focus_budget = self.pending_focus_budget.saturating_sub(1);
+                if self.pending_focus_budget == 0 {
+                    self.set_status(format!(
+                        "started {} — orchestrator booting; cursor unchanged",
+                        crate::orchestrator::short_task_id(&task_id),
+                    ));
+                    self.pending_focus_task_id = None;
+                }
+            }
+        }
         // Newly-discovered orchestrator/worker tmux names need to disappear
         // from the Sessions view immediately; without this the hide flag
         // would only take effect on the next session scan.
         self.rebuild_groups();
+    }
+
+    /// Search the focused project's kanban columns for `task_id`. If found,
+    /// move `projects_col` / `projects_task_sel` onto it and return the
+    /// column index. Returns None if not found in any column (or if no
+    /// project is selected).
+    pub fn focus_task(&mut self, task_id: &str) -> Option<usize> {
+        for col in 0..6 {
+            let tasks = self.kanban_column_tasks(col);
+            if let Some(row) = tasks.iter().position(|t| t.task_id == task_id) {
+                self.projects_col = col;
+                self.projects_task_sel = row;
+                return Some(col);
+            }
+        }
+        None
     }
 
     fn clamp_projects_cursor(&mut self) {
@@ -1026,9 +1067,11 @@ impl App {
     /// step doesn't have to re-load state.json.
     pub fn enter_confirm_task_delete(&mut self) {
         let Some(p) = self.selected_project().cloned() else {
+            self.set_status("no project selected".into());
             return;
         };
         let Some(task) = self.selected_project_task().cloned() else {
+            self.set_status("no task selected — focus a task on the kanban first".into());
             return;
         };
         let status_label = match task.status {
@@ -1064,6 +1107,7 @@ impl App {
     /// count in the prompt so the user sees how much state they're nuking.
     pub fn enter_confirm_project_delete(&mut self) {
         let Some(p) = self.selected_project().cloned() else {
+            self.set_status("no project selected".into());
             return;
         };
         let n = self.projects.tasks.get(&p.id).map(|v| v.len()).unwrap_or(0);
@@ -1526,6 +1570,17 @@ impl App {
     }
 }
 
+pub fn kanban_col_name(col: usize) -> &'static str {
+    match col {
+        0 => "Planning",
+        1 => "Running",
+        2 => "Review",
+        3 => "Merging",
+        4 => "Done",
+        _ => "Failed",
+    }
+}
+
 fn git_rev_parse_short(root: &std::path::Path, rev: &str) -> Option<String> {
     let out = crate::orchestrator::run_git(root, &["rev-parse", rev]).ok()?;
     if !out.status_ok {
@@ -1693,5 +1748,46 @@ mod tests {
             "column should stay where it was when task disappears",
         );
         assert_eq!(app.projects_task_sel, 0, "row should clamp to 0");
+    }
+
+    #[test]
+    fn pending_focus_jumps_to_planning_when_task_appears() {
+        let mut app = App::new();
+        app.current_tab = Tab::Projects;
+        let p = project("p-1");
+        // Initial snapshot: empty (the task hasn't been written yet from
+        // the orchestrator's POV, or is still in Backlog).
+        app.update_projects(snapshot(p.clone(), Vec::new()));
+        app.pending_focus_task_id = Some("t-new".to_string());
+        app.pending_focus_budget = 5;
+        // New snapshot: task appears as Running with no workers → Planning column.
+        app.update_projects(snapshot(
+            p,
+            vec![task("p-1", "t-new", TaskStatus::Running, false)],
+        ));
+        assert_eq!(app.projects_col, 0, "cursor should land on Planning");
+        assert_eq!(app.projects_task_sel, 0);
+        assert!(
+            app.pending_focus_task_id.is_none(),
+            "pending should clear after success"
+        );
+    }
+
+    #[test]
+    fn pending_focus_budget_runs_out_when_task_never_arrives() {
+        let mut app = App::new();
+        app.current_tab = Tab::Projects;
+        let p = project("p-1");
+        app.update_projects(snapshot(p.clone(), Vec::new()));
+        app.pending_focus_task_id = Some("t-ghost".to_string());
+        app.pending_focus_budget = 2;
+        // Two empty snapshots → budget exhausted, pending cleared.
+        app.update_projects(snapshot(p.clone(), Vec::new()));
+        assert!(app.pending_focus_task_id.is_some(), "still pending after 1");
+        app.update_projects(snapshot(p, Vec::new()));
+        assert!(
+            app.pending_focus_task_id.is_none(),
+            "cleared after budget=0"
+        );
     }
 }
