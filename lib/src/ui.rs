@@ -476,45 +476,31 @@ fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
     // removal, project-task deletion, and session close. Project-delete
     // wins precedence because it's the most destructive — if both somehow
     // got staged we want to show the user the bigger blast radius.
-    let (title, display, action_label, action_color) =
-        if let Some(pending) = &app.pending_project_delete {
-            (
-                " Delete project? ",
-                pending.display.clone(),
-                "delete",
-                Color::Red,
-            )
-        } else if let Some(pending) = &app.pending_task_delete {
-            (
-                " Delete task? ",
-                pending.display.clone(),
-                "delete",
-                Color::Red,
-            )
-        } else if let Some(pending) = &app.pending_close {
-            (
-                " Close terminal? ",
-                pending.display.clone(),
-                "close",
-                Color::Red,
-            )
-        } else {
-            return;
-        };
+    let (title, display) = if let Some(pending) = &app.pending_project_delete {
+        (" Delete project? ", pending.display.clone())
+    } else if let Some(pending) = &app.pending_task_delete {
+        (" Delete task? ", pending.display.clone())
+    } else if let Some(pending) = &app.pending_close {
+        (" Close terminal? ", pending.display.clone())
+    } else {
+        return;
+    };
+    let action_color = Color::Red;
 
-    let popup = centered_fixed(area, 72, 7);
+    let popup = centered_fixed(area, 72, 5);
     frame.render_widget(Clear, popup);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(Style::default().fg(action_color))
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(action_color)
-                .add_modifier(Modifier::BOLD),
-        ));
+    let block = popup_block(Span::styled(
+        title,
+        Style::default()
+            .fg(action_color)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .border_style(Style::default().fg(action_color))
+    .title_bottom(Span::styled(
+        " [Y]es · [N]o · Esc cancel ",
+        Style::default().fg(Color::DarkGray),
+    ));
 
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
@@ -531,26 +517,6 @@ fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
             ),
         ]),
         Line::raw(""),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                "[y]",
-                Style::default()
-                    .fg(action_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" {}   ", action_label),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(
-                "[n/esc]",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
-        ]),
     ];
 
     frame.render_widget(Paragraph::new(lines), inner);
