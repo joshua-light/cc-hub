@@ -223,12 +223,6 @@ fn resolve_project_id(f: &Flags) -> Result<String, CliError> {
     Ok(orchestrator::project_id_for_path(&cwd))
 }
 
-fn resolve_worker_agent_id(f: &Flags) -> String {
-    f.agent
-        .clone()
-        .unwrap_or_else(|| config::get().default_worker_agent_id())
-}
-
 fn resolve_orchestrator_agent_id(f: &Flags) -> String {
     f.agent
         .clone()
@@ -278,7 +272,10 @@ fn spawn_worker(args: &[String]) -> Result<(), CliError> {
         ));
     };
 
-    let agent_id = resolve_worker_agent_id(&f);
+    let agent_id = f
+        .agent
+        .clone()
+        .unwrap_or_else(|| state.orchestrator_agent_id.clone());
     let agent = config::get()
         .agent(&agent_id)
         .ok_or_else(|| CliError::Other(format!("unknown worker agent: {}", agent_id)))?;

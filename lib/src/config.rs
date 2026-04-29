@@ -72,13 +72,6 @@ impl Config {
             .unwrap_or_else(|| "claude".into())
     }
 
-    pub fn default_worker_agent_id(&self) -> String {
-        self.projects
-            .default_worker_agent
-            .clone()
-            .unwrap_or_else(|| "claude".into())
-    }
-
     pub fn default_session_agent_id(&self) -> String {
         self.projects
             .default_session_agent
@@ -126,7 +119,6 @@ impl Default for ConfiguredAgent {
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectsConfig {
     pub default_orchestrator_agent: Option<String>,
-    pub default_worker_agent: Option<String>,
     pub default_session_agent: Option<String>,
 }
 
@@ -397,14 +389,13 @@ mod tests {
 
             [projects]
             default_orchestrator_agent = "claude"
-            default_worker_agent = "pi-codex"
             default_session_agent = "pi-codex"
         "#;
         let cfg: Config = toml::from_str(src).unwrap();
         let pi = cfg.agent("pi-codex").unwrap();
         assert_eq!(pi.kind, AgentKind::Pi);
         assert!(pi.use_bridge);
-        assert_eq!(cfg.default_worker_agent_id(), "pi-codex");
+        assert_eq!(cfg.default_orchestrator_agent_id(), "claude");
         assert_eq!(cfg.default_session_agent_id(), "pi-codex");
     }
 }

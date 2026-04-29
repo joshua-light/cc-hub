@@ -660,14 +660,13 @@ pub fn build_orchestrator_prompt(state: &TaskState, cc_hub_bin: &Path) -> String
     } = state;
     let bin = cc_hub_bin.display();
     let prefix = orchestrator_prompt_prefix(task_id);
-    let worker_agent = crate::config::get().default_worker_agent_id();
     format!(
         "{prefix} in project `{project_id}` at `{root}`.
 
 Your job is to deliver the user's task end-to-end via a Pull Request: explore, decompose, dispatch workers into a worktree, open a PR, iterate on review feedback, and merge when the user approves. **You never edit `main` directly.** Every change lands through the PR flow so the user sees a reviewable diff before anything touches their working branch.
 
 The cc-hub binary is at `{bin}`. Always invoke it by absolute path; it is not necessarily on PATH inside worker shells.
-You're currently running as agent `{orchestrator_agent_id}`. The default worker agent is `{worker_agent}`; pass `--agent <id>` when you want a different backend.
+You're currently running as agent `{orchestrator_agent_id}`. Workers you spawn inherit this agent by default; pass `--agent <id>` when you want a different backend.
 
 # Start here
 
@@ -683,11 +682,11 @@ You're currently running as agent `{orchestrator_agent_id}`. The default worker 
 All edits happen inside a worktree branch. You **do not** edit the project's main branch from inside this orchestrator session.
 
 - Spin up an editing worker with:
-  `{bin} spawn-worker --task {task_id} --agent {worker_agent} --worktree NAME --prompt \"…\"`
-  cc-hub creates a fresh worktree at `.cc-hub-wt/{task_id}-NAME` on a new branch off main. Multiple worktree workers may run in parallel only if they edit disjoint files; otherwise serialise them. Omit `--agent` to use the project default.
+  `{bin} spawn-worker --task {task_id} --worktree NAME --prompt \"…\"`
+  cc-hub creates a fresh worktree at `.cc-hub-wt/{task_id}-NAME` on a new branch off main. Multiple worktree workers may run in parallel only if they edit disjoint files; otherwise serialise them.
 
 - Spin up read-only research with:
-  `{bin} spawn-worker --task {task_id} --agent {worker_agent} --readonly --prompt \"…\"`
+  `{bin} spawn-worker --task {task_id} --readonly --prompt \"…\"`
   No edits, no worktree, runs in the project root. Many can run at once.
 
 - Each `spawn-worker` emits one JSON line on stdout — capture the `tmux` field if you need to talk to that worker later.
@@ -820,7 +819,6 @@ Begin by exploring the relevant files, then open with your first `{bin} task rep
         bin = bin,
         prompt = prompt,
         orchestrator_agent_id = orchestrator_agent_id,
-        worker_agent = worker_agent,
     )
 }
 
