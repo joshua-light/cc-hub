@@ -3421,6 +3421,16 @@ fn ctx_bar(pct: u8, width: usize) -> Vec<Span<'static>> {
     out
 }
 
+/// `(done, total)` if the task has a checklist, else `None`. Both card
+/// renderers use this to decide whether to draw the `☑ M/N` badge.
+fn todos_progress(t: &crate::orchestrator::TaskState) -> Option<(usize, usize)> {
+    if t.todos.is_empty() {
+        return None;
+    }
+    let done = t.todos.iter().filter(|i| i.done).count();
+    Some((done, t.todos.len()))
+}
+
 /// Sessions-style rich card for a Running task. Mirrors the layout of the
 /// Sessions grid card: bordered, multi-row, with status emoji, agent dots,
 /// merge glyph, ctx bar, and live tool/thinking line.
@@ -3530,10 +3540,9 @@ fn render_task_card_active(
             Style::default().fg(Color::Rgb(180, 160, 220)),
         ));
     }
-    if !t.todos.is_empty() {
-        let done = t.todos.iter().filter(|i| i.done).count();
+    if let Some((done, total)) = todos_progress(t) {
         row3.push(Span::styled(
-            format!("   ☑ {}/{}", done, t.todos.len()),
+            format!("   ☑ {}/{}", done, total),
             Style::default().fg(Color::Rgb(180, 180, 200)),
         ));
     }
@@ -3691,9 +3700,7 @@ fn render_task_card_collapsed(
             Style::default().fg(Color::Rgb(160, 145, 195)),
         ));
     }
-    if !t.todos.is_empty() {
-        let done = t.todos.iter().filter(|i| i.done).count();
-        let total = t.todos.len();
+    if let Some((done, total)) = todos_progress(t) {
         footer.push(Span::raw("   "));
         footer.push(Span::styled(
             format!("☑ {}/{}", done, total),
@@ -4351,7 +4358,20 @@ fn model_color(model: &str) -> Color {
 }
 
 #[cfg(test)]
+fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
+    let mut out = String::new();
+    for y in 0..buf.area().height {
+        for x in 0..buf.area().width {
+            out.push_str(buf[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    out
+}
+
+#[cfg(test)]
 mod result_popup_tests {
+    use super::buffer_to_string;
     use crate::app::App;
     use crate::orchestrator::{Artifact, Project, TaskState, TaskStatus};
     use crate::projects_scan::ProjectsSnapshot;
@@ -4360,17 +4380,6 @@ mod result_popup_tests {
     use ratatui::Terminal;
     use std::collections::HashMap;
     use std::path::PathBuf;
-
-    fn buffer_to_string(buf: &Buffer) -> String {
-        let mut out = String::new();
-        for y in 0..buf.area().height {
-            for x in 0..buf.area().width {
-                out.push_str(buf[(x, y)].symbol());
-            }
-            out.push('\n');
-        }
-        out
-    }
 
     /// Returns the y-coordinate of the first row that contains `needle`, or
     /// `None` when the substring is missing. Used to assert the proof-first
@@ -4803,23 +4812,12 @@ index 0000001..0000002 100644
 
 #[cfg(test)]
 mod kanban_card_tests {
+    use super::buffer_to_string;
     use crate::orchestrator::{TaskState, TaskStatus, TodoItem};
     use ratatui::backend::TestBackend;
-    use ratatui::buffer::Buffer;
     use ratatui::Terminal;
     use std::collections::HashMap;
     use std::path::PathBuf;
-
-    fn buffer_to_string(buf: &Buffer) -> String {
-        let mut out = String::new();
-        for y in 0..buf.area().height {
-            for x in 0..buf.area().width {
-                out.push_str(buf[(x, y)].symbol());
-            }
-            out.push('\n');
-        }
-        out
-    }
 
     fn task_with_todos(status: TaskStatus, done: usize, total: usize) -> TaskState {
         let mut t = TaskState::new("p".into(), PathBuf::from("/tmp/p"), "prompt".into());
