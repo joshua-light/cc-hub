@@ -558,15 +558,12 @@ impl App {
     /// Approve the focused Review task's PR: flip `pr.review_state` to
     /// `Approved`, snapshot the branch/base SHAs so `pr merge` can detect
     /// whether main moved between approval and merge, and transition the
-    /// task to `Merging` immediately so the card moves to the Merging
-    /// column. If another task in the same project currently holds the
-    /// merge lock, the task still moves — the renderer paints a queued
-    /// border in muted gray so the user sees approval landed even though
-    /// the actual merge waits its turn. The orchestrator's `pr merge`
-    /// gates on `pr.review_state == Approved`, so transitioning early
-    /// doesn't disturb the merge flow; on conflict it auto-demotes back
-    /// to Review (existing behavior preserved). Tmux sessions stay alive
-    /// — they're torn down by `pr finalize` after the merge actually lands.
+    /// task to `Merging` so the card moves to the Merging column. If
+    /// another task in the same project currently holds the merge lock,
+    /// the task still moves — the renderer paints a queued border in
+    /// muted gray so the user sees approval landed even though the actual
+    /// merge waits its turn. Tmux sessions stay alive; they're torn down
+    /// by `pr finalize` after the merge lands.
     pub fn approve_review_task(&mut self) -> bool {
         use crate::orchestrator::TaskStatus;
         let Some(t) = self.selected_project_task() else {

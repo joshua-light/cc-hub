@@ -3644,12 +3644,10 @@ fn render_task_card_collapsed(
         (BorderType::Double, Color::White)
     } else if col_idx == 2 {
         (BorderType::Rounded, Color::Rgb(110, 170, 180))
+    } else if queued {
+        (BorderType::Rounded, Color::Rgb(95, 100, 115))
     } else if col_idx == 3 {
-        if queued {
-            (BorderType::Rounded, Color::Rgb(95, 100, 115))
-        } else {
-            (BorderType::Rounded, Color::Rgb(170, 130, 180))
-        }
+        (BorderType::Rounded, Color::Rgb(170, 130, 180))
     } else {
         (BorderType::Rounded, Color::Rgb(55, 60, 70))
     };
