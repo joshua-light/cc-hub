@@ -2879,7 +2879,8 @@ fn render_projects_body(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// Horizontal strip of project "chips". Selected chip is bold/inverse with
-/// per-column counts (P·R·Rv·D·F). Cycled with `[` / `]`.
+/// per-column counts (P·R·Rv·M·D·F). Cycled with `[` / `]`.
+/// A trailing amber 󰒲N is shown only when backlog > 0.
 fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 {
         return;
@@ -2923,6 +2924,7 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
         let mut merging = 0usize;
         let mut done = 0usize;
         let mut failed = 0usize;
+        let mut backlog = 0usize;
         if let Some(v) = tasks {
             for t in v {
                 match t.status {
@@ -2937,12 +2939,8 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
                     crate::orchestrator::TaskStatus::Merging => merging += 1,
                     crate::orchestrator::TaskStatus::Done => done += 1,
                     crate::orchestrator::TaskStatus::Failed => failed += 1,
-                    // Backlog tasks haven't started — they don't appear
-                    // on the kanban (which starts at Planning) nor in the
-                    // chip-strip running totals. Counted-but-not-shown
-                    // would mislead; the project chip already conveys
-                    // "no active work" via colour when planning+running=0.
-                    crate::orchestrator::TaskStatus::Backlog => {}
+                    // Backlog is rendered as a separate trailing amber token, not mixed into kanban counts.
+                    crate::orchestrator::TaskStatus::Backlog => backlog += 1,
                 }
             }
         }
@@ -2988,6 +2986,17 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
             counts,
             Style::default().fg(counts_fg).bg(counts_bg),
         ));
+        if backlog > 0 {
+            let (bl_fg, bl_bg) = if selected {
+                (Color::Black, Color::Rgb(200, 160, 80))
+            } else {
+                (Color::Rgb(220, 175, 95), Color::Rgb(50, 40, 22))
+            };
+            spans.push(Span::styled(
+                format!(" 󰒲 {} ", backlog),
+                Style::default().fg(bl_fg).bg(bl_bg),
+            ));
+        }
         spans.push(Span::styled(" ", band));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)).style(band), chip_row);
