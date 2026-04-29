@@ -1072,6 +1072,8 @@ async fn run(
                                 if matches!(app.view, View::Backlog) {
                                     app.close_backlog();
                                 }
+                                app.pending_focus_task_id = Some(state.task_id.clone());
+                                app.pending_focus_budget = 5;
                             }
                             Err(e) => {
                                 log::warn!("project task: start backlog failed: {}", e);
