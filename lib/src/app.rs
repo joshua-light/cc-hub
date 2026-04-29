@@ -307,9 +307,7 @@ impl App {
         // Track the focused task by id so a status transition (Running →
         // Review etc.) carries the cursor across columns. Mirrors the
         // prev_sid trick in `update_metrics`.
-        let prev_task_id = self
-            .selected_project_task()
-            .map(|t| t.task_id.clone());
+        let prev_task_id = self.selected_project_task().map(|t| t.task_id.clone());
         let first_load = self.projects.projects.is_empty();
         self.projects = snap;
         if let Some(pid) = prev_pid {
@@ -521,8 +519,8 @@ impl App {
     /// Approve the focused Review task's PR: flip `pr.review_state` to
     /// `Approved` and snapshot the branch/base SHAs so `pr merge` can
     /// detect whether main moved between approval and merge. The task
-    /// itself stays in Review until the orchestrator picks up the
-    /// approval and runs `pr merge` (which transitions to Merging).
+    /// itself stays in Review until the orchestrator receives the
+    /// approval prompt and runs `pr merge` (which transitions to Merging).
     /// Tmux sessions stay alive — they're torn down by `pr finalize`
     /// after the merge actually lands.
     pub fn approve_review_task(&mut self) -> bool {
@@ -563,8 +561,9 @@ impl App {
             return false;
         }
 
-        // Cursor stays on the same Review task; the orchestrator will
-        // pick up the approval and transition to Merging on its own.
+        // Cursor stays on the same Review task; the caller is responsible
+        // for notifying the live orchestrator tmux to continue the merge
+        // flow.
         self.set_status(format!(
             "approved PR #{} for {}",
             pr.id,
@@ -1557,7 +1556,10 @@ mod tests {
 
         let p = project("p-1");
         // Running + workers → kanban column 1 (true Running).
-        let snap1 = snapshot(p.clone(), vec![task("p-1", "t-1", TaskStatus::Running, true)]);
+        let snap1 = snapshot(
+            p.clone(),
+            vec![task("p-1", "t-1", TaskStatus::Running, true)],
+        );
         app.update_projects(snap1);
 
         assert_eq!(app.projects_col, 1, "Running+workers should land in col 1");
@@ -1587,7 +1589,10 @@ mod tests {
         app.current_tab = Tab::Projects;
 
         let p = project("p-1");
-        let snap1 = snapshot(p.clone(), vec![task("p-1", "t-1", TaskStatus::Running, true)]);
+        let snap1 = snapshot(
+            p.clone(),
+            vec![task("p-1", "t-1", TaskStatus::Running, true)],
+        );
         app.update_projects(snap1);
         assert_eq!(app.projects_col, 1);
 

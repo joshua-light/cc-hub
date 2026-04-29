@@ -158,7 +158,9 @@ pub struct Worker {
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum MergeOutcome {
     Ok,
-    Conflict { detail: String },
+    Conflict {
+        detail: String,
+    },
     /// Pre-flight refused: the working tree on the target branch has
     /// uncommitted edits in files the feature branch also modified, so
     /// the merge would either fail with "would be overwritten" or — worse
@@ -647,6 +649,21 @@ pub fn remove_project(project_id: &str) -> io::Result<()> {
 /// run in the same cwd.
 pub fn orchestrator_prompt_prefix(task_id: &str) -> String {
     format!("You are the cc-hub orchestrator for task `{}`", task_id)
+}
+
+pub fn build_review_approval_prompt(task_id: &str, cc_hub_bin: &Path) -> String {
+    let bin = cc_hub_bin.display();
+    format!(
+        "The user approved the PR for task `{task_id}` in cc-hub's Review column.
+
+Continue the merge flow now:
+1. Run `{bin} pr show --task {task_id}` to confirm the PR is still `approved`.
+2. If it is, run `{bin} pr merge --task {task_id}`.
+3. While the merge lock is held, run `/simplify` and `/bump`, then re-run build/test if either changed files.
+4. Finish with `{bin} pr finalize --task {task_id}`.
+
+If `pr merge` reports conflicts or a dirty-tree refusal, follow that recipe instead of forcing the merge. Do not ask the user for another approval unless the PR was demoted back to `open` and needs re-review."
+    )
 }
 
 pub fn build_orchestrator_prompt(state: &TaskState, cc_hub_bin: &Path) -> String {
@@ -1406,6 +1423,27 @@ mod tests {
     }
 
     #[test]
+    fn review_approval_prompt_contains_merge_flow() {
+        let bin = Path::new("/opt/cc-hub/bin/cc-hub");
+        let p = build_review_approval_prompt("t-123", bin);
+        let bin_s = bin.display().to_string();
+
+        for cmd in [
+            format!("{} pr show --task t-123", bin_s),
+            format!("{} pr merge --task t-123", bin_s),
+            format!("{} pr finalize --task t-123", bin_s),
+        ] {
+            assert!(p.contains(&cmd), "approval prompt missing command: {}", cmd);
+        }
+        assert!(p.contains("/simplify"), "approval prompt missing /simplify");
+        assert!(p.contains("/bump"), "approval prompt missing /bump");
+        assert!(
+            p.contains("dirty-tree refusal") || p.contains("conflicts"),
+            "approval prompt missing merge-failure guidance"
+        );
+    }
+
+    #[test]
     fn orchestrator_prompt_substitutes_ids_and_user_prompt() {
         let state = TaskState::new(
             "myproj-42".into(),
@@ -1430,10 +1468,7 @@ mod tests {
         // shell would have to guess the path (a real failure mode).
         let bin_s = bin.display().to_string();
         let expected_primitives = [
-            format!(
-                "{} spawn-worker --task {} --agent",
-                bin_s, state.task_id
-            ),
+            format!("{} spawn-worker --task {}", bin_s, state.task_id),
             format!("{} pr create --task {}", bin_s, state.task_id),
             format!("{} pr show --task {}", bin_s, state.task_id),
             format!("{} pr merge --task {}", bin_s, state.task_id),
@@ -1476,10 +1511,7 @@ mod tests {
             "missing merge-lock framing — the prompt must explain that merges \
              are serialized project-wide"
         );
-        assert!(
-            p.contains("Merging"),
-            "missing Merging state reference"
-        );
+        assert!(p.contains("Merging"), "missing Merging state reference");
         assert!(
             p.contains("auto-demoted") || p.contains("auto-approve"),
             "missing auto-approve / auto-demote conflict-resolution policy"
