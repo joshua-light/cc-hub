@@ -609,11 +609,10 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         Some("review") => Some(TaskStatus::Review),
         Some("merging") => Some(TaskStatus::Merging),
         Some("done") => Some(TaskStatus::Done),
-        Some("failed") => Some(TaskStatus::Failed),
         Some("backlog") => Some(TaskStatus::Backlog),
         Some(other) => {
             return Err(CliError::Usage(format!(
-                "--status must be running|review|merging|done|failed|backlog (got {})",
+                "--status must be running|review|merging|done|backlog (got {})",
                 other
             )));
         }
@@ -625,16 +624,12 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
 
     // Backlog is only a valid target from a Backlog state. Flipping a
     // running task to Backlog would hide it from the kanban while leaving
-    // the orchestrator/tmux session alive — a zombie. Callers wanting to
-    // abandon an active task should use `--status failed`, which runs the
-    // standard cleanup path below.
+    // the orchestrator/tmux session alive — a zombie.
     if raw_status.as_ref() == Some(&TaskStatus::Backlog)
         && prev_status.as_ref() != Some(&TaskStatus::Backlog)
     {
         return Err(CliError::Usage(
-            "--status backlog is only valid from a Backlog state; \
-             use --status failed to abandon an active task (cleanup runs automatically)"
-                .into(),
+            "--status backlog is only valid from a Backlog state".into(),
         ));
     }
 
@@ -643,7 +638,7 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
     // future agentic reviewer) signs off via the TUI's `Space` keybind.
     // The exception: if the task is already in Review, an explicit `done`
     // is the approval path (used by `approve_review_task`'s subprocess
-    // fallback, if any) — let it through. `failed` always lands as Failed.
+    // fallback, if any) — let it through.
     let effective_status = match (raw_status.clone(), prev_status.as_ref()) {
         (Some(TaskStatus::Done), prev) if prev != Some(&TaskStatus::Review) => {
             Some(TaskStatus::Review)
@@ -667,10 +662,7 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         // has already landed on the project's main branch, so the manifest
         // at `project_root` reflects the version that was just shipped.
         let leaving_running = was_running
-            && matches!(
-                s.status,
-                TaskStatus::Review | TaskStatus::Done | TaskStatus::Failed
-            );
+            && matches!(s.status, TaskStatus::Review | TaskStatus::Done);
         if leaving_running && s.shipped_version.is_none() {
             s.shipped_version = cc_hub_lib::version::detect(&s.project_root);
         }
@@ -678,11 +670,11 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
     .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
 
     // Cleanup runs only when the task actually leaves the active flow:
-    // - Failed (immediate)
-    // - Done (only via Review → Done; fresh `done` reports go to Review and
-    //   keep the orchestrator alive in case the human wants follow-up).
-    let became_terminal = matches!(state.status, TaskStatus::Done | TaskStatus::Failed)
-        && prev_status.as_ref() != Some(&state.status);
+    // Done is the only terminal state, and it's only reached via Review → Done
+    // (fresh `done` reports go to Review and keep the orchestrator alive in
+    // case the human wants follow-up).
+    let became_terminal =
+        state.status == TaskStatus::Done && prev_status.as_ref() != Some(&state.status);
     if became_terminal {
         orchestrator::cleanup_task_sessions(&state);
     }
