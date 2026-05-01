@@ -3499,14 +3499,10 @@ fn render_task_card_active(
     };
 
     let title_id = crate::orchestrator::short_task_id(&t.task_id);
-    let prompt_max = (area.width as usize).saturating_sub(14);
+    let prompt_max = (area.width as usize).saturating_sub(8);
     let header_text = task_card_header_text(t, titling_in_flight, prompt_max);
     let title_spans = vec![
         Span::styled(format!(" {} ", title_icon), Style::default().fg(accent)),
-        Span::styled(
-            format!("[{}] ", title_id),
-            Style::default().fg(Color::Rgb(150, 170, 200)),
-        ),
         Span::styled(
             header_text,
             Style::default()
@@ -3564,10 +3560,14 @@ fn render_task_card_active(
     row2.extend(merge_progress_spans(t));
     lines.push(Line::from(row2));
 
-    // Row 3: age · artifacts · ctx bar (right-aligned-ish).
+    // Row 3: id · age · artifacts · ctx bar (right-aligned-ish).
     let age = format_age(now_secs.saturating_sub(t.updated_at as u64));
     let arts = t.artifacts.len();
     let mut row3: Vec<Span<'static>> = vec![
+        Span::styled(
+            format!("#{}  ", title_id),
+            Style::default().fg(Color::Rgb(95, 100, 115)),
+        ),
         Span::styled("󰔟 ", Style::default().fg(Color::Rgb(150, 150, 170))),
         Span::styled(age, Style::default().fg(Color::Rgb(180, 180, 200))),
     ];
@@ -3671,14 +3671,10 @@ fn render_task_card_collapsed(
     let icon_accent = if queued { Color::Rgb(135, 135, 155) } else { accent };
 
     let title_id = crate::orchestrator::short_task_id(&t.task_id);
-    let prompt_max = (area.width as usize).saturating_sub(14);
+    let prompt_max = (area.width as usize).saturating_sub(8);
     let header_text = task_card_header_text(t, titling_in_flight, prompt_max);
     let title_spans = vec![
         Span::styled(format!(" {} ", icon), Style::default().fg(icon_accent)),
-        Span::styled(
-            format!("[{}] ", title_id),
-            Style::default().fg(Color::Rgb(120, 130, 150)),
-        ),
         Span::styled(
             header_text,
             Style::default()
@@ -3730,6 +3726,10 @@ fn render_task_card_collapsed(
     let merged = t.workers.iter().filter(|w| worker_was_merged(w, t)).count();
     let total_w = t.workers.len();
     let mut footer: Vec<Span<'static>> = vec![
+        Span::styled(
+            format!("#{}  ", title_id),
+            Style::default().fg(Color::Rgb(95, 100, 115)),
+        ),
         Span::styled("󰔟 ", Style::default().fg(Color::Rgb(110, 120, 135))),
         Span::styled(age, Style::default().fg(Color::Rgb(140, 145, 160))),
     ];
