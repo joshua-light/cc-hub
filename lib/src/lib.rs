@@ -1,6 +1,7 @@
 pub mod acks;
 pub mod agent;
 pub mod app;
+pub mod auto_review;
 pub mod clipboard;
 pub mod config;
 pub mod conversation;

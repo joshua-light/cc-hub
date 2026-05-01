@@ -1,6 +1,6 @@
 use cc_hub_lib::{
-    app, clipboard, config, conversation, focus, gh, live_view, metrics, models, platform,
-    projects_scan, scanner, send, spawn, title, tmux_pane, triage, ui, usage, watcher,
+    app, auto_review, clipboard, config, conversation, focus, gh, live_view, metrics, models,
+    platform, projects_scan, scanner, send, spawn, title, tmux_pane, triage, ui, usage, watcher,
 };
 
 use app::{App, Tab, View};
@@ -65,6 +65,12 @@ fn queue_missing_titles(
 ) {
     for session in sessions.iter() {
         if session.title.is_some() {
+            continue;
+        }
+        // Skip Inactive sessions — they're synthesized from orphan JSONLs of
+        // dead processes, so spending Haiku tokens to title them only pays
+        // off cosmetically and re-burns every scan if the title fails.
+        if session.state == models::SessionState::Inactive {
             continue;
         }
         let Some(first_msg) = session.summary.clone() else {
@@ -278,6 +284,9 @@ enum ScanMsg {
     Projects(projects_scan::ProjectsSnapshot),
     BacklogTriage {
         promotion: Option<triage::Promotion>,
+        status: Option<String>,
+    },
+    AutoReview {
         status: Option<String>,
     },
 }
@@ -516,6 +525,37 @@ async fn run(
                 let _ = triage_tx
                     .send(ScanMsg::BacklogTriage {
                         promotion: outcome.promotion,
+                        status: outcome.status,
+                    })
+                    .await;
+            }
+        });
+    }
+
+    // Background auto-reviewer. Off unless [auto_review].enabled — every
+    // tick may spawn a full reviewer agent session (billed). Mirrors the
+    // backlog triage shape: at most one reviewer per tick, eligibility
+    // gated by per-task `last_auto_reviewed_at` so each Review round gets
+    // exactly one auto-review pass.
+    if config::get().auto_review.enabled {
+        let review_tx = scan_tx.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(config::get().auto_review.interval());
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let outcome = match tokio::task::spawn_blocking(auto_review::tick).await {
+                    Ok(o) => o,
+                    Err(e) => {
+                        log::warn!("auto_review: spawn_blocking joined with error: {}", e);
+                        continue;
+                    }
+                };
+                if outcome.spawn.is_none() && outcome.status.is_none() {
+                    continue;
+                }
+                let _ = review_tx
+                    .send(ScanMsg::AutoReview {
                         status: outcome.status,
                     })
                     .await;
@@ -1735,6 +1775,15 @@ async fn run(
                             }
                         }
                     }
+                    if let Some(s) = status {
+                        app.set_status(s);
+                    }
+                }
+                ScanMsg::AutoReview { status } => {
+                    // The reviewer session takes its briefing as initial
+                    // prompt (Claude `--initial-prompt` / Pi positional),
+                    // so there is nothing to dispatch here. Status surfaces
+                    // the spawn for the user to follow in the Sessions tab.
                     if let Some(s) = status {
                         app.set_status(s);
                     }
