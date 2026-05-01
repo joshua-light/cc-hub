@@ -26,6 +26,7 @@ pub struct Config {
     pub ui: UiConfig,
     pub metrics: MetricsConfig,
     pub backlog: BacklogConfig,
+    pub auto_review: AutoReviewConfig,
 }
 
 impl Config {
@@ -286,6 +287,52 @@ impl Default for BacklogConfig {
             interval_secs: 8,
             run_timeout_secs: 120,
             ttl_secs: 300,
+        }
+    }
+}
+
+/// Background auto-review tick. When enabled, every `interval_secs` cc-hub
+/// scans for tasks in Review state with an Open / ChangesRequested PR that
+/// haven't been auto-reviewed this round yet, and spawns ONE reviewer
+/// session for the oldest eligible task. The reviewer is a real agent
+/// session (read-only) that can build, test, post comments, and either
+/// approve or request changes via the existing `cc-hub pr ...` CLI verbs —
+/// closing the orchestrator → review → iterate → re-review loop without a
+/// human in the path.
+///
+/// Off by default: each tick spawns a billed agent session.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AutoReviewConfig {
+    pub enabled: bool,
+    /// Agent backend to use for reviewer sessions. Resolved against
+    /// `[agents.*]`; falls back to the default orchestrator agent if unset.
+    pub agent: Option<String>,
+    pub interval_secs: u64,
+    /// Per-tick eligibility cap: don't re-review a task whose
+    /// `last_auto_reviewed_at` is within this many seconds. Belt-and-braces
+    /// alongside the per-round clear-on-re-entry gate.
+    pub ttl_secs: u64,
+    pub run_timeout_secs: u64,
+}
+
+impl AutoReviewConfig {
+    pub fn interval(&self) -> Duration {
+        Duration::from_secs(self.interval_secs)
+    }
+    pub fn run_timeout(&self) -> Duration {
+        Duration::from_secs(self.run_timeout_secs)
+    }
+}
+
+impl Default for AutoReviewConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            agent: None,
+            interval_secs: 30,
+            ttl_secs: 600,
+            run_timeout_secs: 1800,
         }
     }
 }

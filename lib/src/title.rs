@@ -45,9 +45,18 @@ fn cache_file() -> PathBuf {
 /// Scratch cwd used for every `cc-hub-new -p` run. Pinned so the scanner
 /// can skip this directory in a single equality check and the Claude
 /// projects dir contains at most one encoded folder for all our summaries.
+///
+/// Canonicalized at init: on macOS `/tmp` is a symlink to `/private/tmp`, so
+/// the cwd Claude Code records in JSONL is the resolved form. Storing the
+/// canonical path here keeps both the string compare in `is_scratch_cwd` and
+/// the encoded-projects-dir skip in the scanner aligned with what's on disk.
 pub fn scratch_cwd() -> &'static Path {
     static SCRATCH: OnceLock<PathBuf> = OnceLock::new();
-    SCRATCH.get_or_init(|| PathBuf::from("/tmp/cc-hub-summaries"))
+    SCRATCH.get_or_init(|| {
+        let base = PathBuf::from("/tmp/cc-hub-summaries");
+        let _ = fs::create_dir_all(&base);
+        fs::canonicalize(&base).unwrap_or(base)
+    })
 }
 
 /// Current on-disk map of `session_id → title`. Empty on any read/parse

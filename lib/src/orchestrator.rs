@@ -270,6 +270,13 @@ pub struct TaskState {
     /// `[backlog].ttl_secs`. `None` means never triaged.
     #[serde(default)]
     pub triaged_at: Option<i64>,
+    /// Unix timestamp of the last time the auto-reviewer ran against this
+    /// task's current Review round. Cleared whenever the task re-enters
+    /// Review (orchestrator opens PR, or user/orchestrator flips it back
+    /// after iteration), so each round gets exactly one auto-review pass.
+    /// `None` means the current round hasn't been auto-reviewed yet.
+    #[serde(default)]
+    pub last_auto_reviewed_at: Option<i64>,
     /// Version of the project that was shipped as a result of this task,
     /// captured at the moment the orchestrator first declares completion
     /// (Running → Review/Done). Read from the project's manifest
@@ -306,6 +313,7 @@ impl TaskState {
             todos: Vec::new(),
             lead_artifact: None,
             triaged_at: None,
+            last_auto_reviewed_at: None,
             shipped_version: None,
         }
     }
@@ -333,6 +341,7 @@ impl TaskState {
             todos: Vec::new(),
             lead_artifact: None,
             triaged_at: None,
+            last_auto_reviewed_at: None,
             shipped_version: None,
         }
     }
