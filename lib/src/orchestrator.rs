@@ -478,6 +478,14 @@ fn capture_orchestrator_log(state: &TaskState, orch: &str) {
     let Some(path) = task_orchestrator_log_path(&state.project_id, &state.task_id) else {
         return;
     };
+    // Best-effort: the orchestrator log dump is only useful when the
+    // orchestrator's tmux is still alive at termination time (e.g.
+    // user-initiated kill, panic). On clean Done transitions the session
+    // has already exited — skip silently rather than warn-logging the
+    // happy path on every completed task.
+    if !crate::send::tmux_session_exists(orch) {
+        return;
+    }
     let Some(dir) = path.parent() else { return };
     if let Err(e) = std::fs::create_dir_all(dir) {
         log::warn!(
@@ -1220,6 +1228,42 @@ pub fn merge_branch(
 }
 
 #[cfg(test)]
+mod log_capture {
+    //! In-process log capture for tests that need to assert *no* warn-level
+    //! log was emitted during a function call. The `log` crate has a single
+    //! global logger per process — we install a capturing one once and gate
+    //! mutation behind LOG_TEST_LOCK so concurrent tests can't leak records
+    //! into each other's assertions.
+    use log::{Level, LevelFilter, Log, Metadata, Record};
+    use std::sync::{Mutex, Once};
+
+    static INIT: Once = Once::new();
+    pub static CAPTURED: Mutex<Vec<(Level, String)>> = Mutex::new(Vec::new());
+    pub static LOG_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct TestLogger;
+
+    impl Log for TestLogger {
+        fn enabled(&self, _metadata: &Metadata) -> bool {
+            true
+        }
+        fn log(&self, record: &Record) {
+            if let Ok(mut buf) = CAPTURED.lock() {
+                buf.push((record.level(), record.args().to_string()));
+            }
+        }
+        fn flush(&self) {}
+    }
+
+    pub fn install() {
+        INIT.call_once(|| {
+            let _ = log::set_boxed_logger(Box::new(TestLogger));
+            log::set_max_level(LevelFilter::Trace);
+        });
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_util::HOME_TEST_LOCK;
@@ -1628,5 +1672,49 @@ mod tests {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    #[test]
+    fn capture_orchestrator_log_skips_warn_when_session_missing() {
+        use log::Level;
+        let _g = super::log_capture::LOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        super::log_capture::install();
+        super::log_capture::CAPTURED.lock().unwrap().clear();
+
+        // Sanity: confirm the test logger is actually receiving records — if
+        // some other code installed a global logger first, this test would
+        // otherwise pass trivially (zero captured = zero warns).
+        log::info!("log-capture-sanity-check");
+        {
+            let buf = super::log_capture::CAPTURED.lock().unwrap();
+            assert!(
+                buf.iter().any(|(_, m)| m.contains("log-capture-sanity-check")),
+                "test logger isn't capturing — another global logger must be installed"
+            );
+        }
+        super::log_capture::CAPTURED.lock().unwrap().clear();
+
+        let state = TaskState::new(
+            "log-gate-proj".into(),
+            PathBuf::from("/tmp/log-gate-proj"),
+            "x".into(),
+        );
+        // Use a name with only safe chars that almost certainly doesn't exist
+        // as a tmux session on the test host.
+        let orch = "cchub-test-no-such-session-zzzzz9999";
+        capture_orchestrator_log(&state, orch);
+
+        let captured = super::log_capture::CAPTURED.lock().unwrap();
+        let warns: Vec<_> = captured
+            .iter()
+            .filter(|(lvl, _)| *lvl == Level::Warn)
+            .collect();
+        assert!(
+            warns.is_empty(),
+            "expected no warn-level logs from capture_orchestrator_log when tmux session is missing, got: {:?}",
+            warns
+        );
     }
 }
