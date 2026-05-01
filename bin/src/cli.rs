@@ -43,6 +43,7 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
         "orchestrate" => Some(handle(orchestrate_subcommand(rest))),
         "pr" => Some(handle(pr_subcommand(rest))),
         "worker" => Some(handle(worker_subcommand(rest))),
+        "project" => Some(handle(project_subcommand(rest))),
         _ => None,
     }
 }
@@ -110,6 +111,7 @@ struct Flags {
     tmux_targets: Vec<String>,
     all: bool,
     timeout_secs: Option<u64>,
+    json: bool,
 }
 
 fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
@@ -210,6 +212,10 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
                     v.parse()
                         .map_err(|e| CliError::Usage(format!("--timeout-secs: {}", e)))?,
                 );
+            }
+            "--json" => {
+                f.json = true;
+                i += 1;
             }
             other => {
                 return Err(CliError::Usage(format!("unknown flag: {}", other)));
@@ -1776,6 +1782,82 @@ fn worker_wait(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
+fn project_subcommand(args: &[String]) -> Result<(), CliError> {
+    let (verb, rest) = args
+        .split_first()
+        .ok_or_else(|| CliError::Usage("project <verb>: missing verb (try `list`)".into()))?;
+    match verb.as_str() {
+        "list" => project_list(rest),
+        other => Err(CliError::Usage(format!(
+            "unknown project verb: {} (try `list`)",
+            other
+        ))),
+    }
+}
+
+/// `cc-hub project list [--json]`
+///
+/// Enumerate registered projects from `~/.cc-hub/projects.toml`. Plain
+/// output is one row per project: `<id> <name> <root>`. With `--json`, a
+/// single JSON array of `{id, name, root, task_counts:{backlog,running,
+/// review,merging,done}}`. Sorted by name (case-insensitive) so the
+/// listing is stable across machines.
+fn project_list(args: &[String]) -> Result<(), CliError> {
+    use cc_hub_lib::orchestrator::TaskStatus;
+    use cc_hub_lib::projects_scan;
+
+    let f = parse_flags(args)?;
+    let snap = projects_scan::scan();
+
+    let mut projects = snap.projects.clone();
+    projects.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+    if f.json {
+        let arr: Vec<serde_json::Value> = projects
+            .iter()
+            .map(|p| {
+                let tasks = snap.tasks.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]);
+                let mut backlog = 0usize;
+                let mut running = 0usize;
+                let mut review = 0usize;
+                let mut merging = 0usize;
+                let mut done = 0usize;
+                for t in tasks {
+                    match t.status {
+                        TaskStatus::Backlog => backlog += 1,
+                        TaskStatus::Running => running += 1,
+                        TaskStatus::Review => review += 1,
+                        TaskStatus::Merging => merging += 1,
+                        TaskStatus::Done => done += 1,
+                    }
+                }
+                serde_json::json!({
+                    "id": p.id,
+                    "name": p.name,
+                    "root": p.root,
+                    "task_counts": {
+                        "backlog": backlog,
+                        "running": running,
+                        "review": review,
+                        "merging": merging,
+                        "done": done,
+                    },
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string(&arr)
+                .map_err(|e| CliError::Other(format!("serialise: {}", e)))?
+        );
+    } else {
+        for p in &projects {
+            println!("{} {} {}", p.id, p.name, p.root.display());
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1795,6 +1877,21 @@ mod tests {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    #[test]
+    fn dispatch_parses_project_list_json() {
+        let argv = vec![
+            "project".to_string(),
+            "list".to_string(),
+            "--json".to_string(),
+        ];
+        let code = dispatch(&argv);
+        assert_eq!(
+            code,
+            Some(0),
+            "expected dispatch to handle 'project list --json' cleanly"
+        );
     }
 
     #[test]
