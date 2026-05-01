@@ -1325,6 +1325,11 @@ const DIFF_GUTTER_FG: Color = Color::Rgb(120, 120, 130);
 const DIFF_CONTEXT_FG: Color = Color::Rgb(160, 160, 170);
 const DIFF_HEADER_FG: Color = Color::Rgb(140, 180, 230);
 
+// Dim metadata gray used for low-priority info on task cards (queued-merge
+// border + the `#<id>` badge). Sits below every other tone in the card so the
+// id reads as background context, not headline.
+const TASK_META_DIM: Color = Color::Rgb(95, 100, 115);
+
 // `{old:>3} {new:>3} {marker} ` + 1-cell margin = 11 used cols.
 const DIFF_GUTTER_W: usize = 11;
 
@@ -3167,7 +3172,7 @@ fn render_kanban_column(
     // Planning + Running show tall rich cards (orchestrator is alive,
     // there's live state to display); Review/Merging/Done get compact
     // 3-line cards since they're terminal states from the UI's POV.
-    let card_height: u16 = if col_idx <= 1 { 8 } else { 4 };
+    let card_height: u16 = if col_idx <= 1 { 6 } else { 4 };
     let gap: u16 = 1;
     let max_cards =
         ((inner.height as u32 + gap as u32) / (card_height as u32 + gap as u32)) as usize;
@@ -3212,6 +3217,7 @@ fn render_kanban_column(
                 t,
                 selected,
                 col_idx,
+                sessions_by_tmux,
                 now_secs,
                 titling_in_flight,
                 merging_holder_id,
@@ -3238,6 +3244,7 @@ struct AgentSummary {
     max_ctx_pct: u8,
     current_tool: Option<(String, Option<String>)>,
     is_thinking: bool,
+    tool_uses: u64,
 }
 
 fn collect_agent_summary(
@@ -3266,6 +3273,7 @@ fn collect_agent_summary(
         max_ctx_pct: 0,
         current_tool: None,
         is_thinking: false,
+        tool_uses: 0,
     };
 
     let mut tool_priority = 0u8; // prefer Processing > WaitingForInput tools
@@ -3302,6 +3310,7 @@ fn collect_agent_summary(
                 sum.max_ctx_pct = pct;
             }
         }
+        sum.tool_uses = sum.tool_uses.saturating_add(s.tool_uses_count);
         let pri = match s.state {
             SessionState::Processing => 3,
             SessionState::WaitingForInput => 2,
@@ -3319,6 +3328,29 @@ fn collect_agent_summary(
         }
     }
     sum
+}
+
+/// Cheap variant of [`collect_agent_summary`] that only sums tool-use counts
+/// across the orchestrator + workers. Used by the collapsed card renderer,
+/// which needs the count for its footer badge but none of the state /
+/// context-window aggregates.
+fn sum_tool_uses(
+    t: &crate::orchestrator::TaskState,
+    sessions_by_tmux: &std::collections::HashMap<&str, &SessionInfo>,
+) -> u64 {
+    let orch = t
+        .orchestrator_tmux
+        .as_deref()
+        .and_then(|n| sessions_by_tmux.get(n).copied());
+    let workers = t
+        .workers
+        .iter()
+        .filter_map(|w| sessions_by_tmux.get(w.tmux_name.as_str()).copied());
+    std::iter::once(orch)
+        .flatten()
+        .chain(workers)
+        .map(|s| s.tool_uses_count)
+        .fold(0u64, |a, b| a.saturating_add(b))
 }
 
 /// Compact dot strip showing per-agent state. Up to ~12 dots; overflow
@@ -3498,15 +3530,11 @@ fn render_task_card_active(
         (BorderType::Rounded, Color::Rgb(80, 90, 110))
     };
 
-    let title_id = crate::orchestrator::short_task_id(&t.task_id);
-    let prompt_max = (area.width as usize).saturating_sub(14);
+    let short_id = crate::orchestrator::short_task_id(&t.task_id);
+    let prompt_max = (area.width as usize).saturating_sub(8);
     let header_text = task_card_header_text(t, titling_in_flight, prompt_max);
     let title_spans = vec![
         Span::styled(format!(" {} ", title_icon), Style::default().fg(accent)),
-        Span::styled(
-            format!("[{}] ", title_id),
-            Style::default().fg(Color::Rgb(150, 170, 200)),
-        ),
         Span::styled(
             header_text,
             Style::default()
@@ -3564,10 +3592,10 @@ fn render_task_card_active(
     row2.extend(merge_progress_spans(t));
     lines.push(Line::from(row2));
 
-    // Row 3: age · artifacts · ctx bar (right-aligned-ish).
     let age = format_age(now_secs.saturating_sub(t.updated_at as u64));
     let arts = t.artifacts.len();
     let mut row3: Vec<Span<'static>> = vec![
+        Span::styled(format!("#{}  ", short_id), Style::default().fg(TASK_META_DIM)),
         Span::styled("󰔟 ", Style::default().fg(Color::Rgb(150, 150, 170))),
         Span::styled(age, Style::default().fg(Color::Rgb(180, 180, 200))),
     ];
@@ -3581,6 +3609,12 @@ fn render_task_card_active(
         row3.push(Span::styled(
             format!("   ☑ {}/{}", done, total),
             Style::default().fg(Color::Rgb(180, 180, 200)),
+        ));
+    }
+    if sum.tool_uses > 0 {
+        row3.push(Span::styled(
+            format!("   󰠰 {}", sum.tool_uses),
+            Style::default().fg(Color::Rgb(180, 200, 160)),
         ));
     }
     let left_w: usize = row3.iter().map(|s| s.content.chars().count()).sum();
@@ -3641,6 +3675,7 @@ fn render_task_card_collapsed(
     t: &crate::orchestrator::TaskState,
     selected: bool,
     col_idx: usize,
+    sessions_by_tmux: &std::collections::HashMap<&str, &SessionInfo>,
     now_secs: u64,
     titling_in_flight: bool,
     lock_holder: Option<&str>,
@@ -3662,7 +3697,7 @@ fn render_task_card_collapsed(
     } else if col_idx == 2 {
         (BorderType::Rounded, Color::Rgb(110, 170, 180))
     } else if queued {
-        (BorderType::Rounded, Color::Rgb(95, 100, 115))
+        (BorderType::Rounded, TASK_META_DIM)
     } else if col_idx == 3 {
         (BorderType::Rounded, Color::Rgb(170, 130, 180))
     } else {
@@ -3670,15 +3705,11 @@ fn render_task_card_collapsed(
     };
     let icon_accent = if queued { Color::Rgb(135, 135, 155) } else { accent };
 
-    let title_id = crate::orchestrator::short_task_id(&t.task_id);
-    let prompt_max = (area.width as usize).saturating_sub(14);
+    let short_id = crate::orchestrator::short_task_id(&t.task_id);
+    let prompt_max = (area.width as usize).saturating_sub(8);
     let header_text = task_card_header_text(t, titling_in_flight, prompt_max);
     let title_spans = vec![
         Span::styled(format!(" {} ", icon), Style::default().fg(icon_accent)),
-        Span::styled(
-            format!("[{}] ", title_id),
-            Style::default().fg(Color::Rgb(120, 130, 150)),
-        ),
         Span::styled(
             header_text,
             Style::default()
@@ -3730,6 +3761,7 @@ fn render_task_card_collapsed(
     let merged = t.workers.iter().filter(|w| worker_was_merged(w, t)).count();
     let total_w = t.workers.len();
     let mut footer: Vec<Span<'static>> = vec![
+        Span::styled(format!("#{}  ", short_id), Style::default().fg(TASK_META_DIM)),
         Span::styled("󰔟 ", Style::default().fg(Color::Rgb(110, 120, 135))),
         Span::styled(age, Style::default().fg(Color::Rgb(140, 145, 160))),
     ];
@@ -3752,6 +3784,14 @@ fn render_task_card_collapsed(
         footer.push(Span::styled(
             format!("☑ {}/{}", done, total),
             Style::default().fg(Color::Rgb(140, 145, 160)),
+        ));
+    }
+    let tool_uses = sum_tool_uses(t, sessions_by_tmux);
+    if tool_uses > 0 {
+        footer.push(Span::raw("   "));
+        footer.push(Span::styled(
+            format!("󰠰 {}", tool_uses),
+            Style::default().fg(Color::Rgb(180, 200, 160)),
         ));
     }
     lines.push(Line::from(footer));
@@ -4885,6 +4925,7 @@ mod kanban_card_tests {
     #[test]
     fn collapsed_card_shows_todos_badge() {
         let t = task_with_todos(TaskStatus::Review, 2, 4);
+        let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
         let backend = TestBackend::new(40, 6);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
@@ -4895,6 +4936,7 @@ mod kanban_card_tests {
                     &t,
                     false,
                     2,
+                    &sessions,
                     1_000_000_000,
                     false,
                     None,
@@ -4913,6 +4955,7 @@ mod kanban_card_tests {
     #[test]
     fn collapsed_card_omits_badge_when_no_todos() {
         let t = task_with_todos(TaskStatus::Review, 0, 0);
+        let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
         let backend = TestBackend::new(40, 6);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
@@ -4923,6 +4966,7 @@ mod kanban_card_tests {
                     &t,
                     false,
                     2,
+                    &sessions,
                     1_000_000_000,
                     false,
                     None,
@@ -4933,6 +4977,149 @@ mod kanban_card_tests {
         assert!(
             !plain.contains("☑"),
             "no todos => no badge:\n{}",
+            plain
+        );
+    }
+
+    fn fake_session(tmux: &str, tool_uses: u64) -> super::SessionInfo {
+        use crate::agent::AgentKind;
+        use crate::models::SessionState;
+        super::SessionInfo {
+            agent_id: "claude".into(),
+            agent_kind: AgentKind::Claude,
+            pid: 0,
+            session_id: "sid-x".into(),
+            cwd: "/tmp".into(),
+            project_name: "p".into(),
+            started_at: 0,
+            last_activity: None,
+            state: SessionState::Processing,
+            last_user_message: None,
+            summary: None,
+            title: None,
+            titling: false,
+            model: None,
+            git_branch: None,
+            version: None,
+            jsonl_path: None,
+            tmux_session: Some(tmux.into()),
+            current_tool: None,
+            is_thinking: false,
+            context_tokens: None,
+            tool_uses_count: tool_uses,
+        }
+    }
+
+    fn task_with_worker(status: TaskStatus, worker_tmux: &str) -> TaskState {
+        use crate::agent::AgentKind;
+        use crate::orchestrator::Worker;
+        let mut t = TaskState::new("p".into(), PathBuf::from("/tmp/p"), "prompt".into());
+        t.status = status;
+        t.title = Some("test card".into());
+        t.workers.push(Worker {
+            agent_id: "claude".into(),
+            agent_kind: AgentKind::Claude,
+            tmux_name: worker_tmux.into(),
+            cwd: PathBuf::from("/tmp/p"),
+            worktree: None,
+            readonly: false,
+            spawned_at: 0,
+        });
+        t
+    }
+
+    #[test]
+    fn active_card_shows_tool_calls_badge() {
+        let t = task_with_worker(TaskStatus::Running, "wk-1");
+        let session = fake_session("wk-1", 7);
+        let mut sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
+        sessions.insert("wk-1", &session);
+        let backend = TestBackend::new(80, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_active(
+                    f,
+                    f.area(),
+                    &t,
+                    false,
+                    1,
+                    &sessions,
+                    1_000_000_000,
+                    false,
+                )
+            })
+            .expect("render");
+        let plain = buffer_to_string(terminal.backend().buffer());
+        std::fs::write("/tmp/cchub-card-active-tool-uses.txt", &plain).expect("dump");
+        assert!(
+            plain.contains("󰠰 7") || plain.contains(" 7"),
+            "active card should show tool-uses badge with 7:\n{}",
+            plain
+        );
+        assert!(
+            plain.contains("󰠰"),
+            "active card should show tool glyph:\n{}",
+            plain
+        );
+    }
+
+    #[test]
+    fn active_card_omits_tool_calls_when_zero() {
+        let t = task_with_todos(TaskStatus::Running, 0, 0);
+        let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
+        let backend = TestBackend::new(80, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_active(
+                    f,
+                    f.area(),
+                    &t,
+                    false,
+                    1,
+                    &sessions,
+                    1_000_000_000,
+                    false,
+                )
+            })
+            .expect("render");
+        let plain = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            !plain.contains("󰠰"),
+            "no tool uses => no badge:\n{}",
+            plain
+        );
+    }
+
+    #[test]
+    fn collapsed_card_shows_tool_calls_badge() {
+        let t = task_with_worker(TaskStatus::Review, "wk-2");
+        let session = fake_session("wk-2", 5);
+        let mut sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
+        sessions.insert("wk-2", &session);
+        let backend = TestBackend::new(60, 6);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_collapsed(
+                    f,
+                    f.area(),
+                    &t,
+                    false,
+                    2,
+                    &sessions,
+                    1_000_000_000,
+                    false,
+                    None,
+                )
+            })
+            .expect("render");
+        let plain = buffer_to_string(terminal.backend().buffer());
+        std::fs::write("/tmp/cchub-card-collapsed-tool-uses.txt", &plain).expect("dump");
+        assert!(
+            plain.contains("󰠰") && plain.contains("5"),
+            "collapsed card should show tool-uses badge with 5:\n{}",
             plain
         );
     }

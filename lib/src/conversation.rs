@@ -81,37 +81,58 @@ pub fn count_tool_uses(path: &Path) -> usize {
         Ok(f) => f,
         Err(_) => return 0,
     };
-    let reader = BufReader::new(file);
-    let mut count = 0usize;
+    count_tool_uses_in_reader(BufReader::new(file))
+}
+
+/// Streaming counter for assistant `tool_use` blocks reading from any
+/// `BufRead`. Shared with the incremental cache in
+/// [`crate::tool_use_count`], which seeks to a previously-known offset and
+/// counts only the suffix.
+pub fn count_tool_uses_in_reader<R: BufRead>(reader: R) -> usize {
+    count_blocks_in_reader(reader, |val| {
+        if val.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            return 0;
+        }
+        count_blocks_of_type(val, "tool_use")
+    })
+}
+
+/// Streaming dispatch over JSONL entries. For each well-formed line, calls
+/// `per_entry` and sums its returns. Skips empty lines and parse errors.
+/// Shared between Claude and Pi tool-use counters and the incremental cache.
+pub fn count_blocks_in_reader<R, F>(reader: R, mut per_entry: F) -> usize
+where
+    R: BufRead,
+    F: FnMut(&Value) -> usize,
+{
+    let mut total = 0usize;
     for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
+        let Ok(line) = line else { continue };
         if line.trim().is_empty() {
             continue;
         }
-        let val: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if val.get("type").and_then(|t| t.as_str()) != Some("assistant") {
-            continue;
-        }
-        let Some(arr) = val
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_array())
-        else {
+        let Ok(val): Result<Value, _> = serde_json::from_str(&line) else {
             continue;
         };
-        for block in arr {
-            if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                count += 1;
-            }
-        }
+        total += per_entry(&val);
     }
-    count
+    total
+}
+
+/// Count blocks of the given `block_type` in `entry.message.content`. Used
+/// by both Claude (`tool_use`) and Pi (`toolCall`) counters once the caller
+/// has confirmed the entry is an assistant message.
+pub fn count_blocks_of_type(entry: &Value, block_type: &str) -> usize {
+    let Some(arr) = entry
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+    else {
+        return 0;
+    };
+    arr.iter()
+        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some(block_type))
+        .count()
 }
 
 pub fn read_jsonl_tail(path: &Path, max_bytes: u64) -> Vec<Value> {

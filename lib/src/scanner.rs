@@ -452,6 +452,7 @@ struct JsonlData {
     current_tool: Option<conversation::CurrentTool>,
     is_thinking: bool,
     context_tokens: Option<u64>,
+    tool_uses_count: u64,
 }
 
 fn project_name(cwd: &str) -> String {
@@ -499,6 +500,7 @@ fn synthesize_inactive_from_jsonl(
     let summary = conversation::extract_first_user_message(&head_entries);
     let title = titles.get(&session_id).cloned();
 
+    let tool_uses_count = crate::tool_use_count::count_claude(path);
     Some(SessionInfo {
         agent_id: "claude".into(),
         agent_kind: AgentKind::Claude,
@@ -521,6 +523,7 @@ fn synthesize_inactive_from_jsonl(
         is_thinking: false,
         titling: false,
         context_tokens: conversation::extract_context_tokens(&tail_entries),
+        tool_uses_count,
     })
 }
 
@@ -685,6 +688,7 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
                     let current_tool = conversation::extract_current_tool(&entries);
                     let is_thinking = conversation::is_currently_thinking(&entries);
                     let context_tokens = conversation::extract_context_tokens(&entries);
+                    let tool_uses_count = crate::tool_use_count::count_claude(path);
 
                     debug!(
                         "  sid={} tail_entries={} raw_state={} last_activity={:?}",
@@ -726,6 +730,7 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
                         current_tool,
                         is_thinking,
                         context_tokens,
+                        tool_uses_count,
                     }
                 }
                 None => {
@@ -741,6 +746,7 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
                         current_tool: None,
                         is_thinking: false,
                         context_tokens: None,
+                        tool_uses_count: 0,
                     }
                 }
             };
@@ -779,6 +785,7 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
                 is_thinking: data.is_thinking,
                 titling: false,
                 context_tokens: data.context_tokens,
+                tool_uses_count: data.tool_uses_count,
             }
         })
         .collect();

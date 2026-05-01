@@ -1,6 +1,7 @@
 pub mod acks;
 pub mod agent;
 pub mod app;
+pub mod auto_review;
 pub mod clipboard;
 pub mod config;
 pub mod conversation;
@@ -32,6 +33,7 @@ pub mod send;
 pub mod spawn;
 pub mod title;
 pub mod tmux_pane;
+pub mod tool_use_count;
 pub mod triage;
 pub mod ui;
 pub mod usage;

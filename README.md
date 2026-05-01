@@ -189,6 +189,30 @@ run_timeout_secs = 120
 # How long a triage decision sticks before a task becomes eligible again.
 # Caps the worst-case re-ask cadence per dormant task to one per ttl_secs.
 ttl_secs = 300
+
+[auto_review]
+# Background autonomous reviewer. When enabled, every interval cc-hub picks
+# the oldest task in Review whose current review round hasn't been auto-
+# reviewed yet, and spawns a read-only reviewer agent session. The reviewer
+# inspects the diff, runs build/tests, and either approves the PR via
+# `cc-hub pr approve` or asks a clarifying question via
+# `cc-hub pr request-changes` (which flips the task back to Running so the
+# orchestrator iterates). Each Review round gets exactly one auto-review
+# pass — once the orchestrator addresses feedback and re-enters Review,
+# the next tick reviews again. Off by default — every tick may spawn a
+# billed agent session.
+enabled = false
+# Reviewer backend. None → fall back to [projects].default_orchestrator_agent.
+# agent = "claude"
+# How often the auto-reviewer runs.
+interval_secs = 30
+# Belt-and-braces gate alongside the per-round clear-on-re-entry: don't
+# re-review a task whose last_auto_reviewed_at is within this many seconds.
+ttl_secs = 600
+# Reviewer session has up to this long to issue its verdict before cc-hub
+# forgets it (the session itself is not killed; this only bounds the
+# blocking-spawn timeout when applicable).
+run_timeout_secs = 1800
 ```
 
 Only the sections/fields you want to override need to be present — omit

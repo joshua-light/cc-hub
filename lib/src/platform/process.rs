@@ -278,7 +278,79 @@ pub fn command_line(pid: u32) -> String {
         .unwrap_or_default()
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+pub fn command_line(pid: u32) -> String {
+    // KERN_PROCARGS2 returns: argc (i32) | exec_path (NUL-term, padded) |
+    // argv[0..argc] (NUL-separated) | envp... — see Apple's `ps` source.
+    // Buffer size is bounded by `kern.argmax`; querying it is one sysctl, so
+    // do that instead of guessing.
+    use std::mem;
+
+    let mut argmax: libc::c_int = 0;
+    let mut argmax_size = mem::size_of::<libc::c_int>();
+    let mut mib_argmax = [libc::CTL_KERN, libc::KERN_ARGMAX];
+    let rc = unsafe {
+        libc::sysctl(
+            mib_argmax.as_mut_ptr(),
+            mib_argmax.len() as u32,
+            &mut argmax as *mut _ as *mut libc::c_void,
+            &mut argmax_size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || argmax <= 0 {
+        return String::new();
+    }
+
+    let mut buf: Vec<u8> = vec![0; argmax as usize];
+    let mut size = buf.len();
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as u32,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || size < mem::size_of::<libc::c_int>() {
+        return String::new();
+    }
+    buf.truncate(size);
+
+    let argc = i32::from_ne_bytes(buf[..4].try_into().unwrap_or([0; 4]));
+    if argc <= 0 {
+        return String::new();
+    }
+
+    // Skip argc, then the exec_path C string (with any trailing alignment NULs).
+    let mut i = 4;
+    while i < buf.len() && buf[i] != 0 {
+        i += 1;
+    }
+    while i < buf.len() && buf[i] == 0 {
+        i += 1;
+    }
+
+    let mut args: Vec<String> = Vec::with_capacity(argc as usize);
+    for _ in 0..argc {
+        if i >= buf.len() {
+            break;
+        }
+        let start = i;
+        while i < buf.len() && buf[i] != 0 {
+            i += 1;
+        }
+        args.push(String::from_utf8_lossy(&buf[start..i]).into_owned());
+        i += 1;
+    }
+    args.join(" ")
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn command_line(_pid: u32) -> String {
     String::new()
 }
@@ -290,7 +362,51 @@ pub fn current_dir(pid: u32) -> Option<String> {
         .map(|p| p.to_string_lossy().into_owned())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+pub fn current_dir(pid: u32) -> Option<String> {
+    // proc_pidinfo(pid, PROC_PIDVNODEPATHINFO=9, 0, &info, sizeof(info)) returns
+    // a `proc_vnodepathinfo` whose `pvi_cdir.vip_path` is a 1024-byte NUL-
+    // terminated path. The struct itself is two `vnode_info_path`s
+    // (cdir, rdir); we only read the first 1024-byte path field, located
+    // immediately after the 152-byte `vnode_info` header. The layout is
+    // ABI-stable XNU.
+    const PROC_PIDVNODEPATHINFO: libc::c_int = 9;
+    const VNODE_INFO_SIZE: usize = 152;
+    const VIP_PATH_LEN: usize = 1024;
+    const PROC_VNODEPATHINFO_SIZE: usize = (VNODE_INFO_SIZE + VIP_PATH_LEN) * 2;
+
+    extern "C" {
+        fn proc_pidinfo(
+            pid: libc::c_int,
+            flavor: libc::c_int,
+            arg: u64,
+            buffer: *mut libc::c_void,
+            buffersize: libc::c_int,
+        ) -> libc::c_int;
+    }
+
+    let mut buf = [0u8; PROC_VNODEPATHINFO_SIZE];
+    let rc = unsafe {
+        proc_pidinfo(
+            pid as libc::c_int,
+            PROC_PIDVNODEPATHINFO,
+            0,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len() as libc::c_int,
+        )
+    };
+    if rc <= 0 {
+        return None;
+    }
+    let path_bytes = &buf[VNODE_INFO_SIZE..VNODE_INFO_SIZE + VIP_PATH_LEN];
+    let nul = path_bytes.iter().position(|&b| b == 0).unwrap_or(0);
+    if nul == 0 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&path_bytes[..nul]).into_owned())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn current_dir(_pid: u32) -> Option<String> {
     None
 }
@@ -333,7 +449,8 @@ pub fn list_pids() -> Vec<u32> {
 
 #[cfg(target_os = "macos")]
 pub fn list_pids() -> Vec<u32> {
-    Vec::new()
+    use libproc::processes::{pids_by_type, ProcFilter};
+    pids_by_type(ProcFilter::All).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -374,5 +491,45 @@ mod tests {
             "/usr/bin/pipewire-pulse"
         ));
         assert!(!matches_pi_command("ping", "/usr/bin/ping 8.8.8.8"));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn list_pids_includes_self() {
+        let pid = std::process::id();
+        let pids = list_pids();
+        assert!(!pids.is_empty(), "list_pids returned empty");
+        assert!(pids.contains(&pid), "list_pids missing self pid {}", pid);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn current_dir_matches_self() {
+        let pid = std::process::id();
+        let got = current_dir(pid).expect("current_dir returned None");
+        let expected = std::env::current_dir().unwrap();
+        // canonicalize both to neutralise /private symlinks on macOS.
+        let got_c = std::fs::canonicalize(&got).unwrap_or_else(|_| got.clone().into());
+        let exp_c = std::fs::canonicalize(&expected).unwrap_or(expected);
+        assert_eq!(got_c, exp_c, "current_dir mismatch (raw={})", got);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn command_line_contains_self_argv0() {
+        let pid = std::process::id();
+        let cmd = command_line(pid);
+        assert!(!cmd.is_empty(), "command_line returned empty");
+        let argv0 = std::env::args().next().unwrap_or_default();
+        let basename = std::path::Path::new(&argv0)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        assert!(
+            !basename.is_empty() && cmd.contains(basename),
+            "command_line {:?} does not contain argv0 basename {:?}",
+            cmd,
+            basename
+        );
     }
 }

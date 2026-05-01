@@ -84,6 +84,7 @@ fn build_session_info(
                 .map(str::to_string)
         })?;
 
+    let tool_uses_count = crate::tool_use_count::count_pi(&jsonl_path);
     Some(SessionInfo {
         agent_id,
         agent_kind: AgentKind::Pi,
@@ -106,6 +107,7 @@ fn build_session_info(
         current_tool: pi_conversation::extract_current_tool(&tail),
         is_thinking: pi_conversation::is_currently_thinking(&tail),
         context_tokens: pi_conversation::extract_context_tokens(&tail),
+        tool_uses_count,
     })
 }
 
