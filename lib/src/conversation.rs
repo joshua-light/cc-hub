@@ -81,7 +81,14 @@ pub fn count_tool_uses(path: &Path) -> usize {
         Ok(f) => f,
         Err(_) => return 0,
     };
-    let reader = BufReader::new(file);
+    count_tool_uses_in_reader(BufReader::new(file))
+}
+
+/// Streaming counter for assistant `tool_use` blocks reading from any
+/// `BufRead`. Shared with the incremental cache in
+/// [`crate::tool_use_count`], which seeks to a previously-known offset and
+/// counts only the suffix.
+pub fn count_tool_uses_in_reader<R: BufRead>(reader: R) -> usize {
     let mut count = 0usize;
     for line in reader.lines() {
         let line = match line {

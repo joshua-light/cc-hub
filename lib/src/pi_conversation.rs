@@ -5,7 +5,62 @@ use crate::conversation::{
 use crate::models::{ConversationMessage, SessionState};
 use serde_json::Value;
 use std::collections::HashSet;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
+
+/// Count assistant `toolCall` blocks across an entire Pi JSONL transcript.
+/// Streams line-by-line; returns 0 on missing/unreadable file.
+pub fn count_tool_uses(path: &Path) -> usize {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return 0,
+    };
+    count_tool_uses_in_reader(BufReader::new(file))
+}
+
+/// Streaming counter for `toolCall` blocks reading from any `BufRead`.
+/// Shared with [`crate::tool_use_count`] for incremental updates.
+pub fn count_tool_uses_in_reader<R: BufRead>(reader: R) -> usize {
+    let mut count = 0usize;
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let val: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if val.get("type").and_then(|t| t.as_str()) != Some("message") {
+            continue;
+        }
+        if val
+            .get("message")
+            .and_then(|m| m.get("role"))
+            .and_then(|r| r.as_str())
+            != Some("assistant")
+        {
+            continue;
+        }
+        let Some(arr) = val
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        else {
+            continue;
+        };
+        for block in arr {
+            if block.get("type").and_then(|t| t.as_str()) == Some("toolCall") {
+                count += 1;
+            }
+        }
+    }
+    count
+}
 
 pub fn read_jsonl_tail_for_state(path: &Path) -> Vec<Value> {
     const INITIAL: u64 = 64 * 1024;
