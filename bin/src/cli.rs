@@ -42,6 +42,7 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
         "task" => Some(handle(task_subcommand(rest))),
         "orchestrate" => Some(handle(orchestrate_subcommand(rest))),
         "pr" => Some(handle(pr_subcommand(rest))),
+        "worker" => Some(handle(worker_subcommand(rest))),
         _ => None,
     }
 }
@@ -104,6 +105,11 @@ struct Flags {
     description: Option<String>,
     comment: Option<String>,
     author: Option<String>,
+    /// `worker wait` flags. Repeatable `--tmux NAME`, `--all`,
+    /// `--timeout-secs N`.
+    tmux_targets: Vec<String>,
+    all: bool,
+    timeout_secs: Option<u64>,
 }
 
 fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
@@ -190,6 +196,21 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
             "--author" => {
                 f.author = Some(next_value(args, &mut i, "--author")?);
             }
+            "--tmux" => {
+                f.tmux_targets
+                    .push(next_value(args, &mut i, "--tmux")?);
+            }
+            "--all" => {
+                f.all = true;
+                i += 1;
+            }
+            "--timeout-secs" => {
+                let v = next_value(args, &mut i, "--timeout-secs")?;
+                f.timeout_secs = Some(
+                    v.parse()
+                        .map_err(|e| CliError::Usage(format!("--timeout-secs: {}", e)))?,
+                );
+            }
             other => {
                 return Err(CliError::Usage(format!("unknown flag: {}", other)));
             }
@@ -213,6 +234,15 @@ fn require_task(f: &Flags) -> Result<String, CliError> {
     f.task
         .clone()
         .ok_or_else(|| CliError::Usage("--task is required".into()))
+}
+
+fn find_by_tmux<'a>(
+    sessions: &'a [models::SessionInfo],
+    tmux: &str,
+) -> Option<&'a models::SessionInfo> {
+    sessions
+        .iter()
+        .find(|s| s.tmux_session.as_deref() == Some(tmux))
 }
 
 fn resolve_project_id(f: &Flags) -> Result<String, CliError> {
@@ -356,9 +386,8 @@ fn wait_until_idle_and_send(
         //      any cosmetic mismatch silently drops the prompt at the
         //      timeout boundary.
         let sessions = scanner::scan_sessions();
-        let scanner_idle = sessions.iter().any(|s| {
-            s.tmux_session.as_deref() == Some(tmux_name) && s.state == models::SessionState::Idle
-        });
+        let scanner_idle = find_by_tmux(&sessions, tmux_name)
+            .is_some_and(|s| s.state == models::SessionState::Idle);
         if scanner_idle {
             let pane_ready = send::pane_ready_for_input(tmux_name);
             let aged_in = started.elapsed() >= Duration::from_secs(5);
@@ -648,6 +677,7 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
 
     let was_running = prev_status.as_ref() == Some(&TaskStatus::Running);
     let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
+        let prev = s.status.clone();
         if let Some(st) = effective_status {
             s.status = st;
         }
@@ -665,6 +695,11 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
             && matches!(s.status, TaskStatus::Review | TaskStatus::Done);
         if leaving_running && s.shipped_version.is_none() {
             s.shipped_version = cc_hub_lib::version::detect(&s.project_root);
+        }
+        // Each transition *into* Review starts a fresh review round, so
+        // the auto-reviewer gets one pass per round.
+        if s.status == TaskStatus::Review && prev != TaskStatus::Review {
+            s.last_auto_reviewed_at = None;
         }
     })
     .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
@@ -1107,6 +1142,7 @@ fn pr_create(args: &[String]) -> Result<(), CliError> {
     orchestrator::update_task_state(&project_id, &task_id, |s| {
         s.status = TaskStatus::Review;
         s.note = Some(format!("PR #{}: {}", pr.id, pr.title));
+        s.last_auto_reviewed_at = None;
     })
     .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
 
@@ -1337,6 +1373,7 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
                 "PR #{}: conflicts during merge — re-review required",
                 pr.id
             ));
+            s.last_auto_reviewed_at = None;
         });
         let _ = cc_hub_lib::merge_lock::release(&project_id, &task_id);
 
@@ -1531,4 +1568,163 @@ fn resolve_worktree_path(
     let prefix = format!("{}-", state.task_id);
     let name = stripped.strip_prefix(&prefix)?;
     Some(orchestrator::worktree_path(&state.project_root, &state.task_id, name))
+}
+
+// ─── worker ──────────────────────────────────────────────────────────────
+//
+// `cc-hub worker wait --task ID [--tmux NAME ...] [--all] [--timeout-secs N]`
+//
+// Blocks until the named worker tmux session(s) reach a terminal-for-the-
+// orchestrator state — WaitingForInput (Claude end_turn) or Inactive
+// (process gone). Replaces the orchestrator's tmux capture-pane polling
+// loop, which paid 60–90s of LLM-driven latency per spawn; this verb polls
+// scan_sessions() at 500 ms and returns within seconds.
+
+fn worker_subcommand(args: &[String]) -> Result<(), CliError> {
+    let (verb, rest) = args
+        .split_first()
+        .ok_or_else(|| CliError::Usage("worker <verb>: missing verb (try `wait`)".into()))?;
+    match verb.as_str() {
+        "wait" => worker_wait(rest),
+        other => Err(CliError::Usage(format!(
+            "unknown worker verb: {} (try `wait`)",
+            other
+        ))),
+    }
+}
+
+fn worker_wait(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+
+    let state = orchestrator::read_task_state(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
+
+    // Build the target tmux name set. --tmux is validated against
+    // state.workers so the orchestrator catches typos here, not after a
+    // 30-minute timeout.
+    let mut targets: Vec<String> = if !f.tmux_targets.is_empty() {
+        let known: std::collections::HashSet<&str> = state
+            .workers
+            .iter()
+            .map(|w| w.tmux_name.as_str())
+            .collect();
+        for t in &f.tmux_targets {
+            if !known.contains(t.as_str()) {
+                return Err(CliError::Usage(format!(
+                    "--tmux {}: not a worker of task {} (known: [{}])",
+                    t,
+                    task_id,
+                    state
+                        .workers
+                        .iter()
+                        .map(|w| w.tmux_name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+        }
+        f.tmux_targets.clone()
+    } else if f.all {
+        state.workers.iter().map(|w| w.tmux_name.clone()).collect()
+    } else {
+        return Err(CliError::Usage(
+            "must pass either --tmux NAME ... or --all".into(),
+        ));
+    };
+
+    let mut seen = std::collections::HashSet::new();
+    targets.retain(|t| seen.insert(t.clone()));
+
+    if targets.is_empty() {
+        print_json(&serde_json::json!({
+            "ok": true,
+            "all_done": true,
+            "timed_out": false,
+            "elapsed_secs": 0,
+            "workers": [],
+        }));
+        return Ok(());
+    }
+
+    let timeout = Duration::from_secs(f.timeout_secs.unwrap_or(1800));
+    let started = Instant::now();
+    let deadline = started + timeout;
+
+    let mut done: std::collections::HashMap<String, serde_json::Value> =
+        std::collections::HashMap::new();
+    // A target that disappears from the scanner *after* having been seen
+    // is treated as Inactive (worker tmux torn down). One that never
+    // appears stays pending — fresh sessions sometimes lag the scanner.
+    let mut ever_seen: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    let timed_out = loop {
+        let sessions = scanner::scan_sessions();
+        for name in &targets {
+            if done.contains_key(name) {
+                continue;
+            }
+            if let Some(s) = find_by_tmux(&sessions, name) {
+                ever_seen.insert(name.clone());
+                if matches!(
+                    s.state,
+                    models::SessionState::WaitingForInput | models::SessionState::Inactive
+                ) {
+                    done.insert(
+                        name.clone(),
+                        serde_json::json!({
+                            "tmux": name,
+                            "state": s.state.to_string(),
+                            "done": true,
+                            "last_user_message": s.last_user_message,
+                        }),
+                    );
+                }
+            } else if ever_seen.contains(name) {
+                done.insert(
+                    name.clone(),
+                    serde_json::json!({
+                        "tmux": name,
+                        "state": models::SessionState::Inactive.to_string(),
+                        "done": true,
+                        "last_user_message": serde_json::Value::Null,
+                    }),
+                );
+            }
+        }
+        if done.len() == targets.len() {
+            break false;
+        }
+        if Instant::now() >= deadline {
+            break true;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    };
+
+    let elapsed_secs = started.elapsed().as_secs();
+    let workers: Vec<serde_json::Value> = targets
+        .iter()
+        .map(|name| {
+            done.get(name).cloned().unwrap_or_else(|| {
+                serde_json::json!({
+                    "tmux": name,
+                    "state": "unknown",
+                    "done": false,
+                    "last_user_message": serde_json::Value::Null,
+                })
+            })
+        })
+        .collect();
+    let all_done = done.len() == targets.len();
+
+    print_json(&serde_json::json!({
+        "ok": true,
+        "all_done": all_done,
+        "timed_out": timed_out,
+        "elapsed_secs": elapsed_secs,
+        "workers": workers,
+    }));
+    Ok(())
 }

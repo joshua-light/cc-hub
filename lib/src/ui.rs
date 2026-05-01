@@ -3167,7 +3167,7 @@ fn render_kanban_column(
     // Planning + Running show tall rich cards (orchestrator is alive,
     // there's live state to display); Review/Merging/Done get compact
     // 3-line cards since they're terminal states from the UI's POV.
-    let card_height: u16 = if col_idx <= 1 { 8 } else { 4 };
+    let card_height: u16 = if col_idx <= 1 { 6 } else { 4 };
     let gap: u16 = 1;
     let max_cards =
         ((inner.height as u32 + gap as u32) / (card_height as u32 + gap as u32)) as usize;
