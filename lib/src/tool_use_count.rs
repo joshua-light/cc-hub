@@ -37,41 +37,44 @@ fn cache() -> &'static Mutex<HashMap<PathBuf, Cached>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Cumulative `tool_use` count for a Claude JSONL transcript, or `None`
-/// if the file doesn't exist / can't be statted.
-pub fn count_claude(path: &Path) -> Option<u64> {
+/// Cumulative `tool_use` count for a Claude JSONL transcript. Returns 0
+/// when the file is missing or unreadable.
+pub fn count_claude(path: &Path) -> u64 {
     count_with_kind(path, Kind::Claude)
 }
 
-/// Cumulative `toolCall` count for a Pi JSONL transcript, or `None` if
-/// the file doesn't exist / can't be statted.
-pub fn count_pi(path: &Path) -> Option<u64> {
+/// Cumulative `toolCall` count for a Pi JSONL transcript. Returns 0 when
+/// the file is missing or unreadable.
+pub fn count_pi(path: &Path) -> u64 {
     count_with_kind(path, Kind::Pi)
 }
 
-fn count_with_kind(path: &Path, kind: Kind) -> Option<u64> {
-    let size = std::fs::metadata(path).ok()?.len();
+fn count_with_kind(path: &Path, kind: Kind) -> u64 {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return 0;
+    };
+    let size = meta.len();
 
-    let mut guard = cache().lock().ok()?;
+    let Ok(mut guard) = cache().lock() else {
+        return 0;
+    };
     let prev = guard.get(path).copied();
 
     let (count, clean_offset) = match prev {
-        Some(c) if c.size == size => return Some(c.count),
+        Some(c) if c.size == size => return c.count,
         Some(c) if size >= c.clean_offset => {
             // Append-only growth: pick up at the last clean line boundary
             // and tally only complete new lines.
-            match count_from(path, c.clean_offset, kind) {
-                Some((delta, new_offset)) => {
-                    (c.count.saturating_add(delta), new_offset)
-                }
-                None => return None,
-            }
+            let Some((delta, new_offset)) = count_from(path, c.clean_offset, kind) else {
+                return c.count;
+            };
+            (c.count.saturating_add(delta), new_offset)
         }
         // No prior entry, or the file shrank (rewrite/rotation): recount
         // from scratch.
         _ => match count_from(path, 0, kind) {
             Some((n, new_offset)) => (n, new_offset),
-            None => return None,
+            None => return 0,
         },
     };
 
@@ -83,7 +86,7 @@ fn count_with_kind(path: &Path, kind: Kind) -> Option<u64> {
             count,
         },
     );
-    Some(count)
+    count
 }
 
 /// Count tool_uses starting from `start` (which must be at a line boundary
@@ -155,7 +158,7 @@ mod tests {
     fn first_call_counts_everything() {
         let p = fresh_path("first");
         write_assistant_with_tool_uses(&p, 3);
-        assert_eq!(count_claude(&p), Some(3));
+        assert_eq!(count_claude(&p), 3);
         let _ = std::fs::remove_file(&p);
     }
 
@@ -163,7 +166,7 @@ mod tests {
     fn cached_value_used_when_size_unchanged() {
         let p = fresh_path("cached");
         write_assistant_with_tool_uses(&p, 2);
-        assert_eq!(count_claude(&p), Some(2));
+        assert_eq!(count_claude(&p), 2);
 
         // Surreptitiously rewrite the file with different content but the
         // exact same byte size. The cache must NOT re-read — it should
@@ -182,7 +185,7 @@ mod tests {
         assert_eq!(std::fs::metadata(&p).unwrap().len() as usize, original_len);
 
         // Cache hit (same size) — returns the original cached count.
-        assert_eq!(count_claude(&p), Some(2));
+        assert_eq!(count_claude(&p), 2);
         let _ = std::fs::remove_file(&p);
     }
 
@@ -190,26 +193,26 @@ mod tests {
     fn appended_lines_grow_count_incrementally() {
         let p = fresh_path("append");
         write_assistant_with_tool_uses(&p, 4);
-        assert_eq!(count_claude(&p), Some(4));
+        assert_eq!(count_claude(&p), 4);
 
         write_assistant_with_tool_uses(&p, 3);
-        assert_eq!(count_claude(&p), Some(7));
+        assert_eq!(count_claude(&p), 7);
 
         // Append a non-tool entry — count should not grow.
         let mut f = OpenOptions::new().append(true).open(&p).unwrap();
         writeln!(f, r#"{{"type":"user","message":{{"role":"user","content":"hi"}}}}"#).unwrap();
-        assert_eq!(count_claude(&p), Some(7));
+        assert_eq!(count_claude(&p), 7);
 
         write_assistant_with_tool_uses(&p, 2);
-        assert_eq!(count_claude(&p), Some(9));
+        assert_eq!(count_claude(&p), 9);
         let _ = std::fs::remove_file(&p);
     }
 
     #[test]
-    fn missing_file_returns_none() {
+    fn missing_file_returns_zero() {
         let mut p = std::env::temp_dir();
         p.push("cchub-tool-use-cache-does-not-exist.jsonl");
         let _ = std::fs::remove_file(&p);
-        assert!(count_claude(&p).is_none());
+        assert_eq!(count_claude(&p), 0);
     }
 }

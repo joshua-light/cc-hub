@@ -452,7 +452,7 @@ struct JsonlData {
     current_tool: Option<conversation::CurrentTool>,
     is_thinking: bool,
     context_tokens: Option<u64>,
-    tool_uses_count: Option<u64>,
+    tool_uses_count: u64,
 }
 
 fn project_name(cwd: &str) -> String {
@@ -746,7 +746,7 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
                         current_tool: None,
                         is_thinking: false,
                         context_tokens: None,
-                        tool_uses_count: None,
+                        tool_uses_count: 0,
                     }
                 }
             };

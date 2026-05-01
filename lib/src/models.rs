@@ -70,7 +70,7 @@ pub struct SessionInfo {
     pub current_tool: Option<crate::conversation::CurrentTool>,
     pub is_thinking: bool,
     pub context_tokens: Option<u64>,
-    pub tool_uses_count: Option<u64>,
+    pub tool_uses_count: u64,
 }
 
 impl SessionInfo {

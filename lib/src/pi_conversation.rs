@@ -22,21 +22,11 @@ pub fn count_tool_uses(path: &Path) -> usize {
 /// Streaming counter for `toolCall` blocks reading from any `BufRead`.
 /// Shared with [`crate::tool_use_count`] for incremental updates.
 pub fn count_tool_uses_in_reader<R: BufRead>(reader: R) -> usize {
-    let mut count = 0usize;
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let val: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+    crate::conversation::count_blocks_in_reader(reader, |val| {
+        // Pi wraps assistant entries inside `type=message` with
+        // `message.role=assistant`; Claude uses `type=assistant` directly.
         if val.get("type").and_then(|t| t.as_str()) != Some("message") {
-            continue;
+            return 0;
         }
         if val
             .get("message")
@@ -44,22 +34,10 @@ pub fn count_tool_uses_in_reader<R: BufRead>(reader: R) -> usize {
             .and_then(|r| r.as_str())
             != Some("assistant")
         {
-            continue;
+            return 0;
         }
-        let Some(arr) = val
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_array())
-        else {
-            continue;
-        };
-        for block in arr {
-            if block.get("type").and_then(|t| t.as_str()) == Some("toolCall") {
-                count += 1;
-            }
-        }
-    }
-    count
+        crate::conversation::count_blocks_of_type(val, "toolCall")
+    })
 }
 
 pub fn read_jsonl_tail_for_state(path: &Path) -> Vec<Value> {

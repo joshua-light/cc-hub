@@ -3310,7 +3310,7 @@ fn collect_agent_summary(
                 sum.max_ctx_pct = pct;
             }
         }
-        sum.tool_uses = sum.tool_uses.saturating_add(s.tool_uses_count.unwrap_or(0));
+        sum.tool_uses = sum.tool_uses.saturating_add(s.tool_uses_count);
         let pri = match s.state {
             SessionState::Processing => 3,
             SessionState::WaitingForInput => 2,
@@ -3328,6 +3328,29 @@ fn collect_agent_summary(
         }
     }
     sum
+}
+
+/// Cheap variant of [`collect_agent_summary`] that only sums tool-use counts
+/// across the orchestrator + workers. Used by the collapsed card renderer,
+/// which needs the count for its footer badge but none of the state /
+/// context-window aggregates.
+fn sum_tool_uses(
+    t: &crate::orchestrator::TaskState,
+    sessions_by_tmux: &std::collections::HashMap<&str, &SessionInfo>,
+) -> u64 {
+    let orch = t
+        .orchestrator_tmux
+        .as_deref()
+        .and_then(|n| sessions_by_tmux.get(n).copied());
+    let workers = t
+        .workers
+        .iter()
+        .filter_map(|w| sessions_by_tmux.get(w.tmux_name.as_str()).copied());
+    std::iter::once(orch)
+        .flatten()
+        .chain(workers)
+        .map(|s| s.tool_uses_count)
+        .fold(0u64, |a, b| a.saturating_add(b))
 }
 
 /// Compact dot strip showing per-agent state. Up to ~12 dots; overflow
@@ -3763,11 +3786,11 @@ fn render_task_card_collapsed(
             Style::default().fg(Color::Rgb(140, 145, 160)),
         ));
     }
-    let sum = collect_agent_summary(t, sessions_by_tmux);
-    if sum.tool_uses > 0 {
+    let tool_uses = sum_tool_uses(t, sessions_by_tmux);
+    if tool_uses > 0 {
         footer.push(Span::raw("   "));
         footer.push(Span::styled(
-            format!("󰠰 {}", sum.tool_uses),
+            format!("󰠰 {}", tool_uses),
             Style::default().fg(Color::Rgb(180, 200, 160)),
         ));
     }
@@ -4983,7 +5006,7 @@ mod kanban_card_tests {
             current_tool: None,
             is_thinking: false,
             context_tokens: None,
-            tool_uses_count: Some(tool_uses),
+            tool_uses_count: tool_uses,
         }
     }
 
