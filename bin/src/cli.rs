@@ -1798,18 +1798,18 @@ fn project_subcommand(args: &[String]) -> Result<(), CliError> {
 /// `cc-hub project list [--json]`
 ///
 /// Enumerate registered projects from `~/.cc-hub/projects.toml`. Plain
-/// output is one row per project: `<id> <name> <root>`. With `--json`, a
-/// single JSON array of `{id, name, root, task_counts:{backlog,running,
-/// review,merging,done}}`. Sorted by name (case-insensitive) so the
-/// listing is stable across machines.
+/// output is one tab-separated row per project: `<id>\t<name>\t<root>`.
+/// With `--json`, a single JSON array of `{id, name, root,
+/// task_counts:{backlog,running,review,merging,done}}`. Sorted by name
+/// (case-insensitive) so the listing is stable across machines.
 fn project_list(args: &[String]) -> Result<(), CliError> {
     use cc_hub_lib::orchestrator::TaskStatus;
     use cc_hub_lib::projects_scan;
 
     let f = parse_flags(args)?;
-    let snap = projects_scan::scan();
+    let mut snap = projects_scan::scan();
 
-    let mut projects = snap.projects.clone();
+    let mut projects = std::mem::take(&mut snap.projects);
     projects.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
     if f.json {
@@ -1845,14 +1845,11 @@ fn project_list(args: &[String]) -> Result<(), CliError> {
                 })
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string(&arr)
-                .map_err(|e| CliError::Other(format!("serialise: {}", e)))?
-        );
+        print_json(&serde_json::Value::Array(arr));
     } else {
+        // Tab-separated so consumers can split on \t even if a name contains spaces.
         for p in &projects {
-            println!("{} {} {}", p.id, p.name, p.root.display());
+            println!("{}\t{}\t{}", p.id, p.name, p.root.display());
         }
     }
     Ok(())
