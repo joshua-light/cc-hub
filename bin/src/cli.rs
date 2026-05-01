@@ -648,6 +648,7 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
 
     let was_running = prev_status.as_ref() == Some(&TaskStatus::Running);
     let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
+        let prev = s.status.clone();
         if let Some(st) = effective_status {
             s.status = st;
         }
@@ -665,6 +666,11 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
             && matches!(s.status, TaskStatus::Review | TaskStatus::Done);
         if leaving_running && s.shipped_version.is_none() {
             s.shipped_version = cc_hub_lib::version::detect(&s.project_root);
+        }
+        // Each transition *into* Review starts a fresh review round, so
+        // the auto-reviewer gets one pass per round.
+        if s.status == TaskStatus::Review && prev != TaskStatus::Review {
+            s.last_auto_reviewed_at = None;
         }
     })
     .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
@@ -1107,6 +1113,7 @@ fn pr_create(args: &[String]) -> Result<(), CliError> {
     orchestrator::update_task_state(&project_id, &task_id, |s| {
         s.status = TaskStatus::Review;
         s.note = Some(format!("PR #{}: {}", pr.id, pr.title));
+        s.last_auto_reviewed_at = None;
     })
     .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
 
@@ -1337,6 +1344,7 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
                 "PR #{}: conflicts during merge — re-review required",
                 pr.id
             ));
+            s.last_auto_reviewed_at = None;
         });
         let _ = cc_hub_lib::merge_lock::release(&project_id, &task_id);
 
