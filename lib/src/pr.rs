@@ -11,6 +11,7 @@
 //! creation. Sequential ids match the GitHub mental model ("PR #42") and
 //! make TUI rendering and CLI references human-readable.
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -83,6 +84,10 @@ pub fn pr_counter_path(project_id: &str) -> Option<PathBuf> {
     orchestrator::project_state_dir(project_id).map(|d| d.join("pr-counter"))
 }
 
+pub fn pr_counter_lock_path(project_id: &str) -> Option<PathBuf> {
+    orchestrator::project_state_dir(project_id).map(|d| d.join("pr-counter.lock"))
+}
+
 /// Read a task's PR record. Returns `Ok(None)` if no PR has been opened
 /// for this task, `Err` for filesystem or schema errors.
 pub fn read_pr(project_id: &str, task_id: &str) -> io::Result<Option<PullRequest>> {
@@ -143,6 +148,14 @@ pub fn allocate_pr_id(project_id: &str) -> io::Result<u32> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    let lock_path = pr_counter_lock_path(project_id)
+        .ok_or_else(|| io::Error::other("no home dir"))?;
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    FileExt::lock_exclusive(&lock_file)?;
     let current: u32 = match fs::read_to_string(&path) {
         Ok(raw) => raw.trim().parse().map_err(|e| io::Error::new(
             io::ErrorKind::InvalidData,
@@ -157,6 +170,9 @@ pub fn allocate_pr_id(project_id: &str) -> io::Result<u32> {
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     fs::write(&tmp, next.to_string())?;
     fs::rename(&tmp, &path)?;
+    // `lock_file` is held until the end of this scope; dropping the file
+    // handle releases the advisory lock (fs2 guarantees this on Drop).
+    let _ = &lock_file;
     Ok(next)
 }
 
@@ -295,5 +311,54 @@ mod tests {
         assert_eq!(s, "\"changes_requested\"");
         let parsed: ReviewState = serde_json::from_str("\"approved\"").unwrap();
         assert_eq!(parsed, ReviewState::Approved);
+    }
+
+    #[test]
+    fn allocate_pr_id_is_concurrent_safe() {
+        // Acquire HOME_TEST_LOCK so other tests' HOME swaps don't race us.
+        // Then spawn worker threads that share this $HOME — they should all
+        // see distinct ids despite contending on the counter.
+        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        const THREADS: usize = 2;
+        const ITERS: usize = 50;
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let mut ids = Vec::with_capacity(ITERS);
+                    for _ in 0..ITERS {
+                        ids.push(allocate_pr_id("p1").expect("alloc"));
+                    }
+                    ids
+                })
+            })
+            .collect();
+
+        let mut all = Vec::with_capacity(THREADS * ITERS);
+        for h in handles {
+            all.extend(h.join().expect("thread"));
+        }
+
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+
+        let mut sorted = all.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            all.len(),
+            "duplicate PR ids allocated under contention: {:?}",
+            all
+        );
+        assert_eq!(sorted.len(), THREADS * ITERS);
+        // Counter should be exactly THREADS*ITERS — no gaps, no overflows.
+        assert_eq!(*sorted.first().unwrap(), 1);
+        assert_eq!(*sorted.last().unwrap(), (THREADS * ITERS) as u32);
     }
 }
