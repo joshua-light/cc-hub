@@ -579,10 +579,11 @@ fn task_subcommand(args: &[String]) -> Result<(), CliError> {
         "report" => task_report(rest),
         "create" => task_create(rest),
         "start" => task_start(rest),
+        "auto-review" => task_auto_review(rest),
         "artifact" => task_artifact_subcommand(rest),
         "todos" => task_todos_subcommand(rest),
         other => Err(CliError::Usage(format!(
-            "unknown task verb: {} (try `report`, `create`, `start`, `artifact`, or `todos`)",
+            "unknown task verb: {} (try `report`, `create`, `start`, `auto-review`, `artifact`, or `todos`)",
             other
         ))),
     }
@@ -724,6 +725,65 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         "summary": state.summary,
         "shipped_version": state.shipped_version,
         "updated_at": state.updated_at,
+    }));
+    Ok(())
+}
+
+/// `cc-hub task auto-review --task ID [--project-id ID]`
+///
+/// Re-arm the auto-reviewer for the current Review round by clearing
+/// `last_auto_reviewed_at`. The next `auto_review::tick` will then re-pick
+/// the task. Useful after fixing a misconfig (e.g. a stale agent setting)
+/// when the user wants another pass without waiting for a fresh round.
+fn task_auto_review(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+
+    let state = orchestrator::read_task_state(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
+    if state.status != TaskStatus::Review {
+        return Err(CliError::Usage(format!(
+            "auto-review is only meaningful in the Review state (task is currently {:?})",
+            state.status
+        )));
+    }
+
+    let pr = cc_hub_lib::pr::read_pr(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
+        .ok_or_else(|| {
+            CliError::Usage(
+                "no PR exists for this task; auto-review only applies to a task with an open PR"
+                    .into(),
+            )
+        })?;
+    let pr_state_str = match pr.review_state {
+        cc_hub_lib::pr::ReviewState::Open => "open",
+        cc_hub_lib::pr::ReviewState::ChangesRequested => "changes_requested",
+        cc_hub_lib::pr::ReviewState::Approved => "approved",
+        cc_hub_lib::pr::ReviewState::Merged => "merged",
+        cc_hub_lib::pr::ReviewState::Closed => "closed",
+    };
+    if !matches!(
+        pr.review_state,
+        cc_hub_lib::pr::ReviewState::Open | cc_hub_lib::pr::ReviewState::ChangesRequested
+    ) {
+        return Err(CliError::Usage(format!(
+            "auto-review only applies to PRs in Open or ChangesRequested state (PR is currently {})",
+            pr_state_str
+        )));
+    }
+
+    orchestrator::update_task_state(&project_id, &task_id, |s| {
+        s.last_auto_reviewed_at = None;
+    })
+    .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
+
+    print_json(&serde_json::json!({
+        "ok": true,
+        "task_id": task_id,
+        "project_id": project_id,
+        "cleared": true,
     }));
     Ok(())
 }
@@ -1727,4 +1787,65 @@ fn worker_wait(args: &[String]) -> Result<(), CliError> {
         "workers": workers,
     }));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cc_hub_lib::pr;
+    use std::sync::Mutex;
+
+    // $HOME is process-global; serialise tests that redirect it.
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_tempdir_home<F: FnOnce()>(f: F) {
+        let _g = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+        f();
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn auto_review_clears_timestamp_on_review_with_open_pr() {
+        with_tempdir_home(|| {
+            let project_id = "p1".to_string();
+            let task_id = "t-auto".to_string();
+
+            let mut state = TaskState::new(
+                project_id.clone(),
+                PathBuf::from("/tmp/proj"),
+                "do thing".into(),
+            );
+            state.task_id = task_id.clone();
+            state.status = TaskStatus::Review;
+            state.last_auto_reviewed_at = Some(123_456);
+            orchestrator::write_task_state(&state).expect("write state");
+
+            let created = pr::create_pr(
+                &state,
+                "feature".into(),
+                "main".into(),
+                "title".into(),
+                "desc".into(),
+            )
+            .expect("create pr");
+            assert_eq!(created.review_state, pr::ReviewState::Open);
+
+            let args = vec![
+                "--task".to_string(),
+                task_id.clone(),
+                "--project-id".to_string(),
+                project_id.clone(),
+            ];
+            task_auto_review(&args).expect("auto-review ok");
+
+            let after = orchestrator::read_task_state(&project_id, &task_id).expect("read state");
+            assert!(after.last_auto_reviewed_at.is_none());
+        });
+    }
 }
