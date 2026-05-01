@@ -406,9 +406,40 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let max_w = inner.width.saturating_sub(4) as usize;
-    let mut lines: Vec<Line> = Vec::with_capacity(tasks.len() * 3);
-    for (i, t) in tasks.iter().enumerate() {
-        let selected = i == app.backlog_sel;
+
+    let task_lines = 3usize;
+    let inner_h = inner.height as usize;
+    let (scroll_offset, visible_slots) = if tasks.len() * task_lines <= inner_h {
+        (0usize, tasks.len())
+    } else {
+        let visible_slots = ((inner_h.saturating_sub(2)) / task_lines)
+            .max(1)
+            .min(tasks.len());
+        let sel = app.backlog_sel.min(tasks.len().saturating_sub(1));
+        let scroll_offset = if sel < visible_slots {
+            0
+        } else {
+            (sel + 1)
+                .saturating_sub(visible_slots)
+                .min(tasks.len().saturating_sub(visible_slots))
+        };
+        (scroll_offset, visible_slots)
+    };
+
+    let muted = Style::default().fg(Color::Rgb(80, 80, 100));
+    let mut lines: Vec<Line> = Vec::with_capacity(visible_slots * 3 + 2);
+
+    if scroll_offset > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("  ▾ {} more ▾", scroll_offset),
+            muted,
+        )));
+    }
+
+    let end = (scroll_offset + visible_slots).min(tasks.len());
+    for (i, t) in tasks[scroll_offset..end].iter().enumerate() {
+        let abs_i = scroll_offset + i;
+        let selected = abs_i == app.backlog_sel;
         let arrow = if selected { "▌ " } else { "  " };
         let title_text = match t.title.as_deref().filter(|s| !s.is_empty()) {
             Some(name) => name.to_string(),
@@ -435,6 +466,15 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
         ]));
         lines.push(Line::from(""));
     }
+
+    if scroll_offset + visible_slots < tasks.len() {
+        let remaining = tasks.len() - scroll_offset - visible_slots;
+        lines.push(Line::from(Span::styled(
+            format!("  ▴ {} more ▴", remaining),
+            muted,
+        )));
+    }
+
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
