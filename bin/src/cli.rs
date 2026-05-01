@@ -757,20 +757,13 @@ fn task_auto_review(args: &[String]) -> Result<(), CliError> {
                     .into(),
             )
         })?;
-    let pr_state_str = match pr.review_state {
-        cc_hub_lib::pr::ReviewState::Open => "open",
-        cc_hub_lib::pr::ReviewState::ChangesRequested => "changes_requested",
-        cc_hub_lib::pr::ReviewState::Approved => "approved",
-        cc_hub_lib::pr::ReviewState::Merged => "merged",
-        cc_hub_lib::pr::ReviewState::Closed => "closed",
-    };
     if !matches!(
         pr.review_state,
         cc_hub_lib::pr::ReviewState::Open | cc_hub_lib::pr::ReviewState::ChangesRequested
     ) {
         return Err(CliError::Usage(format!(
             "auto-review only applies to PRs in Open or ChangesRequested state (PR is currently {})",
-            pr_state_str
+            pr.review_state.as_str()
         )));
     }
 
@@ -1150,13 +1143,7 @@ fn pr_to_json(pr: &cc_hub_lib::pr::PullRequest) -> serde_json::Value {
         "base": pr.base,
         "title": pr.title,
         "description": pr.description,
-        "review_state": match pr.review_state {
-            cc_hub_lib::pr::ReviewState::Open => "open",
-            cc_hub_lib::pr::ReviewState::ChangesRequested => "changes_requested",
-            cc_hub_lib::pr::ReviewState::Approved => "approved",
-            cc_hub_lib::pr::ReviewState::Merged => "merged",
-            cc_hub_lib::pr::ReviewState::Closed => "closed",
-        },
+        "review_state": pr.review_state.as_str(),
         "comments": pr.comments,
         "approved_at_branch_sha": pr.approved_at_branch_sha,
         "approved_at_base_sha": pr.approved_at_base_sha,

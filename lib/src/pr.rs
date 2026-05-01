@@ -35,6 +35,20 @@ pub enum ReviewState {
     Closed,
 }
 
+impl ReviewState {
+    /// Snake-case rendering matching the on-wire serde representation —
+    /// stable for CLI JSON output and human-facing error messages.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReviewState::Open => "open",
+            ReviewState::ChangesRequested => "changes_requested",
+            ReviewState::Approved => "approved",
+            ReviewState::Merged => "merged",
+            ReviewState::Closed => "closed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Comment {
     /// Free-form: `"user"`, `"orchestrator"`, or a worker tmux name.
