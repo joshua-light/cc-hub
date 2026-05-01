@@ -236,6 +236,15 @@ fn require_task(f: &Flags) -> Result<String, CliError> {
         .ok_or_else(|| CliError::Usage("--task is required".into()))
 }
 
+fn find_by_tmux<'a>(
+    sessions: &'a [models::SessionInfo],
+    tmux: &str,
+) -> Option<&'a models::SessionInfo> {
+    sessions
+        .iter()
+        .find(|s| s.tmux_session.as_deref() == Some(tmux))
+}
+
 fn resolve_project_id(f: &Flags) -> Result<String, CliError> {
     if let Some(id) = f.project_id.clone() {
         return Ok(id);
@@ -377,9 +386,8 @@ fn wait_until_idle_and_send(
         //      any cosmetic mismatch silently drops the prompt at the
         //      timeout boundary.
         let sessions = scanner::scan_sessions();
-        let scanner_idle = sessions.iter().any(|s| {
-            s.tmux_session.as_deref() == Some(tmux_name) && s.state == models::SessionState::Idle
-        });
+        let scanner_idle = find_by_tmux(&sessions, tmux_name)
+            .is_some_and(|s| s.state == models::SessionState::Idle);
         if scanner_idle {
             let pane_ready = send::pane_ready_for_input(tmux_name);
             let aged_in = started.elapsed() >= Duration::from_secs(5);
@@ -1626,7 +1634,6 @@ fn worker_wait(args: &[String]) -> Result<(), CliError> {
         ));
     };
 
-    // Dedup while preserving first-seen order.
     let mut seen = std::collections::HashSet::new();
     targets.retain(|t| seen.insert(t.clone()));
 
@@ -1645,14 +1652,11 @@ fn worker_wait(args: &[String]) -> Result<(), CliError> {
     let started = Instant::now();
     let deadline = started + timeout;
 
-    // Per-target finished record. None means "still pending."
     let mut done: std::collections::HashMap<String, serde_json::Value> =
         std::collections::HashMap::new();
-    // Tracks which targets we have observed at least once in scan_sessions
-    // output. A target that disappears from the scanner *after* having been
-    // seen is treated as Inactive (worker tmux torn down). One that never
-    // appears stays pending — fresh sessions sometimes lag the scanner by a
-    // tick.
+    // A target that disappears from the scanner *after* having been seen
+    // is treated as Inactive (worker tmux torn down). One that never
+    // appears stays pending — fresh sessions sometimes lag the scanner.
     let mut ever_seen: std::collections::HashSet<String> =
         std::collections::HashSet::new();
 
@@ -1662,42 +1666,32 @@ fn worker_wait(args: &[String]) -> Result<(), CliError> {
             if done.contains_key(name) {
                 continue;
             }
-            let found = sessions
-                .iter()
-                .find(|s| s.tmux_session.as_deref() == Some(name.as_str()));
-            match found {
-                Some(s) => {
-                    ever_seen.insert(name.clone());
-                    match s.state {
-                        models::SessionState::WaitingForInput
-                        | models::SessionState::Inactive => {
-                            done.insert(
-                                name.clone(),
-                                serde_json::json!({
-                                    "tmux": name,
-                                    "state": s.state.to_string(),
-                                    "done": true,
-                                    "last_user_message": s.last_user_message,
-                                }),
-                            );
-                        }
-                        _ => {}
-                    }
+            if let Some(s) = find_by_tmux(&sessions, name) {
+                ever_seen.insert(name.clone());
+                if matches!(
+                    s.state,
+                    models::SessionState::WaitingForInput | models::SessionState::Inactive
+                ) {
+                    done.insert(
+                        name.clone(),
+                        serde_json::json!({
+                            "tmux": name,
+                            "state": s.state.to_string(),
+                            "done": true,
+                            "last_user_message": s.last_user_message,
+                        }),
+                    );
                 }
-                None => {
-                    if ever_seen.contains(name) {
-                        // tmux session torn down → treat as Inactive.
-                        done.insert(
-                            name.clone(),
-                            serde_json::json!({
-                                "tmux": name,
-                                "state": models::SessionState::Inactive.to_string(),
-                                "done": true,
-                                "last_user_message": serde_json::Value::Null,
-                            }),
-                        );
-                    }
-                }
+            } else if ever_seen.contains(name) {
+                done.insert(
+                    name.clone(),
+                    serde_json::json!({
+                        "tmux": name,
+                        "state": models::SessionState::Inactive.to_string(),
+                        "done": true,
+                        "last_user_message": serde_json::Value::Null,
+                    }),
+                );
             }
         }
         if done.len() == targets.len() {
