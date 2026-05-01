@@ -1325,6 +1325,11 @@ const DIFF_GUTTER_FG: Color = Color::Rgb(120, 120, 130);
 const DIFF_CONTEXT_FG: Color = Color::Rgb(160, 160, 170);
 const DIFF_HEADER_FG: Color = Color::Rgb(140, 180, 230);
 
+// Dim metadata gray used for low-priority info on task cards (queued-merge
+// border + the `#<id>` badge). Sits below every other tone in the card so the
+// id reads as background context, not headline.
+const TASK_META_DIM: Color = Color::Rgb(95, 100, 115);
+
 // `{old:>3} {new:>3} {marker} ` + 1-cell margin = 11 used cols.
 const DIFF_GUTTER_W: usize = 11;
 
@@ -3167,7 +3172,7 @@ fn render_kanban_column(
     // Planning + Running show tall rich cards (orchestrator is alive,
     // there's live state to display); Review/Merging/Done get compact
     // 3-line cards since they're terminal states from the UI's POV.
-    let card_height: u16 = if col_idx <= 1 { 8 } else { 4 };
+    let card_height: u16 = if col_idx <= 1 { 6 } else { 4 };
     let gap: u16 = 1;
     let max_cards =
         ((inner.height as u32 + gap as u32) / (card_height as u32 + gap as u32)) as usize;
@@ -3502,15 +3507,11 @@ fn render_task_card_active(
         (BorderType::Rounded, Color::Rgb(80, 90, 110))
     };
 
-    let title_id = crate::orchestrator::short_task_id(&t.task_id);
-    let prompt_max = (area.width as usize).saturating_sub(14);
+    let short_id = crate::orchestrator::short_task_id(&t.task_id);
+    let prompt_max = (area.width as usize).saturating_sub(8);
     let header_text = task_card_header_text(t, titling_in_flight, prompt_max);
     let title_spans = vec![
         Span::styled(format!(" {} ", title_icon), Style::default().fg(accent)),
-        Span::styled(
-            format!("[{}] ", title_id),
-            Style::default().fg(Color::Rgb(150, 170, 200)),
-        ),
         Span::styled(
             header_text,
             Style::default()
@@ -3568,10 +3569,10 @@ fn render_task_card_active(
     row2.extend(merge_progress_spans(t));
     lines.push(Line::from(row2));
 
-    // Row 3: age · artifacts · ctx bar (right-aligned-ish).
     let age = format_age(now_secs.saturating_sub(t.updated_at as u64));
     let arts = t.artifacts.len();
     let mut row3: Vec<Span<'static>> = vec![
+        Span::styled(format!("#{}  ", short_id), Style::default().fg(TASK_META_DIM)),
         Span::styled("󰔟 ", Style::default().fg(Color::Rgb(150, 150, 170))),
         Span::styled(age, Style::default().fg(Color::Rgb(180, 180, 200))),
     ];
@@ -3673,7 +3674,7 @@ fn render_task_card_collapsed(
     } else if col_idx == 2 {
         (BorderType::Rounded, Color::Rgb(110, 170, 180))
     } else if queued {
-        (BorderType::Rounded, Color::Rgb(95, 100, 115))
+        (BorderType::Rounded, TASK_META_DIM)
     } else if col_idx == 3 {
         (BorderType::Rounded, Color::Rgb(170, 130, 180))
     } else {
@@ -3681,15 +3682,11 @@ fn render_task_card_collapsed(
     };
     let icon_accent = if queued { Color::Rgb(135, 135, 155) } else { accent };
 
-    let title_id = crate::orchestrator::short_task_id(&t.task_id);
-    let prompt_max = (area.width as usize).saturating_sub(14);
+    let short_id = crate::orchestrator::short_task_id(&t.task_id);
+    let prompt_max = (area.width as usize).saturating_sub(8);
     let header_text = task_card_header_text(t, titling_in_flight, prompt_max);
     let title_spans = vec![
         Span::styled(format!(" {} ", icon), Style::default().fg(icon_accent)),
-        Span::styled(
-            format!("[{}] ", title_id),
-            Style::default().fg(Color::Rgb(120, 130, 150)),
-        ),
         Span::styled(
             header_text,
             Style::default()
@@ -3741,6 +3738,7 @@ fn render_task_card_collapsed(
     let merged = t.workers.iter().filter(|w| worker_was_merged(w, t)).count();
     let total_w = t.workers.len();
     let mut footer: Vec<Span<'static>> = vec![
+        Span::styled(format!("#{}  ", short_id), Style::default().fg(TASK_META_DIM)),
         Span::styled("󰔟 ", Style::default().fg(Color::Rgb(110, 120, 135))),
         Span::styled(age, Style::default().fg(Color::Rgb(140, 145, 160))),
     ];
