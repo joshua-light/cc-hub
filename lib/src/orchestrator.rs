@@ -709,13 +709,24 @@ All edits happen inside a worktree branch. You **do not** edit the project's mai
 
 - If a worker creates or edits `.gitignore`, instruct it to include `.cc-hub-wt/` so cc-hub's worktree dirs don't pollute future commits.
 
-# Monitoring workers
+# Waiting for workers to finish
 
-Two reliable channels, in order of preference:
-- `tmux capture-pane -t <tmux>:0 -p | tail -40` — shows the worker's current screen, including its last action and whether it's at the input prompt (idle) or thinking. Use this to tell when a worker is done.
-- Session transcripts on disk — Claude uses `~/.claude/projects/<sanitised-cwd>/<sid>.jsonl`; Pi uses `~/.pi/agent/sessions/--encoded-cwd--/*.jsonl`. Useful when you need full conversation history.
+The fastest way to know a worker is done is to block on `cc-hub worker wait`. It polls the scanner at sub-second cadence and returns as soon as the worker reaches `WaitingForInput` (turn ended) or `Inactive` (process gone). Use this instead of shell sleep loops or repeated tmux captures — those add 60–90s of LLM-driven latency per spawn.
 
-Avoid `until [ -f X ]; do sleep …; done` shell loops on file existence — they hide a stuck worker behind a 5-minute timeout.
+- Wait on a single worker (most common):
+  `{bin} worker wait --task {task_id} --tmux <TMUX_FROM_SPAWN_WORKER>`
+
+- Spawn N workers in parallel, then block until all finish:
+  `{bin} worker wait --task {task_id} --all`
+  (`--all` waits on every worker recorded on the task. Pass repeated `--tmux NAME` flags instead to wait on a subset.)
+
+- Default timeout is 1800s (30 min). Override with `--timeout-secs N` for unusually long-running workers.
+
+The verb prints one JSON line summarising each target's final `state` and `last_user_message`. `all_done: false` with `timed_out: true` means a worker is still busy past the deadline — use this as a signal to investigate, not to silently retry.
+
+When you really do need to peek inside a still-running worker (debugging, mid-task interventions), `tmux capture-pane -t <tmux>:0 -p` shows the worker's current screen, and the on-disk session transcript (`~/.claude/projects/<sanitised-cwd>/<sid>.jsonl` for Claude, `~/.pi/agent/sessions/--encoded-cwd--/*.jsonl` for Pi) has full history. These are debugging tools, not the wait mechanism.
+
+Never write `until [ -f X ]; do sleep …; done` shell loops or `sleep 60 && tmux capture-pane …` chains — they hide stuck workers behind long timeouts and waste turns on idle waiting.
 
 # Opening the PR
 
@@ -1466,6 +1477,7 @@ mod tests {
         let bin_s = bin.display().to_string();
         let expected_primitives = [
             format!("{} spawn-worker --task {}", bin_s, state.task_id),
+            format!("{} worker wait --task {}", bin_s, state.task_id),
             format!("{} pr create --task {}", bin_s, state.task_id),
             format!("{} pr show --task {}", bin_s, state.task_id),
             format!("{} pr merge --task {}", bin_s, state.task_id),
