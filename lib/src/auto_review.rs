@@ -212,6 +212,7 @@ fn build_review_prompt(
     cc_hub_bin: &std::path::Path,
 ) -> String {
     let bin = cc_hub_bin.display().to_string();
+    let cap = config::get().auto_review.max_comments_in_prompt as usize;
     format!(
         "You are an autonomous code reviewer for cc-hub. A task you have NEVER seen before just opened a pull request, and your job is to either APPROVE it or REQUEST CHANGES with a precise question. There is no human in this loop — your verdict drives whether the orchestrator merges or iterates.
 
@@ -271,17 +272,21 @@ Begin by inspecting the diff, then run any build/test you need, then issue your 
         } else {
             pr.description.clone()
         },
-        comments = format_comments(&pr.comments),
+        comments = format_comments(&pr.comments, cap),
         bin = bin,
     )
 }
 
-fn format_comments(comments: &[pr::Comment]) -> String {
+fn format_comments(comments: &[pr::Comment], cap: usize) -> String {
     if comments.is_empty() {
         return "(none)".to_string();
     }
+    let skipped = comments.len().saturating_sub(cap);
     let mut out = String::new();
-    for c in comments {
+    if skipped > 0 {
+        out.push_str(&format!("(+{} older comments not shown)\n", skipped));
+    }
+    for c in comments.iter().skip(skipped) {
         out.push_str(&format!("- [{}] {}\n", c.author, c.body));
     }
     out
@@ -346,5 +351,26 @@ mod tests {
         let out = build_review_prompt(&s, &p, &std::path::Path::new("/cc-hub"));
         assert!(out.contains("(no description)"));
         assert!(out.contains("(none)"));
+    }
+
+    #[test]
+    fn format_comments_caps_to_last_n_with_footer() {
+        let comments: Vec<pr::Comment> = (0..20)
+            .map(|i| pr::Comment {
+                author: format!("author{}", i),
+                at: i as i64,
+                body: format!("body{}", i),
+            })
+            .collect();
+        let out = format_comments(&comments, 5);
+        // exactly 5 rendered "- [" lines
+        let body_lines = out.lines().filter(|l| l.starts_with("- [")).count();
+        assert_eq!(body_lines, 5);
+        // and the footer mentioning the 15 skipped
+        assert!(out.contains("(+15 older comments not shown)"));
+        // the LAST 5 are the ones rendered (15..20), not the first 5
+        assert!(out.contains("- [author19] body19"));
+        assert!(out.contains("- [author15] body15"));
+        assert!(!out.contains("- [author14]"));
     }
 }
