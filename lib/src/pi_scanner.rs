@@ -354,40 +354,105 @@ pub fn load_state_explanation(
     ))
 }
 
-pub fn find_orchestrator_session(project_root: &Path, task_id: &str) -> Option<(String, PathBuf)> {
-    let dir = session_dirs()?.join(encode_path(&project_root.to_string_lossy()));
-    let needle = crate::orchestrator::orchestrator_prompt_prefix(task_id);
-    let mut candidates: Vec<(SystemTime, PathBuf)> = std::fs::read_dir(&dir)
-        .ok()?
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                return None;
+pub fn find_orchestrator_session(
+    project_root: &Path,
+    task_id: &str,
+    stored_sid: Option<&str>,
+    user_prompt: Option<&str>,
+) -> Option<(String, PathBuf)> {
+    // Fast path: trust the sid the task already recorded. Look up the file
+    // directly under the encoded project dir, then anywhere under the Pi
+    // sessions root — same drift-tolerance reasoning as the Claude scanner.
+    if let Some(sid) = stored_sid {
+        let target = format!("{}.jsonl", sid);
+        if let Some(root) = session_dirs() {
+            let direct = root
+                .join(encode_path(&project_root.to_string_lossy()))
+                .join(&target);
+            if direct.exists() {
+                return Some((sid.to_string(), direct));
             }
-            let mtime = path.metadata().ok()?.modified().ok()?;
-            Some((mtime, path))
-        })
-        .collect();
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
-    for (_, path) in candidates {
-        let head = conversation::read_jsonl_head(&path, 4096);
-        let Some(first) = pi_conversation::extract_first_user_message(&head) else {
-            continue;
-        };
-        if !first.starts_with(&needle) {
-            continue;
+            if let Ok(entries) = std::fs::read_dir(&root) {
+                for entry in entries.flatten() {
+                    let candidate = entry.path().join(&target);
+                    if candidate.exists() {
+                        return Some((sid.to_string(), candidate));
+                    }
+                }
+            }
         }
-        let sid = head
-            .iter()
-            .find_map(|e| e.get("id").and_then(|v| v.as_str()))
-            .map(str::to_string)
-            .or_else(|| {
-                path.file_stem()
-                    .and_then(|s| s.to_str())
+    }
+    use std::io::Read;
+    let root = session_dirs()?;
+    let prompt_needle = user_prompt
+        .map(|p| p.trim())
+        .filter(|p| p.len() >= 8)
+        .map(|p| p.chars().take(60).collect::<String>());
+    let scoped = root.join(encode_path(&project_root.to_string_lossy()));
+    // Pass 1: scoped to encoded project dir. Pass 2: every project dir.
+    let passes: [(PathBuf, bool); 2] = [(scoped, true), (root.clone(), false)];
+    let mut best: Option<(SystemTime, String, PathBuf)> = None;
+    for (dir, scoped_pass) in &passes {
+        let project_dirs: Vec<PathBuf> = if *scoped_pass {
+            vec![dir.clone()]
+        } else {
+            std::fs::read_dir(dir)
+                .ok()
+                .map(|it| {
+                    it.flatten()
+                        .map(|e| e.path())
+                        .filter(|p| p.is_dir())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        for proj_dir in project_dirs {
+            let Ok(entries) = std::fs::read_dir(&proj_dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let mut buf = vec![0u8; 32 * 1024];
+                let n = match std::fs::File::open(&path).and_then(|mut f| f.read(&mut buf)) {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+                buf.truncate(n);
+                let head_str = String::from_utf8_lossy(&buf);
+                let matches = head_str.contains(task_id)
+                    || prompt_needle
+                        .as_deref()
+                        .is_some_and(|p| head_str.contains(p));
+                if !matches {
+                    continue;
+                }
+                let mtime = path
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                let parsed_head = conversation::read_jsonl_head(&path, 4096);
+                let sid = parsed_head
+                    .iter()
+                    .find_map(|e| e.get("id").and_then(|v| v.as_str()))
                     .map(str::to_string)
-            })?;
-        return Some((sid, path));
+                    .or_else(|| {
+                        path.file_stem()
+                            .and_then(|s| s.to_str())
+                            .map(str::to_string)
+                    });
+                if let Some(sid) = sid {
+                    if best.as_ref().map_or(true, |(t, _, _)| mtime > *t) {
+                        best = Some((mtime, sid, path));
+                    }
+                }
+            }
+        }
+        if best.is_some() {
+            return best.map(|(_, sid, p)| (sid, p));
+        }
     }
     None
 }

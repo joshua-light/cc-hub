@@ -287,6 +287,7 @@ enum ScanMsg {
         status: Option<String>,
     },
     AutoReview {
+        spawn: Option<auto_review::Spawn>,
         status: Option<String>,
     },
 }
@@ -556,6 +557,7 @@ async fn run(
                 }
                 let _ = review_tx
                     .send(ScanMsg::AutoReview {
+                        spawn: outcome.spawn,
                         status: outcome.status,
                     })
                     .await;
@@ -960,6 +962,8 @@ async fn run(
                                     &task.project_root,
                                     &task.task_id,
                                     task.orchestrator_agent_kind,
+                                    task.orchestrator_session_id.as_deref(),
+                                    Some(task.prompt.as_str()),
                                 )
                             } else {
                                 None
@@ -1040,9 +1044,20 @@ async fn run(
                                 cc_hub_lib::orchestrator::TaskStatus::Running
                                     | cc_hub_lib::orchestrator::TaskStatus::Review
                             ) {
-                                app.set_status(
-                                    "orchestrator dead and no resumable session on disk — task may need a fresh start".into(),
-                                );
+                                let detail = match task.orchestrator_session_id.as_deref() {
+                                    Some(sid) => format!(
+                                        "orchestrator dead — sid {} not found under ~/.claude/projects/ (cwd {}); no JSONL contains task id {}",
+                                        models::short_sid(sid),
+                                        task.project_root.display(),
+                                        &task.task_id,
+                                    ),
+                                    None => format!(
+                                        "orchestrator dead — no JSONL under ~/.claude/projects/ contains task id {} (cwd {})",
+                                        &task.task_id,
+                                        task.project_root.display(),
+                                    ),
+                                };
+                                app.set_status(detail);
                             } else {
                                 app.set_status("no orchestrator log available".into());
                             }
@@ -1779,11 +1794,23 @@ async fn run(
                         app.set_status(s);
                     }
                 }
-                ScanMsg::AutoReview { status } => {
-                    // The reviewer session takes its briefing as initial
-                    // prompt (Claude `--initial-prompt` / Pi positional),
-                    // so there is nothing to dispatch here. Status surfaces
-                    // the spawn for the user to follow in the Sessions tab.
+                ScanMsg::AutoReview { spawn, status } => {
+                    // Claude ignores spawn-time initial prompts, so the
+                    // briefing is delivered via tmux send-keys after the
+                    // session reaches Idle — same pattern the backlog
+                    // triager uses for orchestrator prompts.
+                    if let Some(s) = spawn {
+                        if let Some(prompt) = s.prompt_to_dispatch {
+                            if app.has_pending_dispatch() {
+                                app.set_status(format!(
+                                    "auto-review: reviewer [{}] up but a dispatch is already queued — briefing may be delayed",
+                                    s.tmux
+                                ));
+                            } else {
+                                app.queue_pending_dispatch(s.tmux, prompt);
+                            }
+                        }
+                    }
                     if let Some(s) = status {
                         app.set_status(s);
                     }

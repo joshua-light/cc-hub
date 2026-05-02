@@ -24,13 +24,15 @@ use crate::projects_scan;
 use log::{debug, info, warn};
 
 /// One auto-reviewer session that the tick spawned. Carried back to the
-/// main loop so it can surface a status string. The session manages itself
-/// — it consumes its initial prompt and either calls `cc-hub pr approve`
-/// or `cc-hub pr request-changes` autonomously.
+/// main loop so it can dispatch the review briefing via `tmux send-keys`
+/// for backends that ignore initial prompts (Claude), and so the loop can
+/// surface a status string. `prompt_to_dispatch` is `None` when the agent
+/// consumed the briefing as its initial prompt (Pi).
 #[derive(Debug, Clone)]
 pub struct Spawn {
     pub task_id: String,
     pub tmux: String,
+    pub prompt_to_dispatch: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -157,6 +159,15 @@ pub fn tick() -> TickOutcome {
     let prompt = build_review_prompt(&stamped, &pr_record, &cc_hub_bin);
 
     let cwd = stamped.project_root.to_string_lossy().into_owned();
+    // Claude ignores `initial_prompt` (see spawn::build_agent_command); for
+    // those backends the prompt has to be dispatched after the session
+    // reaches Idle, same pattern start_backlog_task uses. Pi consumes
+    // initial_prompt directly.
+    let prompt_to_dispatch = if agent.supports_initial_prompt() {
+        None
+    } else {
+        Some(prompt.clone())
+    };
     let initial = if agent.supports_initial_prompt() {
         Some(prompt.as_str())
     } else {
@@ -186,6 +197,7 @@ pub fn tick() -> TickOutcome {
         spawn: Some(Spawn {
             task_id: task_id.clone(),
             tmux: tmux.clone(),
+            prompt_to_dispatch,
         }),
         status: Some(format!(
             "auto-review: reviewing PR #{} on task {} in [{}]",
