@@ -314,6 +314,11 @@ pub struct AutoReviewConfig {
     /// alongside the per-round clear-on-re-entry gate.
     pub ttl_secs: u64,
     pub run_timeout_secs: u64,
+    /// Cap on PR comments rendered into the reviewer briefing. Long iterative
+    /// review rounds otherwise grow the prompt without bound; older comments
+    /// are dropped with a `(+N older comments not shown)` footer so the
+    /// reviewer knows context exists.
+    pub max_comments_in_prompt: u32,
 }
 
 impl AutoReviewConfig {
@@ -333,6 +338,7 @@ impl Default for AutoReviewConfig {
             interval_secs: 30,
             ttl_secs: 600,
             run_timeout_secs: 1800,
+            max_comments_in_prompt: 8,
         }
     }
 }
