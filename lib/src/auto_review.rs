@@ -363,12 +363,9 @@ mod tests {
             })
             .collect();
         let out = format_comments(&comments, 5);
-        // exactly 5 rendered "- [" lines
         let body_lines = out.lines().filter(|l| l.starts_with("- [")).count();
         assert_eq!(body_lines, 5);
-        // and the footer mentioning the 15 skipped
         assert!(out.contains("(+15 older comments not shown)"));
-        // the LAST 5 are the ones rendered (15..20), not the first 5
         assert!(out.contains("- [author19] body19"));
         assert!(out.contains("- [author15] body15"));
         assert!(!out.contains("- [author14]"));
