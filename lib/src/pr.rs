@@ -100,15 +100,14 @@ pub fn pr_counter_path(project_id: &str) -> Option<PathBuf> {
 /// Read a task's PR record. Returns `Ok(None)` if no PR has been opened
 /// for this task, `Err` for filesystem or schema errors.
 pub fn read_pr(project_id: &str, task_id: &str) -> io::Result<Option<PullRequest>> {
-    let path = pr_file_path(project_id, task_id)
-        .ok_or_else(|| io::Error::other("no home dir"))?;
+    let path = pr_file_path(project_id, task_id).ok_or_else(|| io::Error::other("no home dir"))?;
     match fs::read_to_string(&path) {
-        Ok(raw) => serde_json::from_str(&raw)
-            .map(Some)
-            .map_err(|e| io::Error::new(
+        Ok(raw) => serde_json::from_str(&raw).map(Some).map_err(|e| {
+            io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("{}: {}", path.display(), e),
-            )),
+            )
+        }),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }
@@ -116,8 +115,8 @@ pub fn read_pr(project_id: &str, task_id: &str) -> io::Result<Option<PullRequest
 
 /// Atomic write via tempfile + rename. Creates parent dirs on demand.
 pub fn write_pr(pr: &PullRequest) -> io::Result<()> {
-    let path = pr_file_path(&pr.project_id, &pr.task_id)
-        .ok_or_else(|| io::Error::other("no home dir"))?;
+    let path =
+        pr_file_path(&pr.project_id, &pr.task_id).ok_or_else(|| io::Error::other("no home dir"))?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -152,22 +151,23 @@ where
 /// and writing it back atomically. Counter starts at 1 (matches GitHub's
 /// 1-indexed PR numbering).
 pub fn allocate_pr_id(project_id: &str) -> io::Result<u32> {
-    let path = pr_counter_path(project_id)
-        .ok_or_else(|| io::Error::other("no home dir"))?;
+    let path = pr_counter_path(project_id).ok_or_else(|| io::Error::other("no home dir"))?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let current: u32 = match fs::read_to_string(&path) {
-        Ok(raw) => raw.trim().parse().map_err(|e| io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("pr-counter parse: {}", e),
-        ))?,
+        Ok(raw) => raw.trim().parse().map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("pr-counter parse: {}", e),
+            )
+        })?,
         Err(e) if e.kind() == io::ErrorKind::NotFound => 0,
         Err(e) => return Err(e),
     };
-    let next = current.checked_add(1).ok_or_else(|| {
-        io::Error::other("pr-counter overflow — recreate the project state")
-    })?;
+    let next = current
+        .checked_add(1)
+        .ok_or_else(|| io::Error::other("pr-counter overflow — recreate the project state"))?;
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     fs::write(&tmp, next.to_string())?;
     fs::rename(&tmp, &path)?;

@@ -982,6 +982,81 @@ pub fn start_backlog_task(
     Ok((state, tmux_name, prompt_to_dispatch))
 }
 
+/// Restart a task's orchestrator from scratch using the original prompt.
+/// Kills any live orchestrator tmux, clears the recorded session, forces
+/// status back to Running, and spawns a fresh orchestrator. Workers,
+/// merges, artifacts, and the user prompt are preserved as history — only
+/// the orchestrator-side runtime state is reset. Refuses to interrupt Done
+/// tasks or an in-progress merge.
+pub fn restart_task(
+    project_id: &str,
+    task_id: &str,
+    agent_id_override: Option<&str>,
+) -> io::Result<(TaskState, String, Option<String>)> {
+    let mut state = read_task_state(project_id, task_id)?;
+    match state.status {
+        TaskStatus::Done => {
+            return Err(io::Error::other(
+                "task is Done — restart would re-run a finished task; use a new task instead",
+            ));
+        }
+        TaskStatus::Merging => {
+            return Err(io::Error::other(
+                "task is Merging — restart would interrupt the merge flow",
+            ));
+        }
+        TaskStatus::Backlog | TaskStatus::Running | TaskStatus::Review => {}
+    }
+
+    let agent_id = agent_id_override
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::config::get().default_orchestrator_agent_id());
+    let agent = crate::config::get()
+        .agent(&agent_id)
+        .ok_or_else(|| io::Error::other(format!("unknown orchestrator agent: {}", agent_id)))?;
+
+    let cc_hub_bin = std::env::current_exe()
+        .map_err(|e| io::Error::other(format!("resolve cc-hub binary path: {}", e)))?;
+
+    if let Some(tmux) = state.orchestrator_tmux.as_deref() {
+        if crate::send::tmux_session_exists(tmux) {
+            let _ = crate::send::kill_tmux_session(tmux);
+        }
+    }
+    state.orchestrator_tmux = None;
+    state.orchestrator_session_id = None;
+    state.status = TaskStatus::Running;
+    state.orchestrator_agent_id = agent_id.clone();
+    state.orchestrator_agent_kind = agent.kind;
+    state.touch();
+    write_task_state(&state)?;
+    let orchestrator_prompt = build_orchestrator_prompt(&state, &cc_hub_bin);
+
+    let cwd = state.project_root.to_string_lossy().into_owned();
+    let prompt_to_dispatch = if agent.supports_initial_prompt() {
+        None
+    } else {
+        Some(orchestrator_prompt.clone())
+    };
+    let tmux_name = crate::spawn::spawn_agent_session(
+        &agent_id,
+        &cwd,
+        None,
+        if agent.supports_initial_prompt() {
+            Some(orchestrator_prompt.as_str())
+        } else {
+            None
+        },
+        false,
+    )?;
+
+    state.orchestrator_tmux = Some(tmux_name.clone());
+    state.touch();
+    write_task_state(&state)?;
+
+    Ok((state, tmux_name, prompt_to_dispatch))
+}
+
 /// Standard worktree path for `<task>-<name>` under `<root>/.cc-hub-wt/`.
 pub fn worktree_path(project_root: &Path, task_id: &str, name: &str) -> PathBuf {
     project_root

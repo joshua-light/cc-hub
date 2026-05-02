@@ -152,7 +152,10 @@ pub fn scan() -> ProjectsSnapshot {
         tasks.insert(p.id.clone(), list);
         // IO errors are render-side-noise: treat as no holder so a transient
         // glitch doesn't paint every Merging card with the queued style.
-        merge_lock_holders.insert(p.id.clone(), merge_lock::current_holder(&p.id).unwrap_or(None));
+        merge_lock_holders.insert(
+            p.id.clone(),
+            merge_lock::current_holder(&p.id).unwrap_or(None),
+        );
     }
 
     // Evict cache entries for paths not seen this scan (deleted tasks,

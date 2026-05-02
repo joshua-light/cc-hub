@@ -104,35 +104,33 @@ pub fn tick() -> TickOutcome {
     }
 
     match decision {
-        Decision::Promote(task_id) => match orchestrator::start_backlog_task(
-            &project.id,
-            &task_id,
-            None,
-        ) {
-            Ok((state, tmux_name, orch_prompt)) => {
-                info!(
-                    "triage: promoted backlog {} → orchestrator [{}]",
-                    state.task_id, tmux_name
-                );
-                TickOutcome {
-                    promotion: Some(Promotion {
-                        tmux: tmux_name.clone(),
-                        orchestrator_prompt: orch_prompt,
-                    }),
-                    status: Some(format!(
-                        "triage: promoted [{}], orchestrator [{}] starting…",
+        Decision::Promote(task_id) => {
+            match orchestrator::start_backlog_task(&project.id, &task_id, None) {
+                Ok((state, tmux_name, orch_prompt)) => {
+                    info!(
+                        "triage: promoted backlog {} → orchestrator [{}]",
                         state.task_id, tmux_name
-                    )),
+                    );
+                    TickOutcome {
+                        promotion: Some(Promotion {
+                            tmux: tmux_name.clone(),
+                            orchestrator_prompt: orch_prompt,
+                        }),
+                        status: Some(format!(
+                            "triage: promoted [{}], orchestrator [{}] starting…",
+                            state.task_id, tmux_name
+                        )),
+                    }
+                }
+                Err(e) => {
+                    warn!("triage: start_backlog_task failed for {}: {}", task_id, e);
+                    TickOutcome {
+                        promotion: None,
+                        status: Some(format!("triage: failed to promote {}: {}", task_id, e)),
+                    }
                 }
             }
-            Err(e) => {
-                warn!("triage: start_backlog_task failed for {}: {}", task_id, e);
-                TickOutcome {
-                    promotion: None,
-                    status: Some(format!("triage: failed to promote {}: {}", task_id, e)),
-                }
-            }
-        },
+        }
         Decision::Hold => TickOutcome {
             promotion: None,
             status: Some(format!(

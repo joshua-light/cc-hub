@@ -963,7 +963,6 @@ async fn run(
                                     &task.task_id,
                                     task.orchestrator_agent_kind,
                                     task.orchestrator_session_id.as_deref(),
-                                    Some(task.prompt.as_str()),
                                 )
                             } else {
                                 None
@@ -1046,13 +1045,13 @@ async fn run(
                             ) {
                                 let detail = match task.orchestrator_session_id.as_deref() {
                                     Some(sid) => format!(
-                                        "orchestrator dead — sid {} not found under ~/.claude/projects/ (cwd {}); no JSONL contains task id {}",
+                                        "orchestrator dead — sid {} not found under ~/.claude/projects/ (cwd {}); no JSONL contains orchestrator prompt for task {}",
                                         models::short_sid(sid),
                                         task.project_root.display(),
                                         &task.task_id,
                                     ),
                                     None => format!(
-                                        "orchestrator dead — no JSONL under ~/.claude/projects/ contains task id {} (cwd {})",
+                                        "orchestrator dead — no JSONL under ~/.claude/projects/ contains orchestrator prompt for task {} (cwd {})",
                                         &task.task_id,
                                         task.project_root.display(),
                                     ),
@@ -1065,6 +1064,47 @@ async fn run(
                             app.set_status(
                                 "no task selected — focus a task on the kanban first".into(),
                             );
+                        }
+                    }
+                    (View::Grid, KeyCode::Char('R')) if on_projects => {
+                        let Some(task) = app.selected_project_task().cloned() else {
+                            app.set_status(
+                                "no task selected — focus a task on the kanban first".into(),
+                            );
+                            continue;
+                        };
+                        match cc_hub_lib::orchestrator::restart_task(
+                            &task.project_id,
+                            &task.task_id,
+                            None,
+                        ) {
+                            Ok((state, tmux_name, orch_prompt)) => {
+                                if let Some(prompt) = orch_prompt {
+                                    if app.has_pending_dispatch() {
+                                        app.set_status(format!(
+                                            "restarted [{}] but a dispatch is already queued — orchestrator may be slow to start",
+                                            state.task_id
+                                        ));
+                                    } else {
+                                        app.queue_pending_dispatch(tmux_name.clone(), prompt);
+                                    }
+                                }
+                                log::info!(
+                                    "project task: restarted {} orchestrator [{}]",
+                                    state.task_id,
+                                    tmux_name
+                                );
+                                app.set_status(format!(
+                                    "restarted [{}], orchestrator [{}] starting…",
+                                    state.task_id, tmux_name
+                                ));
+                                app.pending_focus_task_id = Some(state.task_id.clone());
+                                app.pending_focus_budget = 5;
+                            }
+                            Err(e) => {
+                                log::warn!("project task: restart failed: {}", e);
+                                app.set_status(format!("restart failed: {}", e));
+                            }
                         }
                     }
                     (View::Grid, KeyCode::Char('x')) if on_projects => {

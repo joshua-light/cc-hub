@@ -199,8 +199,7 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
                 f.author = Some(next_value(args, &mut i, "--author")?);
             }
             "--tmux" => {
-                f.tmux_targets
-                    .push(next_value(args, &mut i, "--tmux")?);
+                f.tmux_targets.push(next_value(args, &mut i, "--tmux")?);
             }
             "--all" => {
                 f.all = true;
@@ -437,9 +436,8 @@ fn merge_worktree(args: &[String]) -> Result<(), CliError> {
     let branch = orchestrator::worktree_branch(&task_id, &worktree_name);
     let main = orchestrator::detect_main_branch(&project_root);
 
-    let (outcome, stdout, stderr) =
-        orchestrator::merge_branch(&project_root, &main, &branch)
-            .map_err(|e| CliError::Other(format!("merge: {}", e)))?;
+    let (outcome, stdout, stderr) = orchestrator::merge_branch(&project_root, &main, &branch)
+        .map_err(|e| CliError::Other(format!("merge: {}", e)))?;
 
     // Don't persist a MergeRecord for the dirty-tree pre-flight refusal —
     // the merge never started, so recording it as "attempted" would
@@ -698,8 +696,8 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         // out of Running. By this point the orchestrator's post-merge /bump
         // has already landed on the project's main branch, so the manifest
         // at `project_root` reflects the version that was just shipped.
-        let leaving_running = was_running
-            && matches!(s.status, TaskStatus::Review | TaskStatus::Done);
+        let leaving_running =
+            was_running && matches!(s.status, TaskStatus::Review | TaskStatus::Done);
         if leaving_running && s.shipped_version.is_none() {
             s.shipped_version = cc_hub_lib::version::detect(&s.project_root);
         }
@@ -1103,7 +1101,6 @@ fn task_create(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-
 // ─── pr ──────────────────────────────────────────────────────────────────
 //
 // PR-flow primitives. The orchestrator opens a PR with `pr create`, the user
@@ -1339,12 +1336,9 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
 
     // Acquire the project-wide merge lock. Held across the entire merging
     // phase — released by `pr finalize` after /simplify and /bump.
-    let acquire = cc_hub_lib::merge_lock::acquire(
-        &project_id,
-        &task_id,
-        state.orchestrator_tmux.as_deref(),
-    )
-    .map_err(|e| CliError::Other(format!("acquire merge lock: {}", e)))?;
+    let acquire =
+        cc_hub_lib::merge_lock::acquire(&project_id, &task_id, state.orchestrator_tmux.as_deref())
+            .map_err(|e| CliError::Other(format!("acquire merge lock: {}", e)))?;
     if let cc_hub_lib::merge_lock::AcquireOutcome::Held(holder) = acquire {
         print_json(&serde_json::json!({
             "ok": false,
@@ -1449,11 +1443,10 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
     // the user's local uncommitted edits.
     let changed = orchestrator::branch_changed_paths(&project_root, &pr.base, &pr.branch)
         .map_err(|e| CliError::Other(format!("diff branch: {}", e)))?;
-    let dirty: std::collections::BTreeSet<String> =
-        orchestrator::dirty_paths(&project_root)
-            .map_err(|e| CliError::Other(format!("git status: {}", e)))?
-            .into_iter()
-            .collect();
+    let dirty: std::collections::BTreeSet<String> = orchestrator::dirty_paths(&project_root)
+        .map_err(|e| CliError::Other(format!("git status: {}", e)))?
+        .into_iter()
+        .collect();
     let branch_files: std::collections::BTreeSet<String> = changed.iter().cloned().collect();
     let overlap: Vec<String> = dirty.intersection(&branch_files).cloned().collect();
     if !overlap.is_empty() {
@@ -1470,8 +1463,7 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
             "recipe": "Commit, stash, or revert the listed paths on the target branch, then re-run `cc-hub pr merge`. The merge lock has been released.",
         }));
         return Err(CliError::Other(
-            "merge blocked: working tree on target branch has overlapping uncommitted edits"
-                .into(),
+            "merge blocked: working tree on target branch has overlapping uncommitted edits".into(),
         ));
     }
 
@@ -1486,12 +1478,13 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
             checkout.stderr.trim()
         )));
     }
-    let msg = format!("cc-hub: merge {} into {} (PR #{})", pr.branch, pr.base, pr.id);
-    let merge_into_main = orchestrator::run_git(
-        &project_root,
-        &["merge", "--no-ff", "-m", &msg, &pr.branch],
-    )
-    .map_err(|e| CliError::Other(format!("git merge: {}", e)))?;
+    let msg = format!(
+        "cc-hub: merge {} into {} (PR #{})",
+        pr.branch, pr.base, pr.id
+    );
+    let merge_into_main =
+        orchestrator::run_git(&project_root, &["merge", "--no-ff", "-m", &msg, &pr.branch])
+            .map_err(|e| CliError::Other(format!("git merge: {}", e)))?;
 
     if !merge_into_main.status_ok {
         // Should be rare given step 1, but possible if main moved
@@ -1574,7 +1567,11 @@ fn git_rev_parse(root: &std::path::Path, rev: &str) -> Result<String, String> {
     let out = orchestrator::run_git(root, &["rev-parse", rev])
         .map_err(|e| format!("git rev-parse: {}", e))?;
     if !out.status_ok {
-        return Err(format!("git rev-parse {} failed: {}", rev, out.stderr.trim()));
+        return Err(format!(
+            "git rev-parse {} failed: {}",
+            rev,
+            out.stderr.trim()
+        ));
     }
     Ok(out.stdout.trim().to_string())
 }
@@ -1582,16 +1579,10 @@ fn git_rev_parse(root: &std::path::Path, rev: &str) -> Result<String, String> {
 /// `git diff --name-only --diff-filter=U` lists files with unresolved
 /// conflicts. Repo-relative paths.
 fn git_conflicting_paths(root: &std::path::Path) -> Result<Vec<String>, String> {
-    let out = orchestrator::run_git(
-        root,
-        &["diff", "--name-only", "--diff-filter=U", "-z"],
-    )
-    .map_err(|e| format!("git diff (conflicts): {}", e))?;
+    let out = orchestrator::run_git(root, &["diff", "--name-only", "--diff-filter=U", "-z"])
+        .map_err(|e| format!("git diff (conflicts): {}", e))?;
     if !out.status_ok {
-        return Err(format!(
-            "git diff failed: {}",
-            out.stderr.trim()
-        ));
+        return Err(format!("git diff failed: {}", out.stderr.trim()));
     }
     Ok(out
         .stdout
@@ -1604,10 +1595,7 @@ fn git_conflicting_paths(root: &std::path::Path) -> Result<Vec<String>, String> 
 /// Locate the worktree directory for `branch` by checking the task's
 /// recorded workers. Falls back to the conventional `<root>/.cc-hub-wt/`
 /// path layout if no Worker record matches.
-fn resolve_worktree_path(
-    state: &TaskState,
-    branch: &str,
-) -> Option<PathBuf> {
+fn resolve_worktree_path(state: &TaskState, branch: &str) -> Option<PathBuf> {
     for w in &state.workers {
         if let Some(name) = &w.worktree {
             let expected_branch = orchestrator::worktree_branch(&state.task_id, name);
@@ -1620,7 +1608,11 @@ fn resolve_worktree_path(
     let stripped = branch.strip_prefix("cc-hub/")?;
     let prefix = format!("{}-", state.task_id);
     let name = stripped.strip_prefix(&prefix)?;
-    Some(orchestrator::worktree_path(&state.project_root, &state.task_id, name))
+    Some(orchestrator::worktree_path(
+        &state.project_root,
+        &state.task_id,
+        name,
+    ))
 }
 
 // ─── worker ──────────────────────────────────────────────────────────────
@@ -1658,11 +1650,8 @@ fn worker_wait(args: &[String]) -> Result<(), CliError> {
     // state.workers so the orchestrator catches typos here, not after a
     // 30-minute timeout.
     let mut targets: Vec<String> = if !f.tmux_targets.is_empty() {
-        let known: std::collections::HashSet<&str> = state
-            .workers
-            .iter()
-            .map(|w| w.tmux_name.as_str())
-            .collect();
+        let known: std::collections::HashSet<&str> =
+            state.workers.iter().map(|w| w.tmux_name.as_str()).collect();
         for t in &f.tmux_targets {
             if !known.contains(t.as_str()) {
                 return Err(CliError::Usage(format!(
@@ -1710,8 +1699,7 @@ fn worker_wait(args: &[String]) -> Result<(), CliError> {
     // A target that disappears from the scanner *after* having been seen
     // is treated as Inactive (worker tmux torn down). One that never
     // appears stays pending — fresh sessions sometimes lag the scanner.
-    let mut ever_seen: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut ever_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let timed_out = loop {
         let sessions = scanner::scan_sessions();

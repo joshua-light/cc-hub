@@ -200,7 +200,11 @@ mod tests {
 
         // Append a non-tool entry — count should not grow.
         let mut f = OpenOptions::new().append(true).open(&p).unwrap();
-        writeln!(f, r#"{{"type":"user","message":{{"role":"user","content":"hi"}}}}"#).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"role":"user","content":"hi"}}}}"#
+        )
+        .unwrap();
         assert_eq!(count_claude(&p), 7);
 
         write_assistant_with_tool_uses(&p, 2);

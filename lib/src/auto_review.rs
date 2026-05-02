@@ -181,10 +181,7 @@ pub fn tick() -> TickOutcome {
             warn!("auto_review: spawn reviewer for {} failed: {}", task_id, e);
             return TickOutcome {
                 spawn: None,
-                status: Some(format!(
-                    "auto-review: spawn failed for {}: {}",
-                    task_id, e
-                )),
+                status: Some(format!("auto-review: spawn failed for {}: {}", task_id, e)),
             };
         }
     };

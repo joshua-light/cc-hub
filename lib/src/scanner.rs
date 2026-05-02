@@ -67,28 +67,20 @@ pub fn find_jsonl_anywhere(session_id: &str) -> Option<PathBuf> {
     None
 }
 
-/// Last-ditch search: scan every `.jsonl` under `~/.claude/projects/` and
-/// return the newest one whose first 32 KB contains `task_id` (or, as a
-/// further fallback, the user's original task prompt) literally.
+/// Last-ditch search: scan JSONL heads under `~/.claude/projects/` and
+/// return the newest one containing this task's orchestrator prompt prefix.
 ///
-/// Reads raw bytes rather than parsed entries: the orchestrator system
-/// prompt embeds the task_id, but Claude Code logs it under `type: "system"`
-/// — so structured `extract_first_user_message` returns None for any
-/// orchestrator session that crashed before producing its first turn. Raw
-/// substring search catches it regardless of where in the head it lives.
-pub fn find_orchestrator_jsonl_by_content(
-    task_id: &str,
-    user_prompt: Option<&str>,
-) -> Option<PathBuf> {
+/// The normal path parses the first user message, but Claude can leave only
+/// early system/bootstrap entries behind if a session crashes immediately.
+/// Raw prefix search recovers those sessions while avoiding the broad
+/// `task_id` substring false positives caused by parent sessions mentioning
+/// worker or child task ids in tool output.
+pub fn find_orchestrator_jsonl_by_prompt_prefix(task_id: &str) -> Option<PathBuf> {
     use std::io::Read;
+
     let projects = projects_dir()?;
-    // 60 chars is enough to disambiguate even short prompts while staying
-    // tolerant to the way Claude wraps them in JSON (escapes, line breaks).
-    let prompt_needle = user_prompt
-        .map(|p| p.trim())
-        .filter(|p| p.len() >= 8)
-        .map(|p| p.chars().take(60).collect::<String>());
-    let mut hits: Vec<(SystemTime, PathBuf)> = Vec::new();
+    let needle = crate::orchestrator::orchestrator_prompt_prefix(task_id);
+    let mut best: Option<(SystemTime, PathBuf)> = None;
     for proj_entry in std::fs::read_dir(&projects).ok()?.flatten() {
         let proj_path = proj_entry.path();
         if !proj_path.is_dir() {
@@ -102,27 +94,23 @@ pub fn find_orchestrator_jsonl_by_content(
             if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
                 continue;
             }
-            let mut buf = vec![0u8; 32 * 1024];
-            let n = match std::fs::File::open(&path).and_then(|mut f| f.read(&mut buf)) {
-                Ok(n) => n,
-                Err(_) => continue,
+            let Ok(mtime) = path.metadata().and_then(|m| m.modified()) else {
+                continue;
             };
-            buf.truncate(n);
-            let head = String::from_utf8_lossy(&buf);
-            let matches = head.contains(task_id)
-                || prompt_needle
-                    .as_deref()
-                    .is_some_and(|p| head.contains(p));
-            if !matches {
+            if best.as_ref().map_or(false, |(t, _)| mtime <= *t) {
                 continue;
             }
-            if let Ok(mtime) = path.metadata().and_then(|m| m.modified()) {
-                hits.push((mtime, path));
+            let mut buf = vec![0u8; 32 * 1024];
+            let Ok(n) = std::fs::File::open(&path).and_then(|mut f| f.read(&mut buf)) else {
+                continue;
+            };
+            buf.truncate(n);
+            if String::from_utf8_lossy(&buf).contains(&needle) {
+                best = Some((mtime, path));
             }
         }
     }
-    hits.sort_by(|a, b| b.0.cmp(&a.0));
-    hits.into_iter().next().map(|(_, p)| p)
+    best.map(|(_, p)| p)
 }
 
 /// Recover the orchestrator's Claude session id for a task whose `state.json`
@@ -136,7 +124,6 @@ pub fn find_orchestrator_session_id(
     project_root: &Path,
     task_id: &str,
     stored_sid: Option<&str>,
-    user_prompt: Option<&str>,
 ) -> Option<String> {
     let cwd = project_root.to_string_lossy();
     // Fast path: trust the sid the task already recorded. Try the direct
@@ -177,12 +164,10 @@ pub fn find_orchestrator_session_id(
             }
         }
     }
-    // Final fallback: full text-search across every project dir for a JSONL
-    // whose head bytes contain task_id or the user prompt. Recovers sessions
-    // after a crash where the orchestrator never produced its first turn —
-    // the system prompt is on disk but no user message exists yet, so the
-    // structured scan above misses.
-    find_orchestrator_jsonl_by_content(task_id, user_prompt)
+    // Final fallback: raw prompt-prefix search. This recovers crashed
+    // sessions where structured first-user-message extraction returns None,
+    // without falling back to broad task-id substring matches.
+    find_orchestrator_jsonl_by_prompt_prefix(task_id)
         .and_then(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
 }
 
@@ -922,27 +907,21 @@ pub fn find_orchestrator_session(
     task_id: &str,
     kind: AgentKind,
     stored_sid: Option<&str>,
-    user_prompt: Option<&str>,
 ) -> Option<ResumableSession> {
     match kind {
         AgentKind::Claude => {
-            find_orchestrator_session_id(project_root, task_id, stored_sid, user_prompt).map(
-                |sid| ResumableSession {
+            find_orchestrator_session_id(project_root, task_id, stored_sid).map(|sid| {
+                ResumableSession {
                     session_id: sid.clone(),
                     resume: ResumeTarget::SessionId(sid),
-                },
-            )
+                }
+            })
         }
-        AgentKind::Pi => pi_scanner::find_orchestrator_session(
-            project_root,
-            task_id,
-            stored_sid,
-            user_prompt,
-        )
-        .map(|(sid, path)| ResumableSession {
-            session_id: sid,
-            resume: ResumeTarget::SessionFile(path),
-        }),
+        AgentKind::Pi => pi_scanner::find_orchestrator_session(project_root, task_id, stored_sid)
+            .map(|(sid, path)| ResumableSession {
+                session_id: sid,
+                resume: ResumeTarget::SessionFile(path),
+            }),
     }
 }
 

@@ -2686,7 +2686,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         let keybinds: &str = match app.view {
             View::Grid => match app.current_tab {
-                Tab::Projects => "tab:next  H/L:project  h/l:col  j/k:task  enter:focus orch  f:agent terminal/resurrect  n:new task  N:register project  b:backlog  r:result  c:copy id  x:delete task  X:remove project  q:quit",
+                Tab::Projects => "tab:next  H/L:project  h/l:col  j/k:task  enter:focus orch  f:agent terminal/resurrect  R:restart  n:new task  N:register project  b:backlog  r:result  c:copy id  x:delete task  X:remove project  q:quit",
                 Tab::Sessions => "tab:next  h/j/k/l:nav  n:new  N:new in…  i:info  D:why?  enter/f:focus/resume  o:shell  x:close  H:inactive  W:workers  q:quit",
                 Tab::Metrics => "tab:next  j/k:select  enter:view transcript  r:refresh  q:quit",
             },
@@ -2979,10 +2979,7 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
         let label = format!(" {} ", p.name);
         // Compact P·R·Rv·M·D counts. Review/Merging squeezed to two-letter
         // labels in the column headers; here they're positional.
-        let counts = format!(
-            " {}·{}·{}·{}·{} ",
-            planning, running, review, merging, done
-        );
+        let counts = format!(" {}·{}·{}·{}·{} ", planning, running, review, merging, done);
         let (chip_fg, chip_bg) = if selected {
             (Color::Black, Color::Rgb(190, 200, 230))
         } else if planning + running + merging > 0 {
@@ -3595,7 +3592,10 @@ fn render_task_card_active(
     let age = format_age(now_secs.saturating_sub(t.updated_at as u64));
     let arts = t.artifacts.len();
     let mut row3: Vec<Span<'static>> = vec![
-        Span::styled(format!("#{}  ", short_id), Style::default().fg(TASK_META_DIM)),
+        Span::styled(
+            format!("#{}  ", short_id),
+            Style::default().fg(TASK_META_DIM),
+        ),
         Span::styled("󰔟 ", Style::default().fg(Color::Rgb(150, 150, 170))),
         Span::styled(age, Style::default().fg(Color::Rgb(180, 180, 200))),
     ];
@@ -3686,8 +3686,7 @@ fn render_task_card_collapsed(
         3 => (Color::LightMagenta, Color::Rgb(180, 145, 195), ""),
         _ => (Color::LightGreen, Color::Rgb(140, 160, 145), "󰸞"),
     };
-    let queued = col_idx == 3
-        && lock_holder.is_some_and(|h| h != t.task_id);
+    let queued = col_idx == 3 && lock_holder.is_some_and(|h| h != t.task_id);
     // Review and Merging cards: brighter border so they stand out — they
     // need user attention or are actively mutating main. Done stays dim.
     // A queued Merging card uses a muted gray instead of the bright
@@ -3703,7 +3702,11 @@ fn render_task_card_collapsed(
     } else {
         (BorderType::Rounded, Color::Rgb(55, 60, 70))
     };
-    let icon_accent = if queued { Color::Rgb(135, 135, 155) } else { accent };
+    let icon_accent = if queued {
+        Color::Rgb(135, 135, 155)
+    } else {
+        accent
+    };
 
     let short_id = crate::orchestrator::short_task_id(&t.task_id);
     let prompt_max = (area.width as usize).saturating_sub(8);
@@ -3761,7 +3764,10 @@ fn render_task_card_collapsed(
     let merged = t.workers.iter().filter(|w| worker_was_merged(w, t)).count();
     let total_w = t.workers.len();
     let mut footer: Vec<Span<'static>> = vec![
-        Span::styled(format!("#{}  ", short_id), Style::default().fg(TASK_META_DIM)),
+        Span::styled(
+            format!("#{}  ", short_id),
+            Style::default().fg(TASK_META_DIM),
+        ),
         Span::styled("󰔟 ", Style::default().fg(Color::Rgb(110, 120, 135))),
         Span::styled(age, Style::default().fg(Color::Rgb(140, 145, 160))),
     ];
@@ -4974,11 +4980,7 @@ mod kanban_card_tests {
             })
             .expect("render");
         let plain = buffer_to_string(terminal.backend().buffer());
-        assert!(
-            !plain.contains("☑"),
-            "no todos => no badge:\n{}",
-            plain
-        );
+        assert!(!plain.contains("☑"), "no todos => no badge:\n{}", plain);
     }
 
     fn fake_session(tmux: &str, tool_uses: u64) -> super::SessionInfo {
@@ -5085,11 +5087,7 @@ mod kanban_card_tests {
             })
             .expect("render");
         let plain = buffer_to_string(terminal.backend().buffer());
-        assert!(
-            !plain.contains("󰠰"),
-            "no tool uses => no badge:\n{}",
-            plain
-        );
+        assert!(!plain.contains("󰠰"), "no tool uses => no badge:\n{}", plain);
     }
 
     #[test]

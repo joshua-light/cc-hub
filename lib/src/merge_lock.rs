@@ -68,8 +68,7 @@ pub fn acquire(
     task_id: &str,
     orchestrator_tmux: Option<&str>,
 ) -> io::Result<AcquireOutcome> {
-    let path = merge_lock_path(project_id)
-        .ok_or_else(|| io::Error::other("no home dir"))?;
+    let path = merge_lock_path(project_id).ok_or_else(|| io::Error::other("no home dir"))?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -114,15 +113,15 @@ pub fn acquire(
 /// if the lock didn't exist or is held by someone else (idempotent — a
 /// double-release is not an error). Returns `Ok(true)` on actual release.
 pub fn release(project_id: &str, task_id: &str) -> io::Result<bool> {
-    let path = merge_lock_path(project_id)
-        .ok_or_else(|| io::Error::other("no home dir"))?;
+    let path = merge_lock_path(project_id).ok_or_else(|| io::Error::other("no home dir"))?;
     let Some(existing) = read_lock(&path)? else {
         return Ok(false);
     };
     if existing.task_id != task_id {
         log::warn!(
             "merge_lock: task {} tried to release lock held by {}",
-            task_id, existing.task_id
+            task_id,
+            existing.task_id
         );
         return Ok(false);
     }
@@ -134,8 +133,7 @@ pub fn release(project_id: &str, task_id: &str) -> io::Result<bool> {
 /// Stale locks are returned as-is — the caller decides whether to honour
 /// or steal.
 pub fn current_holder(project_id: &str) -> io::Result<Option<MergeLock>> {
-    let path = merge_lock_path(project_id)
-        .ok_or_else(|| io::Error::other("no home dir"))?;
+    let path = merge_lock_path(project_id).ok_or_else(|| io::Error::other("no home dir"))?;
     read_lock(&path)
 }
 

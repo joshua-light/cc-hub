@@ -297,10 +297,7 @@ fn scan_inactive_sessions(
     out
 }
 
-pub fn scan(
-    agents: &[AgentConfig],
-    titles: &HashMap<String, String>,
-) -> Vec<SessionInfo> {
+pub fn scan(agents: &[AgentConfig], titles: &HashMap<String, String>) -> Vec<SessionInfo> {
     let mut sessions = scan_live_heartbeats(agents);
     let claimed_paths: HashSet<PathBuf> = sessions
         .iter()
@@ -358,7 +355,6 @@ pub fn find_orchestrator_session(
     project_root: &Path,
     task_id: &str,
     stored_sid: Option<&str>,
-    user_prompt: Option<&str>,
 ) -> Option<(String, PathBuf)> {
     // Fast path: trust the sid the task already recorded. Look up the file
     // directly under the encoded project dir, then anywhere under the Pi
@@ -382,77 +378,60 @@ pub fn find_orchestrator_session(
             }
         }
     }
+    // Final fallback: raw prompt-prefix search. Pi orchestrators run in the
+    // project root (not a task worktree), so the task id is not present in the
+    // encoded session directory. Searching for the stable orchestrator prompt
+    // prefix recovers sessions that crashed before structured message parsing
+    // can identify the first user turn, without broad task-id false positives.
     use std::io::Read;
+
     let root = session_dirs()?;
-    let prompt_needle = user_prompt
-        .map(|p| p.trim())
-        .filter(|p| p.len() >= 8)
-        .map(|p| p.chars().take(60).collect::<String>());
-    let scoped = root.join(encode_path(&project_root.to_string_lossy()));
-    // Pass 1: scoped to encoded project dir. Pass 2: every project dir.
-    let passes: [(PathBuf, bool); 2] = [(scoped, true), (root.clone(), false)];
+    let needle = crate::orchestrator::orchestrator_prompt_prefix(task_id);
     let mut best: Option<(SystemTime, String, PathBuf)> = None;
-    for (dir, scoped_pass) in &passes {
-        let project_dirs: Vec<PathBuf> = if *scoped_pass {
-            vec![dir.clone()]
-        } else {
-            std::fs::read_dir(dir)
-                .ok()
-                .map(|it| {
-                    it.flatten()
-                        .map(|e| e.path())
-                        .filter(|p| p.is_dir())
-                        .collect()
-                })
-                .unwrap_or_default()
+    let Ok(project_dirs) = std::fs::read_dir(&root) else {
+        return None;
+    };
+    for proj_entry in project_dirs.flatten() {
+        let proj_path = proj_entry.path();
+        if !proj_path.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&proj_path) else {
+            continue;
         };
-        for proj_dir in project_dirs {
-            let Ok(entries) = std::fs::read_dir(&proj_dir) else {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Ok(mtime) = path.metadata().and_then(|m| m.modified()) else {
                 continue;
             };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                    continue;
-                }
-                let mut buf = vec![0u8; 32 * 1024];
-                let n = match std::fs::File::open(&path).and_then(|mut f| f.read(&mut buf)) {
-                    Ok(n) => n,
-                    Err(_) => continue,
-                };
-                buf.truncate(n);
-                let head_str = String::from_utf8_lossy(&buf);
-                let matches = head_str.contains(task_id)
-                    || prompt_needle
-                        .as_deref()
-                        .is_some_and(|p| head_str.contains(p));
-                if !matches {
-                    continue;
-                }
-                let mtime = path
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
-                let parsed_head = conversation::read_jsonl_head(&path, 4096);
-                let sid = parsed_head
-                    .iter()
-                    .find_map(|e| e.get("id").and_then(|v| v.as_str()))
-                    .map(str::to_string)
-                    .or_else(|| {
-                        path.file_stem()
-                            .and_then(|s| s.to_str())
-                            .map(str::to_string)
-                    });
-                if let Some(sid) = sid {
-                    if best.as_ref().map_or(true, |(t, _, _)| mtime > *t) {
-                        best = Some((mtime, sid, path));
-                    }
-                }
+            if best.as_ref().map_or(false, |(t, _, _)| mtime <= *t) {
+                continue;
+            }
+            let mut buf = vec![0u8; 32 * 1024];
+            let Ok(n) = std::fs::File::open(&path).and_then(|mut f| f.read(&mut buf)) else {
+                continue;
+            };
+            buf.truncate(n);
+            if !String::from_utf8_lossy(&buf).contains(&needle) {
+                continue;
+            }
+            let parsed_head = conversation::read_jsonl_head(&path, 4096);
+            let sid = parsed_head
+                .iter()
+                .find_map(|e| e.get("id").and_then(|v| v.as_str()))
+                .map(str::to_string)
+                .or_else(|| {
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                });
+            if let Some(sid) = sid {
+                best = Some((mtime, sid, path));
             }
         }
-        if best.is_some() {
-            return best.map(|(_, sid, p)| (sid, p));
-        }
     }
-    None
+    best.map(|(_, sid, p)| (sid, p))
 }
