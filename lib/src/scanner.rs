@@ -51,6 +51,80 @@ pub fn find_jsonl(cwd: &str, session_id: &str) -> Option<PathBuf> {
     }
 }
 
+/// Find a `<session_id>.jsonl` anywhere under `~/.claude/projects/`. Used as
+/// a fallback when the project-root path stored on a task no longer matches
+/// the cwd Claude encoded at spawn time (symlinks, trailing slash, the
+/// directory was renamed, etc.) so the direct `find_jsonl` lookup misses.
+pub fn find_jsonl_anywhere(session_id: &str) -> Option<PathBuf> {
+    let projects = projects_dir()?;
+    let target = format!("{}.jsonl", session_id);
+    for entry in std::fs::read_dir(&projects).ok()?.flatten() {
+        let candidate = entry.path().join(&target);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Last-ditch search: scan every `.jsonl` under `~/.claude/projects/` and
+/// return the newest one whose first 32 KB contains `task_id` (or, as a
+/// further fallback, the user's original task prompt) literally.
+///
+/// Reads raw bytes rather than parsed entries: the orchestrator system
+/// prompt embeds the task_id, but Claude Code logs it under `type: "system"`
+/// — so structured `extract_first_user_message` returns None for any
+/// orchestrator session that crashed before producing its first turn. Raw
+/// substring search catches it regardless of where in the head it lives.
+pub fn find_orchestrator_jsonl_by_content(
+    task_id: &str,
+    user_prompt: Option<&str>,
+) -> Option<PathBuf> {
+    use std::io::Read;
+    let projects = projects_dir()?;
+    // 60 chars is enough to disambiguate even short prompts while staying
+    // tolerant to the way Claude wraps them in JSON (escapes, line breaks).
+    let prompt_needle = user_prompt
+        .map(|p| p.trim())
+        .filter(|p| p.len() >= 8)
+        .map(|p| p.chars().take(60).collect::<String>());
+    let mut hits: Vec<(SystemTime, PathBuf)> = Vec::new();
+    for proj_entry in std::fs::read_dir(&projects).ok()?.flatten() {
+        let proj_path = proj_entry.path();
+        if !proj_path.is_dir() {
+            continue;
+        }
+        let Ok(jsonl_iter) = std::fs::read_dir(&proj_path) else {
+            continue;
+        };
+        for entry in jsonl_iter.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let mut buf = vec![0u8; 32 * 1024];
+            let n = match std::fs::File::open(&path).and_then(|mut f| f.read(&mut buf)) {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            buf.truncate(n);
+            let head = String::from_utf8_lossy(&buf);
+            let matches = head.contains(task_id)
+                || prompt_needle
+                    .as_deref()
+                    .is_some_and(|p| head.contains(p));
+            if !matches {
+                continue;
+            }
+            if let Ok(mtime) = path.metadata().and_then(|m| m.modified()) {
+                hits.push((mtime, path));
+            }
+        }
+    }
+    hits.sort_by(|a, b| b.0.cmp(&a.0));
+    hits.into_iter().next().map(|(_, p)| p)
+}
+
 /// Recover the orchestrator's Claude session id for a task whose `state.json`
 /// lost the field (or never had it written). Returns the JSONL in
 /// `~/.claude/projects/<encoded_cwd>/` whose first user message starts with
@@ -58,35 +132,58 @@ pub fn find_jsonl(cwd: &str, session_id: &str) -> Option<PathBuf> {
 /// orchestrator sessions, so a hit is not a sibling Claude session running in
 /// the same cwd. Newest mtime wins; bails on the first match so a project
 /// with hundreds of JSONLs only parses one in the common case.
-pub fn find_orchestrator_session_id(project_root: &Path, task_id: &str) -> Option<String> {
+pub fn find_orchestrator_session_id(
+    project_root: &Path,
+    task_id: &str,
+    stored_sid: Option<&str>,
+    user_prompt: Option<&str>,
+) -> Option<String> {
     let cwd = project_root.to_string_lossy();
-    let dir = projects_dir()?.join(encode_path(&cwd));
-    let needle = crate::orchestrator::orchestrator_prompt_prefix(task_id);
-    let mut candidates: Vec<(SystemTime, PathBuf)> = std::fs::read_dir(&dir)
-        .ok()?
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                return None;
-            }
-            let mtime = path.metadata().ok()?.modified().ok()?;
-            Some((mtime, path))
-        })
-        .collect();
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
-    for (_, path) in candidates {
-        let head = conversation::read_jsonl_head(&path, 4096);
-        let Some(first) = conversation::extract_first_user_message(&head) else {
-            continue;
-        };
-        if !first.starts_with(&needle) {
-            continue;
+    // Fast path: trust the sid the task already recorded. Try the direct
+    // path first, then any project dir — the encoded cwd can drift from
+    // `task.project_root` (symlinks, renames, `/` differences) which is the
+    // common reason the prompt-prefix scan below comes up empty.
+    if let Some(sid) = stored_sid {
+        if find_jsonl(&cwd, sid).is_some() || find_jsonl_anywhere(sid).is_some() {
+            return Some(sid.to_string());
         }
-        let stem = path.file_stem().and_then(|s| s.to_str())?.to_string();
-        return Some(stem);
     }
-    None
+    let needle = crate::orchestrator::orchestrator_prompt_prefix(task_id);
+    if let Some(dir) = projects_dir().map(|p| p.join(encode_path(&cwd))) {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut candidates: Vec<(SystemTime, PathBuf)> = entries
+                .flatten()
+                .filter_map(|entry| {
+                    let path = entry.path();
+                    if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                        return None;
+                    }
+                    let mtime = path.metadata().ok()?.modified().ok()?;
+                    Some((mtime, path))
+                })
+                .collect();
+            candidates.sort_by(|a, b| b.0.cmp(&a.0));
+            for (_, path) in candidates {
+                let head = conversation::read_jsonl_head(&path, 4096);
+                let Some(first) = conversation::extract_first_user_message(&head) else {
+                    continue;
+                };
+                if !first.starts_with(&needle) {
+                    continue;
+                }
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    return Some(stem.to_string());
+                }
+            }
+        }
+    }
+    // Final fallback: full text-search across every project dir for a JSONL
+    // whose head bytes contain task_id or the user prompt. Recovers sessions
+    // after a crash where the orchestrator never produced its first turn —
+    // the system prompt is on disk but no user message exists yet, so the
+    // structured scan above misses.
+    find_orchestrator_jsonl_by_content(task_id, user_prompt)
+        .and_then(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
 }
 
 /// Check if a process has a real parent (not reparented to init).
@@ -824,22 +921,28 @@ pub fn find_orchestrator_session(
     project_root: &Path,
     task_id: &str,
     kind: AgentKind,
+    stored_sid: Option<&str>,
+    user_prompt: Option<&str>,
 ) -> Option<ResumableSession> {
     match kind {
         AgentKind::Claude => {
-            find_orchestrator_session_id(project_root, task_id).map(|sid| ResumableSession {
-                session_id: sid.clone(),
-                resume: ResumeTarget::SessionId(sid),
-            })
+            find_orchestrator_session_id(project_root, task_id, stored_sid, user_prompt).map(
+                |sid| ResumableSession {
+                    session_id: sid.clone(),
+                    resume: ResumeTarget::SessionId(sid),
+                },
+            )
         }
-        AgentKind::Pi => {
-            pi_scanner::find_orchestrator_session(project_root, task_id).map(|(sid, path)| {
-                ResumableSession {
-                    session_id: sid,
-                    resume: ResumeTarget::SessionFile(path),
-                }
-            })
-        }
+        AgentKind::Pi => pi_scanner::find_orchestrator_session(
+            project_root,
+            task_id,
+            stored_sid,
+            user_prompt,
+        )
+        .map(|(sid, path)| ResumableSession {
+            session_id: sid,
+            resume: ResumeTarget::SessionFile(path),
+        }),
     }
 }
 
