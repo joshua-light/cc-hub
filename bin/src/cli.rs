@@ -226,13 +226,11 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
 
 fn next_value(args: &[String], i: &mut usize, name: &str) -> Result<String, CliError> {
     *i += 1;
-    args.get(*i)
-        .cloned()
-        .map(|v| {
-            *i += 1;
-            v
-        })
-        .ok_or_else(|| CliError::Usage(format!("{} requires a value", name)))
+    let Some(v) = args.get(*i).cloned() else {
+        return Err(CliError::Usage(format!("{} requires a value", name)));
+    };
+    *i += 1;
+    Ok(v)
 }
 
 fn require_task(f: &Flags) -> Result<String, CliError> {
@@ -1798,7 +1796,7 @@ fn project_list(args: &[String]) -> Result<(), CliError> {
     let mut snap = projects_scan::scan();
 
     let mut projects = std::mem::take(&mut snap.projects);
-    projects.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    projects.sort_by_key(|a| a.name.to_lowercase());
 
     if f.json {
         let arr: Vec<serde_json::Value> = projects

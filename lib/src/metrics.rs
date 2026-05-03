@@ -637,7 +637,8 @@ fn parse_pi_session_file(path: &Path) -> Option<ParsedSession> {
                             tool_result_ids.insert(id.to_string());
                         }
                     }
-                    Some("user") | _ => {}
+                    Some("user") => {}
+                    _ => {}
                 }
             }
             _ => {}
@@ -972,7 +973,7 @@ pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> Metr
     });
     growth.findings.truncate(metrics_cfg.top_growth_findings);
 
-    peak_ctx_findings.sort_by(|a, b| b.peak_ctx_tokens.cmp(&a.peak_ctx_tokens));
+    peak_ctx_findings.sort_by_key(|b| std::cmp::Reverse(b.peak_ctx_tokens));
     peak_ctx_findings.truncate(metrics_cfg.top_peak_context_findings);
     let peak_context = PeakContextAnalysis {
         findings: peak_ctx_findings,

@@ -35,7 +35,7 @@ fn projects_dir() -> Option<PathBuf> {
 }
 
 fn encode_path(path: &str) -> String {
-    path.replace('/', "-").replace('.', "-")
+    path.replace(['/', '.'], "-")
 }
 
 pub fn find_jsonl(cwd: &str, session_id: &str) -> Option<PathBuf> {
@@ -97,7 +97,7 @@ pub fn find_orchestrator_jsonl_by_prompt_prefix(task_id: &str) -> Option<PathBuf
             let Ok(mtime) = path.metadata().and_then(|m| m.modified()) else {
                 continue;
             };
-            if best.as_ref().map_or(false, |(t, _)| mtime <= *t) {
+            if best.as_ref().is_some_and(|(t, _)| mtime <= *t) {
                 continue;
             }
             let mut buf = vec![0u8; 32 * 1024];
@@ -149,7 +149,7 @@ pub fn find_orchestrator_session_id(
                     Some((mtime, path))
                 })
                 .collect();
-            candidates.sort_by(|a, b| b.0.cmp(&a.0));
+            candidates.sort_by_key(|b| std::cmp::Reverse(b.0));
             for (_, path) in candidates {
                 let head = conversation::read_jsonl_head(&path, 4096);
                 let Some(first) = conversation::extract_first_user_message(&head) else {
@@ -336,7 +336,7 @@ impl OrphanIndex {
             if delta > max_delta {
                 continue;
             }
-            if best.as_ref().map_or(true, |(_, d)| delta < *d) {
+            if best.as_ref().is_none_or(|(_, d)| delta < *d) {
                 best = Some((i, delta));
             }
         }
@@ -676,7 +676,7 @@ fn scan_orphan_jsonls(
             candidates.push((path, mtime));
         }
         total_in_window += candidates.len();
-        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
         for (path, _) in candidates.into_iter().take(cfg.max_per_project) {
             if let Some(info) = synthesize_inactive_from_jsonl(&path, titles) {
                 out.push(info);
@@ -876,7 +876,7 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
         .iter()
         .filter_map(|s| s.jsonl_path.clone())
         .collect();
-    let (orphans, total_in_window) = scan_orphan_jsonls(&claimed_paths, &titles);
+    let (orphans, total_in_window) = scan_orphan_jsonls(&claimed_paths, titles);
     info!(
         "scan_sessions: {} from metadata + {} orphan JSONLs (of {} within window, capped at {} per project)",
         sessions.len(),
@@ -956,7 +956,7 @@ pub fn load_detail(session_id: &str, sessions: &[SessionInfo]) -> Option<Session
     match info.agent_kind {
         AgentKind::Claude => {
             let jsonl_path = info.jsonl_path.as_ref()?;
-            let entries = conversation::read_jsonl_tail(&jsonl_path, 65536);
+            let entries = conversation::read_jsonl_tail(jsonl_path, 65536);
             let recent_messages = conversation::extract_messages(&entries, 15);
             let (total_input_tokens, total_output_tokens) =
                 conversation::extract_token_totals(&entries);
@@ -992,5 +992,54 @@ pub fn load_state_explanation(
             ))
         }
         AgentKind::Pi => pi_scanner::load_state_explanation(info),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::HOME_TEST_LOCK;
+    use std::fs;
+
+    fn with_temp_home<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
+        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+        let out = f(home.path());
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        out
+    }
+
+    #[test]
+    fn orchestrator_fallback_matches_prompt_prefix_not_task_id_mentions() {
+        with_temp_home(|home| {
+            let task_id = "t-scan-1";
+            let projects = home.join(".claude/projects");
+            let parent_dir = projects.join("parent");
+            let orch_dir = projects.join("orch");
+            fs::create_dir_all(&parent_dir).unwrap();
+            fs::create_dir_all(&orch_dir).unwrap();
+            fs::write(
+                parent_dir.join("parent-session.jsonl"),
+                format!(r#"{{"type":"assistant","message":"mentioned {task_id} in tool output"}}"#),
+            )
+            .unwrap();
+            fs::write(
+                orch_dir.join("good-session.jsonl"),
+                format!(
+                    r#"{{"type":"system","message":"{} crashed before first user"}}"#,
+                    crate::orchestrator::orchestrator_prompt_prefix(task_id)
+                ),
+            )
+            .unwrap();
+
+            let sid =
+                find_orchestrator_session_id(std::path::Path::new("/tmp/project"), task_id, None);
+            assert_eq!(sid.as_deref(), Some("good-session"));
+        });
     }
 }

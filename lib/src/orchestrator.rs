@@ -884,7 +884,6 @@ pub fn spawn_orchestrator_for_new_task(
     let canonical_root =
         fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
     let mut state = TaskState::new(project_id, canonical_root.clone(), user_prompt);
-    write_task_state(&state)?;
 
     let agent_id = agent_id_override
         .map(str::to_string)
@@ -927,7 +926,9 @@ pub fn spawn_orchestrator_for_new_task(
 /// User-initiated transition from Backlog to Running. Mirrors
 /// spawn_orchestrator_for_new_task but operates on an existing Backlog task
 /// instead of creating a new one. Called from the TUI when the user hits the
-/// start-task keybind, and from \ on the CLI.
+/// start-task keybind, and from \ on the CLI. The state transition is only
+/// persisted after the agent session spawns successfully, so a launch failure
+/// leaves the task safely in Backlog.
 pub fn start_backlog_task(
     project_id: &str,
     task_id: &str,
@@ -941,8 +942,6 @@ pub fn start_backlog_task(
         )));
     }
     state.status = TaskStatus::Running;
-    state.touch();
-    write_task_state(&state)?;
 
     let agent_id = agent_id_override
         .map(str::to_string)
@@ -986,8 +985,9 @@ pub fn start_backlog_task(
 /// Kills any live orchestrator tmux, clears the recorded session, forces
 /// status back to Running, and spawns a fresh orchestrator. Workers,
 /// merges, artifacts, and the user prompt are preserved as history — only
-/// the orchestrator-side runtime state is reset. Refuses to interrupt Done
-/// tasks or an in-progress merge.
+/// the orchestrator-side runtime state is reset. Refuses to interrupt Review,
+/// Done, or an in-progress merge. The replacement session is spawned before
+/// the old tmux is killed so spawn failures leave the old orchestrator intact.
 pub fn restart_task(
     project_id: &str,
     task_id: &str,
@@ -1000,12 +1000,17 @@ pub fn restart_task(
                 "task is Done — restart would re-run a finished task; use a new task instead",
             ));
         }
+        TaskStatus::Review => {
+            return Err(io::Error::other(
+                "task is Review — restart would ignore the existing PR; request changes or create a new task instead",
+            ));
+        }
         TaskStatus::Merging => {
             return Err(io::Error::other(
                 "task is Merging — restart would interrupt the merge flow",
             ));
         }
-        TaskStatus::Backlog | TaskStatus::Running | TaskStatus::Review => {}
+        TaskStatus::Backlog | TaskStatus::Running => {}
     }
 
     let agent_id = agent_id_override
@@ -1018,18 +1023,12 @@ pub fn restart_task(
     let cc_hub_bin = std::env::current_exe()
         .map_err(|e| io::Error::other(format!("resolve cc-hub binary path: {}", e)))?;
 
-    if let Some(tmux) = state.orchestrator_tmux.as_deref() {
-        if crate::send::tmux_session_exists(tmux) {
-            let _ = crate::send::kill_tmux_session(tmux);
-        }
-    }
+    let old_tmux = state.orchestrator_tmux.clone();
     state.orchestrator_tmux = None;
     state.orchestrator_session_id = None;
     state.status = TaskStatus::Running;
     state.orchestrator_agent_id = agent_id.clone();
     state.orchestrator_agent_kind = agent.kind;
-    state.touch();
-    write_task_state(&state)?;
     let orchestrator_prompt = build_orchestrator_prompt(&state, &cc_hub_bin);
 
     let cwd = state.project_root.to_string_lossy().into_owned();
@@ -1049,6 +1048,12 @@ pub fn restart_task(
         },
         false,
     )?;
+
+    if let Some(tmux) = old_tmux.as_deref() {
+        if crate::send::tmux_session_exists(tmux) {
+            let _ = crate::send::kill_tmux_session(tmux);
+        }
+    }
 
     state.orchestrator_tmux = Some(tmux_name.clone());
     state.touch();

@@ -1,3 +1,5 @@
+#![allow(clippy::items_after_test_module)]
+
 //! Terminal-multiplexer CLI shim.
 //!
 //! cc-hub was born on tmux, but every CLI it actually uses (`new-session`,

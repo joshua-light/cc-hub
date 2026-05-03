@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_match)]
+
 use cc_hub_lib::{
     app, auto_review, clipboard, config, conversation, focus, gh, live_view, metrics, models,
     platform, projects_scan, scanner, send, spawn, title, tmux_pane, triage, ui, usage, watcher,
@@ -838,11 +840,6 @@ async fn run(
                                         }
                                     };
                                     app.set_status(status);
-                                } else if app.has_pending_dispatch() {
-                                    app.set_status(format!(
-                                        "approved {} but a dispatch is already queued — orchestrator notify not queued",
-                                        short
-                                    ));
                                 } else {
                                     app.queue_pending_dispatch(tmux_name.clone(), prompt);
                                     app.set_status(format!(
@@ -1043,15 +1040,21 @@ async fn run(
                                 cc_hub_lib::orchestrator::TaskStatus::Running
                                     | cc_hub_lib::orchestrator::TaskStatus::Review
                             ) {
+                                let session_store = match task.orchestrator_agent_kind {
+                                    cc_hub_lib::agent::AgentKind::Claude => "~/.claude/projects/",
+                                    cc_hub_lib::agent::AgentKind::Pi => "~/.pi/agent/sessions/",
+                                };
                                 let detail = match task.orchestrator_session_id.as_deref() {
                                     Some(sid) => format!(
-                                        "orchestrator dead — sid {} not found under ~/.claude/projects/ (cwd {}); no JSONL contains orchestrator prompt for task {}",
+                                        "orchestrator dead — sid {} not found under {} (cwd {}); no JSONL contains orchestrator prompt for task {}",
                                         models::short_sid(sid),
+                                        session_store,
                                         task.project_root.display(),
                                         &task.task_id,
                                     ),
                                     None => format!(
-                                        "orchestrator dead — no JSONL under ~/.claude/projects/ contains orchestrator prompt for task {} (cwd {})",
+                                        "orchestrator dead — no JSONL under {} contains orchestrator prompt for task {} (cwd {})",
+                                        session_store,
                                         &task.task_id,
                                         task.project_root.display(),
                                     ),
@@ -1067,45 +1070,7 @@ async fn run(
                         }
                     }
                     (View::Grid, KeyCode::Char('R')) if on_projects => {
-                        let Some(task) = app.selected_project_task().cloned() else {
-                            app.set_status(
-                                "no task selected — focus a task on the kanban first".into(),
-                            );
-                            continue;
-                        };
-                        match cc_hub_lib::orchestrator::restart_task(
-                            &task.project_id,
-                            &task.task_id,
-                            None,
-                        ) {
-                            Ok((state, tmux_name, orch_prompt)) => {
-                                if let Some(prompt) = orch_prompt {
-                                    if app.has_pending_dispatch() {
-                                        app.set_status(format!(
-                                            "restarted [{}] but a dispatch is already queued — orchestrator may be slow to start",
-                                            state.task_id
-                                        ));
-                                    } else {
-                                        app.queue_pending_dispatch(tmux_name.clone(), prompt);
-                                    }
-                                }
-                                log::info!(
-                                    "project task: restarted {} orchestrator [{}]",
-                                    state.task_id,
-                                    tmux_name
-                                );
-                                app.set_status(format!(
-                                    "restarted [{}], orchestrator [{}] starting…",
-                                    state.task_id, tmux_name
-                                ));
-                                app.pending_focus_task_id = Some(state.task_id.clone());
-                                app.pending_focus_budget = 5;
-                            }
-                            Err(e) => {
-                                log::warn!("project task: restart failed: {}", e);
-                                app.set_status(format!("restart failed: {}", e));
-                            }
-                        }
+                        app.enter_confirm_task_restart();
                     }
                     (View::Grid, KeyCode::Char('x')) if on_projects => {
                         app.enter_confirm_task_delete();
@@ -1156,14 +1121,7 @@ async fn run(
                         ) {
                             Ok((state, tmux_name, orch_prompt)) => {
                                 if let Some(prompt) = orch_prompt {
-                                    if app.has_pending_dispatch() {
-                                        app.set_status(format!(
-                                            "task started [{}] but a dispatch is already queued — orchestrator may be slow to start",
-                                            state.task_id
-                                        ));
-                                    } else {
-                                        app.queue_pending_dispatch(tmux_name.clone(), prompt);
-                                    }
+                                    app.queue_pending_dispatch(tmux_name.clone(), prompt);
                                 }
                                 log::info!(
                                     "project task: started backlog {} orchestrator [{}]",
@@ -1377,14 +1335,14 @@ async fn run(
                             let kill_result = pending
                                 .orchestrator_tmux
                                 .as_deref()
-                                .map(|name| send::kill_tmux_session(name));
+                                .map(send::kill_tmux_session);
                             // Remove the on-disk state so the Projects view
                             // refreshes the entry away on next scan.
                             let task_dir = cc_hub_lib::orchestrator::task_state_dir(
                                 &pending.project_id,
                                 &pending.task_id,
                             );
-                            let removal = task_dir.as_ref().map(|d| std::fs::remove_dir_all(d));
+                            let removal = task_dir.as_ref().map(std::fs::remove_dir_all);
                             let kill_msg = match kill_result {
                                 Some(Ok(())) => "orchestrator killed",
                                 Some(Err(_)) => "orchestrator kill failed",
@@ -1402,6 +1360,33 @@ async fn run(
                                 "deleted {} ({}, {})",
                                 pending.display, kill_msg, removal_msg
                             ));
+                        } else if let Some(pending) = app.take_pending_task_restart() {
+                            match cc_hub_lib::orchestrator::restart_task(
+                                &pending.project_id,
+                                &pending.task_id,
+                                None,
+                            ) {
+                                Ok((state, tmux_name, orch_prompt)) => {
+                                    if let Some(prompt) = orch_prompt {
+                                        app.queue_pending_dispatch(tmux_name.clone(), prompt);
+                                    }
+                                    log::info!(
+                                        "project task: restarted {} orchestrator [{}]",
+                                        state.task_id,
+                                        tmux_name
+                                    );
+                                    app.set_status(format!(
+                                        "restarted [{}], orchestrator [{}] starting…",
+                                        state.task_id, tmux_name
+                                    ));
+                                    app.pending_focus_task_id = Some(state.task_id.clone());
+                                    app.pending_focus_budget = 5;
+                                }
+                                Err(e) => {
+                                    log::warn!("project task: restart failed: {}", e);
+                                    app.set_status(format!("restart failed: {}", e));
+                                }
+                            }
                         } else if let Some(pending) = app.take_pending_close() {
                             let ok = focus::close_window(pending.pid);
                             let msg = if ok {
@@ -1629,14 +1614,7 @@ async fn run(
                             ) {
                                 Ok((state, tmux_name, orch_prompt)) => {
                                     if let Some(prompt) = orch_prompt {
-                                        if app.has_pending_dispatch() {
-                                            app.set_status(format!(
-                                                "task created [{}] but a dispatch is already queued — orchestrator may be slow to start",
-                                                state.task_id
-                                            ));
-                                        } else {
-                                            app.queue_pending_dispatch(tmux_name.clone(), prompt);
-                                        }
+                                        app.queue_pending_dispatch(tmux_name.clone(), prompt);
                                     }
                                     log::info!(
                                         "project task: created {} in {}, orchestrator [{}]",
@@ -1681,13 +1659,6 @@ async fn run(
                             continue;
                         }
 
-                        if app.has_pending_dispatch() {
-                            app.set_status(
-                                "dispatch already pending — wait for the new agent to come up"
-                                    .into(),
-                            );
-                            continue;
-                        }
                         let Some(cwd) = app.default_spawn_cwd() else {
                             app.set_status("no idle agent and no cwd to spawn in".into());
                             continue;
@@ -1820,14 +1791,7 @@ async fn run(
                 ScanMsg::BacklogTriage { promotion, status } => {
                     if let Some(p) = promotion {
                         if let Some(prompt) = p.orchestrator_prompt {
-                            if app.has_pending_dispatch() {
-                                app.set_status(format!(
-                                    "triage: promotion ready [{}] but a dispatch is already queued — orchestrator may be slow to start",
-                                    p.tmux
-                                ));
-                            } else {
-                                app.queue_pending_dispatch(p.tmux, prompt);
-                            }
+                            app.queue_pending_dispatch(p.tmux, prompt);
                         }
                     }
                     if let Some(s) = status {
@@ -1841,14 +1805,7 @@ async fn run(
                     // triager uses for orchestrator prompts.
                     if let Some(s) = spawn {
                         if let Some(prompt) = s.prompt_to_dispatch {
-                            if app.has_pending_dispatch() {
-                                app.set_status(format!(
-                                    "auto-review: reviewer [{}] up but a dispatch is already queued — briefing may be delayed",
-                                    s.tmux
-                                ));
-                            } else {
-                                app.queue_pending_dispatch(s.tmux, prompt);
-                            }
+                            app.queue_pending_dispatch(s.tmux, prompt);
                         }
                     }
                     if let Some(s) = status {

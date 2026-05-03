@@ -1,3 +1,5 @@
+#![allow(clippy::items_after_test_module)]
+
 use crate::models::{ConversationMessage, SessionState};
 use log::debug;
 use serde_json::Value;
@@ -146,7 +148,7 @@ pub fn read_jsonl_tail(path: &Path, max_bytes: u64) -> Vec<Value> {
         Err(_) => return Vec::new(),
     };
 
-    let seek_pos = if len > max_bytes { len - max_bytes } else { 0 };
+    let seek_pos = len.saturating_sub(max_bytes);
     if file.seek(SeekFrom::Start(seek_pos)).is_err() {
         return Vec::new();
     }

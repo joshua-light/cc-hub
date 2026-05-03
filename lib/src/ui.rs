@@ -262,7 +262,7 @@ fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
             .split('\n')
             .map(|seg| {
                 let w = seg.chars().count();
-                ((w + wrap_width - 1) / wrap_width).max(1)
+                w.div_ceil(wrap_width).max(1)
             })
             .sum();
         total.try_into().unwrap_or(u16::MAX)
@@ -479,20 +479,25 @@ fn render_tmux_pane(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
-    // The same view handles three confirmations: registry-level project
-    // removal, project-task deletion, and session close. Project-delete
-    // wins precedence because it's the most destructive — if both somehow
-    // got staged we want to show the user the bigger blast radius.
-    let (title, display) = if let Some(pending) = &app.pending_project_delete {
-        (" Delete project? ", pending.display.clone())
+    // The same view handles destructive/interrupting confirmations:
+    // registry-level project removal, project-task deletion, orchestrator
+    // restart, and session close. Project-delete wins precedence because
+    // it's the biggest blast radius if multiple actions somehow got staged.
+    let (title, display, action_color) = if let Some(pending) = &app.pending_project_delete {
+        (" Delete project? ", pending.display.clone(), Color::Red)
     } else if let Some(pending) = &app.pending_task_delete {
-        (" Delete task? ", pending.display.clone())
+        (" Delete task? ", pending.display.clone(), Color::Red)
+    } else if let Some(pending) = &app.pending_task_restart {
+        (
+            " Restart orchestrator? ",
+            pending.display.clone(),
+            Color::Yellow,
+        )
     } else if let Some(pending) = &app.pending_close {
-        (" Close terminal? ", pending.display.clone())
+        (" Close terminal? ", pending.display.clone(), Color::Red)
     } else {
         return;
     };
-    let action_color = Color::Red;
 
     let popup = centered_fixed(area, 72, 5);
     frame.render_widget(Clear, popup);
@@ -672,7 +677,7 @@ fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
     let mut y_acc: u16 = 0;
     for group in &app.groups {
         group_offsets.push(y_acc);
-        let rows = ((group.sessions.len() + cols - 1) / cols) as u16;
+        let rows = group.sessions.len().div_ceil(cols) as u16;
         y_acc = y_acc.saturating_add(GROUP_HEADER_HEIGHT + rows * cell_height() + GROUP_GAP);
     }
 
@@ -2692,7 +2697,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             },
             View::Popup => "j/k:scroll  esc:close  q:close",
             View::LiveTail => "j/k:scroll  G:bottom  esc:close",
-            View::ConfirmClose => "y:close  n/esc:cancel",
+            View::ConfirmClose => "y:confirm  n/esc:cancel",
             View::StateDebug => "j/k:scroll  esc:close  q:close",
             View::PromptInput => "type prompt  enter:dispatch  esc:cancel",
             View::TmuxPane => "forwarding keys to tmux · F1: detach & close",
@@ -2732,8 +2737,14 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     // dispatch in flight, or that it's about to time out.
     if let Some(target) = app.pending_dispatch_target() {
         let age = app.pending_dispatch_age().map(|d| d.as_secs()).unwrap_or(0);
+        let queued = app.pending_dispatch_count();
+        let suffix = if queued > 1 {
+            format!(" +{}", queued - 1)
+        } else {
+            String::new()
+        };
         spans.push(Span::styled(
-            format!(" ↻ dispatch waiting [{}] {}s ", target, age),
+            format!(" ↻ dispatch waiting [{}{}] {}s ", target, suffix, age),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -3301,7 +3312,7 @@ fn collect_agent_summary(
             if c > sum.max_ctx {
                 sum.max_ctx = c;
             }
-            let cap = context_window_size(s.model.as_deref().unwrap_or("")).max(1) as u64;
+            let cap = context_window_size(s.model.as_deref().unwrap_or("")).max(1);
             let pct = ((c.saturating_mul(100)) / cap).min(100) as u8;
             if pct > sum.max_ctx_pct {
                 sum.max_ctx_pct = pct;
@@ -3478,7 +3489,7 @@ fn ctx_bar(pct: u8, width: usize) -> Vec<Span<'static>> {
     let mut out = Vec::with_capacity(2);
     out.push(Span::styled(s, Style::default().fg(color)));
     if drawn < width {
-        let pad: String = std::iter::repeat('░').take(width - drawn).collect();
+        let pad = "░".repeat(width - drawn);
         out.push(Span::styled(
             pad,
             Style::default().fg(Color::Rgb(50, 50, 65)),
@@ -3500,6 +3511,7 @@ fn todos_progress(t: &crate::orchestrator::TaskState) -> Option<(usize, usize)> 
 /// Sessions-style rich card for a Running task. Mirrors the layout of the
 /// Sessions grid card: bordered, multi-row, with status emoji, agent dots,
 /// merge glyph, ctx bar, and live tool/thinking line.
+#[allow(clippy::too_many_arguments)]
 fn render_task_card_active(
     frame: &mut Frame,
     area: Rect,
@@ -3669,6 +3681,7 @@ fn render_task_card_active(
 /// supplied for col_idx == 3; a Merging card whose id differs from the
 /// holder is "queued" and renders with a muted border/icon to make it
 /// visually obvious that approval landed but the merge is waiting.
+#[allow(clippy::too_many_arguments)]
 fn render_task_card_collapsed(
     frame: &mut Frame,
     area: Rect,
@@ -4642,8 +4655,6 @@ mod result_popup_tests {
         let buf = terminal.backend().buffer().clone();
         let dump = buffer_to_string(&buf);
 
-        std::fs::write("/tmp/cc-hub-popup-snapshot.txt", &dump).expect("snapshot write");
-
         assert!(dump.contains("Result"), "should render Result title");
         assert!(
             dump.contains("PROOF-LINE: build is green"),
@@ -4704,76 +4715,6 @@ mod result_popup_tests {
         );
     }
 
-    fn buffer_to_ansi(buf: &Buffer) -> String {
-        use ratatui::style::Color;
-        fn fg(c: Color) -> String {
-            match c {
-                Color::Reset => "\x1b[39m".into(),
-                Color::Rgb(r, g, b) => format!("\x1b[38;2;{};{};{}m", r, g, b),
-                Color::Indexed(i) => format!("\x1b[38;5;{}m", i),
-                Color::Black => "\x1b[30m".into(),
-                Color::Red => "\x1b[31m".into(),
-                Color::Green => "\x1b[32m".into(),
-                Color::Yellow => "\x1b[33m".into(),
-                Color::Blue => "\x1b[34m".into(),
-                Color::Magenta => "\x1b[35m".into(),
-                Color::Cyan => "\x1b[36m".into(),
-                Color::Gray => "\x1b[37m".into(),
-                Color::DarkGray => "\x1b[90m".into(),
-                Color::LightRed => "\x1b[91m".into(),
-                Color::LightGreen => "\x1b[92m".into(),
-                Color::LightYellow => "\x1b[93m".into(),
-                Color::LightBlue => "\x1b[94m".into(),
-                Color::LightMagenta => "\x1b[95m".into(),
-                Color::LightCyan => "\x1b[96m".into(),
-                Color::White => "\x1b[97m".into(),
-            }
-        }
-        fn bg(c: Color) -> String {
-            match c {
-                Color::Reset => "\x1b[49m".into(),
-                Color::Rgb(r, g, b) => format!("\x1b[48;2;{};{};{}m", r, g, b),
-                Color::Indexed(i) => format!("\x1b[48;5;{}m", i),
-                Color::Black => "\x1b[40m".into(),
-                Color::Red => "\x1b[41m".into(),
-                Color::Green => "\x1b[42m".into(),
-                Color::Yellow => "\x1b[43m".into(),
-                Color::Blue => "\x1b[44m".into(),
-                Color::Magenta => "\x1b[45m".into(),
-                Color::Cyan => "\x1b[46m".into(),
-                Color::Gray => "\x1b[47m".into(),
-                Color::DarkGray => "\x1b[100m".into(),
-                Color::LightRed => "\x1b[101m".into(),
-                Color::LightGreen => "\x1b[102m".into(),
-                Color::LightYellow => "\x1b[103m".into(),
-                Color::LightBlue => "\x1b[104m".into(),
-                Color::LightMagenta => "\x1b[105m".into(),
-                Color::LightCyan => "\x1b[106m".into(),
-                Color::White => "\x1b[107m".into(),
-            }
-        }
-        let mut out = String::new();
-        for y in 0..buf.area().height {
-            let mut last_fg = Color::Reset;
-            let mut last_bg = Color::Reset;
-            out.push_str("\x1b[0m");
-            for x in 0..buf.area().width {
-                let c = &buf[(x, y)];
-                if c.fg != last_fg {
-                    out.push_str(&fg(c.fg));
-                    last_fg = c.fg;
-                }
-                if c.bg != last_bg {
-                    out.push_str(&bg(c.bg));
-                    last_bg = c.bg;
-                }
-                out.push_str(c.symbol());
-            }
-            out.push_str("\x1b[0m\n");
-        }
-        out
-    }
-
     fn buffer_bg_map(buf: &Buffer) -> String {
         let mut out = String::new();
         for y in 0..buf.area().height {
@@ -4816,7 +4757,6 @@ index 0000001..0000002 100644
      Ok(())
 ";
         std::fs::write(&patch_path, patch).unwrap();
-        std::fs::copy(&patch_path, "/tmp/cchub-diff-sample.patch").ok();
 
         let now = crate::orchestrator::now_unix_secs();
         let project = Project {
@@ -4860,14 +4800,7 @@ index 0000001..0000002 100644
 
         let buf = terminal.backend().buffer().clone();
         let plain = buffer_to_string(&buf);
-        let ansi = buffer_to_ansi(&buf);
         let bg_map = buffer_bg_map(&buf);
-        let combined = format!(
-            "--- plain ---\n{}\n--- ansi (cat with -R) ---\n{}\n--- bg map (+ added, - removed, . none) ---\n{}",
-            plain, ansi, bg_map
-        );
-        std::fs::write("/tmp/cchub-diff-render.txt", &combined).expect("dump write");
-
         assert!(
             plain.contains("Result"),
             "should render Result title\n{}",
@@ -4950,7 +4883,6 @@ mod kanban_card_tests {
             })
             .expect("render");
         let plain = buffer_to_string(terminal.backend().buffer());
-        std::fs::write("/tmp/cchub-card-collapsed-todos.txt", &plain).expect("dump");
         assert!(
             plain.contains("2/4"),
             "collapsed card should show 2/4 badge:\n{}",
@@ -5053,7 +4985,6 @@ mod kanban_card_tests {
             })
             .expect("render");
         let plain = buffer_to_string(terminal.backend().buffer());
-        std::fs::write("/tmp/cchub-card-active-tool-uses.txt", &plain).expect("dump");
         assert!(
             plain.contains("󰠰 7") || plain.contains(" 7"),
             "active card should show tool-uses badge with 7:\n{}",
@@ -5114,7 +5045,6 @@ mod kanban_card_tests {
             })
             .expect("render");
         let plain = buffer_to_string(terminal.backend().buffer());
-        std::fs::write("/tmp/cchub-card-collapsed-tool-uses.txt", &plain).expect("dump");
         assert!(
             plain.contains("󰠰") && plain.contains("5"),
             "collapsed card should show tool-uses badge with 5:\n{}",
@@ -5143,7 +5073,6 @@ mod kanban_card_tests {
             })
             .expect("render");
         let plain = buffer_to_string(terminal.backend().buffer());
-        std::fs::write("/tmp/cchub-card-active-todos.txt", &plain).expect("dump");
         assert!(
             plain.contains("2/4"),
             "active card should show 2/4 badge:\n{}",

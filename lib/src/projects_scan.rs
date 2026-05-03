@@ -22,14 +22,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
+type TaskStateCache = HashMap<PathBuf, (SystemTime, Arc<TaskState>)>;
+
 /// Process-global mtime-keyed cache of parsed state.json files. Keyed by
 /// the absolute path of `state.json`; value is `(mtime, parsed)`. A scan
 /// stat()s every file each tick and only re-reads on mtime change. The
 /// parsed value is `Arc`-wrapped so cache hits hand out a cheap clone
 /// instead of copying the whole TaskState (Vec<Worker>, prompt strings,
 /// merge/artifact lists) per scan.
-fn cache() -> &'static Mutex<HashMap<PathBuf, (SystemTime, Arc<TaskState>)>> {
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (SystemTime, Arc<TaskState>)>>> = OnceLock::new();
+fn cache() -> &'static Mutex<TaskStateCache> {
+    static CACHE: OnceLock<Mutex<TaskStateCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

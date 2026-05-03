@@ -200,7 +200,7 @@ fn scan_external_live_sessions(
         }
     }
     for files in by_cwd.values_mut() {
-        files.sort_by(|a, b| b.1.cmp(&a.1));
+        files.sort_by_key(|b| std::cmp::Reverse(b.1));
     }
 
     let mut out = Vec::new();
@@ -280,7 +280,7 @@ fn scan_inactive_sessions(
             }
             candidates.push((path, mtime));
         }
-        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
         for (path, _) in candidates.into_iter().take(cfg.max_per_project) {
             if let Some(info) = build_session_info(
                 default_agent.id.clone(),
@@ -407,7 +407,7 @@ pub fn find_orchestrator_session(
             let Ok(mtime) = path.metadata().and_then(|m| m.modified()) else {
                 continue;
             };
-            if best.as_ref().map_or(false, |(t, _, _)| mtime <= *t) {
+            if best.as_ref().is_some_and(|(t, _, _)| mtime <= *t) {
                 continue;
             }
             let mut buf = vec![0u8; 32 * 1024];
@@ -434,4 +434,53 @@ pub fn find_orchestrator_session(
         }
     }
     best.map(|(_, sid, p)| (sid, p))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::HOME_TEST_LOCK;
+    use std::fs;
+
+    fn with_temp_home<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
+        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+        let out = f(home.path());
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        out
+    }
+
+    #[test]
+    fn orchestrator_fallback_matches_prompt_prefix_not_task_id_mentions() {
+        with_temp_home(|home| {
+            let task_id = "t-pi-scan-1";
+            let sessions = home.join(".pi/agent/sessions");
+            let parent_dir = sessions.join("parent");
+            let orch_dir = sessions.join("orch");
+            fs::create_dir_all(&parent_dir).unwrap();
+            fs::create_dir_all(&orch_dir).unwrap();
+            fs::write(
+                parent_dir.join("parent-session.jsonl"),
+                format!(r#"{{"id":"pi-parent","type":"assistant","message":"mentioned {task_id} in output"}}"#),
+            )
+            .unwrap();
+            fs::write(
+                orch_dir.join("good-session.jsonl"),
+                format!(
+                    r#"{{"id":"pi-good","type":"system","message":"{} crashed early"}}"#,
+                    crate::orchestrator::orchestrator_prompt_prefix(task_id)
+                ),
+            )
+            .unwrap();
+
+            let found =
+                find_orchestrator_session(std::path::Path::new("/tmp/project"), task_id, None);
+            assert_eq!(found.as_ref().map(|(sid, _)| sid.as_str()), Some("pi-good"));
+        });
+    }
 }

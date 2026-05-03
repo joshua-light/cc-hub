@@ -345,7 +345,7 @@ mod tests {
         let mut p = fake_pr();
         p.description = String::new();
         p.comments.clear();
-        let out = build_review_prompt(&s, &p, &std::path::Path::new("/cc-hub"));
+        let out = build_review_prompt(&s, &p, std::path::Path::new("/cc-hub"));
         assert!(out.contains("(no description)"));
         assert!(out.contains("(none)"));
     }

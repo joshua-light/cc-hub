@@ -281,8 +281,8 @@ chip-level signal when there's pending work to triage.
 | `j` / `k` (or arrows) | Move the cursor within the focused column |
 | `Enter` | Focus the orchestrator session for the selected task |
 | `f` | Embed the orchestrator's tmux pane; if the pane died (PC reboot), resume the orchestrator's Claude/Pi session from disk and embed the new pane |
-| `R` | Restart the selected task's orchestrator from the original prompt (blocked for Done/Merging tasks) |
-| `Space` | Approve the focused Review task → Done |
+| `R` | Confirm, then restart the selected Running/Backlog task's orchestrator from the original prompt (blocked for Review/Done/Merging tasks) |
+| `Space` | Approve the focused Review PR → Merging/queued; PR-less Review tasks go Done |
 | `r` | Open the Result popup (artifacts + summary) for the focused task |
 | `b` | Open the Backlog popup (`s`/`Enter` starts the selected backlog task) |
 | `n` | New task in the current project (prompt input — `Tab` cycles the orchestrator agent when more than one is configured) |

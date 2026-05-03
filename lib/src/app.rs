@@ -9,7 +9,7 @@ use crate::projects_scan::ProjectsSnapshot;
 use crate::tmux_pane::TmuxPaneView;
 use crate::usage::UsageInfo;
 use ratatui::text::Line;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -115,6 +115,16 @@ pub struct PendingProjectDelete {
     pub display: String,
 }
 
+/// Pending project-task orchestrator restart. Shown via the same
+/// `ConfirmClose` view as destructive actions because it kills/replaces
+/// runtime state even though task history is preserved.
+#[derive(Clone, Debug)]
+pub struct PendingTaskRestart {
+    pub project_id: String,
+    pub task_id: String,
+    pub display: String,
+}
+
 /// A prompt queued for a freshly-spawned tmux session that isn't yet Idle.
 /// Drained by [`App::poll_pending_dispatch`] once the session shows up in the
 /// next scan and its state flips to Idle, or times out after
@@ -150,6 +160,7 @@ pub struct App {
     pub pending_close: Option<PendingClose>,
     pub pending_task_delete: Option<PendingTaskDelete>,
     pub pending_project_delete: Option<PendingProjectDelete>,
+    pub pending_task_restart: Option<PendingTaskRestart>,
     pub state_debug: Option<(SessionInfo, StateExplanation)>,
     pub state_debug_lines: Vec<Line<'static>>,
     pub state_debug_scroll: u16,
@@ -168,7 +179,7 @@ pub struct App {
     /// (scanned, total) for the in-flight metrics scan, shown while
     /// [`Self::metrics`] is `None`. Cleared once analysis completes.
     pub metrics_progress: Option<(usize, usize)>,
-    pub pending_dispatch: Option<PendingDispatch>,
+    pub pending_dispatch: VecDeque<PendingDispatch>,
     pub show_inactive: bool,
     /// When false, the Sessions view hides any session whose tmux name is
     /// claimed by an orchestrator or worker in the current projects
@@ -247,6 +258,12 @@ pub struct App {
     pub pending_focus_budget: u8,
 }
 
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl App {
     pub fn new() -> Self {
         Self {
@@ -267,6 +284,7 @@ impl App {
             pending_close: None,
             pending_task_delete: None,
             pending_project_delete: None,
+            pending_task_restart: None,
             state_debug: None,
             state_debug_lines: Vec::new(),
             state_debug_scroll: 0,
@@ -283,7 +301,7 @@ impl App {
             metrics_rows: Vec::new(),
             metrics_selected: None,
             metrics_progress: None,
-            pending_dispatch: None,
+            pending_dispatch: VecDeque::new(),
             show_inactive: false,
             show_orch_workers: false,
             projects: ProjectsSnapshot::empty(),
@@ -849,9 +867,7 @@ impl App {
     /// resolving `None` to the configured default. Returns `None` outside
     /// the project-creation flow.
     pub fn pending_agent_label(&self) -> Option<String> {
-        if self.projects_pending_cwd.is_none() {
-            return None;
-        }
+        self.projects_pending_cwd.as_ref()?;
         Some(
             self.projects_pending_agent_id
                 .clone()
@@ -977,7 +993,7 @@ impl App {
     }
 
     pub fn queue_pending_dispatch(&mut self, tmux: String, prompt: String) {
-        self.pending_dispatch = Some(PendingDispatch {
+        self.pending_dispatch.push_back(PendingDispatch {
             tmux,
             prompt,
             queued_at: Instant::now(),
@@ -985,15 +1001,20 @@ impl App {
     }
 
     pub fn has_pending_dispatch(&self) -> bool {
-        self.pending_dispatch.is_some()
+        !self.pending_dispatch.is_empty()
+    }
+
+    pub fn pending_dispatch_count(&self) -> usize {
+        self.pending_dispatch.len()
     }
 
     /// If a pending dispatch exists and the target session now reports Idle,
     /// consume it and return [`DispatchAction::Send`]. If the deadline has
     /// passed, return [`DispatchAction::Timeout`]. Otherwise, put it back and
-    /// wait.
+    /// wait. Dispatches are FIFO so multiple Claude launches can't overwrite
+    /// each other's initial prompts.
     pub fn poll_pending_dispatch(&mut self) -> DispatchAction {
-        let Some(pd) = self.pending_dispatch.take() else {
+        let Some(pd) = self.pending_dispatch.pop_front() else {
             return DispatchAction::Wait;
         };
         // Layered readiness, in order of preference:
@@ -1035,7 +1056,7 @@ impl App {
         if pd.queued_at.elapsed() > config::get().ui.pending_dispatch_timeout() {
             return DispatchAction::Timeout { tmux: pd.tmux };
         }
-        self.pending_dispatch = Some(pd);
+        self.pending_dispatch.push_front(pd);
         DispatchAction::Wait
     }
 
@@ -1045,13 +1066,13 @@ impl App {
     /// than wondering why nothing is happening.
     pub fn pending_dispatch_age(&self) -> Option<Duration> {
         self.pending_dispatch
-            .as_ref()
+            .front()
             .map(|pd| pd.queued_at.elapsed())
     }
 
     /// Tmux session name of the current pending dispatch, if any.
     pub fn pending_dispatch_target(&self) -> Option<&str> {
-        self.pending_dispatch.as_ref().map(|pd| pd.tmux.as_str())
+        self.pending_dispatch.front().map(|pd| pd.tmux.as_str())
     }
 
     fn compute_dispatch_target(
@@ -1090,6 +1111,7 @@ impl App {
         self.pending_close = None;
         self.pending_task_delete = None;
         self.pending_project_delete = None;
+        self.pending_task_restart = None;
         self.view = View::Grid;
     }
 
@@ -1157,6 +1179,44 @@ impl App {
     pub fn take_pending_project_delete(&mut self) -> Option<PendingProjectDelete> {
         self.view = View::Grid;
         self.pending_project_delete.take()
+    }
+
+    /// Stage an orchestrator restart behind a confirmation prompt. The
+    /// actual restart reloads state at confirmation time; only task identity
+    /// and display text are captured here.
+    pub fn enter_confirm_task_restart(&mut self) {
+        let Some(p) = self.selected_project().cloned() else {
+            self.set_status("no project selected".into());
+            return;
+        };
+        let Some(task) = self.selected_project_task().cloned() else {
+            self.set_status("no task selected — focus a task on the kanban first".into());
+            return;
+        };
+        let status_label = match task.status {
+            crate::orchestrator::TaskStatus::Running => "running",
+            crate::orchestrator::TaskStatus::Review => "review",
+            crate::orchestrator::TaskStatus::Merging => "merging",
+            crate::orchestrator::TaskStatus::Done => "done",
+            crate::orchestrator::TaskStatus::Backlog => "backlog",
+        };
+        let display = format!(
+            "{} — {} (task {})",
+            p.name,
+            status_label,
+            crate::orchestrator::short_task_id(&task.task_id),
+        );
+        self.pending_task_restart = Some(PendingTaskRestart {
+            project_id: p.id.clone(),
+            task_id: task.task_id.clone(),
+            display,
+        });
+        self.view = View::ConfirmClose;
+    }
+
+    pub fn take_pending_task_restart(&mut self) -> Option<PendingTaskRestart> {
+        self.view = View::Grid;
+        self.pending_task_restart.take()
     }
 
     pub fn set_status(&mut self, msg: String) {
@@ -1422,8 +1482,7 @@ impl App {
             .collect();
 
         // Sort groups alphabetically by name for stable ordering.
-        self.groups
-            .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        self.groups.sort_by_key(|a| a.name.to_lowercase());
 
         if self.view == View::PromptInput {
             self.dispatch_target = Self::compute_dispatch_target(&self.groups);
@@ -1668,6 +1727,62 @@ mod tests {
         snap.tasks
             .insert(pid, tasks.into_iter().map(Arc::new).collect());
         snap
+    }
+
+    fn fake_session(tmux: &str, state: SessionState) -> SessionInfo {
+        SessionInfo {
+            agent_id: "claude".into(),
+            agent_kind: crate::agent::AgentKind::Claude,
+            pid: 1,
+            session_id: tmux.into(),
+            cwd: "/tmp".into(),
+            project_name: "tmp".into(),
+            started_at: 0,
+            last_activity: None,
+            state,
+            last_user_message: None,
+            summary: None,
+            title: None,
+            titling: false,
+            model: None,
+            git_branch: None,
+            version: None,
+            jsonl_path: None,
+            tmux_session: Some(tmux.into()),
+            current_tool: None,
+            is_thinking: false,
+            context_tokens: None,
+            tool_uses_count: 0,
+        }
+    }
+
+    #[test]
+    fn pending_dispatch_is_fifo_queue() {
+        let mut app = App::new();
+        app.queue_pending_dispatch("tmux-a".into(), "prompt-a".into());
+        app.queue_pending_dispatch("tmux-b".into(), "prompt-b".into());
+        for pd in &mut app.pending_dispatch {
+            pd.queued_at = Instant::now() - Duration::from_secs(6);
+        }
+        app.last_sessions = vec![
+            fake_session("tmux-a", SessionState::Idle),
+            fake_session("tmux-b", SessionState::Idle),
+        ];
+
+        match app.poll_pending_dispatch() {
+            DispatchAction::Send { tmux, prompt } => {
+                assert_eq!(tmux, "tmux-a");
+                assert_eq!(prompt, "prompt-a");
+            }
+            _ => panic!("first queued dispatch should send"),
+        }
+        match app.poll_pending_dispatch() {
+            DispatchAction::Send { tmux, prompt } => {
+                assert_eq!(tmux, "tmux-b");
+                assert_eq!(prompt, "prompt-b");
+            }
+            _ => panic!("second queued dispatch should send"),
+        }
     }
 
     #[test]
