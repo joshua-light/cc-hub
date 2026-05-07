@@ -4,17 +4,15 @@
 //! [`dispatch`] handles it and returns an exit code. The TUI in `main.rs`
 //! never sees them.
 //!
-//! Argument parsing is hand-rolled to avoid a clap dep. Three verbs:
+//! Argument parsing is hand-rolled to avoid a clap dep. The orchestrator-facing
+//! verbs include `spawn-worker`, `merge-worktree`, `task ...`, `orchestrate ...`,
+//! `pr ...`, `worker ...`, and `project ...`.
 //!
-//! - `cc-hub spawn-worker --task ID [--agent AGENT] [--worktree NAME | --readonly] [--prompt P]`
-//! - `cc-hub merge-worktree --task ID --worktree NAME`
-//! - `cc-hub task report --task ID [--status S] [--note N]`
-//!
-//! All three derive `project-id` from the current working directory by
-//! default; `--project-id ID` overrides for the rare case of operating
-//! cross-project. They emit a single JSON line on stdout describing the
-//! result so the orchestrator (a Claude or Pi session running under Bash)
-//! can parse the outcome programmatically.
+//! Most verbs derive `project-id` from the current working directory by default;
+//! `--project-id ID` overrides for the rare case of operating cross-project.
+//! They emit a single JSON line on stdout describing the result so the
+//! orchestrator (a Claude or Pi session running under Bash) can parse the
+//! outcome programmatically.
 //!
 //! Worktree mechanics live here too: `git -C <root> worktree add -b <branch>
 //! <path> main`. cc-hub does **only** the mechanical git ops; deciding when
@@ -33,9 +31,16 @@ use std::time::{Duration, Instant};
 /// margin even for the slowest path; the timeout exists to surface
 /// genuinely broken spawns, not to bound happy-path latency.
 const DEFAULT_PROMPT_WAIT_SECS: u64 = 120;
+const TASK_VERBS_HELP: &str = "`report`, `create`, `start`, `auto-review`, `artifact`, or `todos`";
 
 pub fn dispatch(args: &[String]) -> Option<i32> {
     let (verb, rest) = args.split_first()?;
+    if matches!(verb.as_str(), "help" | "--help" | "-h") {
+        return Some(handle(print_cli_help(rest)));
+    }
+    if rest.iter().any(|a| matches!(a.as_str(), "--help" | "-h")) {
+        return Some(handle(print_cli_help(args)));
+    }
     match verb.as_str() {
         "spawn-worker" => Some(handle(spawn_worker(rest))),
         "merge-worktree" => Some(handle(merge_worktree(rest))),
@@ -47,6 +52,132 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
         _ => None,
     }
 }
+
+fn print_cli_help(topic: &[String]) -> Result<(), CliError> {
+    match topic.first().map(String::as_str) {
+        None => print!("{}", GENERAL_HELP),
+        Some("spawn-worker") => print!("{}", SPAWN_WORKER_HELP),
+        Some("merge-worktree") => print!("{}", MERGE_WORKTREE_HELP),
+        Some("task") => print!("{}", TASK_HELP),
+        Some("orchestrate") => print!("{}", ORCHESTRATE_HELP),
+        Some("pr") => print!("{}", PR_HELP),
+        Some("worker") => print!("{}", WORKER_HELP),
+        Some("project") => print!("{}", PROJECT_HELP),
+        Some(other) => {
+            return Err(CliError::Usage(format!(
+                "unknown help topic: {} (try `cc-hub help`)",
+                other
+            )));
+        }
+    }
+    Ok(())
+}
+
+const GENERAL_HELP: &str = r#"cc-hub
+
+Usage:
+  cc-hub                         Start the TUI
+  cc-hub --no-tui                Print discovered sessions
+  cc-hub help [topic]            Show CLI help
+
+Orchestrator-facing topics:
+  spawn-worker      Spawn a readonly or worktree worker for a task
+  merge-worktree    Legacy direct worktree merge helper
+  task              Create/report/start tasks, artifacts, and todos
+  orchestrate       Spawn an orchestrator for an existing task
+  pr                Local PR review/merge flow
+  worker            Wait for worker sessions to finish
+  project           List registered projects
+
+Examples:
+  cc-hub task create --backlog --prompt "Fix the flaky test"
+  cc-hub task start --task t-123 --agent claude
+  cc-hub spawn-worker --task t-123 --worktree fix --prompt "Implement the fix"
+  cc-hub pr show --task t-123
+"#;
+
+const SPAWN_WORKER_HELP: &str = r#"cc-hub spawn-worker
+
+Usage:
+  cc-hub spawn-worker --task ID (--worktree NAME | --readonly) [options]
+
+Options:
+  --project-id ID      Override inferred project id
+  --agent AGENT        Worker backend (defaults to task orchestrator agent)
+  --prompt TEXT        Initial prompt to send to the worker
+  --wait-secs N        Prompt-dispatch readiness timeout (default: 120)
+
+Emits one JSON line with tmux/cwd/worktree/prompt_status.
+"#;
+
+const MERGE_WORKTREE_HELP: &str = r#"cc-hub merge-worktree
+
+Usage:
+  cc-hub merge-worktree --task ID --worktree NAME [--project-id ID]
+
+Legacy helper that merges a worker branch into the project's main branch and
+records a MergeRecord. New PR-flow tasks generally use `cc-hub pr merge`.
+"#;
+
+const TASK_HELP: &str = r#"cc-hub task
+
+Usage:
+  cc-hub task create --prompt TEXT [--backlog] [--name NAME] [--project-id ID]
+  cc-hub task start --task ID [--agent AGENT] [--wait-secs N] [--project-id ID]
+  cc-hub task report --task ID [--status running|review|merging|done|backlog] [--note TEXT] [--summary TEXT]
+  cc-hub task auto-review --task ID [--project-id ID]
+  cc-hub task artifact add --task ID --path PATH_OR_URL [--kind KIND] [--caption TEXT] [--lead]
+  cc-hub task artifact list --task ID [--project-id ID]
+  cc-hub task todos set --task ID --items JSON_ARRAY
+  cc-hub task todos check|uncheck --task ID --index N
+  cc-hub task todos clear --task ID
+
+All mutating verbs emit one JSON line. `report --status done` routes a running
+task into Review first so a human/reviewer can approve it.
+"#;
+
+const ORCHESTRATE_HELP: &str = r#"cc-hub orchestrate
+
+Usage:
+  cc-hub orchestrate start --task ID [--agent AGENT] [--wait-secs N] [--dry-run]
+
+Spawns the configured orchestrator backend in the task's project root, persists
+its tmux session name, and sends the generated orchestrator prompt.
+"#;
+
+const PR_HELP: &str = r#"cc-hub pr
+
+Usage:
+  cc-hub pr create --task ID --worktree NAME --title TEXT [--description TEXT]
+  cc-hub pr show --task ID
+  cc-hub pr approve --task ID
+  cc-hub pr request-changes --task ID --comment TEXT [--author NAME]
+  cc-hub pr comment --task ID --comment TEXT [--author NAME]
+  cc-hub pr merge --task ID
+  cc-hub pr finalize --task ID
+
+Local PR records live beside task state. Merges are serialized with the
+project merge lock; `finalize` releases the lock and marks the task Done.
+"#;
+
+const WORKER_HELP: &str = r#"cc-hub worker
+
+Usage:
+  cc-hub worker wait --task ID (--tmux NAME ... | --all) [--timeout-secs N]
+
+Polls cc-hub's session scanner until selected workers reach WaitingForInput or
+Inactive. Emits one JSON line with per-worker completion state.
+"#;
+
+const PROJECT_HELP: &str = r#"cc-hub project
+
+Usage:
+  cc-hub project list [--json]
+
+Lists registered projects. Plain output is tab-separated:
+  <id>\t<name>\t<root>
+With --json, includes per-status task counts.
+"#;
 
 fn handle(result: Result<(), CliError>) -> i32 {
     match result {
@@ -574,9 +705,12 @@ fn orchestrate_start(args: &[String]) -> Result<(), CliError> {
 // ─── task ────────────────────────────────────────────────────────────────
 
 fn task_subcommand(args: &[String]) -> Result<(), CliError> {
-    let (verb, rest) = args
-        .split_first()
-        .ok_or_else(|| CliError::Usage("task <verb>: missing verb (try `report`)".into()))?;
+    let (verb, rest) = args.split_first().ok_or_else(|| {
+        CliError::Usage(format!(
+            "task <verb>: missing verb (try {})",
+            TASK_VERBS_HELP
+        ))
+    })?;
     match verb.as_str() {
         "report" => task_report(rest),
         "create" => task_create(rest),
@@ -585,8 +719,8 @@ fn task_subcommand(args: &[String]) -> Result<(), CliError> {
         "artifact" => task_artifact_subcommand(rest),
         "todos" => task_todos_subcommand(rest),
         other => Err(CliError::Usage(format!(
-            "unknown task verb: {} (try `report`, `create`, `start`, `auto-review`, `artifact`, or `todos`)",
-            other
+            "unknown task verb: {} (try {})",
+            other, TASK_VERBS_HELP
         ))),
     }
 }
@@ -1860,6 +1994,15 @@ mod tests {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    #[test]
+    fn dispatch_handles_help() {
+        assert_eq!(dispatch(&["--help".to_string()]), Some(0));
+        assert_eq!(
+            dispatch(&["task".to_string(), "--help".to_string()]),
+            Some(0)
+        );
     }
 
     #[test]

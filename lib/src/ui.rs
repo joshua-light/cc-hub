@@ -369,11 +369,21 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
     let popup = centered_fixed(area, 90, 22);
     frame.render_widget(Clear, popup);
 
+    let tasks = app.backlog_tasks();
     let project_name = app
         .selected_project()
         .map(|p| p.name.clone())
         .unwrap_or_else(|| "no project".to_string());
     let title_text = format!(" Backlog · {} ", project_name);
+    let selected_label = if tasks.is_empty() {
+        "".to_string()
+    } else {
+        format!(
+            " · {}/{} ",
+            app.backlog_sel.min(tasks.len() - 1) + 1,
+            tasks.len()
+        )
+    };
     let block = popup_block(Span::styled(
         title_text,
         Style::default()
@@ -381,13 +391,15 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
             .add_modifier(Modifier::BOLD),
     ))
     .title_bottom(Span::styled(
-        " j/k navigate · s/enter start · esc/q close ",
+        format!(
+            " j/k navigate · s/enter start · esc/q close{}",
+            selected_label
+        ),
         Style::default().fg(Color::DarkGray),
     ));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    let tasks = app.backlog_tasks();
     if tasks.is_empty() {
         let empty = Paragraph::new(vec![
             Line::from(Span::styled(
@@ -406,9 +418,22 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let max_w = inner.width.saturating_sub(4) as usize;
-    let mut lines: Vec<Line> = Vec::with_capacity(tasks.len() * 3);
-    for (i, t) in tasks.iter().enumerate() {
-        let selected = i == app.backlog_sel;
+    let rows_per_task = 3usize;
+    let visible_tasks = ((inner.height as usize) / rows_per_task).max(1);
+    let sel = app.backlog_sel.min(tasks.len() - 1);
+    let scroll_top = if tasks.len() <= visible_tasks || sel < visible_tasks {
+        0
+    } else {
+        sel + 1 - visible_tasks
+    };
+    let mut lines: Vec<Line> = Vec::with_capacity(visible_tasks * rows_per_task);
+    for (i, t) in tasks
+        .iter()
+        .enumerate()
+        .skip(scroll_top)
+        .take(visible_tasks)
+    {
+        let selected = i == sel;
         let arrow = if selected { "▌ " } else { "  " };
         let title_text = match t.title.as_deref().filter(|s| !s.is_empty()) {
             Some(name) => name.to_string(),

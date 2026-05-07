@@ -17,12 +17,16 @@ A separate **Projects** tab adds a higher-level layer: register a directory
 as a project, file a free-form *task* against it, and cc-hub spawns an
 *orchestrator* session that decomposes the task and dispatches *worker*
 sessions (read-only research workers, or worktree-isolated edit workers) via
-four new CLI primitives:
+scriptable CLI primitives:
 
+- `cc-hub task create --prompt "…" [--backlog]` / `cc-hub task start --task ID [--agent AGENT]`
+- `cc-hub orchestrate start --task ID [--agent AGENT] [--dry-run]`
 - `cc-hub spawn-worker --task ID [--agent AGENT] [--worktree NAME | --readonly] [--prompt P]`
-- `cc-hub merge-worktree --task ID --worktree NAME`
-- `cc-hub task report --task ID [--status S] [--note N]`
-- `cc-hub task create --prompt "…"` / `cc-hub orchestrate start --task ID [--agent AGENT]`
+- `cc-hub worker wait --task ID [--tmux NAME ... | --all]`
+- `cc-hub task report --task ID [--status S] [--note N] [--summary S]`
+- `cc-hub task artifact add/list ...` and `cc-hub task todos set/check/uncheck/clear ...`
+- `cc-hub pr create/show/approve/request-changes/comment/merge/finalize ...`
+- `cc-hub project list [--json]`
 
 Project state lives at `~/.cc-hub/projects.toml` and
 `~/.cc-hub/projects/<id>/tasks/<id>/state.json`; worktrees are placed under
@@ -160,7 +164,7 @@ status_msg_ttl_secs = 5
 # prompt is abandoned.
 pending_dispatch_timeout_secs = 60
 # Grid cell dimensions (rows, columns of terminal cells per card).
-cell_height = 8
+cell_height = 7
 cell_width = 42
 
 [metrics]
@@ -213,6 +217,8 @@ ttl_secs = 600
 # forgets it (the session itself is not killed; this only bounds the
 # blocking-spawn timeout when applicable).
 run_timeout_secs = 1800
+# Max PR comments rendered into the reviewer briefing.
+max_comments_in_prompt = 8
 ```
 
 Only the sections/fields you want to override need to be present — omit
