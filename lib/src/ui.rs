@@ -508,23 +508,41 @@ fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
     // registry-level project removal, project-task deletion, orchestrator
     // restart, and session close. Project-delete wins precedence because
     // it's the biggest blast radius if multiple actions somehow got staged.
-    let (title, display, action_color) = if let Some(pending) = &app.pending_project_delete {
-        (" Delete project? ", pending.display.clone(), Color::Red)
-    } else if let Some(pending) = &app.pending_task_delete {
-        (" Delete task? ", pending.display.clone(), Color::Red)
-    } else if let Some(pending) = &app.pending_task_restart {
+    let (title, display, consequence, action_color) = if let Some(pending) =
+        app.pending_project_delete.as_ref()
+    {
+        (
+            " Delete project? ",
+            pending.display.clone(),
+            "Removes this project from cc-hub and deletes its hub state. The repository directory is not deleted.",
+            Color::Red,
+        )
+    } else if let Some(pending) = app.pending_task_delete.as_ref() {
+        (
+            " Delete task? ",
+            pending.display.clone(),
+            "Kills the orchestrator if it is live and removes this task's state directory. Worker sessions are left alone.",
+            Color::Red,
+        )
+    } else if let Some(pending) = app.pending_task_restart.as_ref() {
         (
             " Restart orchestrator? ",
             pending.display.clone(),
+            "Kills the current orchestrator if it is live, then starts a new one from the original task prompt. Task history is preserved.",
             Color::Yellow,
         )
-    } else if let Some(pending) = &app.pending_close {
-        (" Close terminal? ", pending.display.clone(), Color::Red)
+    } else if let Some(pending) = app.pending_close.as_ref() {
+        (
+            " Close terminal? ",
+            pending.display.clone(),
+            "Closes the OS terminal window hosting this session when the platform can resolve it. The tmux session may survive.",
+            Color::Red,
+        )
     } else {
         return;
     };
 
-    let popup = centered_fixed(area, 72, 5);
+    let popup = centered_fixed(area, 76, 8);
     frame.render_widget(Clear, popup);
 
     let block = popup_block(Span::styled(
@@ -554,9 +572,13 @@ fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
             ),
         ]),
         Line::raw(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(consequence, Style::default().fg(Color::Rgb(170, 170, 185))),
+        ]),
     ];
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn render_title_bar(frame: &mut Frame, area: Rect, app: &App) {
@@ -2000,8 +2022,19 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
-    let hint =
-        " esc/r:close   j/k:artifact   e:expand   PgUp/PgDn:scroll   c:copy path   o:xdg-open ";
+    let artifact_pos = if t.artifacts.is_empty() {
+        "artifact —".to_string()
+    } else {
+        format!(
+            "artifact {}/{}",
+            app.result_artifact_sel.min(t.artifacts.len() - 1) + 1,
+            t.artifacts.len()
+        )
+    };
+    let hint = format!(
+        " {}   esc/r:close   j/k:artifact   e:expand   PgUp/PgDn:scroll   c:copy path   o:xdg-open ",
+        artifact_pos
+    );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             hint,
@@ -2986,6 +3019,8 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
         " P·R·Rv·M·D  ",
         Style::default().fg(Color::Rgb(110, 110, 130)).bg(BAND_BG),
     ));
+    let mut selected_start: usize = 0;
+    let mut selected_end: usize = 0;
     for (idx, p) in snap.projects.iter().enumerate() {
         let tasks = snap.tasks.get(&p.id);
         let mut planning = 0usize;
@@ -3035,6 +3070,9 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             Color::Rgb(120, 120, 140)
         };
+        if selected {
+            selected_start = spans.iter().map(|s| s.content.chars().count()).sum();
+        }
         spans.push(Span::styled(
             label,
             Style::default()
@@ -3062,8 +3100,22 @@ fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App) {
             ));
         }
         spans.push(Span::styled(" ", band));
+        if selected {
+            selected_end = spans.iter().map(|s| s.content.chars().count()).sum();
+        }
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)).style(band), chip_row);
+    let visible_w = chip_row.width as usize;
+    let chip_scroll = if selected_end > visible_w {
+        selected_start.saturating_sub(4).min(u16::MAX as usize) as u16
+    } else {
+        0
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(spans))
+            .style(band)
+            .scroll((0, chip_scroll)),
+        chip_row,
+    );
 
     if let (Some(row), Some(p)) = (path_row, app.selected_project()) {
         let root = p.root.display().to_string();
@@ -3148,6 +3200,27 @@ fn render_kanban_column(
     let tasks = app.kanban_column_tasks(col_idx);
     let count = tasks.len();
     let col_focused = app.projects_col == col_idx;
+    // Planning + Running show tall rich cards (orchestrator is alive,
+    // there's live state to display); Review/Merging/Done get compact
+    // cards since they're terminal states from the UI's POV.
+    let card_height: u16 = if col_idx <= 1 { 6 } else { 4 };
+    let gap: u16 = 1;
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    let max_cards =
+        ((inner.height as u32 + gap as u32) / (card_height as u32 + gap as u32)) as usize;
+    let sel = if count == 0 {
+        0
+    } else if col_focused {
+        app.projects_task_sel.min(count - 1)
+    } else {
+        0
+    };
+    let scroll_top = if count == 0 || max_cards == 0 || sel < max_cards {
+        0
+    } else {
+        sel + 1 - max_cards
+    };
+    let hidden_below = count.saturating_sub(scroll_top.saturating_add(max_cards));
     // Only the Merging column needs the lock-holder lookup — collapsed
     // cards in other columns ignore it.
     let merging_holder_id: Option<&str> = if col_idx == 3 {
@@ -3174,7 +3247,7 @@ fn render_kanban_column(
             Style::default().fg(Color::Rgb(150, 150, 170)),
         )
     };
-    let title = Line::from(vec![
+    let mut title_spans = vec![
         Span::raw(" "),
         Span::styled(format!("{} ", icon), Style::default().fg(accent)),
         Span::styled(label.to_string(), title_style),
@@ -3182,45 +3255,39 @@ fn render_kanban_column(
             format!(" ({}) ", count),
             Style::default().fg(Color::Rgb(140, 140, 165)),
         ),
-    ]);
+    ];
+    if scroll_top > 0 || hidden_below > 0 {
+        let last_visible = scroll_top.saturating_add(max_cards).min(count);
+        title_spans.push(Span::styled(
+            format!(" · {}-{} ", scroll_top + 1, last_visible),
+            Style::default().fg(Color::Rgb(110, 110, 130)),
+        ));
+    }
+    let title = Line::from(title_spans);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(border_type)
         .border_style(border_style)
         .title(title);
-    let inner = block.inner(area);
     frame.render_widget(block, area);
 
     if tasks.is_empty() {
+        let empty_hint = match col_idx {
+            0 => "No planning tasks",
+            1 => "No active workers",
+            2 => "No reviews pending",
+            3 => "No merges queued",
+            _ => "No completed tasks",
+        };
         let hint = Paragraph::new(Line::from(Span::styled(
-            "— empty —",
+            empty_hint,
             Style::default().fg(Color::Rgb(70, 70, 90)),
         )))
         .alignment(Alignment::Center);
         frame.render_widget(hint, inner);
         return;
     }
-
-    // Planning + Running show tall rich cards (orchestrator is alive,
-    // there's live state to display); Review/Merging/Done get compact
-    // 3-line cards since they're terminal states from the UI's POV.
-    let card_height: u16 = if col_idx <= 1 { 6 } else { 4 };
-    let gap: u16 = 1;
-    let max_cards =
-        ((inner.height as u32 + gap as u32) / (card_height as u32 + gap as u32)) as usize;
-
-    // Anchor the cursor: keep the selected card visible by scrolling.
-    let sel = if col_focused {
-        app.projects_task_sel.min(count - 1)
-    } else {
-        0
-    };
-    let scroll_top = if max_cards == 0 || sel < max_cards {
-        0
-    } else {
-        sel + 1 - max_cards
-    };
 
     let mut y = inner.y;
     for (rel, t) in tasks.iter().enumerate().skip(scroll_top).take(max_cards) {
@@ -3749,7 +3816,7 @@ fn render_task_card_collapsed(
     let short_id = crate::orchestrator::short_task_id(&t.task_id);
     let prompt_max = (area.width as usize).saturating_sub(8);
     let header_text = task_card_header_text(t, titling_in_flight, prompt_max);
-    let title_spans = vec![
+    let mut title_spans = vec![
         Span::styled(format!(" {} ", icon), Style::default().fg(icon_accent)),
         Span::styled(
             header_text,
@@ -3761,8 +3828,24 @@ fn render_task_card_collapsed(
                     Modifier::empty()
                 }),
         ),
-        Span::raw(" "),
     ];
+    if queued {
+        title_spans.push(Span::styled(
+            " queued ",
+            Style::default()
+                .fg(Color::Rgb(170, 170, 185))
+                .bg(Color::Rgb(45, 45, 55)),
+        ));
+    } else if col_idx == 3 && lock_holder == Some(t.task_id.as_str()) {
+        title_spans.push(Span::styled(
+            " merging ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Rgb(190, 145, 210))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    title_spans.push(Span::raw(" "));
     let title = Line::from(title_spans);
 
     let block = Block::default()

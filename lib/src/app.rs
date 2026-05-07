@@ -460,16 +460,30 @@ impl App {
         }
     }
 
-    /// Cycle through projects (top chip strip).
+    /// Cycle through projects (top chip strip), wrapping at the ends. Clamp
+    /// the task cursor against the newly-focused project immediately so the
+    /// kanban never lands on an out-of-range row or an empty column with a
+    /// non-empty neighbor.
     pub fn projects_move_down(&mut self) {
-        if self.projects.projects.is_empty() {
+        let n = self.projects.projects.len();
+        if n == 0 {
             return;
         }
-        self.projects_sel = (self.projects_sel + 1).min(self.projects.projects.len() - 1);
+        self.projects_sel = (self.projects_sel + 1) % n;
+        self.clamp_projects_cursor_jump_if_empty();
     }
 
     pub fn projects_move_up(&mut self) {
-        self.projects_sel = self.projects_sel.saturating_sub(1);
+        let n = self.projects.projects.len();
+        if n == 0 {
+            return;
+        }
+        self.projects_sel = if self.projects_sel == 0 {
+            n - 1
+        } else {
+            self.projects_sel - 1
+        };
+        self.clamp_projects_cursor_jump_if_empty();
     }
 
     /// Move cursor down within the current kanban column.
@@ -1721,11 +1735,17 @@ mod tests {
     }
 
     fn snapshot(p: Project, tasks: Vec<TaskState>) -> ProjectsSnapshot {
+        snapshot_many(vec![(p, tasks)])
+    }
+
+    fn snapshot_many(projects: Vec<(Project, Vec<TaskState>)>) -> ProjectsSnapshot {
         let mut snap = ProjectsSnapshot::empty();
-        let pid = p.id.clone();
-        snap.projects.push(p);
-        snap.tasks
-            .insert(pid, tasks.into_iter().map(Arc::new).collect());
+        for (p, tasks) in projects {
+            let pid = p.id.clone();
+            snap.projects.push(p);
+            snap.tasks
+                .insert(pid, tasks.into_iter().map(Arc::new).collect());
+        }
         snap
     }
 
@@ -1930,6 +1950,45 @@ mod tests {
             "column should stay where it was when task disappears",
         );
         assert_eq!(app.projects_task_sel, 0, "row should clamp to 0");
+    }
+
+    #[test]
+    fn project_chip_cycle_wraps_and_clamps_to_new_project_tasks() {
+        let mut app = App::new();
+        app.current_tab = Tab::Projects;
+
+        let p1 = project("p-1");
+        let p2 = project("p-2");
+        app.update_projects(snapshot_many(vec![
+            (p1, vec![task("p-1", "t-review", TaskStatus::Review, false)]),
+            (p2, vec![task("p-2", "t-plan", TaskStatus::Running, false)]),
+        ]));
+
+        assert_eq!(app.projects_sel, 0);
+        assert_eq!(app.projects_col, 2, "first project starts in Review");
+        assert_eq!(
+            app.selected_project_task().map(|t| t.task_id.as_str()),
+            Some("t-review")
+        );
+
+        app.projects_move_down();
+        assert_eq!(app.projects_sel, 1);
+        assert_eq!(
+            app.projects_col, 0,
+            "switching projects should jump from empty Review to Planning"
+        );
+        assert_eq!(
+            app.selected_project_task().map(|t| t.task_id.as_str()),
+            Some("t-plan")
+        );
+
+        app.projects_move_down();
+        assert_eq!(app.projects_sel, 0, "L/]/down wraps to first project");
+        assert_eq!(app.projects_col, 2);
+
+        app.projects_move_up();
+        assert_eq!(app.projects_sel, 1, "H/[/up wraps to last project");
+        assert_eq!(app.projects_col, 0);
     }
 
     #[test]
