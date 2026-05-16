@@ -152,6 +152,7 @@ Usage:
   cc-hub pr show --task ID
   cc-hub pr approve --task ID
   cc-hub pr request-changes --task ID --comment TEXT [--author NAME]
+  cc-hub pr reopen --task ID [--comment TEXT] [--author NAME]
   cc-hub pr comment --task ID --comment TEXT [--author NAME]
   cc-hub pr merge --task ID
   cc-hub pr finalize --task ID [--build-cmd CMD] [--skip-build] [--keep-tmux]
@@ -1257,6 +1258,7 @@ fn task_create(args: &[String]) -> Result<(), CliError> {
 //
 //   pr create   → task: Running → Review,  PR: (new, Open)
 //   pr request-changes → task: Review → Running, PR: ChangesRequested
+//   pr reopen   → task: Running → Review, PR: ChangesRequested → Open
 //   pr approve  → PR: Open|ChangesRequested → Approved (task stays Review)
 //   pr merge    → acquires merge.lock, merges main → branch then branch →
 //                 main; lock stays held; task: Review → Merging
@@ -1267,7 +1269,7 @@ fn task_create(args: &[String]) -> Result<(), CliError> {
 fn pr_subcommand(args: &[String]) -> Result<(), CliError> {
     let (verb, rest) = args.split_first().ok_or_else(|| {
         CliError::Usage(
-            "pr <verb>: missing verb (try `create`, `show`, `approve`, `request-changes`, `comment`, `merge`, `finalize`)".into(),
+            "pr <verb>: missing verb (try `create`, `show`, `approve`, `request-changes`, `reopen`, `comment`, `merge`, `finalize`)".into(),
         )
     })?;
     match verb.as_str() {
@@ -1275,11 +1277,12 @@ fn pr_subcommand(args: &[String]) -> Result<(), CliError> {
         "show" => pr_show(rest),
         "approve" => pr_approve(rest),
         "request-changes" => pr_request_changes(rest),
+        "reopen" => pr_reopen(rest),
         "comment" => pr_comment(rest),
         "merge" => pr_merge(rest),
         "finalize" => pr_finalize(rest),
         other => Err(CliError::Usage(format!(
-            "unknown pr verb: {} (try `create`, `show`, `approve`, `request-changes`, `comment`, `merge`, `finalize`)",
+            "unknown pr verb: {} (try `create`, `show`, `approve`, `request-changes`, `reopen`, `comment`, `merge`, `finalize`)",
             other
         ))),
     }
@@ -1426,6 +1429,53 @@ fn pr_request_changes(args: &[String]) -> Result<(), CliError> {
     orchestrator::update_task_state(&project_id, &task_id, |s| {
         s.status = TaskStatus::Running;
         s.note = Some(format!("PR #{}: changes requested", pr.id));
+    })
+    .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
+
+    print_json(&serde_json::json!({
+        "ok": true,
+        "pr": pr_to_json(&pr),
+    }));
+    Ok(())
+}
+
+fn pr_reopen(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+    let comment = f.comment.clone();
+    let author = f.author.clone().unwrap_or_else(|| "orchestrator".into());
+
+    let pr = cc_hub_lib::pr::read_pr(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
+        .ok_or_else(|| CliError::Other("no PR for this task".into()))?;
+
+    if pr.review_state != cc_hub_lib::pr::ReviewState::ChangesRequested {
+        return Err(CliError::Other(format!(
+            "PR is not in changes_requested (state: {}); reopen only applies after request-changes",
+            pr.review_state.as_str()
+        )));
+    }
+
+    let now = orchestrator::now_unix_secs();
+    let pr = cc_hub_lib::pr::update_pr(&project_id, &task_id, |p| {
+        p.review_state = cc_hub_lib::pr::ReviewState::Open;
+        if let Some(body) = comment.clone() {
+            p.comments.push(cc_hub_lib::pr::Comment {
+                author: author.clone(),
+                at: now,
+                body,
+            });
+        }
+    })
+    .map_err(|e| CliError::Other(format!("update pr: {}", e)))?;
+
+    // Re-opened PR → task transitions Running → Review and auto-review
+    // should re-fire on the new commits (mirror pr_create precedent).
+    orchestrator::update_task_state(&project_id, &task_id, |s| {
+        s.status = TaskStatus::Review;
+        s.note = Some(format!("PR #{}: reopened for re-review", pr.id));
+        s.last_auto_reviewed_at = None;
     })
     .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
 
@@ -2337,6 +2387,74 @@ mod tests {
             // detached `sh -c sleep …; tmux …`). Asserting Done + Merged is
             // the user-visible signal; whether cleanup_task_sessions ran is
             // an integration concern.
+        });
+    }
+
+    #[test]
+    fn pr_reopen_flips_changes_requested_to_open() {
+        with_tempdir_home(|| {
+            let project_id = "p1".to_string();
+            let task_id = "t-reopen".to_string();
+
+            let mut state = TaskState::new(
+                project_id.clone(),
+                PathBuf::from("/tmp/proj"),
+                "do thing".into(),
+            );
+            state.task_id = task_id.clone();
+            state.status = TaskStatus::Review;
+            orchestrator::write_task_state(&state).expect("write state");
+
+            pr::create_pr(
+                &state,
+                "feature".into(),
+                "main".into(),
+                "title".into(),
+                "desc".into(),
+            )
+            .expect("create pr");
+
+            pr::update_pr(&project_id, &task_id, |p| {
+                p.review_state = pr::ReviewState::ChangesRequested;
+            })
+            .expect("set changes_requested");
+            orchestrator::update_task_state(&project_id, &task_id, |s| {
+                s.status = TaskStatus::Running;
+            })
+            .expect("set running");
+
+            let code = dispatch(&[
+                "pr".into(),
+                "reopen".into(),
+                "--task".into(),
+                task_id.clone(),
+                "--project-id".into(),
+                project_id.clone(),
+                "--comment".into(),
+                "fixed it".into(),
+            ]);
+            assert_eq!(code, Some(0), "dispatch should succeed");
+
+            let after_pr = pr::read_pr(&project_id, &task_id)
+                .expect("read pr")
+                .expect("pr present");
+            assert_eq!(after_pr.review_state, pr::ReviewState::Open);
+            let last = after_pr.comments.last().expect("comment appended");
+            assert_eq!(last.author, "orchestrator");
+            assert_eq!(last.body, "fixed it");
+
+            let after_state =
+                orchestrator::read_task_state(&project_id, &task_id).expect("read state");
+            assert_eq!(after_state.status, TaskStatus::Review);
+            assert!(
+                after_state
+                    .note
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("reopened for re-review"),
+                "note should mention reopen, got {:?}",
+                after_state.note
+            );
         });
     }
 }
