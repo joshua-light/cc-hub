@@ -427,6 +427,7 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
         sel + 1 - visible_tasks
     };
     let mut lines: Vec<Line> = Vec::with_capacity(visible_tasks * rows_per_task);
+    let now_secs = now_ms() / 1000;
     for (i, t) in tasks
         .iter()
         .enumerate()
@@ -451,10 +452,14 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(title_text, title_style),
         ]));
         let id_short = crate::orchestrator::short_task_id(&t.task_id);
-        let preview = first_line_preview(&t.prompt, max_w.saturating_sub(id_short.len() + 6));
+        let age_secs = now_secs.saturating_sub(t.created_at as u64);
+        let age = format!("{:>4}", format_age_short(age_secs));
+        let preview = first_line_preview(&t.prompt, max_w.saturating_sub(id_short.len() + 12));
         lines.push(Line::from(vec![
             Span::raw("    "),
             Span::styled(id_short, Style::default().fg(Color::DarkGray)),
+            Span::styled("  ", Style::default()),
+            Span::styled(age, Style::default().fg(TASK_META_DIM)),
             Span::styled("  ", Style::default()),
             Span::styled(preview, Style::default().fg(Color::Rgb(110, 110, 130))),
         ]));
@@ -3976,6 +3981,18 @@ fn format_age(secs: u64) -> String {
         format!("{}h ago", secs / 3600)
     } else {
         format!("{}d ago", secs / 86400)
+    }
+}
+
+fn format_age_short(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
     }
 }
 
