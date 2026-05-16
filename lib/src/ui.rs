@@ -5357,7 +5357,6 @@ mod kanban_card_tests {
         let t = task_with_todos(TaskStatus::Running, 0, 0);
         let pr = pr_summary(42, crate::pr::ReviewState::ChangesRequested, 3);
         let plain = render_active(&t, Some(&pr), 1);
-        println!("\n=== active card · changes_requested ===\n{}", plain);
         assert!(
             plain.contains("PR #42") && plain.contains("changes requested"),
             "changes_requested badge missing:\n{}",
@@ -5371,7 +5370,6 @@ mod kanban_card_tests {
         let t = task_with_todos(TaskStatus::Review, 0, 0);
         let pr = pr_summary(7, crate::pr::ReviewState::Open, 2);
         let plain = render_collapsed(&t, Some(&pr), 2);
-        println!("\n=== review card · open + 2 comments ===\n{}", plain);
         assert!(plain.contains("PR #7"), "PR id missing:\n{}", plain);
         assert!(
             plain.contains("2"),
@@ -5385,7 +5383,6 @@ mod kanban_card_tests {
         let t = task_with_todos(TaskStatus::Review, 0, 0);
         let pr = pr_summary(9, crate::pr::ReviewState::Open, 0);
         let plain = render_collapsed(&t, Some(&pr), 2);
-        println!("\n=== review card · open + no comments ===\n{}", plain);
         assert!(plain.contains("PR #9"), "PR id missing:\n{}", plain);
         assert!(
             plain.contains("open"),
