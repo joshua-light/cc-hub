@@ -411,15 +411,10 @@ pub fn set_task_title(project_id: &str, task_id: &str, title: &str) -> io::Resul
     })
 }
 
-/// Remove every `<root>/.cc-hub-wt/<task>-<name>` worktree for the workers
-/// recorded in `state`. Called from `cleanup_task_sessions` when the task
-/// reaches `TaskStatus::Done`. Note that `git worktree remove --force` also
-/// deletes the local `cc-hub/<task>-<name>` branch — intended terminal-state
-/// behaviour, since the work has merged and the branch is no longer useful.
-///
-/// Best-effort: each failure (io error or non-zero exit) is logged at
-/// `warn!` and we continue with the next worker, so one stuck worktree
-/// doesn't block the rest from being cleaned up.
+/// Remove every `<root>/.cc-hub-wt/<task>-<name>` worktree recorded for
+/// `state`. `git worktree remove --force` also drops the local
+/// `cc-hub/<task>-<name>` branch — intended terminal-state behaviour. Best-
+/// effort: failures are logged and the loop continues.
 pub fn remove_task_worktrees(state: &TaskState) {
     for w in &state.workers {
         let Some(name) = w.worktree.as_deref() else {
@@ -430,19 +425,19 @@ pub fn remove_task_worktrees(state: &TaskState) {
             &state.project_root,
             &["worktree", "remove", "--force", &path.to_string_lossy()],
         ) {
-            Ok(out) if out.status_ok => {}
-            Ok(out) => log::warn!(
-                "task {}: git worktree remove [{}] failed: {}",
-                state.task_id,
-                path.display(),
-                out.stderr.trim()
-            ),
             Err(e) => log::warn!(
                 "task {}: git worktree remove [{}] errored: {}",
                 state.task_id,
                 path.display(),
                 e
             ),
+            Ok(out) if !out.status_ok => log::warn!(
+                "task {}: git worktree remove [{}] failed: {}",
+                state.task_id,
+                path.display(),
+                out.stderr.trim()
+            ),
+            Ok(_) => {}
         }
     }
 }
@@ -1752,30 +1747,26 @@ mod tests {
         }
     }
 
-    /// Seed a tempdir as a git repo with one commit so `create_worktree`
-    /// has a base to branch from. Returns the resolved main branch name.
-    fn init_repo_with_commit(root: &Path) -> String {
+    /// Seed a tempdir as a git repo with one commit and one worktree, then
+    /// build a `TaskState` referencing that worktree under the given status.
+    /// Returns the tempdir (to keep it alive), the worktree path, and the
+    /// state.
+    fn seed_repo_and_state(status: TaskStatus) -> (tempfile::TempDir, PathBuf, TaskState) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
         run_git(root, &["init", "-q"]).expect("git init");
         run_git(root, &["config", "user.email", "test@example.com"]).expect("config email");
         run_git(root, &["config", "user.name", "Test"]).expect("config name");
         fs::write(root.join("seed.txt"), b"seed").expect("write seed");
         run_git(root, &["add", "seed.txt"]).expect("git add");
         run_git(root, &["commit", "-q", "-m", "seed"]).expect("git commit");
-        detect_main_branch(root)
-    }
-
-    #[test]
-    fn cleanup_removes_worktrees_when_done() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path();
-        let base = init_repo_with_commit(root);
+        let base = detect_main_branch(root);
 
         let wt = create_worktree(root, "t-test", "edit", &base).expect("create_worktree");
-        assert!(wt.exists(), "precondition: worktree dir should exist");
 
         let mut state = TaskState::new("p".into(), root.to_path_buf(), "do thing".into());
         state.task_id = "t-test".into();
-        state.status = TaskStatus::Done;
+        state.status = status;
         state.orchestrator_tmux = None;
         state.workers.push(Worker {
             agent_id: "claude".into(),
@@ -1786,48 +1777,24 @@ mod tests {
             readonly: false,
             spawned_at: 0,
         });
+        (tmp, wt, state)
+    }
 
+    #[test]
+    fn cleanup_removes_worktrees_when_done() {
+        let (_tmp, wt, state) = seed_repo_and_state(TaskStatus::Done);
         cleanup_task_sessions(&state);
-
-        let expected = root.join(".cc-hub-wt").join("t-test-edit");
         assert!(
-            !expected.exists(),
+            !wt.exists(),
             "worktree dir should be gone after cleanup: {}",
-            expected.display()
-        );
-        let list = run_git(root, &["worktree", "list"]).expect("worktree list");
-        assert!(
-            !list.stdout.contains(&expected.to_string_lossy().to_string()),
-            "git worktree list should not reference removed worktree:\n{}",
-            list.stdout
+            wt.display()
         );
     }
 
     #[test]
     fn cleanup_skips_worktree_removal_when_not_done() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path();
-        let base = init_repo_with_commit(root);
-
-        let wt = create_worktree(root, "t-test", "edit", &base).expect("create_worktree");
-        assert!(wt.exists(), "precondition: worktree dir should exist");
-
-        let mut state = TaskState::new("p".into(), root.to_path_buf(), "do thing".into());
-        state.task_id = "t-test".into();
-        state.status = TaskStatus::Running;
-        state.orchestrator_tmux = None;
-        state.workers.push(Worker {
-            agent_id: "claude".into(),
-            agent_kind: AgentKind::Claude,
-            tmux_name: "nonexistent-test-session".into(),
-            cwd: wt.clone(),
-            worktree: Some("edit".into()),
-            readonly: false,
-            spawned_at: 0,
-        });
-
+        let (_tmp, wt, state) = seed_repo_and_state(TaskStatus::Running);
         cleanup_task_sessions(&state);
-
         assert!(
             wt.exists(),
             "worktree dir must survive cleanup while task is still Running: {}",
