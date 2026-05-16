@@ -5286,4 +5286,118 @@ mod kanban_card_tests {
             plain
         );
     }
+
+    fn pr_summary(
+        id: u32,
+        state: crate::pr::ReviewState,
+        comments: u16,
+    ) -> crate::projects_scan::PrCardSummary {
+        crate::projects_scan::PrCardSummary {
+            id,
+            review_state: state,
+            comments,
+        }
+    }
+
+    fn render_active(
+        t: &TaskState,
+        pr: Option<&crate::projects_scan::PrCardSummary>,
+        col_idx: usize,
+    ) -> String {
+        let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
+        let backend = TestBackend::new(70, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_active(
+                    f,
+                    f.area(),
+                    t,
+                    false,
+                    col_idx,
+                    &sessions,
+                    pr,
+                    1_000_000_000,
+                    false,
+                )
+            })
+            .expect("render");
+        buffer_to_string(terminal.backend().buffer())
+    }
+
+    fn render_collapsed(
+        t: &TaskState,
+        pr: Option<&crate::projects_scan::PrCardSummary>,
+        col_idx: usize,
+    ) -> String {
+        let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
+        let backend = TestBackend::new(70, 6);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_collapsed(
+                    f,
+                    f.area(),
+                    t,
+                    false,
+                    col_idx,
+                    &sessions,
+                    pr,
+                    1_000_000_000,
+                    false,
+                    None,
+                )
+            })
+            .expect("render");
+        buffer_to_string(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn active_card_shows_pr_changes_requested_badge() {
+        let t = task_with_todos(TaskStatus::Running, 0, 0);
+        let pr = pr_summary(42, crate::pr::ReviewState::ChangesRequested, 3);
+        let plain = render_active(&t, Some(&pr), 1);
+        println!("\n=== active card · changes_requested ===\n{}", plain);
+        assert!(
+            plain.contains("PR #42") && plain.contains("changes requested"),
+            "changes_requested badge missing:\n{}",
+            plain
+        );
+        assert!(plain.contains("3"), "comment count missing:\n{}", plain);
+    }
+
+    #[test]
+    fn collapsed_card_shows_pr_open_with_comment_count() {
+        let t = task_with_todos(TaskStatus::Review, 0, 0);
+        let pr = pr_summary(7, crate::pr::ReviewState::Open, 2);
+        let plain = render_collapsed(&t, Some(&pr), 2);
+        println!("\n=== review card · open + 2 comments ===\n{}", plain);
+        assert!(plain.contains("PR #7"), "PR id missing:\n{}", plain);
+        assert!(
+            plain.contains("2"),
+            "comment count missing on open PR:\n{}",
+            plain
+        );
+    }
+
+    #[test]
+    fn collapsed_card_open_without_comments_shows_open_label() {
+        let t = task_with_todos(TaskStatus::Review, 0, 0);
+        let pr = pr_summary(9, crate::pr::ReviewState::Open, 0);
+        let plain = render_collapsed(&t, Some(&pr), 2);
+        println!("\n=== review card · open + no comments ===\n{}", plain);
+        assert!(plain.contains("PR #9"), "PR id missing:\n{}", plain);
+        assert!(
+            plain.contains("open"),
+            "open label missing when no comments:\n{}",
+            plain
+        );
+    }
+
+    #[test]
+    fn active_card_omits_pr_badge_when_no_pr() {
+        let t = task_with_todos(TaskStatus::Running, 0, 0);
+        let plain = render_active(&t, None, 1);
+        assert!(!plain.contains("PR #"), "no PR ⇒ no badge:\n{}", plain);
+    }
 }
