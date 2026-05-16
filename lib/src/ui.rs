@@ -435,10 +435,12 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
     {
         let selected = i == sel;
         let arrow = if selected { "▌ " } else { "  " };
-        let title_text = match t.title.as_deref().filter(|s| !s.is_empty()) {
-            Some(name) => name.to_string(),
-            None => first_line_preview(&t.prompt, max_w),
-        };
+        let has_title = t
+            .title
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        let id_short = crate::orchestrator::short_task_id(&t.task_id);
         let title_style = if selected {
             Style::default()
                 .fg(Color::White)
@@ -446,18 +448,32 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             Style::default().fg(Color::Gray)
         };
-        lines.push(Line::from(vec![
-            Span::styled(arrow, Style::default().fg(Color::Rgb(120, 140, 200))),
-            Span::styled(title_text, title_style),
-        ]));
-        let id_short = crate::orchestrator::short_task_id(&t.task_id);
-        let preview = first_line_preview(&t.prompt, max_w.saturating_sub(id_short.len() + 6));
-        lines.push(Line::from(vec![
-            Span::raw("    "),
-            Span::styled(id_short, Style::default().fg(Color::DarkGray)),
-            Span::styled("  ", Style::default()),
-            Span::styled(preview, Style::default().fg(Color::Rgb(110, 110, 130))),
-        ]));
+        if has_title {
+            let title_text = t.title.as_deref().unwrap().to_string();
+            lines.push(Line::from(vec![
+                Span::styled(arrow, Style::default().fg(Color::Rgb(120, 140, 200))),
+                Span::styled(title_text, title_style),
+            ]));
+            let preview =
+                first_line_preview(&t.prompt, max_w.saturating_sub(id_short.len() + 6));
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(id_short, Style::default().fg(Color::DarkGray)),
+                Span::styled("  ", Style::default()),
+                Span::styled(preview, Style::default().fg(Color::Rgb(110, 110, 130))),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(arrow, Style::default().fg(Color::Rgb(120, 140, 200))),
+                Span::styled(format!("#{}", id_short), title_style),
+                Span::styled(" · pending title", Style::default().fg(Color::DarkGray)),
+            ]));
+            let preview = first_line_preview(&t.prompt, max_w);
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(preview, Style::default().fg(Color::Rgb(110, 110, 130))),
+            ]));
+        }
         lines.push(Line::from(""));
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
