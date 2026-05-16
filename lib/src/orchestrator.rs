@@ -411,6 +411,37 @@ pub fn set_task_title(project_id: &str, task_id: &str, title: &str) -> io::Resul
     })
 }
 
+/// Remove every `<root>/.cc-hub-wt/<task>-<name>` worktree recorded for
+/// `state`. `git worktree remove --force` also drops the local
+/// `cc-hub/<task>-<name>` branch — intended terminal-state behaviour. Best-
+/// effort: failures are logged and the loop continues.
+pub fn remove_task_worktrees(state: &TaskState) {
+    for w in &state.workers {
+        let Some(name) = w.worktree.as_deref() else {
+            continue;
+        };
+        let path = worktree_path(&state.project_root, &state.task_id, name);
+        match run_git(
+            &state.project_root,
+            &["worktree", "remove", "--force", &path.to_string_lossy()],
+        ) {
+            Err(e) => log::warn!(
+                "task {}: git worktree remove [{}] errored: {}",
+                state.task_id,
+                path.display(),
+                e
+            ),
+            Ok(out) if !out.status_ok => log::warn!(
+                "task {}: git worktree remove [{}] failed: {}",
+                state.task_id,
+                path.display(),
+                out.stderr.trim()
+            ),
+            Ok(_) => {}
+        }
+    }
+}
+
 /// Tear down every tmux session associated with a finished task: workers
 /// immediately, orchestrator after a short delay. The orchestrator is
 /// almost always the calling process when this runs from the CLI (a Claude
@@ -434,6 +465,9 @@ pub fn cleanup_task_sessions(state: &TaskState) {
                 e
             );
         }
+    }
+    if state.status == TaskStatus::Done {
+        remove_task_worktrees(state);
     }
     if let Some(orch) = state.orchestrator_tmux.as_deref() {
         // tmux session names from `spawn_claude_session` are alphanumeric +
@@ -1823,5 +1857,60 @@ mod tests {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    /// Seed a tempdir as a git repo with one commit and one worktree, then
+    /// build a `TaskState` referencing that worktree under the given status.
+    /// Returns the tempdir (to keep it alive), the worktree path, and the
+    /// state.
+    fn seed_repo_and_state(status: TaskStatus) -> (tempfile::TempDir, PathBuf, TaskState) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        run_git(root, &["init", "-q"]).expect("git init");
+        run_git(root, &["config", "user.email", "test@example.com"]).expect("config email");
+        run_git(root, &["config", "user.name", "Test"]).expect("config name");
+        fs::write(root.join("seed.txt"), b"seed").expect("write seed");
+        run_git(root, &["add", "seed.txt"]).expect("git add");
+        run_git(root, &["commit", "-q", "-m", "seed"]).expect("git commit");
+        let base = detect_main_branch(root);
+
+        let wt = create_worktree(root, "t-test", "edit", &base).expect("create_worktree");
+
+        let mut state = TaskState::new("p".into(), root.to_path_buf(), "do thing".into());
+        state.task_id = "t-test".into();
+        state.status = status;
+        state.orchestrator_tmux = None;
+        state.workers.push(Worker {
+            agent_id: "claude".into(),
+            agent_kind: AgentKind::Claude,
+            tmux_name: "nonexistent-test-session".into(),
+            cwd: wt.clone(),
+            worktree: Some("edit".into()),
+            readonly: false,
+            spawned_at: 0,
+        });
+        (tmp, wt, state)
+    }
+
+    #[test]
+    fn cleanup_removes_worktrees_when_done() {
+        let (_tmp, wt, state) = seed_repo_and_state(TaskStatus::Done);
+        cleanup_task_sessions(&state);
+        assert!(
+            !wt.exists(),
+            "worktree dir should be gone after cleanup: {}",
+            wt.display()
+        );
+    }
+
+    #[test]
+    fn cleanup_skips_worktree_removal_when_not_done() {
+        let (_tmp, wt, state) = seed_repo_and_state(TaskStatus::Running);
+        cleanup_task_sessions(&state);
+        assert!(
+            wt.exists(),
+            "worktree dir must survive cleanup while task is still Running: {}",
+            wt.display()
+        );
     }
 }
