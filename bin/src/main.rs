@@ -1329,37 +1329,38 @@ async fn run(
                             app.projects_sel = 0;
                             app.set_status(msg);
                         } else if let Some(pending) = app.take_pending_task_delete() {
-                            // Best-effort kill of the orchestrator tmux —
-                            // workers stay alive (their parent task is
-                            // gone, but the running claude is independent).
-                            let kill_result = pending
-                                .orchestrator_tmux
-                                .as_deref()
-                                .map(send::kill_tmux_session);
-                            // Remove the on-disk state so the Projects view
-                            // refreshes the entry away on next scan.
-                            let task_dir = cc_hub_lib::orchestrator::task_state_dir(
+                            let msg = match cc_hub_lib::orchestrator::delete_task(
                                 &pending.project_id,
                                 &pending.task_id,
-                            );
-                            let removal = task_dir.as_ref().map(std::fs::remove_dir_all);
-                            let kill_msg = match kill_result {
-                                Some(Ok(())) => "orchestrator killed",
-                                Some(Err(_)) => "orchestrator kill failed",
-                                None => "no orchestrator to kill",
-                            };
-                            let removal_msg = match removal {
-                                Some(Ok(())) => "state removed",
-                                Some(Err(e)) => {
-                                    log::warn!("task delete: rm state.json: {}", e);
-                                    "state removal failed"
+                            ) {
+                                Ok(d) => {
+                                    let kill = if d.orchestrator_killed {
+                                        "orch killed"
+                                    } else {
+                                        "no orch"
+                                    };
+                                    let wt = if d.worktrees_removed.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(
+                                            ", {} worktree{} removed",
+                                            d.worktrees_removed.len(),
+                                            if d.worktrees_removed.len() == 1 { "" } else { "s" }
+                                        )
+                                    };
+                                    let errs = if d.worktree_errors.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(", {} worktree error(s)", d.worktree_errors.len())
+                                    };
+                                    format!("deleted {} ({}{}{})", pending.display, kill, wt, errs)
                                 }
-                                None => "no state path",
+                                Err(e) => {
+                                    log::warn!("task delete: {}", e);
+                                    format!("delete failed: {}", e)
+                                }
                             };
-                            app.set_status(format!(
-                                "deleted {} ({}, {})",
-                                pending.display, kill_msg, removal_msg
-                            ));
+                            app.set_status(msg);
                         } else if let Some(pending) = app.take_pending_task_restart() {
                             match cc_hub_lib::orchestrator::restart_task(
                                 &pending.project_id,
