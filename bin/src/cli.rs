@@ -1203,24 +1203,37 @@ fn task_create(args: &[String]) -> Result<(), CliError> {
         .prompt
         .clone()
         .ok_or_else(|| CliError::Usage("--prompt is required".into()))?;
-    let cwd = std::env::current_dir().map_err(|e| CliError::Other(format!("cwd: {}", e)))?;
-    let project_id = f
-        .project_id
-        .clone()
-        .unwrap_or_else(|| orchestrator::project_id_for_path(&cwd));
-    let project_name = name.unwrap_or_else(|| {
-        cwd.file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| project_id.clone())
-    });
-
-    orchestrator::ensure_project_registered(&cwd, &project_name)
-        .map_err(|e| CliError::Other(format!("register project: {}", e)))?;
+    let (project_id, project_root) = if let Some(id) = f.project_id.clone() {
+        let projects = orchestrator::load_projects();
+        let root = projects
+            .projects
+            .into_iter()
+            .find(|p| p.id == id)
+            .map(|p| p.root)
+            .ok_or_else(|| {
+                CliError::Usage(format!(
+                    "--project-id {}: not registered in ~/.cc-hub/projects.toml",
+                    id
+                ))
+            })?;
+        (id, root)
+    } else {
+        let cwd = std::env::current_dir().map_err(|e| CliError::Other(format!("cwd: {}", e)))?;
+        let project_id = orchestrator::project_id_for_path(&cwd);
+        let project_name = name.unwrap_or_else(|| {
+            cwd.file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| project_id.clone())
+        });
+        orchestrator::ensure_project_registered(&cwd, &project_name)
+            .map_err(|e| CliError::Other(format!("register project: {}", e)))?;
+        (project_id, cwd)
+    };
 
     let state = if f.backlog {
-        TaskState::new_backlog(project_id.clone(), cwd, prompt)
+        TaskState::new_backlog(project_id.clone(), project_root, prompt)
     } else {
-        TaskState::new(project_id.clone(), cwd, prompt)
+        TaskState::new(project_id.clone(), project_root, prompt)
     };
     orchestrator::write_task_state(&state)
         .map_err(|e| CliError::Other(format!("write state: {}", e)))?;
@@ -2174,6 +2187,49 @@ mod tests {
                 "note should mention reopen, got {:?}",
                 after_state.note
             );
+        });
+    }
+
+    #[test]
+    fn task_create_with_project_id_uses_registered_root() {
+        with_tempdir_home(|| {
+            let file = orchestrator::ProjectsFile {
+                projects: vec![orchestrator::Project {
+                    id: "p1".into(),
+                    name: "p1".into(),
+                    root: PathBuf::from("/tmp/p1"),
+                    created_at: 0,
+                }],
+            };
+            orchestrator::save_projects(&file).expect("save");
+
+            task_create(&[
+                "--backlog".into(),
+                "--project-id".into(),
+                "p1".into(),
+                "--prompt".into(),
+                "foo".into(),
+            ])
+            .expect("task_create ok");
+
+            let tasks_dir = orchestrator::project_state_dir("p1")
+                .expect("dir")
+                .join("tasks");
+            let entries: Vec<_> = std::fs::read_dir(&tasks_dir)
+                .expect("read tasks dir")
+                .map(|e| e.expect("entry"))
+                .collect();
+            assert_eq!(entries.len(), 1, "expected exactly one task entry");
+            let task_id = entries[0].file_name().to_string_lossy().into_owned();
+
+            let state = orchestrator::read_task_state("p1", &task_id).expect("read state");
+            assert_eq!(state.project_root, PathBuf::from("/tmp/p1"));
+            assert_eq!(state.project_id, "p1");
+            assert_eq!(state.status, TaskStatus::Backlog);
+
+            let projects = orchestrator::load_projects();
+            assert_eq!(projects.projects.len(), 1);
+            assert_eq!(projects.projects[0].id, "p1");
         });
     }
 }
