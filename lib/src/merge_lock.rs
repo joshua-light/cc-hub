@@ -19,6 +19,10 @@
 //! `/simplify` + `/bump` to `cc-hub pr finalize`. /simplify and /bump touch
 //! `main` directly (Cargo.toml, lockfiles), so they must inherit the same
 //! exclusion the merge itself enforced.
+//!
+//! The lock also tracks the current sub-phase (merging / simplify / bump /
+//! finalize_pending) so the renderer can show queued tasks what the holder
+//! is doing.
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -34,6 +38,41 @@ use crate::orchestrator;
 /// hostage.
 pub const STALE_TTL_SECS: i64 = 60 * 60;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MergePhase {
+    /// `cc-hub pr merge` is executing the git operations (default).
+    #[default]
+    Merging,
+    /// /simplify is running on main.
+    Simplify,
+    /// /bump is running on main.
+    Bump,
+    /// Post-/simplify, post-/bump; `pr finalize` not yet called.
+    FinalizePending,
+}
+
+impl MergePhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MergePhase::Merging => "merging",
+            MergePhase::Simplify => "simplify",
+            MergePhase::Bump => "bump",
+            MergePhase::FinalizePending => "finalize_pending",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "merging" => Some(MergePhase::Merging),
+            "simplify" => Some(MergePhase::Simplify),
+            "bump" => Some(MergePhase::Bump),
+            "finalize_pending" | "finalize-pending" => Some(MergePhase::FinalizePending),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MergeLock {
     pub task_id: String,
@@ -41,6 +80,8 @@ pub struct MergeLock {
     /// tmux session of the orchestrator that holds the lock — used for
     /// liveness checks during stale detection.
     pub orchestrator_tmux: Option<String>,
+    #[serde(default)]
+    pub phase: MergePhase,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,11 +116,14 @@ pub fn acquire(
 
     if let Some(existing) = read_lock(&path)? {
         if existing.task_id == task_id {
-            // We already hold it — refresh and return Acquired.
+            // We already hold it — refresh and return Acquired. Preserve
+            // phase so a re-acquire mid-/simplify/-bump doesn't bounce
+            // back to Merging.
             let refreshed = MergeLock {
                 task_id: task_id.to_string(),
                 acquired_at: orchestrator::now_unix_secs(),
                 orchestrator_tmux: orchestrator_tmux.map(str::to_string),
+                phase: existing.phase,
             };
             write_lock(&path, &refreshed)?;
             return Ok(AcquireOutcome::Acquired);
@@ -104,9 +148,31 @@ pub fn acquire(
         task_id: task_id.to_string(),
         acquired_at: orchestrator::now_unix_secs(),
         orchestrator_tmux: orchestrator_tmux.map(str::to_string),
+        phase: MergePhase::Merging,
     };
     write_lock(&path, &lock)?;
     Ok(AcquireOutcome::Acquired)
+}
+
+/// Update the lock's phase if `task_id` is the current holder. Returns
+/// `Ok(true)` on success, `Ok(false)` if there's no lock or the holder is
+/// someone else. Atomic via the existing `write_lock` rename helper.
+pub fn set_phase(project_id: &str, task_id: &str, phase: MergePhase) -> io::Result<bool> {
+    let path = merge_lock_path(project_id).ok_or_else(|| io::Error::other("no home dir"))?;
+    let Some(mut existing) = read_lock(&path)? else {
+        return Ok(false);
+    };
+    if existing.task_id != task_id {
+        log::warn!(
+            "merge_lock: task {} tried to set phase on lock held by {}",
+            task_id,
+            existing.task_id,
+        );
+        return Ok(false);
+    }
+    existing.phase = phase;
+    write_lock(&path, &existing)?;
+    Ok(true)
 }
 
 /// Release the lock if `task_id` is the current holder. Returns `Ok(false)`
@@ -248,6 +314,7 @@ mod tests {
                 task_id: "t-old".into(),
                 acquired_at: orchestrator::now_unix_secs() - STALE_TTL_SECS - 10,
                 orchestrator_tmux: None,
+                phase: MergePhase::Merging,
             };
             write_lock(&path, &stale).unwrap();
 
@@ -264,6 +331,66 @@ mod tests {
     fn release_when_no_lock_is_noop() {
         with_tempdir(|| {
             assert!(!release("p1", "t-1").expect("release noop"));
+        });
+    }
+
+    #[test]
+    fn lock_round_trips_without_phase_field() {
+        with_tempdir(|| {
+            let path = merge_lock_path("p1").expect("path");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            // Legacy on-disk shape, written before MergePhase existed.
+            let legacy = r#"{
+                "task_id": "t-legacy",
+                "acquired_at": 1,
+                "orchestrator_tmux": null
+            }"#;
+            fs::write(&path, legacy).unwrap();
+
+            let lock = current_holder("p1")
+                .expect("read")
+                .expect("legacy lock present");
+            assert_eq!(lock.task_id, "t-legacy");
+            assert_eq!(lock.phase, MergePhase::Merging);
+        });
+    }
+
+    #[test]
+    fn set_phase_succeeds_for_holder() {
+        with_tempdir(|| {
+            let _ = acquire("p1", "t-1", None).expect("acquire");
+            for phase in [
+                MergePhase::Merging,
+                MergePhase::Simplify,
+                MergePhase::Bump,
+                MergePhase::FinalizePending,
+            ] {
+                assert!(set_phase("p1", "t-1", phase).expect("set_phase"));
+                let lock = current_holder("p1").expect("read").expect("present");
+                assert_eq!(lock.phase, phase);
+            }
+        });
+    }
+
+    #[test]
+    fn set_phase_rejects_non_holder() {
+        with_tempdir(|| {
+            let _ = acquire("p1", "t-1", None).expect("acquire");
+            let before = current_holder("p1").expect("read").expect("present");
+            assert!(!set_phase("p1", "t-2", MergePhase::Simplify).expect("set_phase"));
+            let after = current_holder("p1").expect("read").expect("present");
+            assert_eq!(before, after);
+        });
+    }
+
+    #[test]
+    fn acquire_refresh_preserves_phase() {
+        with_tempdir(|| {
+            let _ = acquire("p1", "t-1", None).expect("acquire");
+            assert!(set_phase("p1", "t-1", MergePhase::Simplify).expect("set_phase"));
+            let _ = acquire("p1", "t-1", None).expect("refresh");
+            let lock = current_holder("p1").expect("read").expect("present");
+            assert_eq!(lock.phase, MergePhase::Simplify);
         });
     }
 }

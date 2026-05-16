@@ -3223,14 +3223,29 @@ fn render_kanban_column(
     let hidden_below = count.saturating_sub(scroll_top.saturating_add(max_cards));
     // Only the Merging column needs the lock-holder lookup — collapsed
     // cards in other columns ignore it.
-    let merging_holder_id: Option<&str> = if col_idx == 3 {
-        app.selected_project()
-            .and_then(|p| app.projects.merge_lock_holders.get(&p.id))
-            .and_then(|h| h.as_ref())
-            .map(|h| h.task_id.as_str())
-    } else {
-        None
-    };
+    let merging_holder: Option<(String, crate::merge_lock::MergePhase, i64, Option<u32>)> =
+        if col_idx == 3 {
+            app.selected_project().and_then(|p| {
+                let holder = app
+                    .projects
+                    .merge_lock_holders
+                    .get(&p.id)
+                    .and_then(|h| h.as_ref())?;
+                let pr_id = app
+                    .projects
+                    .merge_lock_holder_pr_ids
+                    .get(&p.id)
+                    .and_then(|v| *v);
+                Some((
+                    holder.task_id.clone(),
+                    holder.phase,
+                    holder.acquired_at,
+                    pr_id,
+                ))
+            })
+        } else {
+            None
+        };
 
     // Column border. Focused column gets the accent color + Double border so
     // it stands out without changing the layout.
@@ -3311,6 +3326,9 @@ fn render_kanban_column(
                 titling_in_flight,
             );
         } else {
+            let lock_holder = merging_holder
+                .as_ref()
+                .map(|(id, phase, at, pr)| (id.as_str(), *phase, *at, *pr));
             render_task_card_collapsed(
                 frame,
                 card_area,
@@ -3320,7 +3338,7 @@ fn render_kanban_column(
                 sessions_by_tmux,
                 now_secs,
                 titling_in_flight,
-                merging_holder_id,
+                lock_holder,
             );
         }
         y = y.saturating_add(card_height + gap);
@@ -3769,10 +3787,10 @@ fn render_task_card_active(
 /// Compact 3-line card for Review/Merging/Done tasks. Dim border, single-line
 /// prompt, footer with age + summary preview + artifact/merge counts.
 /// `col_idx` is one of 2 (Review), 3 (Merging), or 4 (Done).
-/// `lock_holder` is the merge-lock holder's task_id for this project, only
-/// supplied for col_idx == 3; a Merging card whose id differs from the
-/// holder is "queued" and renders with a muted border/icon to make it
-/// visually obvious that approval landed but the merge is waiting.
+/// `lock_holder` is the merge-lock holder's (task_id, phase, acquired_at,
+/// pr_id) for this project, only supplied for col_idx == 3; a Merging card
+/// whose id differs from the holder is "queued" and renders with a muted
+/// border/icon plus a tooltip line showing what the holder is doing.
 #[allow(clippy::too_many_arguments)]
 fn render_task_card_collapsed(
     frame: &mut Frame,
@@ -3783,15 +3801,19 @@ fn render_task_card_collapsed(
     sessions_by_tmux: &std::collections::HashMap<&str, &SessionInfo>,
     now_secs: u64,
     titling_in_flight: bool,
-    lock_holder: Option<&str>,
+    lock_holder: Option<(&str, crate::merge_lock::MergePhase, i64, Option<u32>)>,
 ) {
+    use crate::merge_lock::MergePhase;
     // Review (2) cyan, Merging (3) magenta, Done (4) green.
     let (accent, dim_text, icon) = match col_idx {
         2 => (Color::LightCyan, Color::Rgb(140, 175, 185), "󱋲"),
         3 => (Color::LightMagenta, Color::Rgb(180, 145, 195), ""),
         _ => (Color::LightGreen, Color::Rgb(140, 160, 145), "󰸞"),
     };
-    let queued = col_idx == 3 && lock_holder.is_some_and(|h| h != t.task_id);
+    let queued =
+        col_idx == 3 && lock_holder.is_some_and(|(holder, ..)| holder != t.task_id.as_str());
+    let merging_self =
+        col_idx == 3 && lock_holder.is_some_and(|(holder, ..)| holder == t.task_id.as_str());
     // Review and Merging cards: brighter border so they stand out — they
     // need user attention or are actively mutating main. Done stays dim.
     // A queued Merging card uses a muted gray instead of the bright
@@ -3836,7 +3858,7 @@ fn render_task_card_collapsed(
                 .fg(Color::Rgb(170, 170, 185))
                 .bg(Color::Rgb(45, 45, 55)),
         ));
-    } else if col_idx == 3 && lock_holder == Some(t.task_id.as_str()) {
+    } else if merging_self {
         title_spans.push(Span::styled(
             " merging ",
             Style::default()
@@ -3877,6 +3899,31 @@ fn render_task_card_collapsed(
         lines.push(Line::from(vec![
             Span::styled("󰓹 ", Style::default().fg(Color::Rgb(110, 120, 135))),
             shipped_version_span(v),
+        ]));
+    }
+
+    if queued {
+        let (holder_task, phase, acquired_at, holder_pr) =
+            lock_holder.expect("queued implies holder");
+        let age = format_age(now_secs.saturating_sub(acquired_at as u64));
+        let phase_label = match phase {
+            MergePhase::Merging => "merging",
+            MergePhase::Simplify => "/simplify",
+            MergePhase::Bump => "/bump",
+            MergePhase::FinalizePending => "finalizing",
+        };
+        let leader = match holder_pr {
+            Some(n) => format!("PR #{} in {} ({})", n, phase_label, age),
+            None => format!(
+                "behind {} in {} ({})",
+                crate::orchestrator::short_task_id(holder_task),
+                phase_label,
+                age
+            ),
+        };
+        lines.push(Line::from(vec![
+            Span::styled("⏳ ", Style::default().fg(Color::Rgb(110, 120, 135))),
+            Span::styled(leader, Style::default().fg(Color::Rgb(150, 150, 170))),
         ]));
     }
 
@@ -4653,6 +4700,7 @@ mod result_popup_tests {
             tasks,
             titling: std::collections::HashSet::new(),
             merge_lock_holders: std::collections::HashMap::new(),
+            merge_lock_holder_pr_ids: std::collections::HashMap::new(),
         };
         app.update_projects(snap);
         assert!(app.enter_projects_result(), "popup should open");
@@ -4747,6 +4795,7 @@ mod result_popup_tests {
             tasks,
             titling: std::collections::HashSet::new(),
             merge_lock_holders: std::collections::HashMap::new(),
+            merge_lock_holder_pr_ids: std::collections::HashMap::new(),
         };
         app.update_projects(snap);
         assert!(app.enter_projects_result(), "popup should open");
@@ -4896,6 +4945,7 @@ index 0000001..0000002 100644
             tasks,
             titling: std::collections::HashSet::new(),
             merge_lock_holders: std::collections::HashMap::new(),
+            merge_lock_holder_pr_ids: std::collections::HashMap::new(),
         };
         app.update_projects(snap);
         assert!(app.enter_projects_result(), "popup should open");
@@ -5184,6 +5234,50 @@ mod kanban_card_tests {
         assert!(
             plain.contains("2/4"),
             "active card should show 2/4 badge:\n{}",
+            plain
+        );
+    }
+
+    #[test]
+    fn queued_collapsed_card_shows_holder_phase_and_age() {
+        use crate::merge_lock::MergePhase;
+        let mut t = task_with_todos(TaskStatus::Merging, 0, 0);
+        t.task_id = "t-self".into();
+        let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
+        let now_secs: u64 = 1_000_000_000;
+        let acquired_at = (now_secs as i64) - 240;
+        let lock_holder = Some(("t-other", MergePhase::Simplify, acquired_at, Some(7u32)));
+        let backend = TestBackend::new(70, 6);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_collapsed(
+                    f,
+                    f.area(),
+                    &t,
+                    false,
+                    3,
+                    &sessions,
+                    now_secs,
+                    false,
+                    lock_holder,
+                )
+            })
+            .expect("render");
+        let plain = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            plain.contains("PR #7"),
+            "queued card should show holder PR id:\n{}",
+            plain
+        );
+        assert!(
+            plain.contains("/simplify"),
+            "queued card should show holder phase:\n{}",
+            plain
+        );
+        assert!(
+            plain.contains("4m"),
+            "queued card should show holder age:\n{}",
             plain
         );
     }
