@@ -758,6 +758,7 @@ The user reviews the PR in the TUI. Two outcomes:
 
 - **Changes requested.** The task transitions back to `Running` and the PR's `review_state` becomes `changes_requested`. Poll for it:
   `{bin} pr show --task {task_id}` — inspect the latest PR state and any new comments.
+  On the first poll after PR open, capture `pr.updated_at` from the response. On every subsequent poll, pass `--comments-since <previous pr.updated_at>` so only NEW comments come back, then stash the new `pr.updated_at` for the next round. The response also returns `comments_total` (all comments on the PR) and `comments_returned` (how many came back after filtering) — use those to sanity-check the filter is doing what you expect.
   Read the new comments, dispatch a worker (or edit yourself in the worktree if it's a tiny tweak — but always inside the worktree, never on main) to address them, push commits to the worktree branch, then re-open the PR for review:
   `{bin} pr show --task {task_id}` will show you're back to `open` once you push? **No** — you need to flip the state explicitly. Append your reply and request re-review by running:
   `{bin} pr comment --task {task_id} --author orchestrator --comment \"<reply explaining the fix>\"`

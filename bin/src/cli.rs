@@ -238,6 +238,11 @@ struct Flags {
     description: Option<String>,
     comment: Option<String>,
     author: Option<String>,
+    /// `pr show --comments-since UNIX_TS` — only emit comments whose `at`
+    /// timestamp is `>= UNIX_TS`. Boundary is inclusive so passing the
+    /// previous `pr.updated_at` returns any comments stamped at exactly
+    /// that second.
+    comments_since: Option<i64>,
     /// `worker wait` flags. Repeatable `--tmux NAME`, `--all`,
     /// `--timeout-secs N`.
     tmux_targets: Vec<String>,
@@ -329,6 +334,13 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
             }
             "--author" => {
                 f.author = Some(next_value(args, &mut i, "--author")?);
+            }
+            "--comments-since" => {
+                let v = next_value(args, &mut i, "--comments-since")?;
+                f.comments_since = Some(
+                    v.parse()
+                        .map_err(|e| CliError::Usage(format!("--comments-since: {}", e)))?,
+                );
             }
             "--tmux" => {
                 f.tmux_targets.push(next_value(args, &mut i, "--tmux")?);
@@ -1273,6 +1285,23 @@ fn pr_subcommand(args: &[String]) -> Result<(), CliError> {
 }
 
 fn pr_to_json(pr: &cc_hub_lib::pr::PullRequest) -> serde_json::Value {
+    pr_to_json_filtered(pr, None)
+}
+
+fn pr_to_json_filtered(
+    pr: &cc_hub_lib::pr::PullRequest,
+    comments_since: Option<i64>,
+) -> serde_json::Value {
+    let total = pr.comments.len();
+    let (comments, returned): (serde_json::Value, usize) = match comments_since {
+        Some(threshold) => {
+            let filtered: Vec<&cc_hub_lib::pr::Comment> =
+                pr.comments.iter().filter(|c| c.at >= threshold).collect();
+            let len = filtered.len();
+            (serde_json::json!(filtered), len)
+        }
+        None => (serde_json::json!(pr.comments), total),
+    };
     serde_json::json!({
         "id": pr.id,
         "task_id": pr.task_id,
@@ -1282,7 +1311,9 @@ fn pr_to_json(pr: &cc_hub_lib::pr::PullRequest) -> serde_json::Value {
         "title": pr.title,
         "description": pr.description,
         "review_state": pr.review_state.as_str(),
-        "comments": pr.comments,
+        "comments": comments,
+        "comments_total": total,
+        "comments_returned": returned,
         "approved_at_branch_sha": pr.approved_at_branch_sha,
         "approved_at_base_sha": pr.approved_at_base_sha,
         "created_at": pr.created_at,
@@ -1347,7 +1378,7 @@ fn pr_show(args: &[String]) -> Result<(), CliError> {
         .ok_or_else(|| CliError::Other("no PR for this task".into()))?;
     print_json(&serde_json::json!({
         "ok": true,
-        "pr": pr_to_json(&pr),
+        "pr": pr_to_json_filtered(&pr, f.comments_since),
     }));
     Ok(())
 }
@@ -2107,6 +2138,59 @@ mod tests {
             let after = orchestrator::read_task_state(&project_id, &task_id).expect("read state");
             assert!(after.last_auto_reviewed_at.is_none());
         });
+    }
+
+    #[test]
+    fn pr_show_comments_since_filters_old_comments() {
+        let pr = pr::PullRequest {
+            id: 1,
+            task_id: "t-x".into(),
+            project_id: "p1".into(),
+            branch: "feature".into(),
+            base: "main".into(),
+            title: "title".into(),
+            description: "desc".into(),
+            review_state: pr::ReviewState::Open,
+            comments: vec![
+                pr::Comment {
+                    author: "user".into(),
+                    at: 100,
+                    body: "first".into(),
+                },
+                pr::Comment {
+                    author: "user".into(),
+                    at: 200,
+                    body: "second".into(),
+                },
+                pr::Comment {
+                    author: "user".into(),
+                    at: 300,
+                    body: "third".into(),
+                },
+            ],
+            approved_at_branch_sha: None,
+            approved_at_base_sha: None,
+            created_at: 0,
+            updated_at: 300,
+        };
+
+        let none = pr_to_json_filtered(&pr, None);
+        assert_eq!(none["comments"].as_array().expect("array").len(), 3);
+        assert_eq!(none["comments_total"], 3);
+        assert_eq!(none["comments_returned"], 3);
+
+        let since_200 = pr_to_json_filtered(&pr, Some(200));
+        let kept = since_200["comments"].as_array().expect("array");
+        assert_eq!(kept.len(), 2);
+        assert_eq!(since_200["comments_total"], 3);
+        assert_eq!(since_200["comments_returned"], 2);
+        let stamps: Vec<i64> = kept.iter().map(|c| c["at"].as_i64().unwrap()).collect();
+        assert_eq!(stamps, vec![200, 300]);
+
+        let since_999 = pr_to_json_filtered(&pr, Some(999));
+        assert_eq!(since_999["comments"].as_array().expect("array").len(), 0);
+        assert_eq!(since_999["comments_total"], 3);
+        assert_eq!(since_999["comments_returned"], 0);
     }
 
     #[test]
