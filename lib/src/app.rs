@@ -1709,6 +1709,7 @@ mod tests {
             name: id.to_string(),
             root: PathBuf::from(format!("/tmp/{}", id)),
             created_at: 0,
+            build_cmd: None,
         }
     }
 

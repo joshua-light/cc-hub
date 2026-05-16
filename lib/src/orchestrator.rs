@@ -518,12 +518,25 @@ pub struct Project {
     pub name: String,
     pub root: PathBuf,
     pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_cmd: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProjectsFile {
     #[serde(default, rename = "project")]
     pub projects: Vec<Project>,
+}
+
+/// Look up the per-project build command from `~/.cc-hub/projects.toml`.
+/// Returns `None` if the project isn't registered or has no `build_cmd` set;
+/// callers fall back to their own default.
+pub fn project_build_cmd(project_id: &str) -> Option<String> {
+    load_projects()
+        .projects
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .and_then(|p| p.build_cmd)
 }
 
 pub fn load_projects() -> ProjectsFile {
@@ -577,6 +590,7 @@ pub fn ensure_project_registered(root: &Path, name: &str) -> io::Result<String> 
             name: name.to_string(),
             root: canon,
             created_at: now_unix_secs(),
+            build_cmd: None,
         });
         save_projects(&file)?;
     }
@@ -667,7 +681,7 @@ pub fn build_review_approval_prompt(task_id: &str, cc_hub_bin: &Path) -> String 
 Continue the merge flow now:
 1. Run `{bin} pr show --task {task_id}` to confirm the PR is still `approved`.
 2. If it is, run `{bin} pr merge --task {task_id}`.
-3. While the merge lock is held, run `/simplify` and `/bump`, then re-run build/test if either changed files.
+3. While the merge lock is held, run `/simplify` and `/bump`. `pr finalize` runs the build itself — do not pre-staple `cargo build`.
 4. Finish with `{bin} pr finalize --task {task_id}`.
 
 If `pr merge` reports conflicts or a dirty-tree refusal, follow that recipe instead of forcing the merge. Do not ask the user for another approval unless the PR was demoted back to `open` and needs re-review."
@@ -784,7 +798,7 @@ Merging is **serialized project-wide** by the merge lock — at most one task is
 
 3. **Run `/bump`** to cut a version commit reflecting the final tree.
 
-4. **Re-run build/test** if `/simplify` or `/bump` modified files. A passing tree is the bar.
+4. **Skip pre-stapled builds.** `pr finalize` runs the build itself before releasing the merge lock — do not pre-staple `cargo build`. The default build command is `cargo build --release`; override per-project via `projects.toml` `build_cmd`, or per-invocation via `--build-cmd CMD`. Pass `--skip-build` only when the project has no fast build to run.
 
 5. **Finalize**:
    `{bin} pr finalize --task {task_id}`

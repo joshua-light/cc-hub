@@ -4628,6 +4628,7 @@ mod result_popup_tests {
             name: "scroll".into(),
             root: PathBuf::from("/tmp/scroll"),
             created_at: now,
+            build_cmd: None,
         };
         let mut state = TaskState::new(
             project.id.clone(),
@@ -4703,6 +4704,7 @@ mod result_popup_tests {
             name: "test".into(),
             root: PathBuf::from("/tmp/test"),
             created_at: now,
+            build_cmd: None,
         };
         let mut state = TaskState::new(
             project.id.clone(),
@@ -4872,6 +4874,7 @@ index 0000001..0000002 100644
             name: "diff".into(),
             root: PathBuf::from("/tmp/diff"),
             created_at: now,
+            build_cmd: None,
         };
         let mut state = TaskState::new(
             project.id.clone(),
