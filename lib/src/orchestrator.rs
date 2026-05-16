@@ -772,9 +772,9 @@ The user reviews the PR in the TUI. Two outcomes:
 Merging is **serialized project-wide** by the merge lock — at most one task is in the Merging state at a time. cc-hub handles the lock automatically; you just call the verbs in order.
 
 1. **Acquire the lock and run the merge**:
-   `{bin} pr merge --task {task_id}`
+   `{bin} pr merge --task {task_id} --wait`
    This:
-   - Acquires the project's merge lock (returns `ok=false, locked=true` with `holder_task` if another task is currently merging — poll and retry).
+   - Acquires the project's merge lock. **Pass `--wait` so the verb blocks in-process until the lock is free** (default 30 min cap, override with `--timeout-secs N`); without it, you get `ok=false, locked=true` and have to reinvent polling. Do not write Monitor tasks, until-loops, or sleep+capture chains for this — `--wait` already does it correctly and inherits stale-lock recovery.
    - Merges `main` into the feature branch first, so any conflicts with main's recent landings are resolved on the *feature branch* (not on main itself).
    - On clean merge, fast-forwards the feature branch into main.
    - On conflict during the main → branch merge, **the PR is auto-demoted to Open**, the lock is released, and a comment is appended explaining what happened. You then need to spawn a worker to resolve conflicts in the worktree, push the resolution, and ask the user to re-approve. (cc-hub's auto-approve rule only accepts *clean* resolutions; substantive conflict resolutions need a fresh review.)
