@@ -1625,17 +1625,13 @@ mod tests {
             "missing progressive-disclosure framing"
         );
 
-        // Proof-of-work section is kept terse — the prompt is paid every
-        // orchestrator turn, so the per-change-type advice was collapsed to a
-        // one-line rule of thumb. If you re-expand this section, update the
-        // bound below — but think twice before doing so.
-        let proof_section = p
-            .split("# Proof of work")
-            .nth(1)
+        // Section is kept terse — this prompt is paid every orchestrator
+        // turn. If you re-expand it, raise the bound below deliberately.
+        let after_header = p
+            .split_once("# Proof of work")
             .expect("Proof of work header present")
-            .split("\n# ")
-            .next()
-            .expect("Proof of work followed by another section");
+            .1;
+        let proof_section = after_header.split("\n# ").next().unwrap();
         let proof_line_count = proof_section.lines().count();
         assert!(
             proof_line_count < 8,
