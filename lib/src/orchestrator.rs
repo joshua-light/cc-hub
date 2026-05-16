@@ -927,20 +927,9 @@ Don't pre-list every micro-step; aim for a checklist the user could read in one 
 
 # Proof of work
 
-The user reviews PRs via **progressive disclosure**: they read the title + a single lead artifact first, scan supporting evidence next, and reach for the description only if they want to dig deeper. Shape your PR description to match — lead with the proof, not the briefing.
+**Progressive disclosure**: the user reads the title + lead artifact first; description is an appendix. Attach evidence with `{bin} task artifact add --task {task_id} --path PATH [--kind KIND] [--caption TEXT] [--lead]` (file or URL); list with `{bin} task artifact list --task {task_id}`. Pass `--lead` on exactly one artifact — the strongest single piece of proof; re-passing it on a later add moves the designation.
 
-Two primitives:
-- `{bin} task artifact add --task {task_id} --path PATH [--kind KIND] [--caption TEXT] [--lead]` — attach a file (copied into cc-hub's store, survives worktree cleanup) or a URL (stored as-is). `KIND` is free-form; common values: `screenshot`, `video`, `log`, `build`, `test`, `diff`, `file`, `url`. URL-shaped paths default to `kind=url`. Pass `--lead` on exactly one artifact — the strongest single piece of proof. Re-passing `--lead` on a later add moves the designation.
-- `{bin} task artifact list --task {task_id}` — review what's already attached, including which one is the current lead.
-
-What counts as proof, and which to lead, by change type:
-- **Web / UI** — screenshot or short screen recording. Lead the screenshot/recording. For regression fixes, attach before *and* after; lead the after.
-- **CLI / library / backend** — terminal recording (asciinema if available) or captured command output (`--kind log`). Lead the recording, or the log if no recording is feasible.
-- **Tests / CI / build** — the build log file, or a URL to the CI run (`--kind url`). Lead the green run.
-- **Refactors (no behavioural change)** — a `diff` artifact plus a `log` showing build + tests still pass. Lead the log (it's the \"still works\" proof).
-- **Bug fixes** — a log showing the repro failing before and passing after, OR a regression test added in the same change. Lead the after-log, or the new test file.
-
-The PR's `--description` is a short appendix: cover only what the title + lead artifact don't already convey (key files changed, what was deliberately out of scope). The title plus the lead artifact should communicate the **headline proof** on their own.
+Rule of thumb: lead with a screenshot/recording for UI; a log (or recording) for CLI/backend; the green build log for refactors; the after-log or new test file for bug fixes.
 
 # Queuing follow-up work
 
@@ -1744,8 +1733,22 @@ mod tests {
             "missing --lead guidance in proof-of-work section"
         );
         assert!(
-            p.contains("headline proof"),
-            "missing headline-proof framing"
+            p.contains("Progressive disclosure"),
+            "missing progressive-disclosure framing"
+        );
+
+        // Section is kept terse — this prompt is paid every orchestrator
+        // turn. If you re-expand it, raise the bound below deliberately.
+        let after_header = p
+            .split_once("# Proof of work")
+            .expect("Proof of work header present")
+            .1;
+        let proof_section = after_header.split("\n# ").next().unwrap();
+        let proof_line_count = proof_section.lines().count();
+        assert!(
+            proof_line_count < 8,
+            "Proof of work section grew to {} lines; keep it terse",
+            proof_line_count
         );
 
         // Post-merge automation: each completed task lands on a green,
