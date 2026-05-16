@@ -800,6 +800,21 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         ));
     }
 
+    // Symmetric guard: leaving Backlog requires an orchestrator spawn,
+    // which only `task start` provides. A bare status flip would mutate
+    // the on-disk state to e.g. Running without any tmux/session, leaving
+    // a zombie that the `s` keybind can't recover (it requires Backlog).
+    if raw_status.is_some()
+        && prev_status.as_ref() == Some(&TaskStatus::Backlog)
+        && raw_status.as_ref() != Some(&TaskStatus::Backlog)
+    {
+        return Err(CliError::Usage(
+            "use cc-hub task start --task ID to launch a Backlog task; \
+             task report --status cannot spawn an orchestrator"
+                .into(),
+        ));
+    }
+
     // An orchestrator's `--status done` means "I'm finished" — it does NOT
     // mean the work is approved. Route that into Review so a human (or
     // future agentic reviewer) signs off via the TUI's `Space` keybind.
@@ -2106,6 +2121,45 @@ mod tests {
 
             let after = orchestrator::read_task_state(&project_id, &task_id).expect("read state");
             assert!(after.last_auto_reviewed_at.is_none());
+        });
+    }
+
+    #[test]
+    fn task_report_rejects_backlog_to_running_transition() {
+        with_tempdir_home(|| {
+            let project_id = "p1".to_string();
+            let task_id = "t-backlog-guard".to_string();
+
+            let mut state = TaskState::new_backlog(
+                project_id.clone(),
+                PathBuf::from("/tmp/proj"),
+                "do thing".into(),
+            );
+            state.task_id = task_id.clone();
+            orchestrator::write_task_state(&state).expect("write state");
+
+            let args = vec![
+                "--task".to_string(),
+                task_id.clone(),
+                "--project-id".to_string(),
+                project_id.clone(),
+                "--status".to_string(),
+                "running".to_string(),
+            ];
+            let err = task_report(&args).expect_err("backlog->running must be rejected");
+            match err {
+                CliError::Usage(msg) => {
+                    assert!(
+                        msg.contains("task start"),
+                        "message should point at the right verb, got: {msg}"
+                    );
+                }
+                other => panic!("expected CliError::Usage, got {other:?}"),
+            }
+
+            // Status must not have been mutated.
+            let after = orchestrator::read_task_state(&project_id, &task_id).expect("read state");
+            assert_eq!(after.status, TaskStatus::Backlog);
         });
     }
 
