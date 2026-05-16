@@ -5205,3 +5205,79 @@ mod kanban_card_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod backlog_age_tests {
+    use super::buffer_to_string;
+    use crate::app::App;
+    use crate::orchestrator::{now_unix_secs, Project, TaskState, TaskStatus};
+    use crate::projects_scan::ProjectsSnapshot;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::collections::{HashMap, HashSet};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    #[test]
+    fn backlog_entries_show_right_justified_age_column() {
+        let now = now_unix_secs();
+        let project = Project {
+            id: "p-bk".into(),
+            name: "demo".into(),
+            root: PathBuf::from("/tmp/demo"),
+            created_at: now,
+        };
+        let ages: [(i64, &str); 4] = [
+            (45, "45s"),
+            (12 * 60, "12m"),
+            (3 * 3600, "3h"),
+            (2 * 86400, "2d"),
+        ];
+        let tasks: Vec<Arc<TaskState>> = ages
+            .iter()
+            .enumerate()
+            .map(|(i, (age_s, _))| {
+                let mut s = TaskState::new(
+                    project.id.clone(),
+                    project.root.clone(),
+                    format!("prompt number {}", i),
+                );
+                s.status = TaskStatus::Backlog;
+                s.created_at = now - age_s;
+                Arc::new(s)
+            })
+            .collect();
+        let mut app = App::new();
+        let mut by_proj = HashMap::new();
+        by_proj.insert(project.id.clone(), tasks);
+        let snap = ProjectsSnapshot {
+            projects: vec![project],
+            tasks: by_proj,
+            titling: HashSet::new(),
+            merge_lock_holders: HashMap::new(),
+        };
+        app.update_projects(snap);
+        app.open_backlog();
+
+        let backend = TestBackend::new(90, 22);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| super::render_backlog(f, f.area(), &app))
+            .expect("render");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+        println!(
+            "---begin backlog render---\n{}---end backlog render---",
+            rendered
+        );
+
+        for (_, token) in ages.iter() {
+            let padded = format!("{:>4}", token);
+            assert!(
+                rendered.contains(&padded),
+                "expected right-justified age {:?} in backlog render:\n{}",
+                padded,
+                rendered,
+            );
+        }
+    }
+}
