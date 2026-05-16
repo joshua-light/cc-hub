@@ -1715,10 +1715,17 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Release the merge lock first, then flip the PR and task to terminal states.
+/// If the release fails the task stays in `Merging` so a re-run can complete the
+/// transition — otherwise a transient FS error would strand a `Done` task as
+/// the lock holder and block the project's merge queue until `STALE_TTL_SECS`.
 fn pr_finalize(args: &[String]) -> Result<(), CliError> {
     let f = parse_flags(args)?;
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
+
+    let released = cc_hub_lib::merge_lock::release(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("release merge lock: {}", e)))?;
 
     cc_hub_lib::pr::update_pr(&project_id, &task_id, |p| {
         p.review_state = cc_hub_lib::pr::ReviewState::Merged;
@@ -1730,10 +1737,6 @@ fn pr_finalize(args: &[String]) -> Result<(), CliError> {
     })
     .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
 
-    let released = cc_hub_lib::merge_lock::release(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("release merge lock: {}", e)))?;
-
-    // Cleanup the orchestrator tmux now that the task is fully done.
     orchestrator::cleanup_task_sessions(&state);
 
     print_json(&serde_json::json!({
@@ -2173,6 +2176,117 @@ mod tests {
                     .contains("reopened for re-review"),
                 "note should mention reopen, got {:?}",
                 after_state.note
+            );
+        });
+    }
+
+    /// Regression: if `merge_lock::release` fails, `pr_finalize` must bail
+    /// without flipping the task to `Done`. Otherwise a transient FS error
+    /// strands a terminal-Done task holding the merge lock and blocks the
+    /// project's merge queue until `STALE_TTL_SECS`.
+    #[test]
+    fn pr_finalize_keeps_task_merging_when_release_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        with_tempdir_home(|| {
+            let project_id = "p1".to_string();
+            let task_id = "t-finalize-fail".to_string();
+
+            let mut state = TaskState::new(
+                project_id.clone(),
+                PathBuf::from("/tmp/proj"),
+                "do thing".into(),
+            );
+            state.task_id = task_id.clone();
+            state.status = TaskStatus::Merging;
+            orchestrator::write_task_state(&state).expect("write state");
+
+            pr::create_pr(
+                &state,
+                "feature".into(),
+                "main".into(),
+                "title".into(),
+                "desc".into(),
+            )
+            .expect("create pr");
+
+            cc_hub_lib::merge_lock::acquire(&project_id, &task_id, None)
+                .expect("acquire lock");
+
+            // Lock unlink requires write+exec on the parent dir; chmod 0o555
+            // forces fs::remove_file to fail with EACCES, simulating the
+            // transient FS error the bug fix guards against.
+            let lock_path =
+                cc_hub_lib::merge_lock::merge_lock_path(&project_id).expect("lock path");
+            let parent = lock_path.parent().expect("parent dir").to_path_buf();
+            let original_perms = std::fs::metadata(&parent).expect("metadata").permissions();
+            let mut ro = original_perms.clone();
+            ro.set_mode(0o555);
+            std::fs::set_permissions(&parent, ro).expect("chmod ro");
+
+            let result = pr_finalize(&[
+                "--task".to_string(),
+                task_id.clone(),
+                "--project-id".to_string(),
+                project_id.clone(),
+            ]);
+
+            // Restore perms before assertions so tempdir teardown works.
+            std::fs::set_permissions(&parent, original_perms.clone()).expect("restore perms");
+
+            assert!(
+                result.is_err(),
+                "pr_finalize should return Err when release fails, got {:?}",
+                result
+            );
+
+            let after_state =
+                orchestrator::read_task_state(&project_id, &task_id).expect("read state");
+            assert_eq!(
+                after_state.status,
+                TaskStatus::Merging,
+                "task must remain Merging when release fails"
+            );
+
+            let after_pr = pr::read_pr(&project_id, &task_id)
+                .expect("read pr")
+                .expect("pr present");
+            assert_eq!(
+                after_pr.review_state,
+                pr::ReviewState::Open,
+                "pr must remain Open when release fails (release runs before pr update)"
+            );
+
+            let holder = cc_hub_lib::merge_lock::current_holder(&project_id)
+                .expect("read holder")
+                .expect("lock present");
+            assert_eq!(
+                holder.task_id, task_id,
+                "lock should still name this task — release never completed"
+            );
+
+            // Retry now that perms are restored: the second pr_finalize must
+            // succeed and drive the task to Done.
+            pr_finalize(&[
+                "--task".to_string(),
+                task_id.clone(),
+                "--project-id".to_string(),
+                project_id.clone(),
+            ])
+            .expect("retry pr_finalize after restore");
+
+            let final_state =
+                orchestrator::read_task_state(&project_id, &task_id).expect("read state");
+            assert_eq!(final_state.status, TaskStatus::Done);
+            let final_pr = pr::read_pr(&project_id, &task_id)
+                .expect("read pr")
+                .expect("pr present");
+            assert_eq!(final_pr.review_state, pr::ReviewState::Merged);
+            assert!(
+                cc_hub_lib::merge_lock::current_holder(&project_id)
+                    .expect("read holder")
+                    .is_none(),
+                "lock must be released after successful retry"
             );
         });
     }
