@@ -3222,12 +3222,28 @@ fn render_kanban_column(
     };
     let hidden_below = count.saturating_sub(scroll_top.saturating_add(max_cards));
     // Only the Merging column needs the lock-holder lookup — collapsed
-    // cards in other columns ignore it.
-    let merging_holder_id: Option<&str> = if col_idx == 3 {
-        app.selected_project()
-            .and_then(|p| app.projects.merge_lock_holders.get(&p.id))
-            .and_then(|h| h.as_ref())
-            .map(|h| h.task_id.as_str())
+    // cards in other columns ignore it. We carry the holder's title and
+    // acquisition time so queued cards can show "behind #abc · 3m" instead
+    // of an opaque pill.
+    let merging_holder_banner: Option<MergeLockBanner<'_>> = if col_idx == 3 {
+        app.selected_project().and_then(|p| {
+            let holder = app
+                .projects
+                .merge_lock_holders
+                .get(&p.id)
+                .and_then(|h| h.as_ref())?;
+            let title = app
+                .projects
+                .tasks
+                .get(&p.id)
+                .and_then(|ts| ts.iter().find(|t| t.task_id == holder.task_id))
+                .and_then(|t| t.title.as_deref());
+            Some(MergeLockBanner {
+                task_id: holder.task_id.as_str(),
+                title,
+                acquired_at: holder.acquired_at,
+            })
+        })
     } else {
         None
     };
@@ -3320,7 +3336,7 @@ fn render_kanban_column(
                 sessions_by_tmux,
                 now_secs,
                 titling_in_flight,
-                merging_holder_id,
+                merging_holder_banner.as_ref(),
             );
         }
         y = y.saturating_add(card_height + gap);
@@ -3766,13 +3782,28 @@ fn render_task_card_active(
     frame.render_widget(para, inner);
 }
 
+/// Context about the project's merge-lock holder, supplied to compact
+/// Merging-column cards so a queued card can show *who* is blocking and for
+/// *how long* — distinguishing a healthy queue (someone is actively merging)
+/// from a stale one (lock has been held for an hour).
+struct MergeLockBanner<'a> {
+    task_id: &'a str,
+    /// Holder's display title if it has one; otherwise the renderer falls
+    /// back to the short id alone.
+    title: Option<&'a str>,
+    /// Unix seconds when the holder acquired the lock — used to compute
+    /// lock-age for display.
+    acquired_at: i64,
+}
+
 /// Compact 3-line card for Review/Merging/Done tasks. Dim border, single-line
 /// prompt, footer with age + summary preview + artifact/merge counts.
 /// `col_idx` is one of 2 (Review), 3 (Merging), or 4 (Done).
-/// `lock_holder` is the merge-lock holder's task_id for this project, only
-/// supplied for col_idx == 3; a Merging card whose id differs from the
-/// holder is "queued" and renders with a muted border/icon to make it
-/// visually obvious that approval landed but the merge is waiting.
+/// `lock_holder` is the merge-lock holder context for this project, only
+/// supplied for col_idx == 3. A Merging card whose id differs from the
+/// holder is "queued" and renders with a muted border plus a waiting line
+/// naming the holder and lock age, so the user can tell at a glance whether
+/// the queue is healthy or stuck.
 #[allow(clippy::too_many_arguments)]
 fn render_task_card_collapsed(
     frame: &mut Frame,
@@ -3783,7 +3814,7 @@ fn render_task_card_collapsed(
     sessions_by_tmux: &std::collections::HashMap<&str, &SessionInfo>,
     now_secs: u64,
     titling_in_flight: bool,
-    lock_holder: Option<&str>,
+    lock_holder: Option<&MergeLockBanner<'_>>,
 ) {
     // Review (2) cyan, Merging (3) magenta, Done (4) green.
     let (accent, dim_text, icon) = match col_idx {
@@ -3791,7 +3822,7 @@ fn render_task_card_collapsed(
         3 => (Color::LightMagenta, Color::Rgb(180, 145, 195), ""),
         _ => (Color::LightGreen, Color::Rgb(140, 160, 145), "󰸞"),
     };
-    let queued = col_idx == 3 && lock_holder.is_some_and(|h| h != t.task_id);
+    let queued = col_idx == 3 && lock_holder.is_some_and(|h| h.task_id != t.task_id);
     // Review and Merging cards: brighter border so they stand out — they
     // need user attention or are actively mutating main. Done stays dim.
     // A queued Merging card uses a muted gray instead of the bright
@@ -3836,7 +3867,7 @@ fn render_task_card_collapsed(
                 .fg(Color::Rgb(170, 170, 185))
                 .bg(Color::Rgb(45, 45, 55)),
         ));
-    } else if col_idx == 3 && lock_holder == Some(t.task_id.as_str()) {
+    } else if col_idx == 3 && lock_holder.is_some_and(|h| h.task_id == t.task_id) {
         title_spans.push(Span::styled(
             " merging ",
             Style::default()
@@ -3860,18 +3891,65 @@ fn render_task_card_collapsed(
         return;
     }
 
-    let summary_text = t
-        .summary
-        .as_deref()
-        .or(t.note.as_deref())
-        .map(|s| first_line_preview(s, inner.width.saturating_sub(4) as usize))
-        .unwrap_or_default();
     let mut lines: Vec<Line<'static>> = Vec::new();
-    if !summary_text.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("󰍡 ", Style::default().fg(Color::Rgb(110, 120, 135))),
-            Span::styled(summary_text, Style::default().fg(Color::Rgb(160, 165, 175))),
-        ]));
+    if queued {
+        // Queued Merging card: replace the usual summary preview with the
+        // waiting context — the user wants to triage a stuck queue at a
+        // glance, and t.summary/t.note for an approved-but-waiting PR is
+        // already shown when that card is in Review. The age suffix is
+        // pinned to the right of the body so it survives title truncation.
+        if let Some(h) = lock_holder {
+            let body_max = inner.width.saturating_sub(4) as usize;
+            // "3m" rather than "3m ago" — this is a lock-held duration,
+            // not a past timestamp.
+            let lock_age_full = format_age(
+                now_secs.saturating_sub(h.acquired_at.max(0) as u64),
+            );
+            let lock_age = lock_age_full
+                .strip_suffix(" ago")
+                .unwrap_or(&lock_age_full)
+                .to_string();
+            let holder_short = crate::orchestrator::short_task_id(h.task_id);
+            let age_suffix = format!(" · {}", lock_age);
+            let holder_title = h
+                .title
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let base = match holder_title {
+                Some(title) => {
+                    let prefix = format!("behind #{} · ", holder_short);
+                    let reserved = prefix.chars().count() + age_suffix.chars().count();
+                    let title_room = body_max.saturating_sub(reserved);
+                    if title_room == 0 {
+                        format!("behind #{}", holder_short)
+                    } else {
+                        format!("{}{}", prefix, first_line_preview(title, title_room))
+                    }
+                }
+                None => format!("behind #{}", holder_short),
+            };
+            let body = first_line_preview(
+                &format!("{}{}", base, age_suffix),
+                body_max,
+            );
+            lines.push(Line::from(vec![
+                Span::styled("󰔟 ", Style::default().fg(Color::Rgb(110, 120, 135))),
+                Span::styled(body, Style::default().fg(Color::Rgb(170, 170, 185))),
+            ]));
+        }
+    } else {
+        let summary_text = t
+            .summary
+            .as_deref()
+            .or(t.note.as_deref())
+            .map(|s| first_line_preview(s, inner.width.saturating_sub(4) as usize))
+            .unwrap_or_default();
+        if !summary_text.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("󰍡 ", Style::default().fg(Color::Rgb(110, 120, 135))),
+                Span::styled(summary_text, Style::default().fg(Color::Rgb(160, 165, 175))),
+            ]));
+        }
     }
     if let Some(v) = t.shipped_version.as_deref().filter(|s| !s.is_empty()) {
         lines.push(Line::from(vec![
@@ -5184,6 +5262,233 @@ mod kanban_card_tests {
         assert!(
             plain.contains("2/4"),
             "active card should show 2/4 badge:\n{}",
+            plain
+        );
+    }
+
+    fn merging_task(task_id: &str) -> TaskState {
+        let mut t = TaskState::new("p".into(), PathBuf::from("/tmp/p"), "prompt".into());
+        t.task_id = task_id.to_string();
+        t.status = TaskStatus::Merging;
+        t.title = Some("waiting card".into());
+        t
+    }
+
+    #[test]
+    fn collapsed_card_shows_holder_context_when_queued() {
+        let t = merging_task("t-self-000111");
+        let now: u64 = 1_700_000_000;
+        let banner = super::MergeLockBanner {
+            task_id: "t-blocker-123456",
+            title: Some("fix flaky tests"),
+            acquired_at: (now - 180) as i64,
+        };
+        let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
+        let backend = TestBackend::new(60, 6);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_collapsed(
+                    f,
+                    f.area(),
+                    &t,
+                    false,
+                    3,
+                    &sessions,
+                    now,
+                    false,
+                    Some(&banner),
+                )
+            })
+            .expect("render");
+        let plain = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            plain.contains("behind"),
+            "queued card should name the holder:\n{}",
+            plain
+        );
+        assert!(
+            plain.contains("123456"),
+            "queued card should show holder short id:\n{}",
+            plain
+        );
+        assert!(
+            plain.contains("3m"),
+            "queued card should show 3m lock age:\n{}",
+            plain
+        );
+        assert!(
+            plain.contains("queued"),
+            "queued card should keep the queued pill:\n{}",
+            plain
+        );
+    }
+
+    #[test]
+    fn collapsed_card_shows_merging_pill_when_self_is_holder() {
+        let t = merging_task("t-self-654321");
+        let now: u64 = 1_700_000_000;
+        let banner = super::MergeLockBanner {
+            task_id: "t-self-654321",
+            title: Some("self merge"),
+            acquired_at: (now - 5) as i64,
+        };
+        let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
+        let backend = TestBackend::new(60, 6);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_collapsed(
+                    f,
+                    f.area(),
+                    &t,
+                    false,
+                    3,
+                    &sessions,
+                    now,
+                    false,
+                    Some(&banner),
+                )
+            })
+            .expect("render");
+        let plain = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            plain.contains("merging"),
+            "self-holder card should show the merging pill:\n{}",
+            plain
+        );
+        assert!(
+            !plain.contains("behind"),
+            "self-holder card must not render a waiting line:\n{}",
+            plain
+        );
+    }
+
+    /// Visual-proof helper — not part of the regression suite. Dumps the
+    /// rendered card buffers for three Merging states (queued, holder, no
+    /// lock) to /tmp so a screenshot artifact can be attached to the PR.
+    /// Run with: `cargo test -p cc-hub-lib dump_merging_states -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn dump_merging_states() {
+        let now: u64 = 1_700_000_000;
+        let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
+
+        let queued = merging_task("t-self-000111");
+        let banner_blocking = super::MergeLockBanner {
+            task_id: "t-blocker-123456",
+            title: Some("fix flaky tests"),
+            acquired_at: (now - 180) as i64,
+        };
+        let backend = TestBackend::new(60, 4);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_collapsed(
+                    f,
+                    f.area(),
+                    &queued,
+                    false,
+                    3,
+                    &sessions,
+                    now,
+                    false,
+                    Some(&banner_blocking),
+                )
+            })
+            .expect("render");
+        let queued_render = buffer_to_string(terminal.backend().buffer());
+
+        let holder = merging_task("t-blocker-123456");
+        let banner_self = super::MergeLockBanner {
+            task_id: "t-blocker-123456",
+            title: Some("fix flaky tests"),
+            acquired_at: (now - 12) as i64,
+        };
+        let backend = TestBackend::new(60, 4);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_collapsed(
+                    f,
+                    f.area(),
+                    &holder,
+                    false,
+                    3,
+                    &sessions,
+                    now,
+                    false,
+                    Some(&banner_self),
+                )
+            })
+            .expect("render");
+        let holder_render = buffer_to_string(terminal.backend().buffer());
+
+        let alone = merging_task("t-self-000111");
+        let backend = TestBackend::new(60, 4);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_collapsed(
+                    f,
+                    f.area(),
+                    &alone,
+                    false,
+                    3,
+                    &sessions,
+                    now,
+                    false,
+                    None,
+                )
+            })
+            .expect("render");
+        let alone_render = buffer_to_string(terminal.backend().buffer());
+
+        let dump = format!(
+            "=== Merging column · QUEUED (lock held by another task) ===\n\
+             {queued}\n\
+             === Merging column · ACTIVE (this card holds the lock) ===\n\
+             {holder}\n\
+             === Merging column · NO LOCK (no holder recorded) ===\n\
+             {alone}\n",
+            queued = queued_render,
+            holder = holder_render,
+            alone = alone_render,
+        );
+        std::fs::write("/tmp/cchub-merging-states.txt", &dump).expect("write dump");
+        eprintln!("{}", dump);
+    }
+
+    #[test]
+    fn collapsed_card_no_holder_context_when_no_lock() {
+        let t = merging_task("t-only-999999");
+        let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
+        let backend = TestBackend::new(60, 6);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_collapsed(
+                    f,
+                    f.area(),
+                    &t,
+                    false,
+                    3,
+                    &sessions,
+                    1_700_000_000,
+                    false,
+                    None,
+                )
+            })
+            .expect("render");
+        let plain = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            !plain.contains("behind"),
+            "no holder => no waiting line:\n{}",
+            plain
+        );
+        assert!(
+            !plain.contains("queued"),
+            "no holder => no queued pill:\n{}",
             plain
         );
     }
