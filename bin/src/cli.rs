@@ -158,6 +158,7 @@ Usage:
   cc-hub pr request-changes --task ID --comment TEXT [--author NAME]
   cc-hub pr reopen --task ID [--comment TEXT] [--author NAME]
   cc-hub pr comment --task ID --comment TEXT [--author NAME]
+  cc-hub pr close --task ID [--project-id ID] [--comment TEXT] [--author NAME]
   cc-hub pr merge --task ID
   cc-hub pr lock-phase --task ID --phase merging|simplify|bump|finalize-pending
   cc-hub pr finalize --task ID [--build-cmd CMD] [--skip-build] [--keep-tmux]
@@ -1685,7 +1686,7 @@ fn task_create(args: &[String]) -> Result<(), CliError> {
 fn pr_subcommand(args: &[String]) -> Result<(), CliError> {
     let (verb, rest) = args.split_first().ok_or_else(|| {
         CliError::Usage(
-            "pr <verb>: missing verb (try `create`, `show`, `approve`, `request-changes`, `reopen`, `comment`, `merge`, `lock-phase`, `finalize`)".into(),
+            "pr <verb>: missing verb (try `create`, `show`, `approve`, `request-changes`, `reopen`, `comment`, `close`, `merge`, `lock-phase`, `finalize`)".into(),
         )
     })?;
     match verb.as_str() {
@@ -1695,11 +1696,12 @@ fn pr_subcommand(args: &[String]) -> Result<(), CliError> {
         "request-changes" => pr_request_changes(rest),
         "reopen" => pr_reopen(rest),
         "comment" => pr_comment(rest),
+        "close" => pr_close(rest),
         "merge" => pr_merge(rest),
         "lock-phase" => pr_lock_phase(rest),
         "finalize" => pr_finalize(rest),
         other => Err(CliError::Usage(format!(
-            "unknown pr verb: {} (try `create`, `show`, `approve`, `request-changes`, `reopen`, `comment`, `merge`, `lock-phase`, `finalize`)",
+            "unknown pr verb: {} (try `create`, `show`, `approve`, `request-changes`, `reopen`, `comment`, `close`, `merge`, `lock-phase`, `finalize`)",
             other
         ))),
     }
@@ -1945,6 +1947,66 @@ fn pr_comment(args: &[String]) -> Result<(), CliError> {
     print_json(&serde_json::json!({
         "ok": true,
         "pr": pr_to_json(&pr),
+    }));
+    Ok(())
+}
+
+/// Non-destructive "abandon" path: flip the PR to Closed, mark the task Done,
+/// drop the merge lock if held, and tear down sessions. Preserves the review
+/// record (comments + history) instead of deleting the task.
+fn pr_close(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+    let comment = f.comment.clone();
+    let author = f.author.clone().unwrap_or_else(|| "user".into());
+
+    let pr = cc_hub_lib::pr::read_pr(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
+        .ok_or_else(|| CliError::Other("no PR for this task".into()))?;
+
+    match pr.review_state {
+        cc_hub_lib::pr::ReviewState::Merged => {
+            return Err(CliError::Usage(
+                "PR is already merged; closing a merged PR is not meaningful — consider opening a follow-up task instead".into(),
+            ));
+        }
+        cc_hub_lib::pr::ReviewState::Closed => {
+            return Err(CliError::Usage(
+                "PR is already closed; reopen it via the TUI before closing again".into(),
+            ));
+        }
+        _ => {}
+    }
+
+    let now = orchestrator::now_unix_secs();
+    let pr = cc_hub_lib::pr::update_pr(&project_id, &task_id, |p| {
+        p.review_state = cc_hub_lib::pr::ReviewState::Closed;
+        if let Some(body) = comment.clone() {
+            p.comments.push(cc_hub_lib::pr::Comment {
+                author: author.clone(),
+                at: now,
+                body,
+            });
+        }
+    })
+    .map_err(|e| CliError::Other(format!("update pr: {}", e)))?;
+
+    let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
+        s.status = TaskStatus::Done;
+        s.note = Some(format!("PR #{}: closed", pr.id));
+    })
+    .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
+
+    // No-op if this task isn't the holder.
+    let _ = cc_hub_lib::merge_lock::release(&project_id, &task_id);
+
+    orchestrator::cleanup_task_sessions(&state);
+
+    print_json(&serde_json::json!({
+        "ok": true,
+        "pr": pr_to_json(&pr),
+        "status": "done",
     }));
     Ok(())
 }
@@ -3211,6 +3273,186 @@ mod tests {
                     .is_none(),
                 "lock should remain unheld when finalize is refused"
             );
+        });
+    }
+
+    #[test]
+    fn pr_close_from_open_marks_task_done() {
+        with_tempdir_home(|| {
+            let project_id = "p-close-open".to_string();
+            let task_id = "t-close-open".to_string();
+
+            let mut state = TaskState::new(
+                project_id.clone(),
+                PathBuf::from("/tmp/proj"),
+                "do thing".into(),
+            );
+            state.task_id = task_id.clone();
+            state.status = TaskStatus::Review;
+            orchestrator::write_task_state(&state).expect("write state");
+
+            pr::create_pr(
+                &state,
+                "feature".into(),
+                "main".into(),
+                "title".into(),
+                "desc".into(),
+            )
+            .expect("create pr");
+
+            // Hold the merge lock so we can assert release on close.
+            cc_hub_lib::merge_lock::acquire(&project_id, &task_id, None).expect("acquire");
+
+            pr_close(&[
+                "--task".into(),
+                task_id.clone(),
+                "--project-id".into(),
+                project_id.clone(),
+                "--comment".into(),
+                "abandoning this work".into(),
+            ])
+            .expect("pr close ok");
+
+            let after_pr = pr::read_pr(&project_id, &task_id)
+                .expect("read pr")
+                .expect("pr present");
+            assert_eq!(after_pr.review_state, pr::ReviewState::Closed);
+            let last = after_pr.comments.last().expect("comment appended");
+            assert_eq!(last.author, "user");
+            assert_eq!(last.body, "abandoning this work");
+
+            let after_state =
+                orchestrator::read_task_state(&project_id, &task_id).expect("read state");
+            assert_eq!(after_state.status, TaskStatus::Done);
+            assert!(
+                after_state
+                    .note
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("closed"),
+                "note should mention closed, got {:?}",
+                after_state.note
+            );
+
+            assert!(
+                cc_hub_lib::merge_lock::current_holder(&project_id)
+                    .expect("read lock")
+                    .is_none(),
+                "lock should be released after close"
+            );
+        });
+    }
+
+    #[test]
+    fn pr_close_from_changes_requested_works() {
+        with_tempdir_home(|| {
+            let project_id = "p-close-cr".to_string();
+            let task_id = "t-close-cr".to_string();
+
+            let mut state = TaskState::new(
+                project_id.clone(),
+                PathBuf::from("/tmp/proj"),
+                "do thing".into(),
+            );
+            state.task_id = task_id.clone();
+            state.status = TaskStatus::Running;
+            orchestrator::write_task_state(&state).expect("write state");
+
+            pr::create_pr(
+                &state,
+                "feature".into(),
+                "main".into(),
+                "title".into(),
+                "desc".into(),
+            )
+            .expect("create pr");
+            pr::update_pr(&project_id, &task_id, |p| {
+                p.review_state = pr::ReviewState::ChangesRequested;
+            })
+            .expect("set changes_requested");
+
+            pr_close(&[
+                "--task".into(),
+                task_id.clone(),
+                "--project-id".into(),
+                project_id.clone(),
+            ])
+            .expect("pr close ok");
+
+            let after_pr = pr::read_pr(&project_id, &task_id)
+                .expect("read pr")
+                .expect("pr present");
+            assert_eq!(after_pr.review_state, pr::ReviewState::Closed);
+
+            let after_state =
+                orchestrator::read_task_state(&project_id, &task_id).expect("read state");
+            assert_eq!(after_state.status, TaskStatus::Done);
+        });
+    }
+
+    #[test]
+    fn pr_close_refuses_merged_and_closed() {
+        with_tempdir_home(|| {
+            let project_id = "p-close-refuse".to_string();
+            let task_id = "t-close-refuse".to_string();
+
+            let mut state = TaskState::new(
+                project_id.clone(),
+                PathBuf::from("/tmp/proj"),
+                "do thing".into(),
+            );
+            state.task_id = task_id.clone();
+            state.status = TaskStatus::Done;
+            orchestrator::write_task_state(&state).expect("write state");
+
+            pr::create_pr(
+                &state,
+                "feature".into(),
+                "main".into(),
+                "title".into(),
+                "desc".into(),
+            )
+            .expect("create pr");
+
+            // Already-merged PR: refuse.
+            pr::update_pr(&project_id, &task_id, |p| {
+                p.review_state = pr::ReviewState::Merged;
+            })
+            .expect("set merged");
+            let err = pr_close(&[
+                "--task".into(),
+                task_id.clone(),
+                "--project-id".into(),
+                project_id.clone(),
+            ])
+            .expect_err("close on merged should fail");
+            match err {
+                CliError::Usage(msg) => assert!(
+                    msg.contains("merged"),
+                    "expected message mentioning merged, got: {msg}"
+                ),
+                other => panic!("expected CliError::Usage, got {other:?}"),
+            }
+
+            // Already-closed PR: refuse.
+            pr::update_pr(&project_id, &task_id, |p| {
+                p.review_state = pr::ReviewState::Closed;
+            })
+            .expect("set closed");
+            let err = pr_close(&[
+                "--task".into(),
+                task_id.clone(),
+                "--project-id".into(),
+                project_id.clone(),
+            ])
+            .expect_err("close on closed should fail");
+            match err {
+                CliError::Usage(msg) => assert!(
+                    msg.contains("closed"),
+                    "expected message mentioning closed, got: {msg}"
+                ),
+                other => panic!("expected CliError::Usage, got {other:?}"),
+            }
         });
     }
 
