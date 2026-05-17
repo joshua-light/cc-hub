@@ -687,6 +687,118 @@ pub fn remove_project(project_id: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Outcome of a `delete_task` call. All boolean fields are best-effort: a
+/// `false` on `orchestrator_killed` means we tried and failed (logged), and
+/// `worktree_errors` lists the per-worktree paths whose cleanup also failed
+/// the `fs::remove_dir_all` fallback. The state directory removal is the
+/// only step that propagates as a hard error (because if it fails, the task
+/// stays visible in the Projects view forever).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeletedTask {
+    pub task_id: String,
+    pub project_id: String,
+    pub orchestrator_killed: bool,
+    pub state_removed: bool,
+    pub worktrees_removed: Vec<String>,
+    pub worktree_errors: Vec<(String, String)>,
+}
+
+/// Delete a task end-to-end: kill its orchestrator tmux, remove every
+/// worktree the task owns (best-effort, falling back to plain rm -rf if
+/// `git worktree remove --force` doesn't take), kill worker tmuxes, then
+/// remove the on-disk state dir.
+///
+/// Returns `NotFound` (propagated from `read_task_state`) when the task
+/// doesn't exist so callers can distinguish "already gone" from "deletion
+/// failed". This is the mechanical primitive — status gating (Merging /
+/// Running / `--force`) lives in the CLI verb and TUI.
+pub fn delete_task(project_id: &str, task_id: &str) -> io::Result<DeletedTask> {
+    let state = read_task_state(project_id, task_id)?;
+
+    let mut orchestrator_killed = false;
+    if let Some(name) = state.orchestrator_tmux.as_deref() {
+        match crate::send::kill_tmux_session(name) {
+            Ok(()) => orchestrator_killed = true,
+            Err(e) => log::warn!(
+                "delete_task {}: kill orchestrator tmux [{}] failed: {}",
+                task_id,
+                name,
+                e
+            ),
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut worktrees_removed = Vec::new();
+    let mut worktree_errors: Vec<(String, String)> = Vec::new();
+    for w in &state.workers {
+        let Some(wt_name) = w.worktree.as_ref() else {
+            continue;
+        };
+        let path = worktree_path(&state.project_root, &state.task_id, wt_name);
+        let path_str = path.to_string_lossy().into_owned();
+        if !seen.insert(path_str.clone()) {
+            continue;
+        }
+        let path_arg = path.to_string_lossy().into_owned();
+        let git_result = run_git(
+            &state.project_root,
+            &["worktree", "remove", "--force", &path_arg],
+        );
+        let counted = match &git_result {
+            Ok(out) => {
+                let stderr_lower = out.stderr.to_lowercase();
+                let not_a_wt = stderr_lower.contains("not a working tree");
+                out.status_ok || !path.exists() || not_a_wt
+            }
+            Err(_) => !path.exists(),
+        };
+        if counted {
+            worktrees_removed.push(path_str);
+            continue;
+        }
+        match fs::remove_dir_all(&path) {
+            Ok(()) => worktrees_removed.push(path_str),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => worktrees_removed.push(path_str),
+            Err(e) => {
+                let prefix = match git_result {
+                    Ok(out) => format!("git: {}", out.stderr.trim()),
+                    Err(ge) => format!("git invoke: {}", ge),
+                };
+                worktree_errors.push((path_str, format!("{}; fs: {}", prefix, e)));
+            }
+        }
+    }
+
+    for w in &state.workers {
+        if let Err(e) = crate::send::kill_tmux_session(&w.tmux_name) {
+            log::warn!(
+                "delete_task {}: kill worker tmux [{}] failed: {}",
+                task_id,
+                w.tmux_name,
+                e
+            );
+        }
+    }
+
+    let state_dir =
+        task_state_dir(project_id, task_id).ok_or_else(|| io::Error::other("no home dir"))?;
+    let state_removed = match fs::remove_dir_all(&state_dir) {
+        Ok(()) => true,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => true,
+        Err(e) => return Err(e),
+    };
+
+    Ok(DeletedTask {
+        task_id: task_id.to_string(),
+        project_id: project_id.to_string(),
+        orchestrator_killed,
+        state_removed,
+        worktrees_removed,
+        worktree_errors,
+    })
+}
+
 /// First user message dispatched to a freshly-spawned orchestrator session.
 ///
 /// This is *the* contract between cc-hub and the orchestrator role: it

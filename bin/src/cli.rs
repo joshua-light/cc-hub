@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 /// genuinely broken spawns, not to bound happy-path latency.
 const DEFAULT_PROMPT_WAIT_SECS: u64 = 120;
 const TASK_VERBS_HELP: &str =
-    "`report`, `create`, `start`, `list`, `show`, `auto-review`, `artifact`, or `todos`";
+    "`report`, `create`, `start`, `list`, `show`, `delete`, `auto-review`, `artifact`, or `todos`";
 
 pub fn dispatch(args: &[String]) -> Option<i32> {
     let (verb, rest) = args.split_first()?;
@@ -127,6 +127,7 @@ Usage:
   cc-hub task start --task ID [--agent AGENT] [--wait-secs N] [--project-id ID]
   cc-hub task report --task ID [--status running|review|merging|done|backlog] [--note TEXT] [--summary TEXT]
   cc-hub task show --task ID [--project-id ID] [--json]
+  cc-hub task delete --task ID [--project-id ID] [--force]
   cc-hub task auto-review --task ID [--project-id ID]
   cc-hub task list [--status backlog|running|review|merging|done] [--project-id ID] [--json]
   cc-hub task artifact add --task ID --path PATH_OR_URL [--kind KIND] [--caption TEXT] [--lead]
@@ -258,6 +259,9 @@ struct Flags {
     progress: bool,
     progress_interval_secs: Option<u64>,
     json: bool,
+    /// `task delete --force` — required for Running/Review tasks. Merging is
+    /// refused outright even with `--force`.
+    force: bool,
     /// `pr finalize` flags: override the build command, skip the build
     /// gate entirely, or keep the orchestrator tmux session alive.
     build_cmd: Option<String>,
@@ -388,6 +392,10 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
             }
             "--json" => {
                 f.json = true;
+                i += 1;
+            }
+            "--force" => {
+                f.force = true;
                 i += 1;
             }
             "--build-cmd" => {
@@ -829,6 +837,7 @@ fn task_subcommand(args: &[String]) -> Result<(), CliError> {
         "start" => task_start(rest),
         "show" => task_show(rest),
         "list" => task_list(rest),
+        "delete" => task_delete(rest),
         "auto-review" => task_auto_review(rest),
         "artifact" => task_artifact_subcommand(rest),
         "todos" => task_todos_subcommand(rest),
@@ -837,6 +846,69 @@ fn task_subcommand(args: &[String]) -> Result<(), CliError> {
             other, TASK_VERBS_HELP
         ))),
     }
+}
+
+/// `cc-hub task delete --task ID [--project-id ID] [--force]`
+///
+/// End-to-end teardown: kills the orchestrator tmux (best-effort), removes
+/// every worktree the task owns, then deletes the on-disk task state dir.
+/// Refuses `Merging` outright (merge lock held → user must finalize or
+/// release first); requires `--force` for `Running` / `Review` so the user
+/// has to acknowledge they're killing live work.
+fn task_delete(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+
+    let state = match orchestrator::read_task_state(&project_id, &task_id) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(CliError::Other(format!(
+                "no such task: {}/{}",
+                project_id, task_id
+            )));
+        }
+        Err(e) => return Err(CliError::Other(format!("load state: {}", e))),
+    };
+
+    if state.status == TaskStatus::Merging {
+        return Err(CliError::Other(format!(
+            "task {} is Merging (merge lock held); finalize or release the lock before deleting",
+            task_id
+        )));
+    }
+
+    if matches!(state.status, TaskStatus::Running | TaskStatus::Review) && !f.force {
+        return Err(CliError::Other(format!(
+            "task {} is {:?}; pass --force to delete an active task (orchestrator tmux will be killed)",
+            task_id, state.status
+        )));
+    }
+
+    let deleted = orchestrator::delete_task(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("delete task: {}", e)))?;
+
+    let worktree_errors: Vec<serde_json::Value> = deleted
+        .worktree_errors
+        .iter()
+        .map(|(path, err)| {
+            serde_json::json!({
+                "path": path,
+                "error": err,
+            })
+        })
+        .collect();
+
+    print_json(&serde_json::json!({
+        "ok": true,
+        "task_id": deleted.task_id,
+        "project_id": deleted.project_id,
+        "orchestrator_killed": deleted.orchestrator_killed,
+        "state_removed": deleted.state_removed,
+        "worktrees_removed": deleted.worktrees_removed,
+        "worktree_errors": worktree_errors,
+    }));
+    Ok(())
 }
 
 /// `cc-hub task start --task ID [--project-id ID] [--agent ID] [--wait-secs N]`
@@ -2960,6 +3032,77 @@ mod tests {
         });
     }
 
+    fn git_available() -> bool {
+        std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    fn git_run(root: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {} failed: stdout={} stderr={}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+
+    fn init_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        git_run(root, &["init", "-q", "-b", "main"]);
+        git_run(root, &["config", "user.email", "cc-hub-test@example.com"]);
+        git_run(root, &["config", "user.name", "cc-hub-test"]);
+        git_run(root, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        git_run(root, &["add", "."]);
+        git_run(root, &["commit", "-q", "-m", "seed"]);
+        dir
+    }
+
+    fn seed_task_with_worktree(
+        project_root: &std::path::Path,
+        status: TaskStatus,
+    ) -> (String, String, std::path::PathBuf) {
+        let project_id = orchestrator::ensure_project_registered(project_root, "test-proj")
+            .expect("register project");
+        let task_id = "t-delete-test".to_string();
+        let worktree_name = "wt".to_string();
+
+        let wt_path =
+            orchestrator::create_worktree(project_root, &task_id, &worktree_name, "main")
+                .expect("create worktree");
+
+        let mut state = TaskState::new(
+            project_id.clone(),
+            project_root.to_path_buf(),
+            "do thing".into(),
+        );
+        state.task_id = task_id.clone();
+        state.status = status;
+        state.workers.push(Worker {
+            agent_id: "claude".into(),
+            agent_kind: cc_hub_lib::agent::AgentKind::Claude,
+            tmux_name: "cc-hub-test-wkr".into(),
+            cwd: wt_path.clone(),
+            worktree: Some(worktree_name),
+            readonly: false,
+            spawned_at: 0,
+        });
+        orchestrator::write_task_state(&state).expect("write state");
+
+        (project_id, task_id, wt_path)
+    }
+
     #[test]
     fn task_show_json_emits_task_id() {
         with_tempdir_home(|| {
@@ -3320,6 +3463,142 @@ mod tests {
                     .expect("read holder")
                     .is_none(),
                 "lock must be released after successful retry"
+            );
+        });
+    }
+
+    #[test]
+    fn task_delete_removes_state_and_worktree() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        with_tempdir_home(|| {
+            let repo = init_repo();
+            let (project_id, task_id, wt_path) =
+                seed_task_with_worktree(repo.path(), TaskStatus::Backlog);
+
+            assert!(wt_path.exists(), "worktree should exist before delete");
+            let state_dir = orchestrator::task_state_dir(&project_id, &task_id).unwrap();
+            assert!(state_dir.exists(), "state dir should exist before delete");
+
+            let code = dispatch(&[
+                "task".into(),
+                "delete".into(),
+                "--task".into(),
+                task_id.clone(),
+                "--project-id".into(),
+                project_id.clone(),
+            ]);
+            assert_eq!(code, Some(0), "task delete should exit 0");
+            assert!(!state_dir.exists(), "state dir should be gone after delete");
+            assert!(!wt_path.exists(), "worktree dir should be gone after delete");
+        });
+    }
+
+    #[test]
+    fn task_delete_refuses_running_without_force() {
+        with_tempdir_home(|| {
+            let project_id = "p-running".to_string();
+            let task_id = "t-running".to_string();
+
+            let mut state = TaskState::new(
+                project_id.clone(),
+                PathBuf::from("/tmp/nonexistent"),
+                "do thing".into(),
+            );
+            state.task_id = task_id.clone();
+            state.status = TaskStatus::Running;
+            orchestrator::write_task_state(&state).expect("write state");
+
+            let state_dir = orchestrator::task_state_dir(&project_id, &task_id).unwrap();
+            assert!(state_dir.exists());
+
+            let code = dispatch(&[
+                "task".into(),
+                "delete".into(),
+                "--task".into(),
+                task_id.clone(),
+                "--project-id".into(),
+                project_id.clone(),
+            ]);
+            assert_ne!(code, Some(0), "expected non-zero exit without --force");
+            assert!(
+                state_dir.exists(),
+                "state dir must survive a refused delete"
+            );
+        });
+    }
+
+    #[test]
+    fn task_delete_running_succeeds_with_force() {
+        with_tempdir_home(|| {
+            let project_id = "p-running-force".to_string();
+            let task_id = "t-running-force".to_string();
+
+            let mut state = TaskState::new(
+                project_id.clone(),
+                PathBuf::from("/tmp/nonexistent"),
+                "do thing".into(),
+            );
+            state.task_id = task_id.clone();
+            state.status = TaskStatus::Running;
+            orchestrator::write_task_state(&state).expect("write state");
+
+            let state_dir = orchestrator::task_state_dir(&project_id, &task_id).unwrap();
+            assert!(state_dir.exists());
+
+            let code = dispatch(&[
+                "task".into(),
+                "delete".into(),
+                "--task".into(),
+                task_id.clone(),
+                "--project-id".into(),
+                project_id.clone(),
+                "--force".into(),
+            ]);
+            assert_eq!(code, Some(0), "task delete --force should exit 0");
+            assert!(
+                !state_dir.exists(),
+                "state dir should be gone after --force delete"
+            );
+        });
+    }
+
+    #[test]
+    fn task_delete_refuses_merging_even_with_force() {
+        with_tempdir_home(|| {
+            let project_id = "p-merging".to_string();
+            let task_id = "t-merging".to_string();
+
+            let mut state = TaskState::new(
+                project_id.clone(),
+                PathBuf::from("/tmp/nonexistent"),
+                "do thing".into(),
+            );
+            state.task_id = task_id.clone();
+            state.status = TaskStatus::Merging;
+            orchestrator::write_task_state(&state).expect("write state");
+
+            let state_dir = orchestrator::task_state_dir(&project_id, &task_id).unwrap();
+
+            let code = dispatch(&[
+                "task".into(),
+                "delete".into(),
+                "--task".into(),
+                task_id.clone(),
+                "--project-id".into(),
+                project_id.clone(),
+                "--force".into(),
+            ]);
+            assert_ne!(
+                code,
+                Some(0),
+                "Merging must refuse delete even with --force"
+            );
+            assert!(
+                state_dir.exists(),
+                "state dir must survive a refused delete"
             );
         });
     }
