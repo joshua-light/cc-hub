@@ -290,10 +290,10 @@ chip-level signal when there's pending work to triage.
 | `R` | Confirm, then restart the selected Running/Backlog task's orchestrator from the original prompt (blocked for Review/Done/Merging tasks) |
 | `Space` | Approve the focused Review PR → Merging/queued; PR-less Review tasks go Done |
 | `r` | Open the Result popup (artifacts + summary) for the focused task |
-| `b` | Open the Backlog popup (`s`/`Enter` starts the selected backlog task) |
+| `b` | Open the Backlog popup (`s`/`Enter` starts the selected backlog task; `x` deletes it) |
 | `n` | New task in the current project (prompt input — `Tab` cycles the orchestrator agent when more than one is configured) |
 | `N` | Folder picker → register a project, then prompt for a task |
-| `x` | Delete the selected task (kills its orchestrator, removes state) |
+| `x` | Delete the selected task (also works in the Backlog popup; kills its orchestrator, removes state) |
 | `X` | Remove the focused project from the hub (does not delete the repo) |
 
 ## Known limitations
