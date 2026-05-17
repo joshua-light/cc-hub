@@ -1337,26 +1337,33 @@ async fn run(
                                 &pending.task_id,
                             ) {
                                 Ok(d) => {
-                                    let kill = if d.orchestrator_killed {
-                                        "orch killed"
-                                    } else {
-                                        "no orch"
-                                    };
-                                    let wt = if d.worktrees_removed.is_empty() {
-                                        String::new()
-                                    } else {
-                                        format!(
-                                            ", {} worktree{} removed",
-                                            d.worktrees_removed.len(),
-                                            if d.worktrees_removed.len() == 1 { "" } else { "s" }
-                                        )
-                                    };
-                                    let errs = if d.worktree_errors.is_empty() {
-                                        String::new()
-                                    } else {
-                                        format!(", {} worktree error(s)", d.worktree_errors.len())
-                                    };
-                                    format!("deleted {} ({}{}{})", pending.display, kill, wt, errs)
+                                    let mut segs: Vec<String> = Vec::new();
+                                    segs.push(
+                                        if d.orchestrator_killed { "orch killed" } else { "no orch" }
+                                            .to_string(),
+                                    );
+                                    if !d.worktrees_removed.is_empty() {
+                                        let n = d.worktrees_removed.len();
+                                        segs.push(format!(
+                                            "{} worktree{} removed",
+                                            n,
+                                            if n == 1 { "" } else { "s" }
+                                        ));
+                                    }
+                                    if !d.worktree_errors.is_empty() {
+                                        segs.push(format!(
+                                            "{} worktree error(s)",
+                                            d.worktree_errors.len()
+                                        ));
+                                    }
+                                    if d.lock_released {
+                                        segs.push("lock released".into());
+                                    }
+                                    format!(
+                                        "deleted {} ({})",
+                                        pending.display,
+                                        segs.join(", ")
+                                    )
                                 }
                                 Err(e) => {
                                     log::warn!("task delete: {}", e);
