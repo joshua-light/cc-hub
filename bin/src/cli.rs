@@ -407,7 +407,72 @@ fn resolve_project_id(f: &Flags) -> Result<String, CliError> {
         return Ok(id);
     }
     let cwd = std::env::current_dir().map_err(|e| CliError::Other(format!("cwd: {}", e)))?;
-    Ok(orchestrator::project_id_for_path(&cwd))
+    let cwd_id = orchestrator::project_id_for_path(&cwd);
+
+    // Fast path: if the cwd id has a state file for this task (or no --task
+    // was passed), keep current behavior. Otherwise fall through and scan.
+    if cwd_id_has_task_state(&cwd_id, f.task.as_deref()) {
+        return Ok(cwd_id);
+    }
+    let Some(task_id) = f.task.as_deref() else {
+        return Ok(cwd_id);
+    };
+
+    let matches = scan_projects_for_task(task_id);
+    match matches.as_slice() {
+        [only] => Ok(only.clone()),
+        [] => Err(CliError::Other(format!(
+            "task {} not found under any registered project (cwd id {} has no state file); pass --project-id to disambiguate",
+            task_id, cwd_id
+        ))),
+        many => Err(CliError::Other(format!(
+            "task {} matches multiple registered projects: {}; pass --project-id to disambiguate",
+            task_id,
+            many.join(", ")
+        ))),
+    }
+}
+
+/// True when `--task` is absent (cwd id is fine on its own) or when the
+/// per-task state.json exists under the cwd-derived project id.
+fn cwd_id_has_task_state(cwd_id: &str, task_id: Option<&str>) -> bool {
+    let Some(task_id) = task_id else {
+        return true;
+    };
+    orchestrator::task_state_file(cwd_id, task_id)
+        .map(|p| p.exists())
+        .unwrap_or(false)
+}
+
+/// Enumerate `~/.cc-hub/projects/*/tasks/<task_id>/state.json` and return the
+/// project ids whose directory contains a state file for the given task.
+fn scan_projects_for_task(task_id: &str) -> Vec<String> {
+    let Some(root) = orchestrator::projects_state_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Some(project_id) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(state_file) = orchestrator::task_state_file(&project_id, task_id) else {
+            continue;
+        };
+        if state_file.exists() {
+            out.push(project_id);
+        }
+    }
+    out.sort();
+    out
 }
 
 fn resolve_orchestrator_agent_id(f: &Flags) -> String {
@@ -2246,6 +2311,110 @@ mod tests {
                 "note should mention reopen, got {:?}",
                 after_state.note
             );
+        });
+    }
+
+    fn write_state_for(project_id: &str, task_id: &str) {
+        let mut state = TaskState::new(
+            project_id.to_string(),
+            PathBuf::from("/tmp/proj"),
+            "do thing".into(),
+        );
+        state.task_id = task_id.to_string();
+        orchestrator::write_task_state(&state).expect("write state");
+    }
+
+    fn flags_for(task: Option<&str>, project_id: Option<&str>) -> Flags {
+        Flags {
+            task: task.map(str::to_owned),
+            project_id: project_id.map(str::to_owned),
+            ..Flags::default()
+        }
+    }
+
+    #[test]
+    fn resolve_project_id_returns_explicit_flag_verbatim() {
+        with_tempdir_home(|| {
+            // No state files anywhere — explicit --project-id must still be
+            // returned without triggering the fallback scan.
+            let f = flags_for(Some("t-anything"), Some("p-explicit"));
+            let got = resolve_project_id(&f).expect("resolve ok");
+            assert_eq!(got, "p-explicit");
+        });
+    }
+
+    #[test]
+    fn resolve_project_id_scans_when_cwd_id_misses() {
+        with_tempdir_home(|| {
+            // Real project id where the task lives. cwd at test time is the
+            // workspace dir, which canonicalizes to a different project id —
+            // so the cwd fast-path will miss and the scan must find p-real.
+            let task_id = "t-scan";
+            write_state_for("p-real", task_id);
+
+            let cwd = std::env::current_dir().expect("cwd");
+            let cwd_id = orchestrator::project_id_for_path(&cwd);
+            assert_ne!(cwd_id, "p-real", "test precondition: cwd id must differ");
+
+            let f = flags_for(Some(task_id), None);
+            let got = resolve_project_id(&f).expect("resolve ok");
+            assert_eq!(got, "p-real");
+        });
+    }
+
+    #[test]
+    fn resolve_project_id_errors_with_candidates_on_multiple_matches() {
+        with_tempdir_home(|| {
+            let task_id = "t-dup";
+            write_state_for("p-alpha", task_id);
+            write_state_for("p-beta", task_id);
+
+            let f = flags_for(Some(task_id), None);
+            let err = resolve_project_id(&f).expect_err("must be ambiguous");
+            let CliError::Other(msg) = err else {
+                panic!("expected CliError::Other, got {:?}", err);
+            };
+            assert!(msg.contains("p-alpha"), "msg should list p-alpha: {}", msg);
+            assert!(msg.contains("p-beta"), "msg should list p-beta: {}", msg);
+            assert!(
+                msg.contains("--project-id"),
+                "msg should mention --project-id: {}",
+                msg
+            );
+        });
+    }
+
+    #[test]
+    fn resolve_project_id_errors_when_task_not_registered() {
+        with_tempdir_home(|| {
+            let f = flags_for(Some("t-nope"), None);
+            let err = resolve_project_id(&f).expect_err("must error");
+            let CliError::Other(msg) = err else {
+                panic!("expected CliError::Other, got {:?}", err);
+            };
+            assert!(
+                msg.contains("t-nope"),
+                "msg should mention task id: {}",
+                msg
+            );
+            assert!(
+                msg.contains("--project-id"),
+                "msg should suggest --project-id: {}",
+                msg
+            );
+        });
+    }
+
+    #[test]
+    fn resolve_project_id_without_task_falls_back_to_cwd_id() {
+        with_tempdir_home(|| {
+            // No --task means the scan is skipped; cwd id is returned as-is
+            // even if no state files exist anywhere. This preserves verbs
+            // like `project list` that don't need a task.
+            let f = flags_for(None, None);
+            let got = resolve_project_id(&f).expect("resolve ok");
+            let cwd = std::env::current_dir().expect("cwd");
+            assert_eq!(got, orchestrator::project_id_for_path(&cwd));
         });
     }
 }
