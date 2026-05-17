@@ -788,7 +788,9 @@ EOF
 
 # Iterating on review feedback
 
-- **Changes requested.** Inspect the new comments with `{bin} pr show --task {task_id}`, push the fix to the worktree branch (never main), then run `{bin} pr reopen --task {task_id} --comment \"<reply explaining the fix>\"`. This flips the PR back to Open, transitions the task `Running → Review`, and re-arms auto-review on the new commits.
+The user reviews the PR in the TUI. Two outcomes:
+
+- **Changes requested.** The task transitions back to `Running` and the PR's `review_state` becomes `changes_requested`. Poll for it with `{bin} pr show --task {task_id}` — inspect the latest PR state and any new comments. On the first poll after PR open, capture `pr.updated_at` from the response. On every subsequent poll, pass `--comments-since <previous pr.updated_at>` so only NEW comments come back, then stash the new `pr.updated_at` for the next round. The response also returns `comments_total` (all comments on the PR) and `comments_returned` (how many came back after filtering) — use those to sanity-check the filter is doing what you expect. Push the fix to the worktree branch (never main), then run `{bin} pr reopen --task {task_id} --comment \"<reply explaining the fix>\"`. This flips the PR back to Open, transitions the task `Running → Review`, and re-arms auto-review on the new commits.
 - **Approved.** When `review_state` becomes `approved`, proceed to **Merging** below.
 
 # Merging (the only path edits reach main)
