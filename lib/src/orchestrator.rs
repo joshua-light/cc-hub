@@ -552,12 +552,25 @@ pub struct Project {
     pub name: String,
     pub root: PathBuf,
     pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_cmd: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProjectsFile {
     #[serde(default, rename = "project")]
     pub projects: Vec<Project>,
+}
+
+/// Look up the per-project build command from `~/.cc-hub/projects.toml`.
+/// Returns `None` if the project isn't registered or has no `build_cmd` set;
+/// callers fall back to their own default.
+pub fn project_build_cmd(project_id: &str) -> Option<String> {
+    load_projects()
+        .projects
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .and_then(|p| p.build_cmd)
 }
 
 pub fn load_projects() -> ProjectsFile {
@@ -611,6 +624,7 @@ pub fn ensure_project_registered(root: &Path, name: &str) -> io::Result<String> 
             name: name.to_string(),
             root: canon,
             created_at: now_unix_secs(),
+            build_cmd: None,
         });
         save_projects(&file)?;
     }
@@ -813,7 +827,7 @@ pub fn build_review_approval_prompt(task_id: &str, cc_hub_bin: &Path) -> String 
 Continue the merge flow now:
 1. Run `{bin} pr show --task {task_id}` to confirm the PR is still `approved`.
 2. If it is, run `{bin} pr merge --task {task_id}`.
-3. While the merge lock is held, run `/simplify` and `/bump`, then re-run build/test if either changed files.
+3. While the merge lock is held, run `/simplify` and `/bump`. `pr finalize` runs the build itself — do not pre-staple `cargo build`.
 4. Finish with `{bin} pr finalize --task {task_id}`.
 
 If `pr merge` reports conflicts or a dirty-tree refusal, follow that recipe instead of forcing the merge. Do not ask the user for another approval unless the PR was demoted back to `open` and needs re-review."
@@ -902,25 +916,17 @@ EOF
 
 The user reviews the PR in the TUI. Two outcomes:
 
-- **Changes requested.** The task transitions back to `Running` and the PR's `review_state` becomes `changes_requested`. Poll for it:
-  `{bin} pr show --task {task_id}` — inspect the latest PR state and any new comments.
-  Read the new comments, dispatch a worker (or edit yourself in the worktree if it's a tiny tweak — but always inside the worktree, never on main) to address them, push commits to the worktree branch, then re-open the PR for review:
-  `{bin} pr show --task {task_id}` will show you're back to `open` once you push? **No** — you need to flip the state explicitly. Append your reply and request re-review by running:
-  `{bin} pr comment --task {task_id} --author orchestrator --comment \"<reply explaining the fix>\"`
-  Then transition the task back to Review with another `task report --status running --note \"PR #N: changes addressed; awaiting re-review\"` followed by a fresh `pr create` is **wrong** — the PR already exists. Instead, set the PR back to Open by re-running:
-  `{bin} task report --task {task_id} --status review --note \"<one line on what you addressed>\"`
-  (You're flipping the task back to Review; the PR's `review_state` gets cleared back to Open via the user's next interaction.)
-
-- **Approved.** The PR's `review_state` becomes `approved` and the task stays in Review until you pick it up. When you see `approved`, proceed to **Merging**.
+- **Changes requested.** The task transitions back to `Running` and the PR's `review_state` becomes `changes_requested`. Poll for it with `{bin} pr show --task {task_id}` — inspect the latest PR state and any new comments. On the first poll after PR open, capture `pr.updated_at` from the response. On every subsequent poll, pass `--comments-since <previous pr.updated_at>` so only NEW comments come back, then stash the new `pr.updated_at` for the next round. The response also returns `comments_total` (all comments on the PR) and `comments_returned` (how many came back after filtering) — use those to sanity-check the filter is doing what you expect. Push the fix to the worktree branch (never main), then run `{bin} pr reopen --task {task_id} --comment \"<reply explaining the fix>\"`. This flips the PR back to Open, transitions the task `Running → Review`, and re-arms auto-review on the new commits.
+- **Approved.** When `review_state` becomes `approved`, proceed to **Merging** below.
 
 # Merging (the only path edits reach main)
 
 Merging is **serialized project-wide** by the merge lock — at most one task is in the Merging state at a time. cc-hub handles the lock automatically; you just call the verbs in order.
 
 1. **Acquire the lock and run the merge**:
-   `{bin} pr merge --task {task_id}`
+   `{bin} pr merge --task {task_id} --wait`
    This:
-   - Acquires the project's merge lock (returns `ok=false, locked=true` with `holder_task` if another task is currently merging — poll and retry).
+   - Acquires the project's merge lock. **Pass `--wait` so the verb blocks in-process until the lock is free** (default 30 min cap, override with `--timeout-secs N`); without it, you get `ok=false, locked=true` and have to reinvent polling. Do not write Monitor tasks, until-loops, or sleep+capture chains for this — `--wait` already does it correctly and inherits stale-lock recovery.
    - Merges `main` into the feature branch first, so any conflicts with main's recent landings are resolved on the *feature branch* (not on main itself).
    - On clean merge, fast-forwards the feature branch into main.
    - On conflict during the main → branch merge, **the PR is auto-demoted to Open**, the lock is released, and a comment is appended explaining what happened. You then need to spawn a worker to resolve conflicts in the worktree, push the resolution, and ask the user to re-approve. (cc-hub's auto-approve rule only accepts *clean* resolutions; substantive conflict resolutions need a fresh review.)
@@ -930,7 +936,7 @@ Merging is **serialized project-wide** by the merge lock — at most one task is
 
 3. **Run `/bump`** to cut a version commit reflecting the final tree.
 
-4. **Re-run build/test** if `/simplify` or `/bump` modified files. A passing tree is the bar.
+4. **Skip pre-stapled builds.** `pr finalize` runs the build itself before releasing the merge lock — do not pre-staple `cargo build`. The default build command is `cargo build --release`; override per-project via `projects.toml` `build_cmd`, or per-invocation via `--build-cmd CMD`. Pass `--skip-build` only when the project has no fast build to run.
 
 5. **Finalize**:
    `{bin} pr finalize --task {task_id}`
@@ -1704,6 +1710,7 @@ mod tests {
             format!("{} worker wait --task {}", bin_s, state.task_id),
             format!("{} pr create --task {}", bin_s, state.task_id),
             format!("{} pr show --task {}", bin_s, state.task_id),
+            format!("{} pr reopen --task {}", bin_s, state.task_id),
             format!("{} pr merge --task {}", bin_s, state.task_id),
             format!("{} pr finalize --task {}", bin_s, state.task_id),
             format!("{} task report --task {}", bin_s, state.task_id),
@@ -1811,6 +1818,22 @@ mod tests {
                 "prompt still references removed concept `{}` — \
                  this is the PR-flow rewrite; reservations and \
                  merge-worktree are gone",
+                forbidden
+            );
+        }
+
+        // The PR-reopen verb collapsed the iteration dance into one call. If the
+        // prompt still teaches the old `pr comment` + `task report --status review`
+        // workaround, the orchestrator will execute a two-step that no longer
+        // matches the auto-review semantics.
+        for forbidden in [
+            format!("pr comment --task {} --author orchestrator", state.task_id),
+            format!("task report --task {} --status review", state.task_id),
+        ] {
+            assert!(
+                !p.contains(&forbidden),
+                "prompt still references obsolete iteration step `{}` — \
+                 use `pr reopen` instead",
                 forbidden
             );
         }

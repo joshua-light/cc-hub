@@ -409,6 +409,7 @@ mod tests {
                 name: "scan-pr".into(),
                 root: project_root.clone(),
                 created_at: 0,
+                build_cmd: None,
             }],
         })
         .expect("save_projects");
