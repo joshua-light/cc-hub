@@ -3163,6 +3163,7 @@ fn render_kanban_board(frame: &mut Frame, area: Rect, app: &App) {
 
     let sessions_by_tmux = app.sessions_by_tmux();
     let now_secs = now_ms() / 1000;
+    let pr_summaries = &app.projects.pr_summaries;
 
     for col_idx in 0..5 {
         render_kanban_column(
@@ -3171,6 +3172,7 @@ fn render_kanban_board(frame: &mut Frame, area: Rect, app: &App) {
             app,
             col_idx,
             &sessions_by_tmux,
+            pr_summaries,
             now_secs,
         );
     }
@@ -3194,6 +3196,7 @@ fn render_kanban_column(
     app: &App,
     col_idx: usize,
     sessions_by_tmux: &std::collections::HashMap<&str, &SessionInfo>,
+    pr_summaries: &std::collections::HashMap<String, crate::projects_scan::PrCardSummary>,
     now_secs: u64,
 ) {
     let (label, icon, accent) = kanban_column_meta(col_idx);
@@ -3299,6 +3302,7 @@ fn render_kanban_column(
         };
         let selected = col_focused && rel == sel;
         let titling_in_flight = app.projects.is_titling(&t.task_id);
+        let pr_summary = pr_summaries.get(&t.task_id);
         if col_idx <= 1 {
             render_task_card_active(
                 frame,
@@ -3307,6 +3311,7 @@ fn render_kanban_column(
                 selected,
                 col_idx,
                 sessions_by_tmux,
+                pr_summary,
                 now_secs,
                 titling_in_flight,
             );
@@ -3318,6 +3323,7 @@ fn render_kanban_column(
                 selected,
                 col_idx,
                 sessions_by_tmux,
+                pr_summary,
                 now_secs,
                 titling_in_flight,
                 merging_holder_id,
@@ -3590,6 +3596,76 @@ fn ctx_bar(pct: u8, width: usize) -> Vec<Span<'static>> {
     out
 }
 
+/// Compact PR status badge for kanban cards. Surfaces the bits a reviewer
+/// needs to triage at-a-glance — PR id, review state, comment count — so
+/// the orchestrator's iterate-on-feedback loop is visible without opening
+/// the PR-details popup. Colour weights:
+/// * `changes_requested` is loud (the orchestrator needs attention).
+/// * `open` is calm; comments perk it up a notch.
+/// * `approved` is positive green.
+/// * `merged` / `closed` are muted — terminal states.
+fn pr_badge_spans(pr: &crate::projects_scan::PrCardSummary) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    spans.push(Span::styled(
+        format!("󰊢 PR #{}", pr.id),
+        Style::default().fg(Color::Rgb(150, 170, 200)),
+    ));
+    match pr.review_state {
+        crate::pr::ReviewState::ChangesRequested => {
+            spans.push(Span::styled(
+                " · changes requested".to_string(),
+                Style::default()
+                    .fg(Color::Rgb(230, 150, 110))
+                    .add_modifier(Modifier::BOLD),
+            ));
+            if pr.comments > 0 {
+                spans.push(Span::styled(
+                    format!(" · 󰭹 {}", pr.comments),
+                    Style::default().fg(Color::Rgb(180, 180, 200)),
+                ));
+            }
+        }
+        crate::pr::ReviewState::Open => {
+            if pr.comments > 0 {
+                spans.push(Span::styled(
+                    format!(" · 󰭹 {}", pr.comments),
+                    Style::default().fg(Color::Rgb(180, 200, 230)),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    " · open".to_string(),
+                    Style::default().fg(Color::Rgb(150, 170, 200)),
+                ));
+            }
+        }
+        crate::pr::ReviewState::Approved => {
+            spans.push(Span::styled(
+                " · approved".to_string(),
+                Style::default().fg(Color::LightGreen),
+            ));
+            if pr.comments > 0 {
+                spans.push(Span::styled(
+                    format!(" · 󰭹 {}", pr.comments),
+                    Style::default().fg(Color::Rgb(180, 180, 200)),
+                ));
+            }
+        }
+        crate::pr::ReviewState::Merged => {
+            spans.push(Span::styled(
+                " · merged".to_string(),
+                Style::default().fg(Color::Rgb(140, 160, 145)),
+            ));
+        }
+        crate::pr::ReviewState::Closed => {
+            spans.push(Span::styled(
+                " · closed".to_string(),
+                Style::default().fg(Color::Rgb(110, 120, 135)),
+            ));
+        }
+    }
+    spans
+}
+
 /// `(done, total)` if the task has a checklist, else `None`. Both card
 /// renderers use this to decide whether to draw the `☑ M/N` badge.
 fn todos_progress(t: &crate::orchestrator::TaskState) -> Option<(usize, usize)> {
@@ -3611,6 +3687,7 @@ fn render_task_card_active(
     selected: bool,
     col_idx: usize,
     sessions_by_tmux: &std::collections::HashMap<&str, &SessionInfo>,
+    pr_summary: Option<&crate::projects_scan::PrCardSummary>,
     now_secs: u64,
     titling_in_flight: bool,
 ) {
@@ -3680,6 +3757,14 @@ fn render_task_card_active(
         ]));
     } else {
         lines.push(Line::from(Span::raw("")));
+    }
+
+    // PR badge row — inserted above agent dots so a `changes requested`
+    // bounce-back is obvious before the eye scans the rest of the card.
+    // The live-tool row at the bottom is allowed to fall off when present
+    // (the card height is fixed at 4 inner rows).
+    if let Some(pr) = pr_summary {
+        lines.push(Line::from(pr_badge_spans(pr)));
     }
 
     // Row 2: agent dot strip + merge glyph.
@@ -3781,6 +3866,7 @@ fn render_task_card_collapsed(
     selected: bool,
     col_idx: usize,
     sessions_by_tmux: &std::collections::HashMap<&str, &SessionInfo>,
+    pr_summary: Option<&crate::projects_scan::PrCardSummary>,
     now_secs: u64,
     titling_in_flight: bool,
     lock_holder: Option<&str>,
@@ -3920,6 +4006,10 @@ fn render_task_card_collapsed(
             format!("󰠰 {}", tool_uses),
             Style::default().fg(Color::Rgb(180, 200, 160)),
         ));
+    }
+    if let Some(pr) = pr_summary {
+        footer.push(Span::raw("   "));
+        footer.extend(pr_badge_spans(pr));
     }
     lines.push(Line::from(footer));
 
@@ -4653,6 +4743,7 @@ mod result_popup_tests {
             tasks,
             titling: std::collections::HashSet::new(),
             merge_lock_holders: std::collections::HashMap::new(),
+            pr_summaries: std::collections::HashMap::new(),
         };
         app.update_projects(snap);
         assert!(app.enter_projects_result(), "popup should open");
@@ -4747,6 +4838,7 @@ mod result_popup_tests {
             tasks,
             titling: std::collections::HashSet::new(),
             merge_lock_holders: std::collections::HashMap::new(),
+            pr_summaries: std::collections::HashMap::new(),
         };
         app.update_projects(snap);
         assert!(app.enter_projects_result(), "popup should open");
@@ -4896,6 +4988,7 @@ index 0000001..0000002 100644
             tasks,
             titling: std::collections::HashSet::new(),
             merge_lock_holders: std::collections::HashMap::new(),
+            pr_summaries: std::collections::HashMap::new(),
         };
         app.update_projects(snap);
         assert!(app.enter_projects_result(), "popup should open");
@@ -4984,6 +5077,7 @@ mod kanban_card_tests {
                     false,
                     2,
                     &sessions,
+                    None,
                     1_000_000_000,
                     false,
                     None,
@@ -5013,6 +5107,7 @@ mod kanban_card_tests {
                     false,
                     2,
                     &sessions,
+                    None,
                     1_000_000_000,
                     false,
                     None,
@@ -5087,6 +5182,7 @@ mod kanban_card_tests {
                     false,
                     1,
                     &sessions,
+                    None,
                     1_000_000_000,
                     false,
                 )
@@ -5120,6 +5216,7 @@ mod kanban_card_tests {
                     false,
                     1,
                     &sessions,
+                    None,
                     1_000_000_000,
                     false,
                 )
@@ -5146,6 +5243,7 @@ mod kanban_card_tests {
                     false,
                     2,
                     &sessions,
+                    None,
                     1_000_000_000,
                     false,
                     None,
@@ -5175,6 +5273,7 @@ mod kanban_card_tests {
                     false,
                     1,
                     &sessions,
+                    None,
                     1_000_000_000,
                     false,
                 )
@@ -5186,5 +5285,116 @@ mod kanban_card_tests {
             "active card should show 2/4 badge:\n{}",
             plain
         );
+    }
+
+    fn pr_summary(
+        id: u32,
+        state: crate::pr::ReviewState,
+        comments: u16,
+    ) -> crate::projects_scan::PrCardSummary {
+        crate::projects_scan::PrCardSummary {
+            id,
+            review_state: state,
+            comments,
+        }
+    }
+
+    fn render_active(
+        t: &TaskState,
+        pr: Option<&crate::projects_scan::PrCardSummary>,
+        col_idx: usize,
+    ) -> String {
+        let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
+        let backend = TestBackend::new(70, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_active(
+                    f,
+                    f.area(),
+                    t,
+                    false,
+                    col_idx,
+                    &sessions,
+                    pr,
+                    1_000_000_000,
+                    false,
+                )
+            })
+            .expect("render");
+        buffer_to_string(terminal.backend().buffer())
+    }
+
+    fn render_collapsed(
+        t: &TaskState,
+        pr: Option<&crate::projects_scan::PrCardSummary>,
+        col_idx: usize,
+    ) -> String {
+        let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
+        let backend = TestBackend::new(70, 6);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_collapsed(
+                    f,
+                    f.area(),
+                    t,
+                    false,
+                    col_idx,
+                    &sessions,
+                    pr,
+                    1_000_000_000,
+                    false,
+                    None,
+                )
+            })
+            .expect("render");
+        buffer_to_string(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn active_card_shows_pr_changes_requested_badge() {
+        let t = task_with_todos(TaskStatus::Running, 0, 0);
+        let pr = pr_summary(42, crate::pr::ReviewState::ChangesRequested, 3);
+        let plain = render_active(&t, Some(&pr), 1);
+        assert!(
+            plain.contains("PR #42") && plain.contains("changes requested"),
+            "changes_requested badge missing:\n{}",
+            plain
+        );
+        assert!(plain.contains("3"), "comment count missing:\n{}", plain);
+    }
+
+    #[test]
+    fn collapsed_card_shows_pr_open_with_comment_count() {
+        let t = task_with_todos(TaskStatus::Review, 0, 0);
+        let pr = pr_summary(7, crate::pr::ReviewState::Open, 2);
+        let plain = render_collapsed(&t, Some(&pr), 2);
+        assert!(plain.contains("PR #7"), "PR id missing:\n{}", plain);
+        assert!(
+            plain.contains("2"),
+            "comment count missing on open PR:\n{}",
+            plain
+        );
+    }
+
+    #[test]
+    fn collapsed_card_open_without_comments_shows_open_label() {
+        let t = task_with_todos(TaskStatus::Review, 0, 0);
+        let pr = pr_summary(9, crate::pr::ReviewState::Open, 0);
+        let plain = render_collapsed(&t, Some(&pr), 2);
+        assert!(plain.contains("PR #9"), "PR id missing:\n{}", plain);
+        assert!(
+            plain.contains("open"),
+            "open label missing when no comments:\n{}",
+            plain
+        );
+    }
+
+    #[test]
+    fn active_card_omits_pr_badge_when_no_pr() {
+        let t = task_with_todos(TaskStatus::Running, 0, 0);
+        let plain = render_active(&t, None, 1);
+        assert!(!plain.contains("PR #"), "no PR ⇒ no badge:\n{}", plain);
     }
 }

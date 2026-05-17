@@ -165,9 +165,13 @@ const WORKER_HELP: &str = r#"cc-hub worker
 
 Usage:
   cc-hub worker wait --task ID (--tmux NAME ... | --all) [--timeout-secs N]
+                     [--progress [--progress-interval-secs N]]
 
 Polls cc-hub's session scanner until selected workers reach WaitingForInput or
 Inactive. Emits one JSON line with per-worker completion state.
+
+With --progress, emits one JSON line every N seconds (default 5) describing
+which targets are still pending vs. done. The final summary line is unchanged.
 "#;
 
 const PROJECT_HELP: &str = r#"cc-hub project
@@ -243,7 +247,10 @@ struct Flags {
     tmux_targets: Vec<String>,
     all: bool,
     timeout_secs: Option<u64>,
+    progress: bool,
+    progress_interval_secs: Option<u64>,
     json: bool,
+    wait: bool,
 }
 
 fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
@@ -337,11 +344,26 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
                 f.all = true;
                 i += 1;
             }
+            "--wait" => {
+                f.wait = true;
+                i += 1;
+            }
             "--timeout-secs" => {
                 let v = next_value(args, &mut i, "--timeout-secs")?;
                 f.timeout_secs = Some(
                     v.parse()
                         .map_err(|e| CliError::Usage(format!("--timeout-secs: {}", e)))?,
+                );
+            }
+            "--progress" => {
+                f.progress = true;
+                i += 1;
+            }
+            "--progress-interval-secs" => {
+                let v = next_value(args, &mut i, "--progress-interval-secs")?;
+                f.progress_interval_secs = Some(
+                    v.parse()
+                        .map_err(|e| CliError::Usage(format!("--progress-interval-secs: {}", e)))?,
                 );
             }
             "--json" => {
@@ -1583,17 +1605,35 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
 
     // Acquire the project-wide merge lock. Held across the entire merging
     // phase — released by `pr finalize` after /simplify and /bump.
-    let acquire =
+    let acquire = if f.wait {
+        let timeout = std::time::Duration::from_secs(f.timeout_secs.unwrap_or(1800));
+        cc_hub_lib::merge_lock::acquire_blocking(
+            &project_id,
+            &task_id,
+            state.orchestrator_tmux.as_deref(),
+            timeout,
+            std::time::Duration::from_millis(500),
+        )
+        .map_err(|e| CliError::Other(format!("acquire merge lock: {}", e)))?
+    } else {
         cc_hub_lib::merge_lock::acquire(&project_id, &task_id, state.orchestrator_tmux.as_deref())
-            .map_err(|e| CliError::Other(format!("acquire merge lock: {}", e)))?;
+            .map_err(|e| CliError::Other(format!("acquire merge lock: {}", e)))?
+    };
     if let cc_hub_lib::merge_lock::AcquireOutcome::Held(holder) = acquire {
-        print_json(&serde_json::json!({
+        let mut payload = serde_json::json!({
             "ok": false,
             "locked": true,
             "holder_task": holder.task_id,
             "since": holder.acquired_at,
-            "recipe": "Another task currently holds the merge lock. Poll until clear (re-run `cc-hub pr merge`) or wait for it to release.",
-        }));
+            "recipe": "Another task currently holds the merge lock. Re-run with `--wait` to block until it releases, or poll `cc-hub pr merge` manually.",
+        });
+        if f.wait {
+            payload["timed_out"] = serde_json::Value::Bool(true);
+            payload["recipe"] = serde_json::Value::String(
+                "Merge lock still held after the wait timeout. Re-run `cc-hub pr merge --wait` (optionally with `--timeout-secs N`) or investigate why the holder is stuck.".into(),
+            );
+        }
+        print_json(&payload);
         return Err(CliError::Other(format!(
             "merge lock held by task {}",
             holder.task_id
@@ -1941,6 +1981,15 @@ fn worker_wait(args: &[String]) -> Result<(), CliError> {
     let started = Instant::now();
     let deadline = started + timeout;
 
+    let progress_interval = if f.progress {
+        Some(Duration::from_secs(
+            f.progress_interval_secs.unwrap_or(5).max(1),
+        ))
+    } else {
+        None
+    };
+    let mut last_emit: Option<Instant> = None;
+
     let mut done: std::collections::HashMap<String, serde_json::Value> =
         std::collections::HashMap::new();
     // A target that disappears from the scanner *after* having been seen
@@ -1987,6 +2036,29 @@ fn worker_wait(args: &[String]) -> Result<(), CliError> {
         }
         if Instant::now() >= deadline {
             break true;
+        }
+        if let Some(interval) = progress_interval {
+            let should_emit = match last_emit {
+                None => true,
+                Some(t) => t.elapsed() >= interval,
+            };
+            if should_emit {
+                let mut done_names: Vec<String> = done.keys().cloned().collect();
+                done_names.sort();
+                let mut pending_names: Vec<String> = targets
+                    .iter()
+                    .filter(|n| !done.contains_key(n.as_str()))
+                    .cloned()
+                    .collect();
+                pending_names.sort();
+                print_json(&serde_json::json!({
+                    "event": "progress",
+                    "elapsed_secs": started.elapsed().as_secs(),
+                    "pending": pending_names,
+                    "done": done_names,
+                }));
+                last_emit = Some(Instant::now());
+            }
         }
         std::thread::sleep(Duration::from_millis(500));
     };
