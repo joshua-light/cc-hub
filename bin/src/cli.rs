@@ -159,6 +159,7 @@ Usage:
   cc-hub pr reopen --task ID [--comment TEXT] [--author NAME]
   cc-hub pr comment --task ID --comment TEXT [--author NAME]
   cc-hub pr merge --task ID
+  cc-hub pr lock-phase --task ID --phase merging|simplify|bump|finalize-pending
   cc-hub pr finalize --task ID [--build-cmd CMD] [--skip-build] [--keep-tmux]
 
 Local PR records live beside task state. Merges are serialized with the
@@ -259,6 +260,8 @@ struct Flags {
     progress: bool,
     progress_interval_secs: Option<u64>,
     json: bool,
+    /// `pr lock-phase` — one of merging|simplify|bump|finalize-pending.
+    phase: Option<String>,
     /// `task delete --force` — required for Running/Review tasks. Merging is
     /// refused outright even with `--force`.
     force: bool,
@@ -393,6 +396,9 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
             "--json" => {
                 f.json = true;
                 i += 1;
+            }
+            "--phase" => {
+                f.phase = Some(next_value(args, &mut i, "--phase")?);
             }
             "--force" => {
                 f.force = true;
@@ -1676,7 +1682,7 @@ fn task_create(args: &[String]) -> Result<(), CliError> {
 fn pr_subcommand(args: &[String]) -> Result<(), CliError> {
     let (verb, rest) = args.split_first().ok_or_else(|| {
         CliError::Usage(
-            "pr <verb>: missing verb (try `create`, `show`, `approve`, `request-changes`, `reopen`, `comment`, `merge`, `finalize`)".into(),
+            "pr <verb>: missing verb (try `create`, `show`, `approve`, `request-changes`, `reopen`, `comment`, `merge`, `lock-phase`, `finalize`)".into(),
         )
     })?;
     match verb.as_str() {
@@ -1687,9 +1693,10 @@ fn pr_subcommand(args: &[String]) -> Result<(), CliError> {
         "reopen" => pr_reopen(rest),
         "comment" => pr_comment(rest),
         "merge" => pr_merge(rest),
+        "lock-phase" => pr_lock_phase(rest),
         "finalize" => pr_finalize(rest),
         other => Err(CliError::Usage(format!(
-            "unknown pr verb: {} (try `create`, `show`, `approve`, `request-changes`, `reopen`, `comment`, `merge`, `finalize`)",
+            "unknown pr verb: {} (try `create`, `show`, `approve`, `request-changes`, `reopen`, `comment`, `merge`, `lock-phase`, `finalize`)",
             other
         ))),
     }
@@ -1975,11 +1982,15 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
             .map_err(|e| CliError::Other(format!("acquire merge lock: {}", e)))?
     };
     if let cc_hub_lib::merge_lock::AcquireOutcome::Held(holder) = acquire {
+        let holder_task = holder.task_id.clone();
+        let age_seconds = orchestrator::now_unix_secs().saturating_sub(holder.acquired_at);
         let mut payload = serde_json::json!({
             "ok": false,
             "locked": true,
             "holder_task": holder.task_id,
             "since": holder.acquired_at,
+            "phase": holder.phase.as_str(),
+            "age_seconds": age_seconds,
             "recipe": "Another task currently holds the merge lock. Re-run with `--wait` to block until it releases, or poll `cc-hub pr merge` manually.",
         });
         if f.wait {
@@ -1991,7 +2002,7 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
         print_json(&payload);
         return Err(CliError::Other(format!(
             "merge lock held by task {}",
-            holder.task_id
+            holder_task
         )));
     }
 
@@ -2171,6 +2182,37 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
         "base": pr.base,
         "stdout": merge_into_main.stdout,
         "next": "Run /simplify, then /bump, then `cc-hub pr finalize --task <id>` to release the merge lock and mark the task done.",
+    }));
+    Ok(())
+}
+
+fn pr_lock_phase(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+    let phase_raw = f
+        .phase
+        .clone()
+        .ok_or_else(|| CliError::Usage("--phase is required (merging|simplify|bump|finalize-pending)".into()))?;
+    let phase = cc_hub_lib::merge_lock::MergePhase::parse(&phase_raw).ok_or_else(|| {
+        CliError::Usage(format!(
+            "--phase: unknown value '{}' (expected merging|simplify|bump|finalize-pending)",
+            phase_raw
+        ))
+    })?;
+    let updated = cc_hub_lib::merge_lock::set_phase(&project_id, &task_id, phase)
+        .map_err(|e| CliError::Other(format!("set merge phase: {}", e)))?;
+    if !updated {
+        return Err(CliError::Other(format!(
+            "task {} does not hold the merge lock for project {} (or no lock exists)",
+            task_id, project_id
+        )));
+    }
+    print_json(&serde_json::json!({
+        "ok": true,
+        "task_id": task_id,
+        "project_id": project_id,
+        "phase": phase.as_str(),
     }));
     Ok(())
 }

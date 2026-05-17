@@ -3264,10 +3264,17 @@ fn render_kanban_column(
                 .get(&p.id)
                 .and_then(|ts| ts.iter().find(|t| t.task_id == holder.task_id))
                 .and_then(|t| t.title.as_deref());
+            let pr_id = app
+                .projects
+                .merge_lock_holder_pr_ids
+                .get(&p.id)
+                .and_then(|v| *v);
             Some(MergeLockBanner {
                 task_id: holder.task_id.as_str(),
                 title,
                 acquired_at: holder.acquired_at,
+                phase: holder.phase,
+                pr_id,
             })
         })
     } else {
@@ -3897,6 +3904,8 @@ struct MergeLockBanner<'a> {
     task_id: &'a str,
     title: Option<&'a str>,
     acquired_at: i64,
+    phase: crate::merge_lock::MergePhase,
+    pr_id: Option<u32>,
 }
 
 /// Compact 3-line card for Review/Merging/Done tasks. Dim border, single-line
@@ -3905,7 +3914,8 @@ struct MergeLockBanner<'a> {
 /// `lock_holder` is the merge-lock holder context for this project, only
 /// supplied for col_idx == 3. A Merging card whose id differs from the
 /// holder is "queued" and renders with a muted border plus a waiting line
-/// naming the holder and lock age, so the user can tell at a glance whether
+/// naming the holder and lock age, plus a tooltip showing the current phase
+/// (e.g. "PR #N in /simplify (4m)") so the user can tell at a glance whether
 /// the queue is healthy or stuck.
 #[allow(clippy::too_many_arguments)]
 fn render_task_card_collapsed(
@@ -3920,6 +3930,7 @@ fn render_task_card_collapsed(
     titling_in_flight: bool,
     lock_holder: Option<&MergeLockBanner<'_>>,
 ) {
+    use crate::merge_lock::MergePhase;
     // Review (2) cyan, Merging (3) magenta, Done (4) green.
     let (accent, dim_text, icon) = match col_idx {
         2 => (Color::LightCyan, Color::Rgb(140, 175, 185), "󱋲"),
@@ -3927,6 +3938,7 @@ fn render_task_card_collapsed(
         _ => (Color::LightGreen, Color::Rgb(140, 160, 145), "󰸞"),
     };
     let queued = col_idx == 3 && lock_holder.is_some_and(|h| h.task_id != t.task_id);
+    let merging_self = col_idx == 3 && lock_holder.is_some_and(|h| h.task_id == t.task_id);
     // Review and Merging cards: brighter border so they stand out — they
     // need user attention or are actively mutating main. Done stays dim.
     // A queued Merging card uses a muted gray instead of the bright
@@ -3971,7 +3983,7 @@ fn render_task_card_collapsed(
                 .fg(Color::Rgb(170, 170, 185))
                 .bg(Color::Rgb(45, 45, 55)),
         ));
-    } else if col_idx == 3 && lock_holder.is_some_and(|h| h.task_id == t.task_id) {
+    } else if merging_self {
         title_spans.push(Span::styled(
             " merging ",
             Style::default()
@@ -4044,6 +4056,30 @@ fn render_task_card_collapsed(
         lines.push(Line::from(vec![
             Span::styled("󰓹 ", Style::default().fg(Color::Rgb(110, 120, 135))),
             shipped_version_span(v),
+        ]));
+    }
+
+    if queued {
+        let banner = lock_holder.expect("queued implies holder");
+        let age = format_age(now_secs.saturating_sub(banner.acquired_at as u64));
+        let phase_label = match banner.phase {
+            MergePhase::Merging => "merging",
+            MergePhase::Simplify => "/simplify",
+            MergePhase::Bump => "/bump",
+            MergePhase::FinalizePending => "finalizing",
+        };
+        let leader = match banner.pr_id {
+            Some(n) => format!("PR #{} in {} ({})", n, phase_label, age),
+            None => format!(
+                "behind {} in {} ({})",
+                crate::orchestrator::short_task_id(banner.task_id),
+                phase_label,
+                age
+            ),
+        };
+        lines.push(Line::from(vec![
+            Span::styled("⏳ ", Style::default().fg(Color::Rgb(110, 120, 135))),
+            Span::styled(leader, Style::default().fg(Color::Rgb(150, 150, 170))),
         ]));
     }
 
@@ -4837,6 +4873,7 @@ mod result_popup_tests {
             tasks,
             titling: std::collections::HashSet::new(),
             merge_lock_holders: std::collections::HashMap::new(),
+            merge_lock_holder_pr_ids: std::collections::HashMap::new(),
             pr_summaries: std::collections::HashMap::new(),
         };
         app.update_projects(snap);
@@ -4933,6 +4970,7 @@ mod result_popup_tests {
             tasks,
             titling: std::collections::HashSet::new(),
             merge_lock_holders: std::collections::HashMap::new(),
+            merge_lock_holder_pr_ids: std::collections::HashMap::new(),
             pr_summaries: std::collections::HashMap::new(),
         };
         app.update_projects(snap);
@@ -5084,6 +5122,7 @@ index 0000001..0000002 100644
             tasks,
             titling: std::collections::HashSet::new(),
             merge_lock_holders: std::collections::HashMap::new(),
+            merge_lock_holder_pr_ids: std::collections::HashMap::new(),
             pr_summaries: std::collections::HashMap::new(),
         };
         app.update_projects(snap);
@@ -5464,6 +5503,8 @@ mod kanban_card_tests {
             task_id: "t-blocker-123456",
             title: Some("fix flaky tests"),
             acquired_at: (now - 180) as i64,
+            phase: crate::merge_lock::MergePhase::Merging,
+            pr_id: None,
         };
         let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
         let backend = TestBackend::new(60, 6);
@@ -5508,6 +5549,55 @@ mod kanban_card_tests {
     }
 
     #[test]
+    fn queued_collapsed_card_shows_holder_phase_and_pr() {
+        use crate::merge_lock::MergePhase;
+        let t = merging_task("t-self-000222");
+        let now: u64 = 1_700_000_000;
+        let banner = super::MergeLockBanner {
+            task_id: "t-other-000333",
+            title: Some("blocking work"),
+            acquired_at: (now - 240) as i64,
+            phase: MergePhase::Simplify,
+            pr_id: Some(7),
+        };
+        let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
+        let backend = TestBackend::new(70, 6);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_collapsed(
+                    f,
+                    f.area(),
+                    &t,
+                    false,
+                    3,
+                    &sessions,
+                    None,
+                    now,
+                    false,
+                    Some(&banner),
+                )
+            })
+            .expect("render");
+        let plain = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            plain.contains("PR #7"),
+            "queued card should show holder PR id:\n{}",
+            plain
+        );
+        assert!(
+            plain.contains("/simplify"),
+            "queued card should show holder phase:\n{}",
+            plain
+        );
+        assert!(
+            plain.contains("4m"),
+            "queued card should show holder age:\n{}",
+            plain
+        );
+    }
+
+    #[test]
     fn collapsed_card_shows_merging_pill_when_self_is_holder() {
         let t = merging_task("t-self-654321");
         let now: u64 = 1_700_000_000;
@@ -5515,6 +5605,8 @@ mod kanban_card_tests {
             task_id: "t-self-654321",
             title: Some("self merge"),
             acquired_at: (now - 5) as i64,
+            phase: crate::merge_lock::MergePhase::Merging,
+            pr_id: None,
         };
         let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
         let backend = TestBackend::new(60, 6);
@@ -5563,6 +5655,8 @@ mod kanban_card_tests {
             task_id: "t-blocker-123456",
             title: Some("fix flaky tests"),
             acquired_at: (now - 180) as i64,
+            phase: crate::merge_lock::MergePhase::Merging,
+            pr_id: None,
         };
         let backend = TestBackend::new(60, 4);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -5589,6 +5683,8 @@ mod kanban_card_tests {
             task_id: "t-blocker-123456",
             title: Some("fix flaky tests"),
             acquired_at: (now - 12) as i64,
+            phase: crate::merge_lock::MergePhase::Merging,
+            pr_id: None,
         };
         let backend = TestBackend::new(60, 4);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -5770,6 +5866,7 @@ mod backlog_popup_tests {
             tasks: tasks_map,
             titling: HashSet::new(),
             merge_lock_holders: HashMap::new(),
+            merge_lock_holder_pr_ids: HashMap::new(),
             pr_summaries: HashMap::new(),
         };
         let mut app = App::new();
@@ -5909,6 +6006,7 @@ mod backlog_age_tests {
             tasks: by_proj,
             titling: HashSet::new(),
             merge_lock_holders: HashMap::new(),
+            merge_lock_holder_pr_ids: HashMap::new(),
             pr_summaries: HashMap::new(),
         };
         app.update_projects(snap);

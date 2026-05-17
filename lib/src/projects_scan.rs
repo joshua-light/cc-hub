@@ -96,6 +96,10 @@ pub struct ProjectsSnapshot {
     /// holder for that project. Stale-lock detection is left to acquire(); the
     /// renderer treats whatever `current_holder` returns as the truth.
     pub merge_lock_holders: HashMap<String, Option<MergeLock>>,
+    /// PR id of each merge-lock holder, when one exists. Parallel to
+    /// `merge_lock_holders` keyed by project_id. Used by the renderer to
+    /// show 'PR #N in /<phase> (<age>)' on queued cards.
+    pub merge_lock_holder_pr_ids: HashMap<String, Option<u32>>,
     /// Compact PR summary per `task_id`, populated each scan from the
     /// task's `pr.json`. Empty entry means the task has no PR yet.
     pub pr_summaries: HashMap<String, PrCardSummary>,
@@ -108,6 +112,7 @@ impl ProjectsSnapshot {
             tasks: HashMap::new(),
             titling: HashSet::new(),
             merge_lock_holders: HashMap::new(),
+            merge_lock_holder_pr_ids: HashMap::new(),
             pr_summaries: HashMap::new(),
         }
     }
@@ -163,6 +168,7 @@ pub fn scan() -> ProjectsSnapshot {
     let projects = orchestrator::load_projects().projects;
     let mut tasks: HashMap<String, Vec<Arc<TaskState>>> = HashMap::new();
     let mut merge_lock_holders: HashMap<String, Option<MergeLock>> = HashMap::new();
+    let mut merge_lock_holder_pr_ids: HashMap<String, Option<u32>> = HashMap::new();
     let mut pr_summaries: HashMap<String, PrCardSummary> = HashMap::new();
     let mut visited_all: HashSet<PathBuf> = HashSet::new();
     let mut visited_prs: HashSet<PathBuf> = HashSet::new();
@@ -189,10 +195,13 @@ pub fn scan() -> ProjectsSnapshot {
         tasks.insert(p.id.clone(), list);
         // IO errors are render-side-noise: treat as no holder so a transient
         // glitch doesn't paint every Merging card with the queued style.
-        merge_lock_holders.insert(
-            p.id.clone(),
-            merge_lock::current_holder(&p.id).unwrap_or(None),
-        );
+        let holder = merge_lock::current_holder(&p.id).unwrap_or(None);
+        let holder_pr_id = holder
+            .as_ref()
+            .and_then(|h| crate::pr::read_pr(&p.id, &h.task_id).ok().flatten())
+            .map(|pr| pr.id);
+        merge_lock_holders.insert(p.id.clone(), holder);
+        merge_lock_holder_pr_ids.insert(p.id.clone(), holder_pr_id);
     }
 
     // Evict cache entries for paths not seen this scan (deleted tasks,
@@ -211,6 +220,7 @@ pub fn scan() -> ProjectsSnapshot {
         tasks,
         titling: HashSet::new(),
         merge_lock_holders,
+        merge_lock_holder_pr_ids,
         pr_summaries,
     }
 }
