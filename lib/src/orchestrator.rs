@@ -908,7 +908,7 @@ All edits happen inside a worktree branch. You **do not** edit the project's mai
   `{bin} spawn-worker --task {task_id} --readonly --prompt \"…\"`
   No edits, no worktree, runs in the project root. Many can run at once.
 
-- Each `spawn-worker` emits one JSON line on stdout — capture the `tmux` field if you need to talk to that worker later.
+- Each `spawn-worker` emits one JSON line on stdout — `worktree` is what you pass to subsequent verbs like `worker wait --worktree NAME` (use `tmux` for read-only spawns, which have no worktree).
 
 - If a worker creates or edits `.gitignore`, instruct it to include `.cc-hub-wt/` so cc-hub's worktree dirs don't pollute future commits.
 
@@ -917,11 +917,11 @@ All edits happen inside a worktree branch. You **do not** edit the project's mai
 The fastest way to know a worker is done is to block on `cc-hub worker wait`. It polls the scanner at sub-second cadence and returns as soon as the worker reaches `WaitingForInput` (turn ended) or `Inactive` (process gone). Use this instead of shell sleep loops or repeated tmux captures — those add 60–90s of LLM-driven latency per spawn.
 
 - Wait on a single worker (most common):
-  `{bin} worker wait --task {task_id} --tmux <TMUX_FROM_SPAWN_WORKER>`
+  `{bin} worker wait --task {task_id} --worktree NAME`
 
 - Spawn N workers in parallel, then block until all finish:
   `{bin} worker wait --task {task_id} --all`
-  (`--all` waits on every worker recorded on the task. Pass repeated `--tmux NAME` flags instead to wait on a subset.)
+  (`--all` waits on every worker recorded on the task. Pass repeated `--worktree NAME` flags — or `--tmux NAME` for read-only workers — to wait on a subset.)
 
 - Default timeout is 1800s (30 min). Override with `--timeout-secs N` for unusually long-running workers.
 
