@@ -31,7 +31,8 @@ use std::time::{Duration, Instant};
 /// margin even for the slowest path; the timeout exists to surface
 /// genuinely broken spawns, not to bound happy-path latency.
 const DEFAULT_PROMPT_WAIT_SECS: u64 = 120;
-const TASK_VERBS_HELP: &str = "`report`, `create`, `start`, `auto-review`, `artifact`, or `todos`";
+const TASK_VERBS_HELP: &str =
+    "`report`, `create`, `start`, `list`, `auto-review`, `artifact`, or `todos`";
 
 pub fn dispatch(args: &[String]) -> Option<i32> {
     let (verb, rest) = args.split_first()?;
@@ -126,6 +127,7 @@ Usage:
   cc-hub task start --task ID [--agent AGENT] [--wait-secs N] [--project-id ID]
   cc-hub task report --task ID [--status running|review|merging|done|backlog] [--note TEXT] [--summary TEXT]
   cc-hub task auto-review --task ID [--project-id ID]
+  cc-hub task list [--status backlog|running|review|merging|done] [--project-id ID] [--json]
   cc-hub task artifact add --task ID --path PATH_OR_URL [--kind KIND] [--caption TEXT] [--lead]
   cc-hub task artifact list --task ID [--project-id ID]
   cc-hub task todos set --task ID --items JSON_ARRAY
@@ -824,6 +826,7 @@ fn task_subcommand(args: &[String]) -> Result<(), CliError> {
         "report" => task_report(rest),
         "create" => task_create(rest),
         "start" => task_start(rest),
+        "list" => task_list(rest),
         "auto-review" => task_auto_review(rest),
         "artifact" => task_artifact_subcommand(rest),
         "todos" => task_todos_subcommand(rest),
@@ -870,6 +873,139 @@ fn task_start(args: &[String]) -> Result<(), CliError> {
         "task_id": task_id,
         "project_id": project_id,
     }));
+    Ok(())
+}
+
+fn status_str(s: &TaskStatus) -> &'static str {
+    match s {
+        TaskStatus::Backlog => "backlog",
+        TaskStatus::Running => "running",
+        TaskStatus::Review => "review",
+        TaskStatus::Merging => "merging",
+        TaskStatus::Done => "done",
+    }
+}
+
+fn fmt_age(unix_secs: i64) -> String {
+    let now = orchestrator::now_unix_secs();
+    let delta = (now - unix_secs).max(0);
+    if delta < 60 {
+        format!("{}s", delta)
+    } else if delta < 3600 {
+        format!("{}m", delta / 60)
+    } else if delta < 86_400 {
+        format!("{}h", delta / 3600)
+    } else {
+        format!("{}d", delta / 86_400)
+    }
+}
+
+/// `cc-hub task list [--status STATUS] [--project-id ID] [--json]`
+///
+/// Enumerate tasks for a project by reading `~/.cc-hub/projects/<pid>/tasks/*/state.json`
+/// directly — `projects_scan::scan` only sees projects registered in
+/// `projects.toml`, so this verb works for ad-hoc/unregistered projects too.
+fn task_list(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let project_id = resolve_project_id(&f)?;
+
+    let filter = match f.status.as_deref() {
+        None => None,
+        Some("backlog") => Some(TaskStatus::Backlog),
+        Some("running") => Some(TaskStatus::Running),
+        Some("review") => Some(TaskStatus::Review),
+        Some("merging") => Some(TaskStatus::Merging),
+        Some("done") => Some(TaskStatus::Done),
+        Some(other) => {
+            return Err(CliError::Usage(format!(
+                "--status must be backlog|running|review|merging|done (got {})",
+                other
+            )));
+        }
+    };
+
+    let Some(project_dir) = orchestrator::project_state_dir(&project_id) else {
+        return Err(CliError::Other("no home dir".into()));
+    };
+    let tasks_dir = project_dir.join("tasks");
+
+    let mut tasks: Vec<TaskState> = Vec::new();
+    match std::fs::read_dir(&tasks_dir) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let task_id = name.to_string_lossy().into_owned();
+                if !task_id.starts_with("t-") {
+                    continue;
+                }
+                match orchestrator::read_task_state(&project_id, &task_id) {
+                    Ok(state) => tasks.push(state),
+                    Err(e) => {
+                        eprintln!("warning: skipping {}: {}", task_id, e);
+                    }
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(CliError::Other(format!(
+                "read tasks dir {}: {}",
+                tasks_dir.display(),
+                e
+            )));
+        }
+    }
+
+    if let Some(ref s) = filter {
+        tasks.retain(|t| &t.status == s);
+    }
+
+    tasks.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then(b.task_id.cmp(&a.task_id))
+    });
+
+    if f.json {
+        let arr: Vec<serde_json::Value> = tasks
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "task_id": t.task_id,
+                    "status": t.status,
+                    "title": t.title,
+                    "prompt": t.prompt,
+                    "note": t.note,
+                    "updated_at": t.updated_at,
+                    "shipped_version": t.shipped_version,
+                })
+            })
+            .collect();
+        print_json(&serde_json::Value::Array(arr));
+    } else {
+        for t in &tasks {
+            let preview = match t.title.as_deref() {
+                Some(s) => s.to_string(),
+                None => {
+                    let first = t.prompt.lines().next().unwrap_or("").trim_end();
+                    if first.chars().count() > 60 {
+                        let truncated: String = first.chars().take(60).collect();
+                        format!("{}…", truncated)
+                    } else {
+                        first.to_string()
+                    }
+                }
+            };
+            println!(
+                "{}\t{}\t{}\t{}",
+                t.task_id,
+                status_str(&t.status),
+                preview,
+                fmt_age(t.updated_at)
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -2730,6 +2866,59 @@ mod tests {
             project_id: project_id.map(str::to_owned),
             ..Flags::default()
         }
+    }
+
+    #[test]
+    fn task_list_plain_emits_one_row_per_task() {
+        with_tempdir_home(|| {
+            let project_id = "p-list".to_string();
+
+            let mut a = TaskState::new(
+                project_id.clone(),
+                PathBuf::from("/tmp/proj"),
+                "first task".into(),
+            );
+            a.task_id = "t-aaaa".into();
+            a.status = TaskStatus::Running;
+            a.updated_at = 2_000;
+            orchestrator::write_task_state(&a).expect("write a");
+
+            let mut b = TaskState::new(
+                project_id.clone(),
+                PathBuf::from("/tmp/proj"),
+                "second task".into(),
+            );
+            b.task_id = "t-bbbb".into();
+            b.status = TaskStatus::Backlog;
+            b.updated_at = 1_000;
+            orchestrator::write_task_state(&b).expect("write b");
+
+            let args = vec!["--project-id".into(), project_id.clone()];
+            task_list(&args).expect("task_list ok");
+        });
+    }
+
+    #[test]
+    fn task_list_status_filter_rejects_garbage() {
+        let args = vec!["--status".into(), "nope".into()];
+        match task_list(&args) {
+            Err(CliError::Usage(_)) => {}
+            other => panic!("expected Usage error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn task_list_missing_tasks_dir_is_ok() {
+        with_tempdir_home(|| {
+            let args = vec!["--project-id".into(), "nonexistent".into()];
+            task_list(&args).expect("missing tasks dir should be ok");
+        });
+    }
+
+    #[test]
+    fn task_list_dispatch_smoke() {
+        let code = dispatch(&["task".into(), "list".into(), "--json".into()]);
+        assert_eq!(code, Some(0));
     }
 
     #[test]
