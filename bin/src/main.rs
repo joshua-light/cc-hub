@@ -1356,7 +1356,15 @@ async fn run(
                                     } else {
                                         format!(", {} worktree error(s)", d.worktree_errors.len())
                                     };
-                                    format!("deleted {} ({}{}{})", pending.display, kill, wt, errs)
+                                    let lock = if d.lock_released {
+                                        ", lock released"
+                                    } else {
+                                        ""
+                                    };
+                                    format!(
+                                        "deleted {} ({}{}{}{})",
+                                        pending.display, kill, wt, errs, lock
+                                    )
                                 }
                                 Err(e) => {
                                     log::warn!("task delete: {}", e);
