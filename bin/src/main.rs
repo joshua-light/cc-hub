@@ -807,24 +807,10 @@ async fn run(
                                     ));
                                     continue;
                                 }
-                                let prompt = match std::env::current_exe() {
-                                    Ok(bin) => {
-                                        cc_hub_lib::orchestrator::build_review_approval_prompt(
-                                            &task.task_id,
-                                            &bin,
-                                        )
-                                    }
-                                    Err(e) => {
-                                        log::warn!(
-                                            "approve: current_exe failed while building notify prompt: {}",
-                                            e
-                                        );
-                                        cc_hub_lib::orchestrator::build_review_approval_prompt(
-                                            &task.task_id,
-                                            std::path::Path::new("cc-hub"),
-                                        )
-                                    }
-                                };
+                                let prompt = cc_hub_lib::orchestrator::build_review_approval_prompt(
+                                    &task.task_id,
+                                    &cc_hub_lib::orchestrator::resolve_cc_hub_bin(),
+                                );
                                 if send::pane_ready_for_input(&tmux_name) {
                                     let status = match send::send_prompt(&tmux_name, &prompt) {
                                         Ok(()) => format!(
@@ -1337,26 +1323,33 @@ async fn run(
                                 &pending.task_id,
                             ) {
                                 Ok(d) => {
-                                    let kill = if d.orchestrator_killed {
-                                        "orch killed"
-                                    } else {
-                                        "no orch"
-                                    };
-                                    let wt = if d.worktrees_removed.is_empty() {
-                                        String::new()
-                                    } else {
-                                        format!(
-                                            ", {} worktree{} removed",
-                                            d.worktrees_removed.len(),
-                                            if d.worktrees_removed.len() == 1 { "" } else { "s" }
-                                        )
-                                    };
-                                    let errs = if d.worktree_errors.is_empty() {
-                                        String::new()
-                                    } else {
-                                        format!(", {} worktree error(s)", d.worktree_errors.len())
-                                    };
-                                    format!("deleted {} ({}{}{})", pending.display, kill, wt, errs)
+                                    let mut segs: Vec<String> = Vec::new();
+                                    segs.push(
+                                        if d.orchestrator_killed {
+                                            "orch killed"
+                                        } else {
+                                            "no orch"
+                                        }
+                                        .to_string(),
+                                    );
+                                    if !d.worktrees_removed.is_empty() {
+                                        let n = d.worktrees_removed.len();
+                                        segs.push(format!(
+                                            "{} worktree{} removed",
+                                            n,
+                                            if n == 1 { "" } else { "s" }
+                                        ));
+                                    }
+                                    if !d.worktree_errors.is_empty() {
+                                        segs.push(format!(
+                                            "{} worktree error(s)",
+                                            d.worktree_errors.len()
+                                        ));
+                                    }
+                                    if d.lock_released {
+                                        segs.push("lock released".into());
+                                    }
+                                    format!("deleted {} ({})", pending.display, segs.join(", "))
                                 }
                                 Err(e) => {
                                     log::warn!("task delete: {}", e);

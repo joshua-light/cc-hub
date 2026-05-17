@@ -770,8 +770,7 @@ fn orchestrate_start(args: &[String]) -> Result<(), CliError> {
     let mut state = orchestrator::read_task_state(&project_id, &task_id)
         .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
 
-    let cc_hub_bin = std::env::current_exe()
-        .map_err(|e| CliError::Other(format!("resolve cc-hub binary path: {}", e)))?;
+    let cc_hub_bin = orchestrator::resolve_cc_hub_bin();
 
     if f.dry_run {
         // Useful for verifying prompt content without paying for a session.
@@ -911,6 +910,7 @@ fn task_delete(args: &[String]) -> Result<(), CliError> {
         "task_id": deleted.task_id,
         "project_id": deleted.project_id,
         "orchestrator_killed": deleted.orchestrator_killed,
+        "lock_released": deleted.lock_released,
         "state_removed": deleted.state_removed,
         "worktrees_removed": deleted.worktrees_removed,
         "worktree_errors": worktree_errors,
@@ -3883,6 +3883,52 @@ mod tests {
             assert!(
                 state_dir.exists(),
                 "state dir must survive a refused delete"
+            );
+        });
+    }
+
+    #[test]
+    fn task_delete_releases_merge_lock() {
+        with_tempdir_home(|| {
+            let project_id = "p-lock-leak".to_string();
+            let task_id = "t-lock-leak".to_string();
+
+            let mut state = TaskState::new(
+                project_id.clone(),
+                PathBuf::from("/tmp/nonexistent"),
+                "do thing".into(),
+            );
+            state.task_id = task_id.clone();
+            state.status = TaskStatus::Backlog;
+            orchestrator::write_task_state(&state).expect("write state");
+
+            match cc_hub_lib::merge_lock::acquire(&project_id, &task_id, None)
+                .expect("acquire lock")
+            {
+                cc_hub_lib::merge_lock::AcquireOutcome::Acquired => {}
+                other => panic!("expected Acquired, got {:?}", other),
+            }
+            assert!(
+                cc_hub_lib::merge_lock::current_holder(&project_id)
+                    .expect("current_holder")
+                    .is_some(),
+                "lock should be held before delete"
+            );
+
+            let code = dispatch(&[
+                "task".into(),
+                "delete".into(),
+                "--task".into(),
+                task_id.clone(),
+                "--project-id".into(),
+                project_id.clone(),
+            ]);
+            assert_eq!(code, Some(0), "task delete should exit 0");
+            assert!(
+                cc_hub_lib::merge_lock::current_holder(&project_id)
+                    .expect("current_holder")
+                    .is_none(),
+                "merge lock must be released by task delete"
             );
         });
     }
