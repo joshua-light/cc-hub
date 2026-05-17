@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 /// genuinely broken spawns, not to bound happy-path latency.
 const DEFAULT_PROMPT_WAIT_SECS: u64 = 120;
 const TASK_VERBS_HELP: &str =
-    "`report`, `create`, `start`, `list`, `auto-review`, `artifact`, or `todos`";
+    "`report`, `create`, `start`, `list`, `show`, `auto-review`, `artifact`, or `todos`";
 
 pub fn dispatch(args: &[String]) -> Option<i32> {
     let (verb, rest) = args.split_first()?;
@@ -126,6 +126,7 @@ Usage:
   cc-hub task create --prompt TEXT [--backlog] [--name NAME] [--project-id ID]
   cc-hub task start --task ID [--agent AGENT] [--wait-secs N] [--project-id ID]
   cc-hub task report --task ID [--status running|review|merging|done|backlog] [--note TEXT] [--summary TEXT]
+  cc-hub task show --task ID [--project-id ID] [--json]
   cc-hub task auto-review --task ID [--project-id ID]
   cc-hub task list [--status backlog|running|review|merging|done] [--project-id ID] [--json]
   cc-hub task artifact add --task ID --path PATH_OR_URL [--kind KIND] [--caption TEXT] [--lead]
@@ -826,6 +827,7 @@ fn task_subcommand(args: &[String]) -> Result<(), CliError> {
         "report" => task_report(rest),
         "create" => task_create(rest),
         "start" => task_start(rest),
+        "show" => task_show(rest),
         "list" => task_list(rest),
         "auto-review" => task_auto_review(rest),
         "artifact" => task_artifact_subcommand(rest),
@@ -1122,6 +1124,95 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         "shipped_version": state.shipped_version,
         "updated_at": state.updated_at,
     }));
+    Ok(())
+}
+
+fn format_age(now: i64, ts: i64) -> String {
+    let delta = now.saturating_sub(ts).max(0);
+    if delta < 60 {
+        format!("{}s ago", delta)
+    } else if delta < 3600 {
+        format!("{}m ago", delta / 60)
+    } else if delta < 86400 {
+        format!("{}h ago", delta / 3600)
+    } else {
+        format!("{}d ago", delta / 86400)
+    }
+}
+
+fn one_line(s: &str, max: usize) -> String {
+    let line = s.lines().next().unwrap_or("");
+    if line.chars().count() > max {
+        let truncated: String = line.chars().take(max - 1).collect();
+        format!("{}…", truncated)
+    } else {
+        line.to_string()
+    }
+}
+
+/// `cc-hub task show --task ID [--project-id ID] [--json]`
+///
+/// Read-only inspection of a single task. With `--json`, emits one JSON
+/// object on stdout containing the full TaskState verbatim at the top level
+/// plus `ok: true` and an embedded `pr` field (the PR object, or null).
+/// Without `--json`, prints key/value lines suitable for skim-reading.
+fn task_show(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+
+    let state = orchestrator::read_task_state(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
+    let pr = cc_hub_lib::pr::read_pr(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("read pr: {}", e)))?;
+
+    if f.json {
+        // Top-level shape: full TaskState fields, plus `ok` and `pr`.
+        let mut obj = serde_json::to_value(&state)
+            .map_err(|e| CliError::Other(format!("serialize state: {}", e)))?;
+        let map = obj
+            .as_object_mut()
+            .expect("TaskState serializes to a JSON object");
+        map.insert("ok".into(), serde_json::Value::Bool(true));
+        map.insert(
+            "pr".into(),
+            match &pr {
+                Some(p) => pr_to_json(p),
+                None => serde_json::Value::Null,
+            },
+        );
+        print_json(&obj);
+        return Ok(());
+    }
+
+    let now = orchestrator::now_unix_secs();
+    let todos_done = state.todos.iter().filter(|t| t.done).count();
+    let todos_total = state.todos.len();
+
+    println!("status: {:?}", state.status);
+    println!("prompt: {}", one_line(&state.prompt, 80));
+    println!("note: {}", state.note.as_deref().unwrap_or("-"));
+    println!(
+        "summary: {}",
+        state
+            .summary
+            .as_deref()
+            .map(|s| one_line(s, 120))
+            .unwrap_or_else(|| "-".into())
+    );
+    println!("created_at: {}", format_age(now, state.created_at));
+    println!("updated_at: {}", format_age(now, state.updated_at));
+    println!("workers: {}", state.workers.len());
+    println!("artifacts: {}", state.artifacts.len());
+    println!("todos: {}/{}", todos_done, todos_total);
+    println!(
+        "shipped_version: {}",
+        state.shipped_version.as_deref().unwrap_or("-")
+    );
+    println!(
+        "orchestrator_tmux: {}",
+        state.orchestrator_tmux.as_deref().unwrap_or("-")
+    );
     Ok(())
 }
 
@@ -2864,6 +2955,33 @@ mod tests {
     }
 
     #[test]
+    fn task_show_json_emits_task_id() {
+        with_tempdir_home(|| {
+            let project_id = "p1".to_string();
+            let task_id = "t-show".to_string();
+
+            let mut state = TaskState::new(
+                project_id.clone(),
+                PathBuf::from("/tmp/proj"),
+                "inspect me".into(),
+            );
+            state.task_id = task_id.clone();
+            orchestrator::write_task_state(&state).expect("write state");
+
+            let code = dispatch(&[
+                "task".into(),
+                "show".into(),
+                "--task".into(),
+                task_id.clone(),
+                "--project-id".into(),
+                project_id.clone(),
+                "--json".into(),
+            ]);
+            assert_eq!(code, Some(0), "dispatch should succeed");
+        });
+    }
+
+    #[test]
     fn task_create_with_project_id_uses_registered_root() {
         with_tempdir_home(|| {
             let file = orchestrator::ProjectsFile {
@@ -2952,6 +3070,29 @@ mod tests {
 
             let args = vec!["--project-id".into(), project_id.clone()];
             task_list(&args).expect("task_list ok");
+        });
+    }
+
+    #[test]
+    fn task_show_function_succeeds_without_pr() {
+        with_tempdir_home(|| {
+            let project_id = "p1".to_string();
+            let task_id = "t-show-fn".to_string();
+            let mut state = TaskState::new(
+                project_id.clone(),
+                PathBuf::from("/tmp/proj"),
+                "hello".into(),
+            );
+            state.task_id = task_id.clone();
+            orchestrator::write_task_state(&state).expect("write state");
+            let args = vec![
+                "--task".into(),
+                task_id.clone(),
+                "--project-id".into(),
+                project_id.clone(),
+                "--json".into(),
+            ];
+            task_show(&args).expect("task_show ok");
         });
     }
 
