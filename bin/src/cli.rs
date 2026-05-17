@@ -169,8 +169,8 @@ project merge lock; `finalize` releases the lock and marks the task Done.
 const WORKER_HELP: &str = r#"cc-hub worker
 
 Usage:
-  cc-hub worker wait --task ID (--tmux NAME ... | --all) [--timeout-secs N]
-                     [--progress [--progress-interval-secs N]]
+  cc-hub worker wait --task ID (--tmux NAME ... | --worktree NAME ... | --all)
+                     [--timeout-secs N] [--progress [--progress-interval-secs N]]
 
 Polls cc-hub's session scanner until selected workers reach WaitingForInput or
 Inactive. Emits one JSON line with per-worker completion state.
@@ -255,6 +255,7 @@ struct Flags {
     /// `worker wait` flags. Repeatable `--tmux NAME`, `--all`,
     /// `--timeout-secs N`.
     tmux_targets: Vec<String>,
+    worktree_targets: Vec<String>,
     all: bool,
     timeout_secs: Option<u64>,
     progress: bool,
@@ -283,7 +284,9 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
                 f.task = Some(next_value(args, &mut i, "--task")?);
             }
             "--worktree" => {
-                f.worktree = Some(next_value(args, &mut i, "--worktree")?);
+                let v = next_value(args, &mut i, "--worktree")?;
+                f.worktree = Some(v.clone());
+                f.worktree_targets.push(v);
             }
             "--readonly" => {
                 f.readonly = true;
@@ -2375,7 +2378,7 @@ fn resolve_worktree_path(state: &TaskState, branch: &str) -> Option<PathBuf> {
 
 // ─── worker ──────────────────────────────────────────────────────────────
 //
-// `cc-hub worker wait --task ID [--tmux NAME ...] [--all] [--timeout-secs N]`
+// `cc-hub worker wait --task ID [--tmux NAME ...] [--worktree NAME ...] [--all] [--timeout-secs N]`
 //
 // Blocks until the named worker tmux session(s) reach a terminal-for-the-
 // orchestrator state — WaitingForInput (Claude end_turn) or Inactive
@@ -2396,6 +2399,84 @@ fn worker_subcommand(args: &[String]) -> Result<(), CliError> {
     }
 }
 
+/// Resolve the tmux-name targets for `worker wait` from the various
+/// selection flags. Returns a deduped Vec of tmux session names.
+///
+/// Selection is the union of:
+///   * each `--tmux NAME`  (must exist in state.workers as a tmux_name)
+///   * each `--worktree NAME` (must exist in state.workers as a worktree)
+///   * `--all` (every worker on the task)
+///
+/// Passing none of the three is a usage error. `--all` on a task with
+/// zero workers yields an empty Vec (preserved existing behavior — the
+/// caller emits ok=true / all_done=true / workers=[]).
+fn resolve_wait_targets(
+    state: &orchestrator::TaskState,
+    tmux_targets: &[String],
+    worktree_targets: &[String],
+    all: bool,
+) -> Result<Vec<String>, CliError> {
+    if tmux_targets.is_empty() && worktree_targets.is_empty() && !all {
+        return Err(CliError::Usage(
+            "must pass --tmux NAME ..., --worktree NAME ..., or --all".into(),
+        ));
+    }
+
+    let known_tmux: std::collections::HashSet<&str> =
+        state.workers.iter().map(|w| w.tmux_name.as_str()).collect();
+    for t in tmux_targets {
+        if !known_tmux.contains(t.as_str()) {
+            return Err(CliError::Usage(format!(
+                "--tmux {}: not a worker of task {} (known: [{}])",
+                t,
+                state.task_id,
+                state
+                    .workers
+                    .iter()
+                    .map(|w| w.tmux_name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+    }
+
+    let mut targets: Vec<String> = Vec::new();
+    for t in tmux_targets {
+        targets.push(t.clone());
+    }
+    for wt in worktree_targets {
+        match state
+            .workers
+            .iter()
+            .find(|w| w.worktree.as_deref() == Some(wt.as_str()))
+        {
+            Some(w) => targets.push(w.tmux_name.clone()),
+            None => {
+                let known_wt: Vec<&str> = state
+                    .workers
+                    .iter()
+                    .filter_map(|w| w.worktree.as_deref())
+                    .collect();
+                return Err(CliError::Usage(format!(
+                    "--worktree {}: not a worker of task {} (known worktrees: [{}])",
+                    wt,
+                    state.task_id,
+                    known_wt.join(", ")
+                )));
+            }
+        }
+    }
+    if all {
+        for w in &state.workers {
+            targets.push(w.tmux_name.clone());
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    targets.retain(|t| seen.insert(t.clone()));
+    Ok(targets)
+}
+
 fn worker_wait(args: &[String]) -> Result<(), CliError> {
     let f = parse_flags(args)?;
     let task_id = require_task(&f)?;
@@ -2404,38 +2485,7 @@ fn worker_wait(args: &[String]) -> Result<(), CliError> {
     let state = orchestrator::read_task_state(&project_id, &task_id)
         .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
 
-    // Build the target tmux name set. --tmux is validated against
-    // state.workers so the orchestrator catches typos here, not after a
-    // 30-minute timeout.
-    let mut targets: Vec<String> = if !f.tmux_targets.is_empty() {
-        let known: std::collections::HashSet<&str> =
-            state.workers.iter().map(|w| w.tmux_name.as_str()).collect();
-        for t in &f.tmux_targets {
-            if !known.contains(t.as_str()) {
-                return Err(CliError::Usage(format!(
-                    "--tmux {}: not a worker of task {} (known: [{}])",
-                    t,
-                    task_id,
-                    state
-                        .workers
-                        .iter()
-                        .map(|w| w.tmux_name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )));
-            }
-        }
-        f.tmux_targets.clone()
-    } else if f.all {
-        state.workers.iter().map(|w| w.tmux_name.clone()).collect()
-    } else {
-        return Err(CliError::Usage(
-            "must pass either --tmux NAME ... or --all".into(),
-        ));
-    };
-
-    let mut seen = std::collections::HashSet::new();
-    targets.retain(|t| seen.insert(t.clone()));
+    let targets = resolve_wait_targets(&state, &f.tmux_targets, &f.worktree_targets, f.all)?;
 
     if targets.is_empty() {
         print_json(&serde_json::json!({
@@ -3643,5 +3693,97 @@ mod tests {
                 "state dir must survive a refused delete"
             );
         });
+    }
+
+    fn make_state_with_three_workers() -> TaskState {
+        let mut state = TaskState::new(
+            "p-wait".to_string(),
+            PathBuf::from("/tmp/proj"),
+            "do thing".into(),
+        );
+        state.task_id = "t-wait".to_string();
+        state.workers.push(orchestrator::Worker {
+            agent_id: "claude".into(),
+            agent_kind: cc_hub_lib::agent::AgentKind::Claude,
+            tmux_name: "cchub-1".into(),
+            cwd: PathBuf::from("/tmp"),
+            worktree: Some("fix".into()),
+            readonly: false,
+            spawned_at: 0,
+        });
+        state.workers.push(orchestrator::Worker {
+            agent_id: "claude".into(),
+            agent_kind: cc_hub_lib::agent::AgentKind::Claude,
+            tmux_name: "cchub-2".into(),
+            cwd: PathBuf::from("/tmp"),
+            worktree: Some("docs".into()),
+            readonly: false,
+            spawned_at: 0,
+        });
+        state.workers.push(orchestrator::Worker {
+            agent_id: "claude".into(),
+            agent_kind: cc_hub_lib::agent::AgentKind::Claude,
+            tmux_name: "cchub-ro".into(),
+            cwd: PathBuf::from("/tmp"),
+            worktree: None,
+            readonly: true,
+            spawned_at: 0,
+        });
+        state
+    }
+
+    #[test]
+    fn resolve_wait_targets_resolves_worktree_to_tmux() {
+        let state = make_state_with_three_workers();
+        let targets =
+            resolve_wait_targets(&state, &[], &["fix".to_string()], false).expect("ok");
+        assert_eq!(targets, vec!["cchub-1".to_string()]);
+    }
+
+    #[test]
+    fn resolve_wait_targets_unknown_worktree_errors() {
+        let state = make_state_with_three_workers();
+        let err = resolve_wait_targets(&state, &[], &["missing".to_string()], false)
+            .expect_err("must error on unknown worktree");
+        match err {
+            CliError::Usage(msg) => {
+                assert!(
+                    msg.contains("missing"),
+                    "error must mention the unknown worktree name: {}",
+                    msg
+                );
+                assert!(
+                    msg.contains("fix") && msg.contains("docs"),
+                    "error must list known worktrees: {}",
+                    msg
+                );
+            }
+            other => panic!("expected CliError::Usage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn resolve_wait_targets_union_of_flags_deduped() {
+        let state = make_state_with_three_workers();
+        let targets = resolve_wait_targets(
+            &state,
+            &["cchub-1".to_string()],
+            &["fix".to_string(), "docs".to_string()],
+            false,
+        )
+        .expect("ok");
+        assert_eq!(
+            targets,
+            vec!["cchub-1".to_string(), "cchub-2".to_string()],
+            "tmux first, then worktree-resolved tmux names, with dedup preserving first occurrence"
+        );
+    }
+
+    #[test]
+    fn resolve_wait_targets_empty_selection_errors() {
+        let state = make_state_with_three_workers();
+        let err = resolve_wait_targets(&state, &[], &[], false)
+            .expect_err("must error when no selection flags given");
+        assert!(matches!(err, CliError::Usage(_)));
     }
 }
