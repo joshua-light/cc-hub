@@ -835,6 +835,43 @@ pub fn orchestrator_prompt_prefix(task_id: &str) -> String {
     format!("You are the cc-hub orchestrator for task `{}`", task_id)
 }
 
+/// Resolve the absolute path of the running cc-hub binary, working around
+/// Linux's `(deleted)` suffix.
+///
+/// `std::env::current_exe()` on Linux appends a literal " (deleted)" to the
+/// path when the on-disk inode has been unlinked or replaced (typical when the
+/// user ran `cargo build --release` while a long-lived process — e.g. a TUI
+/// orchestrator — is still running off the old binary). Baking that suffixed
+/// path into a prompt makes every downstream cc-hub invocation fail because
+/// the literal path does not exist.
+///
+/// We strip the suffix and verify the stripped path resolves to a real file.
+/// If neither variant exists, we fall back to whatever `current_exe()`
+/// returned so callers get a best-effort path rather than a panic.
+pub fn resolve_cc_hub_bin() -> PathBuf {
+    let raw = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return PathBuf::from("cc-hub"),
+    };
+    resolve_cc_hub_bin_from(raw, |p| p.exists())
+}
+
+/// The pure suffix-stripping logic, exposed for testing.
+fn resolve_cc_hub_bin_from(raw: PathBuf, exists: impl Fn(&Path) -> bool) -> PathBuf {
+    let s = raw.to_string_lossy();
+    if let Some(stripped) = s.strip_suffix(" (deleted)") {
+        let candidate = PathBuf::from(stripped);
+        if exists(&candidate) {
+            return candidate;
+        }
+        if exists(&raw) {
+            return raw;
+        }
+        return candidate;
+    }
+    raw
+}
+
 pub fn build_review_approval_prompt(task_id: &str, cc_hub_bin: &Path) -> String {
     let bin = cc_hub_bin.display();
     format!(
@@ -1049,8 +1086,7 @@ pub fn spawn_orchestrator_for_new_task(
         .agent(&agent_id)
         .ok_or_else(|| io::Error::other(format!("unknown orchestrator agent: {}", agent_id)))?;
 
-    let cc_hub_bin = std::env::current_exe()
-        .map_err(|e| io::Error::other(format!("resolve cc-hub binary path: {}", e)))?;
+    let cc_hub_bin = resolve_cc_hub_bin();
     state.orchestrator_agent_id = agent_id.clone();
     state.orchestrator_agent_kind = agent.kind;
     let orchestrator_prompt = build_orchestrator_prompt(&state, &cc_hub_bin);
@@ -1107,8 +1143,7 @@ pub fn start_backlog_task(
         .agent(&agent_id)
         .ok_or_else(|| io::Error::other(format!("unknown orchestrator agent: {}", agent_id)))?;
 
-    let cc_hub_bin = std::env::current_exe()
-        .map_err(|e| io::Error::other(format!("resolve cc-hub binary path: {}", e)))?;
+    let cc_hub_bin = resolve_cc_hub_bin();
     state.orchestrator_agent_id = agent_id.clone();
     state.orchestrator_agent_kind = agent.kind;
     let orchestrator_prompt = build_orchestrator_prompt(&state, &cc_hub_bin);
@@ -1177,8 +1212,7 @@ pub fn restart_task(
         .agent(&agent_id)
         .ok_or_else(|| io::Error::other(format!("unknown orchestrator agent: {}", agent_id)))?;
 
-    let cc_hub_bin = std::env::current_exe()
-        .map_err(|e| io::Error::other(format!("resolve cc-hub binary path: {}", e)))?;
+    let cc_hub_bin = resolve_cc_hub_bin();
 
     let old_tmux = state.orchestrator_tmux.clone();
     state.orchestrator_tmux = None;
@@ -1460,6 +1494,34 @@ pub fn merge_branch(
 mod tests {
     use super::*;
     use crate::test_util::HOME_TEST_LOCK;
+
+    #[test]
+    fn resolve_cc_hub_bin_strips_deleted_suffix_when_sibling_exists() {
+        use std::fs;
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("cc-hub");
+        fs::write(&real, b"#!/bin/sh\necho cc-hub\n").unwrap();
+
+        let suffixed = PathBuf::from(format!("{} (deleted)", real.display()));
+        let resolved = resolve_cc_hub_bin_from(suffixed, |p| p.exists());
+        assert_eq!(resolved, real);
+    }
+
+    #[test]
+    fn resolve_cc_hub_bin_leaves_clean_path_alone() {
+        let p = PathBuf::from("/usr/bin/cc-hub");
+        let resolved = resolve_cc_hub_bin_from(p.clone(), |_| true);
+        assert_eq!(resolved, p);
+    }
+
+    #[test]
+    fn resolve_cc_hub_bin_falls_back_to_raw_when_stripped_missing_but_raw_exists() {
+        // Edge case: stripped sibling gone but raw path somehow exists.
+        let raw = PathBuf::from("/tmp/fake-cc-hub (deleted)");
+        let stripped = PathBuf::from("/tmp/fake-cc-hub");
+        let resolved = resolve_cc_hub_bin_from(raw.clone(), |p| *p == raw && *p != stripped);
+        assert_eq!(resolved, raw);
+    }
 
     #[test]
     fn project_id_is_stable_and_sanitised() {
