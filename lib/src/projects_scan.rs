@@ -15,6 +15,7 @@
 use crate::agent::AgentKind;
 use crate::merge_lock::{self, MergeLock};
 use crate::orchestrator::{self, Project, TaskState, TaskStatus};
+use crate::pr::ReviewState;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
@@ -24,6 +25,19 @@ use std::time::SystemTime;
 
 type TaskStateCache = HashMap<PathBuf, (SystemTime, Arc<TaskState>)>;
 
+/// Compact PR summary surfaced on kanban cards. Kept tiny so the
+/// snapshot can carry one per task without inflating clone cost: the
+/// renderer only needs id + review state + comment count to draw the
+/// badge.
+#[derive(Debug, Clone, Copy)]
+pub struct PrCardSummary {
+    pub id: u32,
+    pub review_state: ReviewState,
+    pub comments: u16,
+}
+
+type PrSummaryCache = HashMap<PathBuf, (SystemTime, PrCardSummary)>;
+
 /// Process-global mtime-keyed cache of parsed state.json files. Keyed by
 /// the absolute path of `state.json`; value is `(mtime, parsed)`. A scan
 /// stat()s every file each tick and only re-reads on mtime change. The
@@ -32,6 +46,14 @@ type TaskStateCache = HashMap<PathBuf, (SystemTime, Arc<TaskState>)>;
 /// merge/artifact lists) per scan.
 fn cache() -> &'static Mutex<TaskStateCache> {
     static CACHE: OnceLock<Mutex<TaskStateCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Mirrors [`cache`] for `pr.json` files. Same mtime-keyed read-skip
+/// pattern: every scan stat()s each `pr.json` so deletions/edits surface
+/// immediately, but parse is skipped when mtime matches.
+fn pr_cache() -> &'static Mutex<PrSummaryCache> {
+    static CACHE: OnceLock<Mutex<PrSummaryCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -74,6 +96,9 @@ pub struct ProjectsSnapshot {
     /// holder for that project. Stale-lock detection is left to acquire(); the
     /// renderer treats whatever `current_holder` returns as the truth.
     pub merge_lock_holders: HashMap<String, Option<MergeLock>>,
+    /// Compact PR summary per `task_id`, populated each scan from the
+    /// task's `pr.json`. Empty entry means the task has no PR yet.
+    pub pr_summaries: HashMap<String, PrCardSummary>,
 }
 
 impl ProjectsSnapshot {
@@ -83,6 +108,7 @@ impl ProjectsSnapshot {
             tasks: HashMap::new(),
             titling: HashSet::new(),
             merge_lock_holders: HashMap::new(),
+            pr_summaries: HashMap::new(),
         }
     }
 
@@ -137,7 +163,9 @@ pub fn scan() -> ProjectsSnapshot {
     let projects = orchestrator::load_projects().projects;
     let mut tasks: HashMap<String, Vec<Arc<TaskState>>> = HashMap::new();
     let mut merge_lock_holders: HashMap<String, Option<MergeLock>> = HashMap::new();
+    let mut pr_summaries: HashMap<String, PrCardSummary> = HashMap::new();
     let mut visited_all: HashSet<PathBuf> = HashSet::new();
+    let mut visited_prs: HashSet<PathBuf> = HashSet::new();
 
     for p in &projects {
         let (mut list, visited) = load_tasks_for(&p.id);
@@ -151,6 +179,13 @@ pub fn scan() -> ProjectsSnapshot {
                 .cmp(&a.updated_at)
                 .then(b.task_id.cmp(&a.task_id))
         });
+        // Walk the same task ids for pr.json before we move `list`.
+        for t in &list {
+            if let Some((path, summary)) = load_pr_summary(&p.id, &t.task_id) {
+                visited_prs.insert(path);
+                pr_summaries.insert(t.task_id.clone(), summary);
+            }
+        }
         tasks.insert(p.id.clone(), list);
         // IO errors are render-side-noise: treat as no holder so a transient
         // glitch doesn't paint every Merging card with the queued style.
@@ -166,12 +201,75 @@ pub fn scan() -> ProjectsSnapshot {
         let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
         c.retain(|k, _| visited_all.contains(k));
     }
+    {
+        let mut c = pr_cache().lock().unwrap_or_else(|e| e.into_inner());
+        c.retain(|k, _| visited_prs.contains(k));
+    }
 
     ProjectsSnapshot {
         projects,
         tasks,
         titling: HashSet::new(),
         merge_lock_holders,
+        pr_summaries,
+    }
+}
+
+/// Load (or cache-hit) the PR summary for one task. Returns the canonical
+/// `pr.json` path alongside the summary so callers can track visitation
+/// for cache eviction. Filesystem errors are logged and treated as
+/// "no PR" — render noise must never escalate to a panic.
+fn load_pr_summary(project_id: &str, task_id: &str) -> Option<(PathBuf, PrCardSummary)> {
+    let path = crate::pr::pr_file_path(project_id, task_id)?;
+    let meta = match fs::metadata(&path) {
+        Ok(m) => m,
+        Err(e) => {
+            if e.kind() != io::ErrorKind::NotFound {
+                log::warn!("projects_scan: pr stat error at {}: {}", path.display(), e);
+            }
+            return None;
+        }
+    };
+    if !meta.is_file() {
+        return None;
+    }
+    let mtime = match meta.modified() {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!(
+                "projects_scan: pr mtime unavailable at {}: {}",
+                path.display(),
+                e
+            );
+            return None;
+        }
+    };
+    {
+        let c = pr_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((cached_mtime, summary)) = c.get(&path) {
+            if *cached_mtime == mtime {
+                return Some((path, *summary));
+            }
+        }
+    }
+    match crate::pr::read_pr(project_id, task_id) {
+        Ok(Some(pr)) => {
+            let summary = PrCardSummary {
+                id: pr.id,
+                review_state: pr.review_state,
+                comments: pr.comments.len().min(u16::MAX as usize) as u16,
+            };
+            {
+                let mut c = pr_cache().lock().unwrap_or_else(|e| e.into_inner());
+                c.insert(path.clone(), (mtime, summary));
+            }
+            Some((path, summary))
+        }
+        Ok(None) => None,
+        Err(e) => {
+            log::warn!("projects_scan: pr parse error at {}: {}", path.display(), e);
+            None
+        }
     }
 }
 
@@ -290,6 +388,77 @@ mod tests {
         );
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, json).unwrap();
+    }
+
+    #[test]
+    fn scan_populates_pr_summaries_from_pr_json() {
+        use crate::test_util::HOME_TEST_LOCK;
+        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        // Set up a registered project + one task with a PR. `scan()` walks
+        // projects.toml and the task tree under `$HOME/.cc-hub`.
+        let project_id = "p-scan-pr";
+        let project_root = home.path().join("proj");
+        fs::create_dir_all(&project_root).expect("project root");
+        orchestrator::save_projects(&orchestrator::ProjectsFile {
+            projects: vec![orchestrator::Project {
+                id: project_id.into(),
+                name: "scan-pr".into(),
+                root: project_root.clone(),
+                created_at: 0,
+                build_cmd: None,
+            }],
+        })
+        .expect("save_projects");
+
+        let mut state =
+            orchestrator::TaskState::new(project_id.into(), project_root.clone(), "do".into());
+        state.task_id = "t-scan-1".into();
+        orchestrator::write_task_state(&state).expect("write_task_state");
+
+        // Drive write_pr through the public helper so the on-disk schema
+        // matches what real PRs produce.
+        let mut pr = crate::pr::create_pr(
+            &state,
+            "cc-hub/t-scan-1".into(),
+            "main".into(),
+            "T".into(),
+            "D".into(),
+        )
+        .expect("create_pr");
+        pr.review_state = crate::pr::ReviewState::ChangesRequested;
+        pr.comments.push(crate::pr::Comment {
+            author: "user".into(),
+            at: 0,
+            body: "please fix".into(),
+        });
+        pr.comments.push(crate::pr::Comment {
+            author: "user".into(),
+            at: 0,
+            body: "another note".into(),
+        });
+        crate::pr::write_pr(&pr).expect("write_pr");
+
+        let snap = scan();
+        let summary = snap
+            .pr_summaries
+            .get("t-scan-1")
+            .copied()
+            .expect("pr_summaries entry present");
+        assert_eq!(summary.id, pr.id);
+        assert_eq!(
+            summary.review_state,
+            crate::pr::ReviewState::ChangesRequested
+        );
+        assert_eq!(summary.comments, 2);
+
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     #[test]
