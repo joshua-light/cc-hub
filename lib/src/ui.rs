@@ -392,7 +392,7 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
     ))
     .title_bottom(Span::styled(
         format!(
-            " j/k navigate · s/enter start · esc/q close{}",
+            " j/k navigate · s/enter start · x delete · esc/q close{}",
             selected_label
         ),
         Style::default().fg(Color::DarkGray),
