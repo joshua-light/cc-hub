@@ -427,6 +427,7 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
         sel + 1 - visible_tasks
     };
     let mut lines: Vec<Line> = Vec::with_capacity(visible_tasks * rows_per_task);
+    let now_secs = now_ms() / 1000;
     for (i, t) in tasks
         .iter()
         .enumerate()
@@ -448,17 +449,23 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             Style::default().fg(Color::Gray)
         };
+        let age_secs = now_secs.saturating_sub(t.created_at as u64);
+        let age = format!("{:>4}", format_age_short(age_secs));
         if has_title {
             let title_text = t.title.as_deref().unwrap().to_string();
             lines.push(Line::from(vec![
                 Span::styled(arrow, Style::default().fg(Color::Rgb(120, 140, 200))),
                 Span::styled(title_text, title_style),
             ]));
-            let preview =
-                first_line_preview(&t.prompt, max_w.saturating_sub(id_short.len() + 6));
+            let preview = first_line_preview(
+                &t.prompt,
+                max_w.saturating_sub(id_short.len() + age.len() + 8),
+            );
             lines.push(Line::from(vec![
                 Span::raw("    "),
                 Span::styled(id_short, Style::default().fg(Color::DarkGray)),
+                Span::styled("  ", Style::default()),
+                Span::styled(age, Style::default().fg(TASK_META_DIM)),
                 Span::styled("  ", Style::default()),
                 Span::styled(preview, Style::default().fg(Color::Rgb(110, 110, 130))),
             ]));
@@ -468,9 +475,11 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled(format!("#{}", id_short), title_style),
                 Span::styled(" · pending title", Style::default().fg(Color::DarkGray)),
             ]));
-            let preview = first_line_preview(&t.prompt, max_w);
+            let preview = first_line_preview(&t.prompt, max_w.saturating_sub(age.len() + 6));
             lines.push(Line::from(vec![
                 Span::raw("    "),
+                Span::styled(age, Style::default().fg(TASK_META_DIM)),
+                Span::styled("  ", Style::default()),
                 Span::styled(preview, Style::default().fg(Color::Rgb(110, 110, 130))),
             ]));
         }
@@ -4141,6 +4150,18 @@ fn format_age(secs: u64) -> String {
     }
 }
 
+fn format_age_short(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
+}
+
 /// Styled `vX.Y.Z` span for the shipped-version display. Idempotent on the
 /// `v` prefix so `0.1` and `v0.1` both render as `v0.1`.
 fn shipped_version_span(v: &str) -> Span<'static> {
@@ -5831,5 +5852,82 @@ mod backlog_popup_tests {
             "titled entry should not show 'pending title' hint:\n{}",
             plain
         );
+    }
+}
+
+#[cfg(test)]
+mod backlog_age_tests {
+    use super::buffer_to_string;
+    use crate::app::App;
+    use crate::orchestrator::{now_unix_secs, Project, TaskState, TaskStatus};
+    use crate::projects_scan::ProjectsSnapshot;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::collections::{HashMap, HashSet};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    #[test]
+    fn backlog_entries_show_right_justified_age_column() {
+        let now = now_unix_secs();
+        let project = Project {
+            id: "p-bk".into(),
+            name: "demo".into(),
+            root: PathBuf::from("/tmp/demo"),
+            created_at: now,
+        };
+        let ages: [(i64, &str); 4] = [
+            (45, "45s"),
+            (12 * 60, "12m"),
+            (3 * 3600, "3h"),
+            (2 * 86400, "2d"),
+        ];
+        let tasks: Vec<Arc<TaskState>> = ages
+            .iter()
+            .enumerate()
+            .map(|(i, (age_s, _))| {
+                let mut s = TaskState::new(
+                    project.id.clone(),
+                    project.root.clone(),
+                    format!("prompt number {}", i),
+                );
+                s.status = TaskStatus::Backlog;
+                s.created_at = now - age_s;
+                Arc::new(s)
+            })
+            .collect();
+        let mut app = App::new();
+        let mut by_proj = HashMap::new();
+        by_proj.insert(project.id.clone(), tasks);
+        let snap = ProjectsSnapshot {
+            projects: vec![project],
+            tasks: by_proj,
+            titling: HashSet::new(),
+            merge_lock_holders: HashMap::new(),
+            pr_summaries: HashMap::new(),
+        };
+        app.update_projects(snap);
+        app.open_backlog();
+
+        let backend = TestBackend::new(90, 22);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| super::render_backlog(f, f.area(), &app))
+            .expect("render");
+        let rendered = buffer_to_string(terminal.backend().buffer());
+        println!(
+            "---begin backlog render---\n{}---end backlog render---",
+            rendered
+        );
+
+        for (_, token) in ages.iter() {
+            let padded = format!("{:>4}", token);
+            assert!(
+                rendered.contains(&padded),
+                "expected right-justified age {:?} in backlog render:\n{}",
+                padded,
+                rendered,
+            );
+        }
     }
 }
