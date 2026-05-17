@@ -136,13 +136,7 @@ pub fn tick() -> TickOutcome {
         }
     };
 
-    let cc_hub_bin = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("auto_review: resolve cc-hub binary path: {}", e);
-            return TickOutcome::default();
-        }
-    };
+    let cc_hub_bin = orchestrator::resolve_cc_hub_bin();
 
     let agent_id = cfg
         .agent
