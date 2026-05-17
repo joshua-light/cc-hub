@@ -392,7 +392,7 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
     ))
     .title_bottom(Span::styled(
         format!(
-            " j/k navigate · s/enter start · esc/q close{}",
+            " j/k navigate · s/enter start · x delete · esc/q close{}",
             selected_label
         ),
         Style::default().fg(Color::DarkGray),
@@ -436,10 +436,12 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
     {
         let selected = i == sel;
         let arrow = if selected { "▌ " } else { "  " };
-        let title_text = match t.title.as_deref().filter(|s| !s.is_empty()) {
-            Some(name) => name.to_string(),
-            None => first_line_preview(&t.prompt, max_w),
-        };
+        let has_title = t
+            .title
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        let id_short = crate::orchestrator::short_task_id(&t.task_id);
         let title_style = if selected {
             Style::default()
                 .fg(Color::White)
@@ -447,22 +449,40 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             Style::default().fg(Color::Gray)
         };
-        lines.push(Line::from(vec![
-            Span::styled(arrow, Style::default().fg(Color::Rgb(120, 140, 200))),
-            Span::styled(title_text, title_style),
-        ]));
-        let id_short = crate::orchestrator::short_task_id(&t.task_id);
         let age_secs = now_secs.saturating_sub(t.created_at as u64);
         let age = format!("{:>4}", format_age_short(age_secs));
-        let preview = first_line_preview(&t.prompt, max_w.saturating_sub(id_short.len() + 12));
-        lines.push(Line::from(vec![
-            Span::raw("    "),
-            Span::styled(id_short, Style::default().fg(Color::DarkGray)),
-            Span::styled("  ", Style::default()),
-            Span::styled(age, Style::default().fg(TASK_META_DIM)),
-            Span::styled("  ", Style::default()),
-            Span::styled(preview, Style::default().fg(Color::Rgb(110, 110, 130))),
-        ]));
+        if has_title {
+            let title_text = t.title.as_deref().unwrap().to_string();
+            lines.push(Line::from(vec![
+                Span::styled(arrow, Style::default().fg(Color::Rgb(120, 140, 200))),
+                Span::styled(title_text, title_style),
+            ]));
+            let preview = first_line_preview(
+                &t.prompt,
+                max_w.saturating_sub(id_short.len() + age.len() + 8),
+            );
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(id_short, Style::default().fg(Color::DarkGray)),
+                Span::styled("  ", Style::default()),
+                Span::styled(age, Style::default().fg(TASK_META_DIM)),
+                Span::styled("  ", Style::default()),
+                Span::styled(preview, Style::default().fg(Color::Rgb(110, 110, 130))),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(arrow, Style::default().fg(Color::Rgb(120, 140, 200))),
+                Span::styled(format!("#{}", id_short), title_style),
+                Span::styled(" · pending title", Style::default().fg(Color::DarkGray)),
+            ]));
+            let preview = first_line_preview(&t.prompt, max_w.saturating_sub(age.len() + 6));
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(age, Style::default().fg(TASK_META_DIM)),
+                Span::styled("  ", Style::default()),
+                Span::styled(preview, Style::default().fg(Color::Rgb(110, 110, 130))),
+            ]));
+        }
         lines.push(Line::from(""));
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -3168,6 +3188,7 @@ fn render_kanban_board(frame: &mut Frame, area: Rect, app: &App) {
 
     let sessions_by_tmux = app.sessions_by_tmux();
     let now_secs = now_ms() / 1000;
+    let pr_summaries = &app.projects.pr_summaries;
 
     for col_idx in 0..5 {
         render_kanban_column(
@@ -3176,6 +3197,7 @@ fn render_kanban_board(frame: &mut Frame, area: Rect, app: &App) {
             app,
             col_idx,
             &sessions_by_tmux,
+            pr_summaries,
             now_secs,
         );
     }
@@ -3199,6 +3221,7 @@ fn render_kanban_column(
     app: &App,
     col_idx: usize,
     sessions_by_tmux: &std::collections::HashMap<&str, &SessionInfo>,
+    pr_summaries: &std::collections::HashMap<String, crate::projects_scan::PrCardSummary>,
     now_secs: u64,
 ) {
     let (label, icon, accent) = kanban_column_meta(col_idx);
@@ -3228,11 +3251,25 @@ fn render_kanban_column(
     let hidden_below = count.saturating_sub(scroll_top.saturating_add(max_cards));
     // Only the Merging column needs the lock-holder lookup — collapsed
     // cards in other columns ignore it.
-    let merging_holder_id: Option<&str> = if col_idx == 3 {
-        app.selected_project()
-            .and_then(|p| app.projects.merge_lock_holders.get(&p.id))
-            .and_then(|h| h.as_ref())
-            .map(|h| h.task_id.as_str())
+    let merging_holder_banner: Option<MergeLockBanner<'_>> = if col_idx == 3 {
+        app.selected_project().and_then(|p| {
+            let holder = app
+                .projects
+                .merge_lock_holders
+                .get(&p.id)
+                .and_then(|h| h.as_ref())?;
+            let title = app
+                .projects
+                .tasks
+                .get(&p.id)
+                .and_then(|ts| ts.iter().find(|t| t.task_id == holder.task_id))
+                .and_then(|t| t.title.as_deref());
+            Some(MergeLockBanner {
+                task_id: holder.task_id.as_str(),
+                title,
+                acquired_at: holder.acquired_at,
+            })
+        })
     } else {
         None
     };
@@ -3304,6 +3341,7 @@ fn render_kanban_column(
         };
         let selected = col_focused && rel == sel;
         let titling_in_flight = app.projects.is_titling(&t.task_id);
+        let pr_summary = pr_summaries.get(&t.task_id);
         if col_idx <= 1 {
             render_task_card_active(
                 frame,
@@ -3312,6 +3350,7 @@ fn render_kanban_column(
                 selected,
                 col_idx,
                 sessions_by_tmux,
+                pr_summary,
                 now_secs,
                 titling_in_flight,
             );
@@ -3323,9 +3362,10 @@ fn render_kanban_column(
                 selected,
                 col_idx,
                 sessions_by_tmux,
+                pr_summary,
                 now_secs,
                 titling_in_flight,
-                merging_holder_id,
+                merging_holder_banner.as_ref(),
             );
         }
         y = y.saturating_add(card_height + gap);
@@ -3595,6 +3635,76 @@ fn ctx_bar(pct: u8, width: usize) -> Vec<Span<'static>> {
     out
 }
 
+/// Compact PR status badge for kanban cards. Surfaces the bits a reviewer
+/// needs to triage at-a-glance — PR id, review state, comment count — so
+/// the orchestrator's iterate-on-feedback loop is visible without opening
+/// the PR-details popup. Colour weights:
+/// * `changes_requested` is loud (the orchestrator needs attention).
+/// * `open` is calm; comments perk it up a notch.
+/// * `approved` is positive green.
+/// * `merged` / `closed` are muted — terminal states.
+fn pr_badge_spans(pr: &crate::projects_scan::PrCardSummary) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    spans.push(Span::styled(
+        format!("󰊢 PR #{}", pr.id),
+        Style::default().fg(Color::Rgb(150, 170, 200)),
+    ));
+    match pr.review_state {
+        crate::pr::ReviewState::ChangesRequested => {
+            spans.push(Span::styled(
+                " · changes requested".to_string(),
+                Style::default()
+                    .fg(Color::Rgb(230, 150, 110))
+                    .add_modifier(Modifier::BOLD),
+            ));
+            if pr.comments > 0 {
+                spans.push(Span::styled(
+                    format!(" · 󰭹 {}", pr.comments),
+                    Style::default().fg(Color::Rgb(180, 180, 200)),
+                ));
+            }
+        }
+        crate::pr::ReviewState::Open => {
+            if pr.comments > 0 {
+                spans.push(Span::styled(
+                    format!(" · 󰭹 {}", pr.comments),
+                    Style::default().fg(Color::Rgb(180, 200, 230)),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    " · open".to_string(),
+                    Style::default().fg(Color::Rgb(150, 170, 200)),
+                ));
+            }
+        }
+        crate::pr::ReviewState::Approved => {
+            spans.push(Span::styled(
+                " · approved".to_string(),
+                Style::default().fg(Color::LightGreen),
+            ));
+            if pr.comments > 0 {
+                spans.push(Span::styled(
+                    format!(" · 󰭹 {}", pr.comments),
+                    Style::default().fg(Color::Rgb(180, 180, 200)),
+                ));
+            }
+        }
+        crate::pr::ReviewState::Merged => {
+            spans.push(Span::styled(
+                " · merged".to_string(),
+                Style::default().fg(Color::Rgb(140, 160, 145)),
+            ));
+        }
+        crate::pr::ReviewState::Closed => {
+            spans.push(Span::styled(
+                " · closed".to_string(),
+                Style::default().fg(Color::Rgb(110, 120, 135)),
+            ));
+        }
+    }
+    spans
+}
+
 /// `(done, total)` if the task has a checklist, else `None`. Both card
 /// renderers use this to decide whether to draw the `☑ M/N` badge.
 fn todos_progress(t: &crate::orchestrator::TaskState) -> Option<(usize, usize)> {
@@ -3616,6 +3726,7 @@ fn render_task_card_active(
     selected: bool,
     col_idx: usize,
     sessions_by_tmux: &std::collections::HashMap<&str, &SessionInfo>,
+    pr_summary: Option<&crate::projects_scan::PrCardSummary>,
     now_secs: u64,
     titling_in_flight: bool,
 ) {
@@ -3685,6 +3796,14 @@ fn render_task_card_active(
         ]));
     } else {
         lines.push(Line::from(Span::raw("")));
+    }
+
+    // PR badge row — inserted above agent dots so a `changes requested`
+    // bounce-back is obvious before the eye scans the rest of the card.
+    // The live-tool row at the bottom is allowed to fall off when present
+    // (the card height is fixed at 4 inner rows).
+    if let Some(pr) = pr_summary {
+        lines.push(Line::from(pr_badge_spans(pr)));
     }
 
     // Row 2: agent dot strip + merge glyph.
@@ -3771,13 +3890,23 @@ fn render_task_card_active(
     frame.render_widget(para, inner);
 }
 
+/// Borrowed view of [`crate::merge_lock::MergeLock`] plus the holder's
+/// resolved title, supplied to Merging-column cards so a queued card can
+/// distinguish a healthy queue from one stuck behind a wedged orchestrator.
+struct MergeLockBanner<'a> {
+    task_id: &'a str,
+    title: Option<&'a str>,
+    acquired_at: i64,
+}
+
 /// Compact 3-line card for Review/Merging/Done tasks. Dim border, single-line
 /// prompt, footer with age + summary preview + artifact/merge counts.
 /// `col_idx` is one of 2 (Review), 3 (Merging), or 4 (Done).
-/// `lock_holder` is the merge-lock holder's task_id for this project, only
-/// supplied for col_idx == 3; a Merging card whose id differs from the
-/// holder is "queued" and renders with a muted border/icon to make it
-/// visually obvious that approval landed but the merge is waiting.
+/// `lock_holder` is the merge-lock holder context for this project, only
+/// supplied for col_idx == 3. A Merging card whose id differs from the
+/// holder is "queued" and renders with a muted border plus a waiting line
+/// naming the holder and lock age, so the user can tell at a glance whether
+/// the queue is healthy or stuck.
 #[allow(clippy::too_many_arguments)]
 fn render_task_card_collapsed(
     frame: &mut Frame,
@@ -3786,9 +3915,10 @@ fn render_task_card_collapsed(
     selected: bool,
     col_idx: usize,
     sessions_by_tmux: &std::collections::HashMap<&str, &SessionInfo>,
+    pr_summary: Option<&crate::projects_scan::PrCardSummary>,
     now_secs: u64,
     titling_in_flight: bool,
-    lock_holder: Option<&str>,
+    lock_holder: Option<&MergeLockBanner<'_>>,
 ) {
     // Review (2) cyan, Merging (3) magenta, Done (4) green.
     let (accent, dim_text, icon) = match col_idx {
@@ -3796,7 +3926,7 @@ fn render_task_card_collapsed(
         3 => (Color::LightMagenta, Color::Rgb(180, 145, 195), ""),
         _ => (Color::LightGreen, Color::Rgb(140, 160, 145), "󰸞"),
     };
-    let queued = col_idx == 3 && lock_holder.is_some_and(|h| h != t.task_id);
+    let queued = col_idx == 3 && lock_holder.is_some_and(|h| h.task_id != t.task_id);
     // Review and Merging cards: brighter border so they stand out — they
     // need user attention or are actively mutating main. Done stays dim.
     // A queued Merging card uses a muted gray instead of the bright
@@ -3841,7 +3971,7 @@ fn render_task_card_collapsed(
                 .fg(Color::Rgb(170, 170, 185))
                 .bg(Color::Rgb(45, 45, 55)),
         ));
-    } else if col_idx == 3 && lock_holder == Some(t.task_id.as_str()) {
+    } else if col_idx == 3 && lock_holder.is_some_and(|h| h.task_id == t.task_id) {
         title_spans.push(Span::styled(
             " merging ",
             Style::default()
@@ -3865,18 +3995,50 @@ fn render_task_card_collapsed(
         return;
     }
 
-    let summary_text = t
-        .summary
-        .as_deref()
-        .or(t.note.as_deref())
-        .map(|s| first_line_preview(s, inner.width.saturating_sub(4) as usize))
-        .unwrap_or_default();
     let mut lines: Vec<Line<'static>> = Vec::new();
-    if !summary_text.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("󰍡 ", Style::default().fg(Color::Rgb(110, 120, 135))),
-            Span::styled(summary_text, Style::default().fg(Color::Rgb(160, 165, 175))),
-        ]));
+    if queued {
+        // t.summary/t.note for an approved-but-waiting PR is already shown
+        // on its Review card; on the Merging card the user wants who is
+        // blocking and for how long instead.
+        if let Some(h) = lock_holder {
+            let body_max = inner.width.saturating_sub(4) as usize;
+            let lock_age = format_duration_secs(
+                now_secs.saturating_sub(h.acquired_at.max(0) as u64),
+            );
+            let holder_short = crate::orchestrator::short_task_id(h.task_id);
+            let age_suffix = format!(" · {}", lock_age);
+            let holder_title = h.title.map(str::trim).filter(|s| !s.is_empty());
+            let body = match holder_title {
+                Some(title) => {
+                    let prefix = format!("behind #{} · ", holder_short);
+                    let reserved = prefix.chars().count() + age_suffix.chars().count();
+                    let title_room = body_max.saturating_sub(reserved);
+                    if title_room == 0 {
+                        format!("behind #{}{}", holder_short, age_suffix)
+                    } else {
+                        format!("{}{}{}", prefix, first_line_preview(title, title_room), age_suffix)
+                    }
+                }
+                None => format!("behind #{}{}", holder_short, age_suffix),
+            };
+            lines.push(Line::from(vec![
+                Span::styled("󰔟 ", Style::default().fg(Color::Rgb(110, 120, 135))),
+                Span::styled(body, Style::default().fg(Color::Rgb(170, 170, 185))),
+            ]));
+        }
+    } else {
+        let summary_text = t
+            .summary
+            .as_deref()
+            .or(t.note.as_deref())
+            .map(|s| first_line_preview(s, inner.width.saturating_sub(4) as usize))
+            .unwrap_or_default();
+        if !summary_text.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("󰍡 ", Style::default().fg(Color::Rgb(110, 120, 135))),
+                Span::styled(summary_text, Style::default().fg(Color::Rgb(160, 165, 175))),
+            ]));
+        }
     }
     if let Some(v) = t.shipped_version.as_deref().filter(|s| !s.is_empty()) {
         lines.push(Line::from(vec![
@@ -3925,6 +4087,10 @@ fn render_task_card_collapsed(
             format!("󰠰 {}", tool_uses),
             Style::default().fg(Color::Rgb(180, 200, 160)),
         ));
+    }
+    if let Some(pr) = pr_summary {
+        footer.push(Span::raw("   "));
+        footer.extend(pr_badge_spans(pr));
     }
     lines.push(Line::from(footer));
 
@@ -4670,6 +4836,7 @@ mod result_popup_tests {
             tasks,
             titling: std::collections::HashSet::new(),
             merge_lock_holders: std::collections::HashMap::new(),
+            pr_summaries: std::collections::HashMap::new(),
         };
         app.update_projects(snap);
         assert!(app.enter_projects_result(), "popup should open");
@@ -4764,6 +4931,7 @@ mod result_popup_tests {
             tasks,
             titling: std::collections::HashSet::new(),
             merge_lock_holders: std::collections::HashMap::new(),
+            pr_summaries: std::collections::HashMap::new(),
         };
         app.update_projects(snap);
         assert!(app.enter_projects_result(), "popup should open");
@@ -4913,6 +5081,7 @@ index 0000001..0000002 100644
             tasks,
             titling: std::collections::HashSet::new(),
             merge_lock_holders: std::collections::HashMap::new(),
+            pr_summaries: std::collections::HashMap::new(),
         };
         app.update_projects(snap);
         assert!(app.enter_projects_result(), "popup should open");
@@ -5001,6 +5170,7 @@ mod kanban_card_tests {
                     false,
                     2,
                     &sessions,
+                    None,
                     1_000_000_000,
                     false,
                     None,
@@ -5030,6 +5200,7 @@ mod kanban_card_tests {
                     false,
                     2,
                     &sessions,
+                    None,
                     1_000_000_000,
                     false,
                     None,
@@ -5104,6 +5275,7 @@ mod kanban_card_tests {
                     false,
                     1,
                     &sessions,
+                    None,
                     1_000_000_000,
                     false,
                 )
@@ -5137,6 +5309,7 @@ mod kanban_card_tests {
                     false,
                     1,
                     &sessions,
+                    None,
                     1_000_000_000,
                     false,
                 )
@@ -5163,6 +5336,7 @@ mod kanban_card_tests {
                     false,
                     2,
                     &sessions,
+                    None,
                     1_000_000_000,
                     false,
                     None,
@@ -5192,6 +5366,7 @@ mod kanban_card_tests {
                     false,
                     1,
                     &sessions,
+                    None,
                     1_000_000_000,
                     false,
                 )
@@ -5201,6 +5376,480 @@ mod kanban_card_tests {
         assert!(
             plain.contains("2/4"),
             "active card should show 2/4 badge:\n{}",
+            plain
+        );
+    }
+
+    fn merging_task(task_id: &str) -> TaskState {
+        let mut t = TaskState::new("p".into(), PathBuf::from("/tmp/p"), "prompt".into());
+        t.task_id = task_id.to_string();
+        t.status = TaskStatus::Merging;
+        t.title = Some("waiting card".into());
+        t
+    }
+
+    fn pr_summary(
+        id: u32,
+        state: crate::pr::ReviewState,
+        comments: u16,
+    ) -> crate::projects_scan::PrCardSummary {
+        crate::projects_scan::PrCardSummary {
+            id,
+            review_state: state,
+            comments,
+        }
+    }
+
+    fn render_active(
+        t: &TaskState,
+        pr: Option<&crate::projects_scan::PrCardSummary>,
+        col_idx: usize,
+    ) -> String {
+        let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
+        let backend = TestBackend::new(70, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_active(
+                    f,
+                    f.area(),
+                    t,
+                    false,
+                    col_idx,
+                    &sessions,
+                    pr,
+                    1_000_000_000,
+                    false,
+                )
+            })
+            .expect("render");
+        buffer_to_string(terminal.backend().buffer())
+    }
+
+    fn render_collapsed(
+        t: &TaskState,
+        pr: Option<&crate::projects_scan::PrCardSummary>,
+        col_idx: usize,
+    ) -> String {
+        let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
+        let backend = TestBackend::new(70, 6);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_collapsed(
+                    f,
+                    f.area(),
+                    t,
+                    false,
+                    col_idx,
+                    &sessions,
+                    pr,
+                    1_000_000_000,
+                    false,
+                    None,
+                )
+            })
+            .expect("render");
+        buffer_to_string(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn collapsed_card_shows_holder_context_when_queued() {
+        let t = merging_task("t-self-000111");
+        let now: u64 = 1_700_000_000;
+        let banner = super::MergeLockBanner {
+            task_id: "t-blocker-123456",
+            title: Some("fix flaky tests"),
+            acquired_at: (now - 180) as i64,
+        };
+        let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
+        let backend = TestBackend::new(60, 6);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_collapsed(
+                    f,
+                    f.area(),
+                    &t,
+                    false,
+                    3,
+                    &sessions,
+                    None,
+                    now,
+                    false,
+                    Some(&banner),
+                )
+            })
+            .expect("render");
+        let plain = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            plain.contains("behind"),
+            "queued card should name the holder:\n{}",
+            plain
+        );
+        assert!(
+            plain.contains("123456"),
+            "queued card should show holder short id:\n{}",
+            plain
+        );
+        assert!(
+            plain.contains("3m"),
+            "queued card should show 3m lock age:\n{}",
+            plain
+        );
+        assert!(
+            plain.contains("queued"),
+            "queued card should keep the queued pill:\n{}",
+            plain
+        );
+    }
+
+    #[test]
+    fn collapsed_card_shows_merging_pill_when_self_is_holder() {
+        let t = merging_task("t-self-654321");
+        let now: u64 = 1_700_000_000;
+        let banner = super::MergeLockBanner {
+            task_id: "t-self-654321",
+            title: Some("self merge"),
+            acquired_at: (now - 5) as i64,
+        };
+        let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
+        let backend = TestBackend::new(60, 6);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_collapsed(
+                    f,
+                    f.area(),
+                    &t,
+                    false,
+                    3,
+                    &sessions,
+                    None,
+                    now,
+                    false,
+                    Some(&banner),
+                )
+            })
+            .expect("render");
+        let plain = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            plain.contains("merging"),
+            "self-holder card should show the merging pill:\n{}",
+            plain
+        );
+        assert!(
+            !plain.contains("behind"),
+            "self-holder card must not render a waiting line:\n{}",
+            plain
+        );
+    }
+
+    /// Visual-proof helper — not part of the regression suite. Dumps the
+    /// rendered card buffers for three Merging states (queued, holder, no
+    /// lock) to /tmp so a screenshot artifact can be attached to the PR.
+    /// Run with: `cargo test -p cc-hub-lib dump_merging_states -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn dump_merging_states() {
+        let now: u64 = 1_700_000_000;
+        let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
+
+        let queued = merging_task("t-self-000111");
+        let banner_blocking = super::MergeLockBanner {
+            task_id: "t-blocker-123456",
+            title: Some("fix flaky tests"),
+            acquired_at: (now - 180) as i64,
+        };
+        let backend = TestBackend::new(60, 4);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_collapsed(
+                    f,
+                    f.area(),
+                    &queued,
+                    false,
+                    3,
+                    &sessions,
+                    None,
+                    now,
+                    false,
+                    Some(&banner_blocking),
+                )
+            })
+            .expect("render");
+        let queued_render = buffer_to_string(terminal.backend().buffer());
+
+        let holder = merging_task("t-blocker-123456");
+        let banner_self = super::MergeLockBanner {
+            task_id: "t-blocker-123456",
+            title: Some("fix flaky tests"),
+            acquired_at: (now - 12) as i64,
+        };
+        let backend = TestBackend::new(60, 4);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_collapsed(
+                    f,
+                    f.area(),
+                    &holder,
+                    false,
+                    3,
+                    &sessions,
+                    None,
+                    now,
+                    false,
+                    Some(&banner_self),
+                )
+            })
+            .expect("render");
+        let holder_render = buffer_to_string(terminal.backend().buffer());
+
+        let alone = merging_task("t-self-000111");
+        let backend = TestBackend::new(60, 4);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_collapsed(
+                    f,
+                    f.area(),
+                    &alone,
+                    false,
+                    3,
+                    &sessions,
+                    None,
+                    now,
+                    false,
+                    None,
+                )
+            })
+            .expect("render");
+        let alone_render = buffer_to_string(terminal.backend().buffer());
+
+        let dump = format!(
+            "=== Merging column · QUEUED (lock held by another task) ===\n\
+             {queued}\n\
+             === Merging column · ACTIVE (this card holds the lock) ===\n\
+             {holder}\n\
+             === Merging column · NO LOCK (no holder recorded) ===\n\
+             {alone}\n",
+            queued = queued_render,
+            holder = holder_render,
+            alone = alone_render,
+        );
+        std::fs::write("/tmp/cchub-merging-states.txt", &dump).expect("write dump");
+        eprintln!("{}", dump);
+    }
+
+    #[test]
+    fn collapsed_card_no_holder_context_when_no_lock() {
+        let t = merging_task("t-only-999999");
+        let sessions: HashMap<&str, &super::SessionInfo> = HashMap::new();
+        let backend = TestBackend::new(60, 6);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                super::render_task_card_collapsed(
+                    f,
+                    f.area(),
+                    &t,
+                    false,
+                    3,
+                    &sessions,
+                    None,
+                    1_700_000_000,
+                    false,
+                    None,
+                )
+            })
+            .expect("render");
+        let plain = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            !plain.contains("behind"),
+            "no holder => no waiting line:\n{}",
+            plain
+        );
+        assert!(
+            !plain.contains("queued"),
+            "no holder => no queued pill:\n{}",
+            plain
+        );
+    }
+
+    #[test]
+    fn active_card_shows_pr_changes_requested_badge() {
+        let t = task_with_todos(TaskStatus::Running, 0, 0);
+        let pr = pr_summary(42, crate::pr::ReviewState::ChangesRequested, 3);
+        let plain = render_active(&t, Some(&pr), 1);
+        assert!(
+            plain.contains("PR #42") && plain.contains("changes requested"),
+            "changes_requested badge missing:\n{}",
+            plain
+        );
+        assert!(plain.contains("3"), "comment count missing:\n{}", plain);
+    }
+
+    #[test]
+    fn collapsed_card_shows_pr_open_with_comment_count() {
+        let t = task_with_todos(TaskStatus::Review, 0, 0);
+        let pr = pr_summary(7, crate::pr::ReviewState::Open, 2);
+        let plain = render_collapsed(&t, Some(&pr), 2);
+        assert!(plain.contains("PR #7"), "PR id missing:\n{}", plain);
+        assert!(
+            plain.contains("2"),
+            "comment count missing on open PR:\n{}",
+            plain
+        );
+    }
+
+    #[test]
+    fn collapsed_card_open_without_comments_shows_open_label() {
+        let t = task_with_todos(TaskStatus::Review, 0, 0);
+        let pr = pr_summary(9, crate::pr::ReviewState::Open, 0);
+        let plain = render_collapsed(&t, Some(&pr), 2);
+        assert!(plain.contains("PR #9"), "PR id missing:\n{}", plain);
+        assert!(
+            plain.contains("open"),
+            "open label missing when no comments:\n{}",
+            plain
+        );
+    }
+
+    #[test]
+    fn active_card_omits_pr_badge_when_no_pr() {
+        let t = task_with_todos(TaskStatus::Running, 0, 0);
+        let plain = render_active(&t, None, 1);
+        assert!(!plain.contains("PR #"), "no PR ⇒ no badge:\n{}", plain);
+    }
+}
+
+#[cfg(test)]
+mod backlog_popup_tests {
+    use super::buffer_to_string;
+    use crate::app::App;
+    use crate::orchestrator::{Project, TaskState};
+    use crate::projects_scan::ProjectsSnapshot;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::collections::{HashMap, HashSet};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn render_popup(prompts: &[&str], titles: &[Option<&str>]) -> String {
+        assert_eq!(prompts.len(), titles.len());
+        let now = crate::orchestrator::now_unix_secs();
+        let project = Project {
+            id: "p-backlog".into(),
+            name: "backlog".into(),
+            root: PathBuf::from("/tmp/backlog"),
+            created_at: now,
+        };
+        let tasks: Vec<Arc<TaskState>> = prompts
+            .iter()
+            .zip(titles.iter())
+            .map(|(p, title)| {
+                let mut t = TaskState::new_backlog(
+                    project.id.clone(),
+                    project.root.clone(),
+                    (*p).into(),
+                );
+                t.title = title.map(|s| s.to_string());
+                Arc::new(t)
+            })
+            .collect();
+        let mut tasks_map = HashMap::new();
+        tasks_map.insert(project.id.clone(), tasks);
+        let snap = ProjectsSnapshot {
+            projects: vec![project],
+            tasks: tasks_map,
+            titling: HashSet::new(),
+            merge_lock_holders: HashMap::new(),
+            pr_summaries: HashMap::new(),
+        };
+        let mut app = App::new();
+        app.update_projects(snap);
+        app.open_backlog();
+        let backend = TestBackend::new(100, 22);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| super::render_backlog(f, f.area(), &app))
+            .expect("render");
+        buffer_to_string(terminal.backend().buffer())
+    }
+
+    /// Renders mixed titled + untitled tasks and dumps the buffer to the path
+    /// in `CC_HUB_BACKLOG_RENDER_DUMP`. Used to capture a proof-of-fix artifact
+    /// for PRs; skipped under normal `cargo test`.
+    #[test]
+    #[ignore]
+    fn dump_render_for_artifact() {
+        let Some(dest) = std::env::var_os("CC_HUB_BACKLOG_RENDER_DUMP") else {
+            return;
+        };
+        let prompts = [
+            "wire up exporter for daily reports",
+            "refactor the merge-lock retry policy",
+            "investigate flaky CI on macOS runners",
+            "ship the new exporter",
+        ];
+        let titles: [Option<&str>; 4] = [None, None, None, Some("Exporter rollout")];
+        let plain = render_popup(&prompts, &titles);
+        std::fs::write(&dest, plain).expect("write dump");
+    }
+
+    #[test]
+    fn untitled_entries_do_not_duplicate_prompt_preview() {
+        let prompts = [
+            "wire up exporter for daily reports",
+            "refactor the merge-lock retry policy",
+            "investigate flaky CI on macOS runners",
+        ];
+        let titles: [Option<&str>; 3] = [None, None, None];
+        let plain = render_popup(&prompts, &titles);
+
+        // Each unique prompt-preview substring must appear exactly once in
+        // the rendered popup. Before the fix, untitled tasks rendered the
+        // prompt on row 1 (title fallback) AND row 2 (id + prompt preview),
+        // doubling each line.
+        for p in prompts.iter() {
+            let count = plain.matches(p).count();
+            assert_eq!(
+                count, 1,
+                "prompt {:?} should appear exactly once, got {}:\n{}",
+                p, count, plain
+            );
+        }
+        // The pending-title placeholder should appear once per untitled task.
+        let pending = plain.matches("pending title").count();
+        assert_eq!(
+            pending,
+            prompts.len(),
+            "expected one 'pending title' hint per untitled task:\n{}",
+            plain
+        );
+    }
+
+    #[test]
+    fn titled_entries_keep_title_then_id_prompt_layout() {
+        let prompts = ["ship the new exporter"];
+        let titles = [Some("Exporter rollout")];
+        let plain = render_popup(&prompts, &titles);
+        assert!(
+            plain.contains("Exporter rollout"),
+            "title should render on row 1:\n{}",
+            plain
+        );
+        assert!(
+            plain.contains("ship the new exporter"),
+            "prompt preview should still render on row 2:\n{}",
+            plain
+        );
+        // No pending-title hint when the title has landed.
+        assert!(
+            !plain.contains("pending title"),
+            "titled entry should not show 'pending title' hint:\n{}",
             plain
         );
     }
@@ -5255,6 +5904,7 @@ mod backlog_age_tests {
             tasks: by_proj,
             titling: HashSet::new(),
             merge_lock_holders: HashMap::new(),
+            pr_summaries: HashMap::new(),
         };
         app.update_projects(snap);
         app.open_backlog();
