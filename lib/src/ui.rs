@@ -5947,6 +5947,38 @@ mod backlog_popup_tests {
         std::fs::write(&dest, plain).expect("write dump");
     }
 
+    /// Like `dump_render_for_artifact`, but the focused task carries a
+    /// realistic multi-line prompt (bug repro / fix sketch / acceptance
+    /// criteria) — the case the split-pane refactor was motivated by.
+    /// Dump path comes from `CC_HUB_BACKLOG_RENDER_DUMP_MULTILINE`.
+    #[test]
+    #[ignore]
+    fn dump_render_for_artifact_multiline() {
+        let Some(dest) = std::env::var_os("CC_HUB_BACKLOG_RENDER_DUMP_MULTILINE") else {
+            return;
+        };
+        let multiline = "\
+In lib/src/ui.rs::render_backlog, each backlog entry only shows a one-line\n\
+preview. Explorer-loop tasks carry full repro + fix sketch + acceptance\n\
+criteria — none of which is visible.\n\
+\n\
+Fix: split the popup into list (left) + body (right). Reuse j/k.\n\
+\n\
+Acceptance:\n\
+- Full prompt visible without leaving the popup.\n\
+- Narrow terminals clip gracefully.\n\
+- Existing keybinds keep working.";
+        let prompts = [
+            multiline,
+            "refactor the merge-lock retry policy",
+            "investigate flaky CI on macOS runners",
+        ];
+        let titles: [Option<&str>; 3] =
+            [Some("Backlog popup: show full prompt"), None, None];
+        let plain = render_popup(&prompts, &titles);
+        std::fs::write(&dest, plain).expect("write dump");
+    }
+
     #[test]
     fn untitled_entries_do_not_duplicate_prompt_preview() {
         let prompts = [
