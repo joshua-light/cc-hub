@@ -769,8 +769,7 @@ fn orchestrate_start(args: &[String]) -> Result<(), CliError> {
     let mut state = orchestrator::read_task_state(&project_id, &task_id)
         .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
 
-    let cc_hub_bin = std::env::current_exe()
-        .map_err(|e| CliError::Other(format!("resolve cc-hub binary path: {}", e)))?;
+    let cc_hub_bin = orchestrator::resolve_cc_hub_bin();
 
     if f.dry_run {
         // Useful for verifying prompt content without paying for a session.
