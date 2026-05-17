@@ -22,7 +22,7 @@ scriptable CLI primitives:
 - `cc-hub task create --prompt "…" [--backlog]` / `cc-hub task start --task ID [--agent AGENT]`
 - `cc-hub orchestrate start --task ID [--agent AGENT] [--dry-run]`
 - `cc-hub spawn-worker --task ID [--agent AGENT] [--worktree NAME | --readonly] [--prompt P]`
-- `cc-hub worker wait --task ID [--tmux NAME ... | --all]`
+- `cc-hub worker wait --task ID [--tmux NAME ... | --worktree NAME ... | --all]`
 - `cc-hub task report --task ID [--status S] [--note N] [--summary S]`
 - `cc-hub task artifact add/list ...` and `cc-hub task todos set/check/uncheck/clear ...`
 - `cc-hub pr create/show/approve/request-changes/reopen/comment/close/merge/finalize ...`
