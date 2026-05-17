@@ -25,7 +25,7 @@ scriptable CLI primitives:
 - `cc-hub worker wait --task ID [--tmux NAME ... | --all]`
 - `cc-hub task report --task ID [--status S] [--note N] [--summary S]`
 - `cc-hub task artifact add/list ...` and `cc-hub task todos set/check/uncheck/clear ...`
-- `cc-hub pr create/show/approve/request-changes/comment/merge/finalize ...`
+- `cc-hub pr create/show/approve/request-changes/reopen/comment/merge/finalize ...`
 - `cc-hub project list [--json]`
 
 Project state lives at `~/.cc-hub/projects.toml` and

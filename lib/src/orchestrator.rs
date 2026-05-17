@@ -411,6 +411,37 @@ pub fn set_task_title(project_id: &str, task_id: &str, title: &str) -> io::Resul
     })
 }
 
+/// Remove every `<root>/.cc-hub-wt/<task>-<name>` worktree recorded for
+/// `state`. `git worktree remove --force` also drops the local
+/// `cc-hub/<task>-<name>` branch — intended terminal-state behaviour. Best-
+/// effort: failures are logged and the loop continues.
+pub fn remove_task_worktrees(state: &TaskState) {
+    for w in &state.workers {
+        let Some(name) = w.worktree.as_deref() else {
+            continue;
+        };
+        let path = worktree_path(&state.project_root, &state.task_id, name);
+        match run_git(
+            &state.project_root,
+            &["worktree", "remove", "--force", &path.to_string_lossy()],
+        ) {
+            Err(e) => log::warn!(
+                "task {}: git worktree remove [{}] errored: {}",
+                state.task_id,
+                path.display(),
+                e
+            ),
+            Ok(out) if !out.status_ok => log::warn!(
+                "task {}: git worktree remove [{}] failed: {}",
+                state.task_id,
+                path.display(),
+                out.stderr.trim()
+            ),
+            Ok(_) => {}
+        }
+    }
+}
+
 /// Tear down every tmux session associated with a finished task: workers
 /// immediately, orchestrator after a short delay. The orchestrator is
 /// almost always the calling process when this runs from the CLI (a Claude
@@ -434,6 +465,9 @@ pub fn cleanup_task_sessions(state: &TaskState) {
                 e
             );
         }
+    }
+    if state.status == TaskStatus::Done {
+        remove_task_worktrees(state);
     }
     if let Some(orch) = state.orchestrator_tmux.as_deref() {
         // tmux session names from `spawn_claude_session` are alphanumeric +
@@ -815,20 +849,9 @@ Don't pre-list every micro-step; aim for a checklist the user could read in one 
 
 # Proof of work
 
-The user reviews PRs via **progressive disclosure**: they read the title + a single lead artifact first, scan supporting evidence next, and reach for the description only if they want to dig deeper. Shape your PR description to match — lead with the proof, not the briefing.
+**Progressive disclosure**: the user reads the title + lead artifact first; description is an appendix. Attach evidence with `{bin} task artifact add --task {task_id} --path PATH [--kind KIND] [--caption TEXT] [--lead]` (file or URL); list with `{bin} task artifact list --task {task_id}`. Pass `--lead` on exactly one artifact — the strongest single piece of proof; re-passing it on a later add moves the designation.
 
-Two primitives:
-- `{bin} task artifact add --task {task_id} --path PATH [--kind KIND] [--caption TEXT] [--lead]` — attach a file (copied into cc-hub's store, survives worktree cleanup) or a URL (stored as-is). `KIND` is free-form; common values: `screenshot`, `video`, `log`, `build`, `test`, `diff`, `file`, `url`. URL-shaped paths default to `kind=url`. Pass `--lead` on exactly one artifact — the strongest single piece of proof. Re-passing `--lead` on a later add moves the designation.
-- `{bin} task artifact list --task {task_id}` — review what's already attached, including which one is the current lead.
-
-What counts as proof, and which to lead, by change type:
-- **Web / UI** — screenshot or short screen recording. Lead the screenshot/recording. For regression fixes, attach before *and* after; lead the after.
-- **CLI / library / backend** — terminal recording (asciinema if available) or captured command output (`--kind log`). Lead the recording, or the log if no recording is feasible.
-- **Tests / CI / build** — the build log file, or a URL to the CI run (`--kind url`). Lead the green run.
-- **Refactors (no behavioural change)** — a `diff` artifact plus a `log` showing build + tests still pass. Lead the log (it's the \"still works\" proof).
-- **Bug fixes** — a log showing the repro failing before and passing after, OR a regression test added in the same change. Lead the after-log, or the new test file.
-
-The PR's `--description` is a short appendix: cover only what the title + lead artifact don't already convey (key files changed, what was deliberately out of scope). The title plus the lead artifact should communicate the **headline proof** on their own.
+Rule of thumb: lead with a screenshot/recording for UI; a log (or recording) for CLI/backend; the green build log for refactors; the after-log or new test file for bug fixes.
 
 # Queuing follow-up work
 
@@ -1632,8 +1655,22 @@ mod tests {
             "missing --lead guidance in proof-of-work section"
         );
         assert!(
-            p.contains("headline proof"),
-            "missing headline-proof framing"
+            p.contains("Progressive disclosure"),
+            "missing progressive-disclosure framing"
+        );
+
+        // Section is kept terse — this prompt is paid every orchestrator
+        // turn. If you re-expand it, raise the bound below deliberately.
+        let after_header = p
+            .split_once("# Proof of work")
+            .expect("Proof of work header present")
+            .1;
+        let proof_section = after_header.split("\n# ").next().unwrap();
+        let proof_line_count = proof_section.lines().count();
+        assert!(
+            proof_line_count < 8,
+            "Proof of work section grew to {} lines; keep it terse",
+            proof_line_count
         );
 
         // Post-merge automation: each completed task lands on a green,
@@ -1708,5 +1745,60 @@ mod tests {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    /// Seed a tempdir as a git repo with one commit and one worktree, then
+    /// build a `TaskState` referencing that worktree under the given status.
+    /// Returns the tempdir (to keep it alive), the worktree path, and the
+    /// state.
+    fn seed_repo_and_state(status: TaskStatus) -> (tempfile::TempDir, PathBuf, TaskState) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        run_git(root, &["init", "-q"]).expect("git init");
+        run_git(root, &["config", "user.email", "test@example.com"]).expect("config email");
+        run_git(root, &["config", "user.name", "Test"]).expect("config name");
+        fs::write(root.join("seed.txt"), b"seed").expect("write seed");
+        run_git(root, &["add", "seed.txt"]).expect("git add");
+        run_git(root, &["commit", "-q", "-m", "seed"]).expect("git commit");
+        let base = detect_main_branch(root);
+
+        let wt = create_worktree(root, "t-test", "edit", &base).expect("create_worktree");
+
+        let mut state = TaskState::new("p".into(), root.to_path_buf(), "do thing".into());
+        state.task_id = "t-test".into();
+        state.status = status;
+        state.orchestrator_tmux = None;
+        state.workers.push(Worker {
+            agent_id: "claude".into(),
+            agent_kind: AgentKind::Claude,
+            tmux_name: "nonexistent-test-session".into(),
+            cwd: wt.clone(),
+            worktree: Some("edit".into()),
+            readonly: false,
+            spawned_at: 0,
+        });
+        (tmp, wt, state)
+    }
+
+    #[test]
+    fn cleanup_removes_worktrees_when_done() {
+        let (_tmp, wt, state) = seed_repo_and_state(TaskStatus::Done);
+        cleanup_task_sessions(&state);
+        assert!(
+            !wt.exists(),
+            "worktree dir should be gone after cleanup: {}",
+            wt.display()
+        );
+    }
+
+    #[test]
+    fn cleanup_skips_worktree_removal_when_not_done() {
+        let (_tmp, wt, state) = seed_repo_and_state(TaskStatus::Running);
+        cleanup_task_sessions(&state);
+        assert!(
+            wt.exists(),
+            "worktree dir must survive cleanup while task is still Running: {}",
+            wt.display()
+        );
     }
 }
