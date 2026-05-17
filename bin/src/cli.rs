@@ -250,6 +250,7 @@ struct Flags {
     progress: bool,
     progress_interval_secs: Option<u64>,
     json: bool,
+    wait: bool,
 }
 
 fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
@@ -341,6 +342,10 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
             }
             "--all" => {
                 f.all = true;
+                i += 1;
+            }
+            "--wait" => {
+                f.wait = true;
                 i += 1;
             }
             "--timeout-secs" => {
@@ -1535,17 +1540,35 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
 
     // Acquire the project-wide merge lock. Held across the entire merging
     // phase — released by `pr finalize` after /simplify and /bump.
-    let acquire =
+    let acquire = if f.wait {
+        let timeout = std::time::Duration::from_secs(f.timeout_secs.unwrap_or(1800));
+        cc_hub_lib::merge_lock::acquire_blocking(
+            &project_id,
+            &task_id,
+            state.orchestrator_tmux.as_deref(),
+            timeout,
+            std::time::Duration::from_millis(500),
+        )
+        .map_err(|e| CliError::Other(format!("acquire merge lock: {}", e)))?
+    } else {
         cc_hub_lib::merge_lock::acquire(&project_id, &task_id, state.orchestrator_tmux.as_deref())
-            .map_err(|e| CliError::Other(format!("acquire merge lock: {}", e)))?;
+            .map_err(|e| CliError::Other(format!("acquire merge lock: {}", e)))?
+    };
     if let cc_hub_lib::merge_lock::AcquireOutcome::Held(holder) = acquire {
-        print_json(&serde_json::json!({
+        let mut payload = serde_json::json!({
             "ok": false,
             "locked": true,
             "holder_task": holder.task_id,
             "since": holder.acquired_at,
-            "recipe": "Another task currently holds the merge lock. Poll until clear (re-run `cc-hub pr merge`) or wait for it to release.",
-        }));
+            "recipe": "Another task currently holds the merge lock. Re-run with `--wait` to block until it releases, or poll `cc-hub pr merge` manually.",
+        });
+        if f.wait {
+            payload["timed_out"] = serde_json::Value::Bool(true);
+            payload["recipe"] = serde_json::Value::String(
+                "Merge lock still held after the wait timeout. Re-run `cc-hub pr merge --wait` (optionally with `--timeout-secs N`) or investigate why the holder is stuck.".into(),
+            );
+        }
+        print_json(&payload);
         return Err(CliError::Other(format!(
             "merge lock held by task {}",
             holder.task_id
