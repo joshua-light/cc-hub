@@ -1090,6 +1090,9 @@ async fn run(
                     (View::Backlog, KeyCode::Up | KeyCode::Char('k')) => {
                         app.backlog_up();
                     }
+                    (View::Backlog, KeyCode::Char('x')) => {
+                        app.enter_confirm_backlog_task_delete();
+                    }
                     (View::Backlog, KeyCode::Char('s') | KeyCode::Enter)
                     | (View::Grid, KeyCode::Char('s'))
                         if on_projects || matches!(app.view, View::Backlog) =>
@@ -1360,6 +1363,14 @@ async fn run(
                                 "deleted {} ({}, {})",
                                 pending.display, kill_msg, removal_msg
                             ));
+                            if pending.from_backlog {
+                                // Model may still include the just-removed task
+                                // until the next scan tick; render-time clamp at
+                                // ui.rs:423 catches any residual drift.
+                                app.backlog_sel = app
+                                    .backlog_sel
+                                    .min(app.backlog_tasks().len().saturating_sub(1));
+                            }
                         } else if let Some(pending) = app.take_pending_task_restart() {
                             match cc_hub_lib::orchestrator::restart_task(
                                 &pending.project_id,

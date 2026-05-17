@@ -165,9 +165,13 @@ const WORKER_HELP: &str = r#"cc-hub worker
 
 Usage:
   cc-hub worker wait --task ID (--tmux NAME ... | --all) [--timeout-secs N]
+                     [--progress [--progress-interval-secs N]]
 
 Polls cc-hub's session scanner until selected workers reach WaitingForInput or
 Inactive. Emits one JSON line with per-worker completion state.
+
+With --progress, emits one JSON line every N seconds (default 5) describing
+which targets are still pending vs. done. The final summary line is unchanged.
 "#;
 
 const PROJECT_HELP: &str = r#"cc-hub project
@@ -248,7 +252,10 @@ struct Flags {
     tmux_targets: Vec<String>,
     all: bool,
     timeout_secs: Option<u64>,
+    progress: bool,
+    progress_interval_secs: Option<u64>,
     json: bool,
+    wait: bool,
 }
 
 fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
@@ -349,11 +356,26 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
                 f.all = true;
                 i += 1;
             }
+            "--wait" => {
+                f.wait = true;
+                i += 1;
+            }
             "--timeout-secs" => {
                 let v = next_value(args, &mut i, "--timeout-secs")?;
                 f.timeout_secs = Some(
                     v.parse()
                         .map_err(|e| CliError::Usage(format!("--timeout-secs: {}", e)))?,
+                );
+            }
+            "--progress" => {
+                f.progress = true;
+                i += 1;
+            }
+            "--progress-interval-secs" => {
+                let v = next_value(args, &mut i, "--progress-interval-secs")?;
+                f.progress_interval_secs = Some(
+                    v.parse()
+                        .map_err(|e| CliError::Usage(format!("--progress-interval-secs: {}", e)))?,
                 );
             }
             "--json" => {
@@ -397,7 +419,72 @@ fn resolve_project_id(f: &Flags) -> Result<String, CliError> {
         return Ok(id);
     }
     let cwd = std::env::current_dir().map_err(|e| CliError::Other(format!("cwd: {}", e)))?;
-    Ok(orchestrator::project_id_for_path(&cwd))
+    let cwd_id = orchestrator::project_id_for_path(&cwd);
+
+    // Fast path: if the cwd id has a state file for this task (or no --task
+    // was passed), keep current behavior. Otherwise fall through and scan.
+    if cwd_id_has_task_state(&cwd_id, f.task.as_deref()) {
+        return Ok(cwd_id);
+    }
+    let Some(task_id) = f.task.as_deref() else {
+        return Ok(cwd_id);
+    };
+
+    let matches = scan_projects_for_task(task_id);
+    match matches.as_slice() {
+        [only] => Ok(only.clone()),
+        [] => Err(CliError::Other(format!(
+            "task {} not found under any registered project (cwd id {} has no state file); pass --project-id to disambiguate",
+            task_id, cwd_id
+        ))),
+        many => Err(CliError::Other(format!(
+            "task {} matches multiple registered projects: {}; pass --project-id to disambiguate",
+            task_id,
+            many.join(", ")
+        ))),
+    }
+}
+
+/// True when `--task` is absent (cwd id is fine on its own) or when the
+/// per-task state.json exists under the cwd-derived project id.
+fn cwd_id_has_task_state(cwd_id: &str, task_id: Option<&str>) -> bool {
+    let Some(task_id) = task_id else {
+        return true;
+    };
+    orchestrator::task_state_file(cwd_id, task_id)
+        .map(|p| p.exists())
+        .unwrap_or(false)
+}
+
+/// Enumerate `~/.cc-hub/projects/*/tasks/<task_id>/state.json` and return the
+/// project ids whose directory contains a state file for the given task.
+fn scan_projects_for_task(task_id: &str) -> Vec<String> {
+    let Some(root) = orchestrator::projects_state_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Some(project_id) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(state_file) = orchestrator::task_state_file(&project_id, task_id) else {
+            continue;
+        };
+        if state_file.exists() {
+            out.push(project_id);
+        }
+    }
+    out.sort();
+    out
 }
 
 fn resolve_orchestrator_agent_id(f: &Flags) -> String {
@@ -473,15 +560,8 @@ fn spawn_worker(args: &[String]) -> Result<(), CliError> {
         readonly: f.readonly,
         spawned_at: orchestrator::now_unix_secs(),
     };
-    let prompt_preview = f.prompt.as_ref().map(|p| {
-        let preview: String = p.chars().take(80).collect();
-        format!("spawned worker: {}", preview)
-    });
     orchestrator::update_task_state(&project_id, &task_id, move |s| {
         s.workers.push(worker);
-        if let Some(note) = prompt_preview {
-            s.note = Some(note);
-        }
     })
     .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
 
@@ -812,6 +892,21 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         ));
     }
 
+    // Symmetric guard: leaving Backlog requires an orchestrator spawn,
+    // which only `task start` provides. A bare status flip would mutate
+    // the on-disk state to e.g. Running without any tmux/session, leaving
+    // a zombie that the `s` keybind can't recover (it requires Backlog).
+    if raw_status.is_some()
+        && prev_status.as_ref() == Some(&TaskStatus::Backlog)
+        && raw_status.as_ref() != Some(&TaskStatus::Backlog)
+    {
+        return Err(CliError::Usage(
+            "use cc-hub task start --task ID to launch a Backlog task; \
+             task report --status cannot spawn an orchestrator"
+                .into(),
+        ));
+    }
+
     // An orchestrator's `--status done` means "I'm finished" — it does NOT
     // mean the work is approved. Route that into Review so a human (or
     // future agentic reviewer) signs off via the TUI's `Space` keybind.
@@ -964,15 +1059,9 @@ fn task_artifact_add(args: &[String]) -> Result<(), CliError> {
     let _ = orchestrator::read_task_state(&project_id, &task_id)
         .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
 
-    let (kind, stored_path, basename_for_note) = if looks_like_url(&raw_path) {
+    let (kind, stored_path) = if looks_like_url(&raw_path) {
         let kind = f.kind.clone().unwrap_or_else(|| "url".into());
-        // Last URL segment is the closest thing to a "basename" for note text.
-        let basename = raw_path
-            .rsplit_once('/')
-            .map(|(_, tail)| tail.to_string())
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| raw_path.clone());
-        (kind, raw_path.clone(), basename)
+        (kind, raw_path.clone())
     } else {
         let kind = f.kind.clone().unwrap_or_else(|| "file".into());
         let src = std::fs::canonicalize(&raw_path).map_err(|e| {
@@ -1010,7 +1099,7 @@ fn task_artifact_add(args: &[String]) -> Result<(), CliError> {
                 e
             ))
         })?;
-        (kind, dest.to_string_lossy().into_owned(), basename)
+        (kind, dest.to_string_lossy().into_owned())
     };
 
     let artifact = Artifact {
@@ -1020,18 +1109,12 @@ fn task_artifact_add(args: &[String]) -> Result<(), CliError> {
         caption: f.caption.clone(),
         added_at: orchestrator::now_unix_secs(),
     };
-    let lead_note_suffix = if f.lead { " (lead)" } else { "" };
-    let note = format!(
-        "artifact added: {} {}{}",
-        kind, basename_for_note, lead_note_suffix
-    );
     let mark_lead = f.lead;
     let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
         s.artifacts.push(artifact.clone());
         if mark_lead {
             s.lead_artifact = Some(s.artifacts.len() - 1);
         }
-        s.note = Some(note);
     })
     .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
 
@@ -1549,17 +1632,35 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
 
     // Acquire the project-wide merge lock. Held across the entire merging
     // phase — released by `pr finalize` after /simplify and /bump.
-    let acquire =
+    let acquire = if f.wait {
+        let timeout = std::time::Duration::from_secs(f.timeout_secs.unwrap_or(1800));
+        cc_hub_lib::merge_lock::acquire_blocking(
+            &project_id,
+            &task_id,
+            state.orchestrator_tmux.as_deref(),
+            timeout,
+            std::time::Duration::from_millis(500),
+        )
+        .map_err(|e| CliError::Other(format!("acquire merge lock: {}", e)))?
+    } else {
         cc_hub_lib::merge_lock::acquire(&project_id, &task_id, state.orchestrator_tmux.as_deref())
-            .map_err(|e| CliError::Other(format!("acquire merge lock: {}", e)))?;
+            .map_err(|e| CliError::Other(format!("acquire merge lock: {}", e)))?
+    };
     if let cc_hub_lib::merge_lock::AcquireOutcome::Held(holder) = acquire {
-        print_json(&serde_json::json!({
+        let mut payload = serde_json::json!({
             "ok": false,
             "locked": true,
             "holder_task": holder.task_id,
             "since": holder.acquired_at,
-            "recipe": "Another task currently holds the merge lock. Poll until clear (re-run `cc-hub pr merge`) or wait for it to release.",
-        }));
+            "recipe": "Another task currently holds the merge lock. Re-run with `--wait` to block until it releases, or poll `cc-hub pr merge` manually.",
+        });
+        if f.wait {
+            payload["timed_out"] = serde_json::Value::Bool(true);
+            payload["recipe"] = serde_json::Value::String(
+                "Merge lock still held after the wait timeout. Re-run `cc-hub pr merge --wait` (optionally with `--timeout-secs N`) or investigate why the holder is stuck.".into(),
+            );
+        }
+        print_json(&payload);
         return Err(CliError::Other(format!(
             "merge lock held by task {}",
             holder.task_id
@@ -1907,6 +2008,15 @@ fn worker_wait(args: &[String]) -> Result<(), CliError> {
     let started = Instant::now();
     let deadline = started + timeout;
 
+    let progress_interval = if f.progress {
+        Some(Duration::from_secs(
+            f.progress_interval_secs.unwrap_or(5).max(1),
+        ))
+    } else {
+        None
+    };
+    let mut last_emit: Option<Instant> = None;
+
     let mut done: std::collections::HashMap<String, serde_json::Value> =
         std::collections::HashMap::new();
     // A target that disappears from the scanner *after* having been seen
@@ -1953,6 +2063,29 @@ fn worker_wait(args: &[String]) -> Result<(), CliError> {
         }
         if Instant::now() >= deadline {
             break true;
+        }
+        if let Some(interval) = progress_interval {
+            let should_emit = match last_emit {
+                None => true,
+                Some(t) => t.elapsed() >= interval,
+            };
+            if should_emit {
+                let mut done_names: Vec<String> = done.keys().cloned().collect();
+                done_names.sort();
+                let mut pending_names: Vec<String> = targets
+                    .iter()
+                    .filter(|n| !done.contains_key(n.as_str()))
+                    .cloned()
+                    .collect();
+                pending_names.sort();
+                print_json(&serde_json::json!({
+                    "event": "progress",
+                    "elapsed_secs": started.elapsed().as_secs(),
+                    "pending": pending_names,
+                    "done": done_names,
+                }));
+                last_emit = Some(Instant::now());
+            }
         }
         std::thread::sleep(Duration::from_millis(500));
     };
@@ -2194,6 +2327,45 @@ mod tests {
     }
 
     #[test]
+    fn task_report_rejects_backlog_to_running_transition() {
+        with_tempdir_home(|| {
+            let project_id = "p1".to_string();
+            let task_id = "t-backlog-guard".to_string();
+
+            let mut state = TaskState::new_backlog(
+                project_id.clone(),
+                PathBuf::from("/tmp/proj"),
+                "do thing".into(),
+            );
+            state.task_id = task_id.clone();
+            orchestrator::write_task_state(&state).expect("write state");
+
+            let args = vec![
+                "--task".to_string(),
+                task_id.clone(),
+                "--project-id".to_string(),
+                project_id.clone(),
+                "--status".to_string(),
+                "running".to_string(),
+            ];
+            let err = task_report(&args).expect_err("backlog->running must be rejected");
+            match err {
+                CliError::Usage(msg) => {
+                    assert!(
+                        msg.contains("task start"),
+                        "message should point at the right verb, got: {msg}"
+                    );
+                }
+                other => panic!("expected CliError::Usage, got {other:?}"),
+            }
+
+            // Status must not have been mutated.
+            let after = orchestrator::read_task_state(&project_id, &task_id).expect("read state");
+            assert_eq!(after.status, TaskStatus::Backlog);
+        });
+    }
+
+    #[test]
     fn pr_reopen_flips_changes_requested_to_open() {
         with_tempdir_home(|| {
             let project_id = "p1".to_string();
@@ -2258,6 +2430,110 @@ mod tests {
                 "note should mention reopen, got {:?}",
                 after_state.note
             );
+        });
+    }
+
+    fn write_state_for(project_id: &str, task_id: &str) {
+        let mut state = TaskState::new(
+            project_id.to_string(),
+            PathBuf::from("/tmp/proj"),
+            "do thing".into(),
+        );
+        state.task_id = task_id.to_string();
+        orchestrator::write_task_state(&state).expect("write state");
+    }
+
+    fn flags_for(task: Option<&str>, project_id: Option<&str>) -> Flags {
+        Flags {
+            task: task.map(str::to_owned),
+            project_id: project_id.map(str::to_owned),
+            ..Flags::default()
+        }
+    }
+
+    #[test]
+    fn resolve_project_id_returns_explicit_flag_verbatim() {
+        with_tempdir_home(|| {
+            // No state files anywhere — explicit --project-id must still be
+            // returned without triggering the fallback scan.
+            let f = flags_for(Some("t-anything"), Some("p-explicit"));
+            let got = resolve_project_id(&f).expect("resolve ok");
+            assert_eq!(got, "p-explicit");
+        });
+    }
+
+    #[test]
+    fn resolve_project_id_scans_when_cwd_id_misses() {
+        with_tempdir_home(|| {
+            // Real project id where the task lives. cwd at test time is the
+            // workspace dir, which canonicalizes to a different project id —
+            // so the cwd fast-path will miss and the scan must find p-real.
+            let task_id = "t-scan";
+            write_state_for("p-real", task_id);
+
+            let cwd = std::env::current_dir().expect("cwd");
+            let cwd_id = orchestrator::project_id_for_path(&cwd);
+            assert_ne!(cwd_id, "p-real", "test precondition: cwd id must differ");
+
+            let f = flags_for(Some(task_id), None);
+            let got = resolve_project_id(&f).expect("resolve ok");
+            assert_eq!(got, "p-real");
+        });
+    }
+
+    #[test]
+    fn resolve_project_id_errors_with_candidates_on_multiple_matches() {
+        with_tempdir_home(|| {
+            let task_id = "t-dup";
+            write_state_for("p-alpha", task_id);
+            write_state_for("p-beta", task_id);
+
+            let f = flags_for(Some(task_id), None);
+            let err = resolve_project_id(&f).expect_err("must be ambiguous");
+            let CliError::Other(msg) = err else {
+                panic!("expected CliError::Other, got {:?}", err);
+            };
+            assert!(msg.contains("p-alpha"), "msg should list p-alpha: {}", msg);
+            assert!(msg.contains("p-beta"), "msg should list p-beta: {}", msg);
+            assert!(
+                msg.contains("--project-id"),
+                "msg should mention --project-id: {}",
+                msg
+            );
+        });
+    }
+
+    #[test]
+    fn resolve_project_id_errors_when_task_not_registered() {
+        with_tempdir_home(|| {
+            let f = flags_for(Some("t-nope"), None);
+            let err = resolve_project_id(&f).expect_err("must error");
+            let CliError::Other(msg) = err else {
+                panic!("expected CliError::Other, got {:?}", err);
+            };
+            assert!(
+                msg.contains("t-nope"),
+                "msg should mention task id: {}",
+                msg
+            );
+            assert!(
+                msg.contains("--project-id"),
+                "msg should suggest --project-id: {}",
+                msg
+            );
+        });
+    }
+
+    #[test]
+    fn resolve_project_id_without_task_falls_back_to_cwd_id() {
+        with_tempdir_home(|| {
+            // No --task means the scan is skipped; cwd id is returned as-is
+            // even if no state files exist anywhere. This preserves verbs
+            // like `project list` that don't need a task.
+            let f = flags_for(None, None);
+            let got = resolve_project_id(&f).expect("resolve ok");
+            let cwd = std::env::current_dir().expect("cwd");
+            assert_eq!(got, orchestrator::project_id_for_path(&cwd));
         });
     }
 }
