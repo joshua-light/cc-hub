@@ -734,11 +734,7 @@ pub fn delete_task(project_id: &str, task_id: &str) -> io::Result<DeletedTask> {
     let lock_released = match crate::merge_lock::release(&state.project_id, &state.task_id) {
         Ok(released) => released,
         Err(e) => {
-            log::warn!(
-                "delete_task {}: merge_lock release failed: {}",
-                task_id,
-                e
-            );
+            log::warn!("delete_task {}: merge_lock release failed: {}", task_id, e);
             false
         }
     };
@@ -835,19 +831,10 @@ pub fn orchestrator_prompt_prefix(task_id: &str) -> String {
     format!("You are the cc-hub orchestrator for task `{}`", task_id)
 }
 
-/// Resolve the absolute path of the running cc-hub binary, working around
-/// Linux's `(deleted)` suffix.
-///
-/// `std::env::current_exe()` on Linux appends a literal " (deleted)" to the
-/// path when the on-disk inode has been unlinked or replaced (typical when the
-/// user ran `cargo build --release` while a long-lived process — e.g. a TUI
-/// orchestrator — is still running off the old binary). Baking that suffixed
-/// path into a prompt makes every downstream cc-hub invocation fail because
-/// the literal path does not exist.
-///
-/// We strip the suffix and verify the stripped path resolves to a real file.
-/// If neither variant exists, we fall back to whatever `current_exe()`
-/// returned so callers get a best-effort path rather than a panic.
+/// Resolve the running cc-hub binary path, stripping Linux's ` (deleted)`
+/// suffix. The kernel appends that suffix after the on-disk inode is replaced
+/// (e.g. a fresh `cargo build` while this process keeps running), and the
+/// suffixed string is not a path that resolves anywhere.
 pub fn resolve_cc_hub_bin() -> PathBuf {
     let raw = match std::env::current_exe() {
         Ok(p) => p,
@@ -856,18 +843,12 @@ pub fn resolve_cc_hub_bin() -> PathBuf {
     resolve_cc_hub_bin_from(raw, |p| p.exists())
 }
 
-/// The pure suffix-stripping logic, exposed for testing.
 fn resolve_cc_hub_bin_from(raw: PathBuf, exists: impl Fn(&Path) -> bool) -> PathBuf {
-    let s = raw.to_string_lossy();
-    if let Some(stripped) = s.strip_suffix(" (deleted)") {
+    if let Some(stripped) = raw.to_string_lossy().strip_suffix(" (deleted)") {
         let candidate = PathBuf::from(stripped);
         if exists(&candidate) {
             return candidate;
         }
-        if exists(&raw) {
-            return raw;
-        }
-        return candidate;
     }
     raw
 }
@@ -1515,11 +1496,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_cc_hub_bin_falls_back_to_raw_when_stripped_missing_but_raw_exists() {
-        // Edge case: stripped sibling gone but raw path somehow exists.
-        let raw = PathBuf::from("/tmp/fake-cc-hub (deleted)");
-        let stripped = PathBuf::from("/tmp/fake-cc-hub");
-        let resolved = resolve_cc_hub_bin_from(raw.clone(), |p| *p == raw && *p != stripped);
+    fn resolve_cc_hub_bin_falls_back_to_raw_when_stripped_missing() {
+        let raw = PathBuf::from("/nonexistent/cc-hub (deleted)");
+        let resolved = resolve_cc_hub_bin_from(raw.clone(), |_| false);
         assert_eq!(resolved, raw);
     }
 
@@ -1997,7 +1976,10 @@ mod tests {
         }
 
         let deleted = delete_task(&project_id, &task_id).expect("delete_task");
-        assert!(deleted.lock_released, "lock_released should be true when this task held the lock");
+        assert!(
+            deleted.lock_released,
+            "lock_released should be true when this task held the lock"
+        );
         assert!(
             crate::merge_lock::current_holder(&project_id)
                 .expect("current_holder")
@@ -2016,7 +1998,10 @@ mod tests {
 
         let state_dir = task_state_dir(&project_id, &task_id).expect("task_state_dir");
         let deleted = delete_task(&project_id, &task_id).expect("delete_task");
-        assert!(!deleted.lock_released, "lock_released should be false when no lock was held");
+        assert!(
+            !deleted.lock_released,
+            "lock_released should be false when no lock was held"
+        );
         assert!(deleted.state_removed, "rest of delete should still succeed");
         assert!(!state_dir.exists(), "state dir should be gone after delete");
 
