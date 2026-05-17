@@ -3241,9 +3241,7 @@ fn render_kanban_column(
     };
     let hidden_below = count.saturating_sub(scroll_top.saturating_add(max_cards));
     // Only the Merging column needs the lock-holder lookup — collapsed
-    // cards in other columns ignore it. We carry the holder's title and
-    // acquisition time so queued cards can show "behind #abc · 3m" instead
-    // of an opaque pill.
+    // cards in other columns ignore it.
     let merging_holder_banner: Option<MergeLockBanner<'_>> = if col_idx == 3 {
         app.selected_project().and_then(|p| {
             let holder = app
@@ -3883,17 +3881,12 @@ fn render_task_card_active(
     frame.render_widget(para, inner);
 }
 
-/// Context about the project's merge-lock holder, supplied to compact
-/// Merging-column cards so a queued card can show *who* is blocking and for
-/// *how long* — distinguishing a healthy queue (someone is actively merging)
-/// from a stale one (lock has been held for an hour).
+/// Borrowed view of [`crate::merge_lock::MergeLock`] plus the holder's
+/// resolved title, supplied to Merging-column cards so a queued card can
+/// distinguish a healthy queue from one stuck behind a wedged orchestrator.
 struct MergeLockBanner<'a> {
     task_id: &'a str,
-    /// Holder's display title if it has one; otherwise the renderer falls
-    /// back to the short id alone.
     title: Option<&'a str>,
-    /// Unix seconds when the holder acquired the lock — used to compute
-    /// lock-age for display.
     acquired_at: i64,
 }
 
@@ -3995,45 +3988,30 @@ fn render_task_card_collapsed(
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     if queued {
-        // Queued Merging card: replace the usual summary preview with the
-        // waiting context — the user wants to triage a stuck queue at a
-        // glance, and t.summary/t.note for an approved-but-waiting PR is
-        // already shown when that card is in Review. The age suffix is
-        // pinned to the right of the body so it survives title truncation.
+        // t.summary/t.note for an approved-but-waiting PR is already shown
+        // on its Review card; on the Merging card the user wants who is
+        // blocking and for how long instead.
         if let Some(h) = lock_holder {
             let body_max = inner.width.saturating_sub(4) as usize;
-            // "3m" rather than "3m ago" — this is a lock-held duration,
-            // not a past timestamp.
-            let lock_age_full = format_age(
+            let lock_age = format_duration_secs(
                 now_secs.saturating_sub(h.acquired_at.max(0) as u64),
             );
-            let lock_age = lock_age_full
-                .strip_suffix(" ago")
-                .unwrap_or(&lock_age_full)
-                .to_string();
             let holder_short = crate::orchestrator::short_task_id(h.task_id);
             let age_suffix = format!(" · {}", lock_age);
-            let holder_title = h
-                .title
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
-            let base = match holder_title {
+            let holder_title = h.title.map(str::trim).filter(|s| !s.is_empty());
+            let body = match holder_title {
                 Some(title) => {
                     let prefix = format!("behind #{} · ", holder_short);
                     let reserved = prefix.chars().count() + age_suffix.chars().count();
                     let title_room = body_max.saturating_sub(reserved);
                     if title_room == 0 {
-                        format!("behind #{}", holder_short)
+                        format!("behind #{}{}", holder_short, age_suffix)
                     } else {
-                        format!("{}{}", prefix, first_line_preview(title, title_room))
+                        format!("{}{}{}", prefix, first_line_preview(title, title_room), age_suffix)
                     }
                 }
-                None => format!("behind #{}", holder_short),
+                None => format!("behind #{}{}", holder_short, age_suffix),
             };
-            let body = first_line_preview(
-                &format!("{}{}", base, age_suffix),
-                body_max,
-            );
             lines.push(Line::from(vec![
                 Span::styled("󰔟 ", Style::default().fg(Color::Rgb(110, 120, 135))),
                 Span::styled(body, Style::default().fg(Color::Rgb(170, 170, 185))),
