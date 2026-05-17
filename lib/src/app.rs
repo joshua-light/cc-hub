@@ -104,6 +104,9 @@ pub struct PendingTaskDelete {
     /// tmux name of the orchestrator, captured at delete-prompt time so a
     /// concurrent state rewrite can't change what we kill.
     pub orchestrator_tmux: Option<String>,
+    /// True when the delete was initiated from the Backlog popup, so the
+    /// confirm/cancel return path lands back on the popup instead of the Grid.
+    pub from_backlog: bool,
 }
 
 /// Pending registry-level project removal. Shown via the same
@@ -1122,11 +1125,20 @@ impl App {
     }
 
     pub fn cancel_confirm_close(&mut self) {
+        let from_backlog = self
+            .pending_task_delete
+            .as_ref()
+            .map(|p| p.from_backlog)
+            .unwrap_or(false);
         self.pending_close = None;
         self.pending_task_delete = None;
         self.pending_project_delete = None;
         self.pending_task_restart = None;
-        self.view = View::Grid;
+        self.view = if from_backlog {
+            View::Backlog
+        } else {
+            View::Grid
+        };
     }
 
     pub fn take_pending_close(&mut self) -> Option<PendingClose> {
@@ -1164,12 +1176,56 @@ impl App {
             task_id: task.task_id.clone(),
             display,
             orchestrator_tmux: task.orchestrator_tmux.clone(),
+            from_backlog: false,
+        });
+        self.view = View::ConfirmClose;
+    }
+
+    /// Stage a backlog-task deletion, mirroring [`Self::enter_confirm_task_delete`]
+    /// but resolving the task from the Backlog popup cursor so the confirm/cancel
+    /// flow returns to the popup.
+    pub fn enter_confirm_backlog_task_delete(&mut self) {
+        let Some(p) = self.selected_project().cloned() else {
+            self.set_status("no project selected".into());
+            return;
+        };
+        let Some(task) = self.selected_backlog_task().cloned() else {
+            self.set_status("no backlog task selected".into());
+            return;
+        };
+        if task.status != crate::orchestrator::TaskStatus::Backlog {
+            self.set_status(format!(
+                "task is not in backlog (status = {:?})",
+                task.status
+            ));
+            return;
+        }
+        let display = format!(
+            "{} — backlog (task {})",
+            p.name,
+            crate::orchestrator::short_task_id(&task.task_id),
+        );
+        self.pending_task_delete = Some(PendingTaskDelete {
+            project_id: p.id.clone(),
+            task_id: task.task_id.clone(),
+            display,
+            orchestrator_tmux: task.orchestrator_tmux.clone(),
+            from_backlog: true,
         });
         self.view = View::ConfirmClose;
     }
 
     pub fn take_pending_task_delete(&mut self) -> Option<PendingTaskDelete> {
-        self.view = View::Grid;
+        let from_backlog = self
+            .pending_task_delete
+            .as_ref()
+            .map(|p| p.from_backlog)
+            .unwrap_or(false);
+        self.view = if from_backlog {
+            View::Backlog
+        } else {
+            View::Grid
+        };
         self.pending_task_delete.take()
     }
 
