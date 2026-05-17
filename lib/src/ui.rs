@@ -4811,6 +4811,7 @@ mod result_popup_tests {
             name: "scroll".into(),
             root: PathBuf::from("/tmp/scroll"),
             created_at: now,
+            build_cmd: None,
         };
         let mut state = TaskState::new(
             project.id.clone(),
@@ -4887,6 +4888,7 @@ mod result_popup_tests {
             name: "test".into(),
             root: PathBuf::from("/tmp/test"),
             created_at: now,
+            build_cmd: None,
         };
         let mut state = TaskState::new(
             project.id.clone(),
@@ -5057,6 +5059,7 @@ index 0000001..0000002 100644
             name: "diff".into(),
             root: PathBuf::from("/tmp/diff"),
             created_at: now,
+            build_cmd: None,
         };
         let mut state = TaskState::new(
             project.id.clone(),
@@ -5745,6 +5748,7 @@ mod backlog_popup_tests {
             name: "backlog".into(),
             root: PathBuf::from("/tmp/backlog"),
             created_at: now,
+            build_cmd: None,
         };
         let tasks: Vec<Arc<TaskState>> = prompts
             .iter()
@@ -5875,6 +5879,7 @@ mod backlog_age_tests {
             name: "demo".into(),
             root: PathBuf::from("/tmp/demo"),
             created_at: now,
+            build_cmd: None,
         };
         let ages: [(i64, &str); 4] = [
             (45, "45s"),

@@ -155,7 +155,7 @@ Usage:
   cc-hub pr reopen --task ID [--comment TEXT] [--author NAME]
   cc-hub pr comment --task ID --comment TEXT [--author NAME]
   cc-hub pr merge --task ID
-  cc-hub pr finalize --task ID
+  cc-hub pr finalize --task ID [--build-cmd CMD] [--skip-build] [--keep-tmux]
 
 Local PR records live beside task state. Merges are serialized with the
 project merge lock; `finalize` releases the lock and marks the task Done.
@@ -255,6 +255,11 @@ struct Flags {
     progress: bool,
     progress_interval_secs: Option<u64>,
     json: bool,
+    /// `pr finalize` flags: override the build command, skip the build
+    /// gate entirely, or keep the orchestrator tmux session alive.
+    build_cmd: Option<String>,
+    skip_build: bool,
+    keep_tmux: bool,
     wait: bool,
 }
 
@@ -380,6 +385,17 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
             }
             "--json" => {
                 f.json = true;
+                i += 1;
+            }
+            "--build-cmd" => {
+                f.build_cmd = Some(next_value(args, &mut i, "--build-cmd")?);
+            }
+            "--skip-build" => {
+                f.skip_build = true;
+                i += 1;
+            }
+            "--keep-tmux" => {
+                f.keep_tmux = true;
                 i += 1;
             }
             other => {
@@ -1847,10 +1863,75 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Run a build command inside `project_root` and capture stdout+stderr.
+/// `cmd` runs via `sh -c "<cmd>"` so users can pass pipelines / `&&` chains.
+/// Returns (status_ok, stdout, stderr).
+fn run_build_command(
+    project_root: &std::path::Path,
+    cmd: &str,
+) -> Result<(bool, String, String), CliError> {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(project_root)
+        .output()
+        .map_err(|e| CliError::Other(format!("run build: {}", e)))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    Ok((out.status.success(), stdout, stderr))
+}
+
+fn tail_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let take = lines.len().saturating_sub(n);
+    lines[take..].join("\n")
+}
+
 fn pr_finalize(args: &[String]) -> Result<(), CliError> {
     let f = parse_flags(args)?;
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
+
+    // Resolve build command: CLI flag > project config > default.
+    let build_cmd = f
+        .build_cmd
+        .clone()
+        .or_else(|| orchestrator::project_build_cmd(&project_id))
+        .unwrap_or_else(|| "cargo build --release".to_string());
+
+    // Build gate runs on main after /simplify and /bump. If the tree is
+    // broken, refuse to release the lock so a follow-up task can't
+    // inherit a red main.
+    let state = orchestrator::read_task_state(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
+
+    if !f.skip_build {
+        let project_root = state.project_root.clone();
+        let (ok, _stdout, stderr) = run_build_command(&project_root, &build_cmd)?;
+        if !ok {
+            let tail = tail_lines(&stderr, 80);
+            let comment_body = format!(
+                "`cc-hub pr finalize` build gate failed.\n\nCommand: `{}`\n\nstderr tail:\n```\n{}\n```",
+                build_cmd, tail
+            );
+            let now = orchestrator::now_unix_secs();
+            let _ = cc_hub_lib::pr::update_pr(&project_id, &task_id, |p| {
+                p.comments.push(cc_hub_lib::pr::Comment {
+                    author: "cc-hub".into(),
+                    at: now,
+                    body: comment_body,
+                });
+            });
+            print_json(&serde_json::json!({
+                "ok": false,
+                "phase": "build",
+                "command": build_cmd,
+                "stderr": tail,
+                "recipe": "Build failed on main after /simplify or /bump; fix in the working tree, commit, then re-run cc-hub pr finalize.",
+            }));
+            return Err(CliError::Other("build gate failed".into()));
+        }
+    }
 
     cc_hub_lib::pr::update_pr(&project_id, &task_id, |p| {
         p.review_state = cc_hub_lib::pr::ReviewState::Merged;
@@ -1865,14 +1946,17 @@ fn pr_finalize(args: &[String]) -> Result<(), CliError> {
     let released = cc_hub_lib::merge_lock::release(&project_id, &task_id)
         .map_err(|e| CliError::Other(format!("release merge lock: {}", e)))?;
 
-    // Cleanup the orchestrator tmux now that the task is fully done.
-    orchestrator::cleanup_task_sessions(&state);
+    if !f.keep_tmux {
+        orchestrator::cleanup_task_sessions(&state);
+    }
 
     print_json(&serde_json::json!({
         "ok": true,
         "released": released,
         "task_id": task_id,
         "status": "done",
+        "build_skipped": f.skip_build,
+        "tmux_kept": f.keep_tmux,
     }));
     Ok(())
 }
@@ -2270,6 +2354,203 @@ mod tests {
 
             let after = orchestrator::read_task_state(&project_id, &task_id).expect("read state");
             assert!(after.last_auto_reviewed_at.is_none());
+        });
+    }
+
+    #[test]
+    fn pr_finalize_build_failure_keeps_lock_and_comments_pr() {
+        with_tempdir_home(|| {
+            let project_id = "p-build".to_string();
+            let task_id = "t-build".to_string();
+
+            // Project root lives outside $HOME so we can drop a build script in it.
+            let project_dir = tempfile::tempdir().expect("project tempdir");
+            let project_root = project_dir.path().to_path_buf();
+
+            // State: task is Merging, /simplify + /bump nominally complete.
+            let mut state = TaskState::new(
+                project_id.clone(),
+                project_root.clone(),
+                "do thing".into(),
+            );
+            state.task_id = task_id.clone();
+            state.status = TaskStatus::Merging;
+            orchestrator::write_task_state(&state).expect("write state");
+
+            // Lock held by this task so we can observe it stays held on failure.
+            cc_hub_lib::merge_lock::acquire(&project_id, &task_id, None)
+                .expect("acquire merge lock");
+
+            // PR exists in Approved state.
+            let pr_record = pr::create_pr(
+                &state,
+                "feature".into(),
+                "main".into(),
+                "title".into(),
+                "desc".into(),
+            )
+            .expect("create pr");
+            pr::update_pr(&project_id, &task_id, |p| {
+                p.review_state = pr::ReviewState::Approved;
+            })
+            .expect("approve pr");
+            assert_eq!(pr_record.review_state, pr::ReviewState::Open);
+
+            // Build script that fails with a known stderr signature.
+            let build_script = project_root.join("build.sh");
+            std::fs::write(&build_script, "#!/bin/sh\necho 'build broke!' 1>&2\nexit 7\n")
+                .expect("write build script");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&build_script).unwrap().permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&build_script, perms).unwrap();
+            }
+
+            let result = pr_finalize(&[
+                "--task".into(),
+                task_id.clone(),
+                "--project-id".into(),
+                project_id.clone(),
+                "--build-cmd".into(),
+                build_script.to_string_lossy().into_owned(),
+            ]);
+            match result {
+                Err(CliError::Other(msg)) => assert!(
+                    msg.contains("build gate failed"),
+                    "unexpected error: {}",
+                    msg
+                ),
+                other => panic!("expected build gate failure, got {:?}", other),
+            }
+
+            // Task stayed in Merging.
+            let after_state =
+                orchestrator::read_task_state(&project_id, &task_id).expect("read state");
+            assert_eq!(after_state.status, TaskStatus::Merging);
+
+            // PR did NOT flip to Merged; it stays Approved with a new comment.
+            let after_pr = pr::read_pr(&project_id, &task_id)
+                .expect("read pr")
+                .expect("pr present");
+            assert_eq!(after_pr.review_state, pr::ReviewState::Approved);
+            assert!(
+                after_pr
+                    .comments
+                    .iter()
+                    .any(|c| c.body.contains("build broke!")),
+                "expected PR comment containing build stderr; got {:?}",
+                after_pr.comments,
+            );
+
+            // Merge lock still held.
+            let holder = cc_hub_lib::merge_lock::current_holder(&project_id)
+                .expect("read lock")
+                .expect("lock still held");
+            assert_eq!(holder.task_id, task_id);
+        });
+    }
+
+    #[test]
+    fn pr_finalize_skip_build_releases_lock_even_with_missing_command() {
+        with_tempdir_home(|| {
+            let project_id = "p-skip".to_string();
+            let task_id = "t-skip".to_string();
+            let project_dir = tempfile::tempdir().expect("project tempdir");
+
+            let mut state = TaskState::new(
+                project_id.clone(),
+                project_dir.path().to_path_buf(),
+                "do thing".into(),
+            );
+            state.task_id = task_id.clone();
+            state.status = TaskStatus::Merging;
+            orchestrator::write_task_state(&state).expect("write state");
+
+            cc_hub_lib::merge_lock::acquire(&project_id, &task_id, None).expect("acquire");
+            pr::create_pr(
+                &state,
+                "feature".into(),
+                "main".into(),
+                "title".into(),
+                "desc".into(),
+            )
+            .expect("create pr");
+
+            pr_finalize(&[
+                "--task".into(),
+                task_id.clone(),
+                "--project-id".into(),
+                project_id.clone(),
+                "--skip-build".into(),
+                "--build-cmd".into(),
+                "/nonexistent/build-script-does-not-exist".into(),
+            ])
+            .expect("finalize ok with --skip-build");
+
+            let after_state =
+                orchestrator::read_task_state(&project_id, &task_id).expect("read state");
+            assert_eq!(after_state.status, TaskStatus::Done);
+
+            let after_pr = pr::read_pr(&project_id, &task_id)
+                .expect("read pr")
+                .expect("present");
+            assert_eq!(after_pr.review_state, pr::ReviewState::Merged);
+
+            assert!(
+                cc_hub_lib::merge_lock::current_holder(&project_id)
+                    .expect("read lock")
+                    .is_none(),
+                "lock should be released after successful finalize"
+            );
+        });
+    }
+
+    #[test]
+    fn pr_finalize_keep_tmux_still_marks_task_done() {
+        with_tempdir_home(|| {
+            let project_id = "p-keep".to_string();
+            let task_id = "t-keep".to_string();
+            let project_dir = tempfile::tempdir().expect("project tempdir");
+
+            let mut state = TaskState::new(
+                project_id.clone(),
+                project_dir.path().to_path_buf(),
+                "do thing".into(),
+            );
+            state.task_id = task_id.clone();
+            state.status = TaskStatus::Merging;
+            state.orchestrator_tmux = Some("cc-hub-test-orch".into());
+            orchestrator::write_task_state(&state).expect("write state");
+
+            cc_hub_lib::merge_lock::acquire(&project_id, &task_id, None).expect("acquire");
+            pr::create_pr(
+                &state,
+                "feature".into(),
+                "main".into(),
+                "title".into(),
+                "desc".into(),
+            )
+            .expect("create pr");
+
+            pr_finalize(&[
+                "--task".into(),
+                task_id.clone(),
+                "--project-id".into(),
+                project_id.clone(),
+                "--skip-build".into(),
+                "--keep-tmux".into(),
+            ])
+            .expect("finalize ok with --keep-tmux");
+
+            let after_state =
+                orchestrator::read_task_state(&project_id, &task_id).expect("read state");
+            assert_eq!(after_state.status, TaskStatus::Done);
+            // We don't observe tmux state in unit tests (cleanup happens via
+            // detached `sh -c sleep …; tmux …`). Asserting Done + Merged is
+            // the user-visible signal; whether cleanup_task_sessions ran is
+            // an integration concern.
         });
     }
 
