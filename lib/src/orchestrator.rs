@@ -788,18 +788,8 @@ EOF
 
 # Iterating on review feedback
 
-The user reviews the PR in the TUI. Two outcomes:
-
-- **Changes requested.** The task transitions back to `Running` and the PR's `review_state` becomes `changes_requested`. Poll for it:
-  `{bin} pr show --task {task_id}` — inspect the latest PR state and any new comments.
-  Read the new comments, dispatch a worker (or edit yourself in the worktree if it's a tiny tweak — but always inside the worktree, never on main) to address them, push commits to the worktree branch, then re-open the PR for review:
-  `{bin} pr show --task {task_id}` will show you're back to `open` once you push? **No** — you need to flip the state explicitly. Append your reply and request re-review by running:
-  `{bin} pr comment --task {task_id} --author orchestrator --comment \"<reply explaining the fix>\"`
-  Then transition the task back to Review with another `task report --status running --note \"PR #N: changes addressed; awaiting re-review\"` followed by a fresh `pr create` is **wrong** — the PR already exists. Instead, set the PR back to Open by re-running:
-  `{bin} task report --task {task_id} --status review --note \"<one line on what you addressed>\"`
-  (You're flipping the task back to Review; the PR's `review_state` gets cleared back to Open via the user's next interaction.)
-
-- **Approved.** The PR's `review_state` becomes `approved` and the task stays in Review until you pick it up. When you see `approved`, proceed to **Merging**.
+- **Changes requested.** Inspect the new comments with `{bin} pr show --task {task_id}`, push the fix to the worktree branch (never main), then run `{bin} pr reopen --task {task_id} --comment \"<reply explaining the fix>\"`. This flips the PR back to Open, transitions the task `Running → Review`, and re-arms auto-review on the new commits.
+- **Approved.** When `review_state` becomes `approved`, proceed to **Merging** below.
 
 # Merging (the only path edits reach main)
 
@@ -1592,6 +1582,7 @@ mod tests {
             format!("{} worker wait --task {}", bin_s, state.task_id),
             format!("{} pr create --task {}", bin_s, state.task_id),
             format!("{} pr show --task {}", bin_s, state.task_id),
+            format!("{} pr reopen --task {}", bin_s, state.task_id),
             format!("{} pr merge --task {}", bin_s, state.task_id),
             format!("{} pr finalize --task {}", bin_s, state.task_id),
             format!("{} task report --task {}", bin_s, state.task_id),
@@ -1699,6 +1690,22 @@ mod tests {
                 "prompt still references removed concept `{}` — \
                  this is the PR-flow rewrite; reservations and \
                  merge-worktree are gone",
+                forbidden
+            );
+        }
+
+        // The PR-reopen verb collapsed the iteration dance into one call. If the
+        // prompt still teaches the old `pr comment` + `task report --status review`
+        // workaround, the orchestrator will execute a two-step that no longer
+        // matches the auto-review semantics.
+        for forbidden in [
+            format!("pr comment --task {} --author orchestrator", state.task_id),
+            format!("task report --task {} --status review", state.task_id),
+        ] {
+            assert!(
+                !p.contains(&forbidden),
+                "prompt still references obsolete iteration step `{}` — \
+                 use `pr reopen` instead",
                 forbidden
             );
         }
