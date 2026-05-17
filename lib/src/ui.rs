@@ -392,7 +392,7 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
     ))
     .title_bottom(Span::styled(
         format!(
-            " j/k navigate · s/enter start · esc/q close{}",
+            " j/k navigate · s/enter start · x delete · esc/q close{}",
             selected_label
         ),
         Style::default().fg(Color::DarkGray),
@@ -435,10 +435,12 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
     {
         let selected = i == sel;
         let arrow = if selected { "▌ " } else { "  " };
-        let title_text = match t.title.as_deref().filter(|s| !s.is_empty()) {
-            Some(name) => name.to_string(),
-            None => first_line_preview(&t.prompt, max_w),
-        };
+        let has_title = t
+            .title
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        let id_short = crate::orchestrator::short_task_id(&t.task_id);
         let title_style = if selected {
             Style::default()
                 .fg(Color::White)
@@ -446,18 +448,32 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             Style::default().fg(Color::Gray)
         };
-        lines.push(Line::from(vec![
-            Span::styled(arrow, Style::default().fg(Color::Rgb(120, 140, 200))),
-            Span::styled(title_text, title_style),
-        ]));
-        let id_short = crate::orchestrator::short_task_id(&t.task_id);
-        let preview = first_line_preview(&t.prompt, max_w.saturating_sub(id_short.len() + 6));
-        lines.push(Line::from(vec![
-            Span::raw("    "),
-            Span::styled(id_short, Style::default().fg(Color::DarkGray)),
-            Span::styled("  ", Style::default()),
-            Span::styled(preview, Style::default().fg(Color::Rgb(110, 110, 130))),
-        ]));
+        if has_title {
+            let title_text = t.title.as_deref().unwrap().to_string();
+            lines.push(Line::from(vec![
+                Span::styled(arrow, Style::default().fg(Color::Rgb(120, 140, 200))),
+                Span::styled(title_text, title_style),
+            ]));
+            let preview =
+                first_line_preview(&t.prompt, max_w.saturating_sub(id_short.len() + 6));
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(id_short, Style::default().fg(Color::DarkGray)),
+                Span::styled("  ", Style::default()),
+                Span::styled(preview, Style::default().fg(Color::Rgb(110, 110, 130))),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(arrow, Style::default().fg(Color::Rgb(120, 140, 200))),
+                Span::styled(format!("#{}", id_short), title_style),
+                Span::styled(" · pending title", Style::default().fg(Color::DarkGray)),
+            ]));
+            let preview = first_line_preview(&t.prompt, max_w);
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(preview, Style::default().fg(Color::Rgb(110, 110, 130))),
+            ]));
+        }
         lines.push(Line::from(""));
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -5396,5 +5412,134 @@ mod kanban_card_tests {
         let t = task_with_todos(TaskStatus::Running, 0, 0);
         let plain = render_active(&t, None, 1);
         assert!(!plain.contains("PR #"), "no PR ⇒ no badge:\n{}", plain);
+    }
+}
+
+#[cfg(test)]
+mod backlog_popup_tests {
+    use super::buffer_to_string;
+    use crate::app::App;
+    use crate::orchestrator::{Project, TaskState};
+    use crate::projects_scan::ProjectsSnapshot;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::collections::{HashMap, HashSet};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn render_popup(prompts: &[&str], titles: &[Option<&str>]) -> String {
+        assert_eq!(prompts.len(), titles.len());
+        let now = crate::orchestrator::now_unix_secs();
+        let project = Project {
+            id: "p-backlog".into(),
+            name: "backlog".into(),
+            root: PathBuf::from("/tmp/backlog"),
+            created_at: now,
+        };
+        let tasks: Vec<Arc<TaskState>> = prompts
+            .iter()
+            .zip(titles.iter())
+            .map(|(p, title)| {
+                let mut t = TaskState::new_backlog(
+                    project.id.clone(),
+                    project.root.clone(),
+                    (*p).into(),
+                );
+                t.title = title.map(|s| s.to_string());
+                Arc::new(t)
+            })
+            .collect();
+        let mut tasks_map = HashMap::new();
+        tasks_map.insert(project.id.clone(), tasks);
+        let snap = ProjectsSnapshot {
+            projects: vec![project],
+            tasks: tasks_map,
+            titling: HashSet::new(),
+            merge_lock_holders: HashMap::new(),
+        };
+        let mut app = App::new();
+        app.update_projects(snap);
+        app.open_backlog();
+        let backend = TestBackend::new(100, 22);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| super::render_backlog(f, f.area(), &app))
+            .expect("render");
+        buffer_to_string(terminal.backend().buffer())
+    }
+
+    /// Renders mixed titled + untitled tasks and dumps the buffer to the path
+    /// in `CC_HUB_BACKLOG_RENDER_DUMP`. Used to capture a proof-of-fix artifact
+    /// for PRs; skipped under normal `cargo test`.
+    #[test]
+    #[ignore]
+    fn dump_render_for_artifact() {
+        let Some(dest) = std::env::var_os("CC_HUB_BACKLOG_RENDER_DUMP") else {
+            return;
+        };
+        let prompts = [
+            "wire up exporter for daily reports",
+            "refactor the merge-lock retry policy",
+            "investigate flaky CI on macOS runners",
+            "ship the new exporter",
+        ];
+        let titles: [Option<&str>; 4] = [None, None, None, Some("Exporter rollout")];
+        let plain = render_popup(&prompts, &titles);
+        std::fs::write(&dest, plain).expect("write dump");
+    }
+
+    #[test]
+    fn untitled_entries_do_not_duplicate_prompt_preview() {
+        let prompts = [
+            "wire up exporter for daily reports",
+            "refactor the merge-lock retry policy",
+            "investigate flaky CI on macOS runners",
+        ];
+        let titles: [Option<&str>; 3] = [None, None, None];
+        let plain = render_popup(&prompts, &titles);
+
+        // Each unique prompt-preview substring must appear exactly once in
+        // the rendered popup. Before the fix, untitled tasks rendered the
+        // prompt on row 1 (title fallback) AND row 2 (id + prompt preview),
+        // doubling each line.
+        for p in prompts.iter() {
+            let count = plain.matches(p).count();
+            assert_eq!(
+                count, 1,
+                "prompt {:?} should appear exactly once, got {}:\n{}",
+                p, count, plain
+            );
+        }
+        // The pending-title placeholder should appear once per untitled task.
+        let pending = plain.matches("pending title").count();
+        assert_eq!(
+            pending,
+            prompts.len(),
+            "expected one 'pending title' hint per untitled task:\n{}",
+            plain
+        );
+    }
+
+    #[test]
+    fn titled_entries_keep_title_then_id_prompt_layout() {
+        let prompts = ["ship the new exporter"];
+        let titles = [Some("Exporter rollout")];
+        let plain = render_popup(&prompts, &titles);
+        assert!(
+            plain.contains("Exporter rollout"),
+            "title should render on row 1:\n{}",
+            plain
+        );
+        assert!(
+            plain.contains("ship the new exporter"),
+            "prompt preview should still render on row 2:\n{}",
+            plain
+        );
+        // No pending-title hint when the title has landed.
+        assert!(
+            !plain.contains("pending title"),
+            "titled entry should not show 'pending title' hint:\n{}",
+            plain
+        );
     }
 }

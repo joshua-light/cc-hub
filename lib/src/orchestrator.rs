@@ -411,6 +411,37 @@ pub fn set_task_title(project_id: &str, task_id: &str, title: &str) -> io::Resul
     })
 }
 
+/// Remove every `<root>/.cc-hub-wt/<task>-<name>` worktree recorded for
+/// `state`. `git worktree remove --force` also drops the local
+/// `cc-hub/<task>-<name>` branch — intended terminal-state behaviour. Best-
+/// effort: failures are logged and the loop continues.
+pub fn remove_task_worktrees(state: &TaskState) {
+    for w in &state.workers {
+        let Some(name) = w.worktree.as_deref() else {
+            continue;
+        };
+        let path = worktree_path(&state.project_root, &state.task_id, name);
+        match run_git(
+            &state.project_root,
+            &["worktree", "remove", "--force", &path.to_string_lossy()],
+        ) {
+            Err(e) => log::warn!(
+                "task {}: git worktree remove [{}] errored: {}",
+                state.task_id,
+                path.display(),
+                e
+            ),
+            Ok(out) if !out.status_ok => log::warn!(
+                "task {}: git worktree remove [{}] failed: {}",
+                state.task_id,
+                path.display(),
+                out.stderr.trim()
+            ),
+            Ok(_) => {}
+        }
+    }
+}
+
 /// Tear down every tmux session associated with a finished task: workers
 /// immediately, orchestrator after a short delay. The orchestrator is
 /// almost always the calling process when this runs from the CLI (a Claude
@@ -434,6 +465,9 @@ pub fn cleanup_task_sessions(state: &TaskState) {
                 e
             );
         }
+    }
+    if state.status == TaskStatus::Done {
+        remove_task_worktrees(state);
     }
     if let Some(orch) = state.orchestrator_tmux.as_deref() {
         // tmux session names from `spawn_claude_session` are alphanumeric +
@@ -754,27 +788,17 @@ EOF
 
 # Iterating on review feedback
 
-The user reviews the PR in the TUI. Two outcomes:
-
-- **Changes requested.** The task transitions back to `Running` and the PR's `review_state` becomes `changes_requested`. Poll for it:
-  `{bin} pr show --task {task_id}` — inspect the latest PR state and any new comments.
-  Read the new comments, dispatch a worker (or edit yourself in the worktree if it's a tiny tweak — but always inside the worktree, never on main) to address them, push commits to the worktree branch, then re-open the PR for review:
-  `{bin} pr show --task {task_id}` will show you're back to `open` once you push? **No** — you need to flip the state explicitly. Append your reply and request re-review by running:
-  `{bin} pr comment --task {task_id} --author orchestrator --comment \"<reply explaining the fix>\"`
-  Then transition the task back to Review with another `task report --status running --note \"PR #N: changes addressed; awaiting re-review\"` followed by a fresh `pr create` is **wrong** — the PR already exists. Instead, set the PR back to Open by re-running:
-  `{bin} task report --task {task_id} --status review --note \"<one line on what you addressed>\"`
-  (You're flipping the task back to Review; the PR's `review_state` gets cleared back to Open via the user's next interaction.)
-
-- **Approved.** The PR's `review_state` becomes `approved` and the task stays in Review until you pick it up. When you see `approved`, proceed to **Merging**.
+- **Changes requested.** Inspect the new comments with `{bin} pr show --task {task_id}`, push the fix to the worktree branch (never main), then run `{bin} pr reopen --task {task_id} --comment \"<reply explaining the fix>\"`. This flips the PR back to Open, transitions the task `Running → Review`, and re-arms auto-review on the new commits.
+- **Approved.** When `review_state` becomes `approved`, proceed to **Merging** below.
 
 # Merging (the only path edits reach main)
 
 Merging is **serialized project-wide** by the merge lock — at most one task is in the Merging state at a time. cc-hub handles the lock automatically; you just call the verbs in order.
 
 1. **Acquire the lock and run the merge**:
-   `{bin} pr merge --task {task_id}`
+   `{bin} pr merge --task {task_id} --wait`
    This:
-   - Acquires the project's merge lock (returns `ok=false, locked=true` with `holder_task` if another task is currently merging — poll and retry).
+   - Acquires the project's merge lock. **Pass `--wait` so the verb blocks in-process until the lock is free** (default 30 min cap, override with `--timeout-secs N`); without it, you get `ok=false, locked=true` and have to reinvent polling. Do not write Monitor tasks, until-loops, or sleep+capture chains for this — `--wait` already does it correctly and inherits stale-lock recovery.
    - Merges `main` into the feature branch first, so any conflicts with main's recent landings are resolved on the *feature branch* (not on main itself).
    - On clean merge, fast-forwards the feature branch into main.
    - On conflict during the main → branch merge, **the PR is auto-demoted to Open**, the lock is released, and a comment is appended explaining what happened. You then need to spawn a worker to resolve conflicts in the worktree, push the resolution, and ask the user to re-approve. (cc-hub's auto-approve rule only accepts *clean* resolutions; substantive conflict resolutions need a fresh review.)
@@ -1558,6 +1582,7 @@ mod tests {
             format!("{} worker wait --task {}", bin_s, state.task_id),
             format!("{} pr create --task {}", bin_s, state.task_id),
             format!("{} pr show --task {}", bin_s, state.task_id),
+            format!("{} pr reopen --task {}", bin_s, state.task_id),
             format!("{} pr merge --task {}", bin_s, state.task_id),
             format!("{} pr finalize --task {}", bin_s, state.task_id),
             format!("{} task report --task {}", bin_s, state.task_id),
@@ -1668,6 +1693,22 @@ mod tests {
                 forbidden
             );
         }
+
+        // The PR-reopen verb collapsed the iteration dance into one call. If the
+        // prompt still teaches the old `pr comment` + `task report --status review`
+        // workaround, the orchestrator will execute a two-step that no longer
+        // matches the auto-review semantics.
+        for forbidden in [
+            format!("pr comment --task {} --author orchestrator", state.task_id),
+            format!("task report --task {} --status review", state.task_id),
+        ] {
+            assert!(
+                !p.contains(&forbidden),
+                "prompt still references obsolete iteration step `{}` — \
+                 use `pr reopen` instead",
+                forbidden
+            );
+        }
     }
 
     #[test]
@@ -1711,5 +1752,60 @@ mod tests {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    /// Seed a tempdir as a git repo with one commit and one worktree, then
+    /// build a `TaskState` referencing that worktree under the given status.
+    /// Returns the tempdir (to keep it alive), the worktree path, and the
+    /// state.
+    fn seed_repo_and_state(status: TaskStatus) -> (tempfile::TempDir, PathBuf, TaskState) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        run_git(root, &["init", "-q"]).expect("git init");
+        run_git(root, &["config", "user.email", "test@example.com"]).expect("config email");
+        run_git(root, &["config", "user.name", "Test"]).expect("config name");
+        fs::write(root.join("seed.txt"), b"seed").expect("write seed");
+        run_git(root, &["add", "seed.txt"]).expect("git add");
+        run_git(root, &["commit", "-q", "-m", "seed"]).expect("git commit");
+        let base = detect_main_branch(root);
+
+        let wt = create_worktree(root, "t-test", "edit", &base).expect("create_worktree");
+
+        let mut state = TaskState::new("p".into(), root.to_path_buf(), "do thing".into());
+        state.task_id = "t-test".into();
+        state.status = status;
+        state.orchestrator_tmux = None;
+        state.workers.push(Worker {
+            agent_id: "claude".into(),
+            agent_kind: AgentKind::Claude,
+            tmux_name: "nonexistent-test-session".into(),
+            cwd: wt.clone(),
+            worktree: Some("edit".into()),
+            readonly: false,
+            spawned_at: 0,
+        });
+        (tmp, wt, state)
+    }
+
+    #[test]
+    fn cleanup_removes_worktrees_when_done() {
+        let (_tmp, wt, state) = seed_repo_and_state(TaskStatus::Done);
+        cleanup_task_sessions(&state);
+        assert!(
+            !wt.exists(),
+            "worktree dir should be gone after cleanup: {}",
+            wt.display()
+        );
+    }
+
+    #[test]
+    fn cleanup_skips_worktree_removal_when_not_done() {
+        let (_tmp, wt, state) = seed_repo_and_state(TaskStatus::Running);
+        cleanup_task_sessions(&state);
+        assert!(
+            wt.exists(),
+            "worktree dir must survive cleanup while task is still Running: {}",
+            wt.display()
+        );
     }
 }
