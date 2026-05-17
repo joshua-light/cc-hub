@@ -5456,6 +5456,7 @@ mod backlog_popup_tests {
             tasks: tasks_map,
             titling: HashSet::new(),
             merge_lock_holders: HashMap::new(),
+            pr_summaries: HashMap::new(),
         };
         let mut app = App::new();
         app.update_projects(snap);
