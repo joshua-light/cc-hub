@@ -688,16 +688,19 @@ pub fn remove_project(project_id: &str) -> io::Result<()> {
 }
 
 /// Outcome of a `delete_task` call. All boolean fields are best-effort: a
-/// `false` on `orchestrator_killed` means we tried and failed (logged), and
-/// `worktree_errors` lists the per-worktree paths whose cleanup also failed
-/// the `fs::remove_dir_all` fallback. The state directory removal is the
-/// only step that propagates as a hard error (because if it fails, the task
-/// stays visible in the Projects view forever).
+/// `false` on `orchestrator_killed` means we tried and failed (logged),
+/// `lock_released` is `false` when no lock was held by this task (or release
+/// failed — logged), and `worktree_errors` lists the per-worktree paths
+/// whose cleanup also failed the `fs::remove_dir_all` fallback. The state
+/// directory removal is the only step that propagates as a hard error
+/// (because if it fails, the task stays visible in the Projects view
+/// forever).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeletedTask {
     pub task_id: String,
     pub project_id: String,
     pub orchestrator_killed: bool,
+    pub lock_released: bool,
     pub state_removed: bool,
     pub worktrees_removed: Vec<String>,
     pub worktree_errors: Vec<(String, String)>,
@@ -727,6 +730,18 @@ pub fn delete_task(project_id: &str, task_id: &str) -> io::Result<DeletedTask> {
             ),
         }
     }
+
+    let lock_released = match crate::merge_lock::release(&state.project_id, &state.task_id) {
+        Ok(released) => released,
+        Err(e) => {
+            log::warn!(
+                "delete_task {}: merge_lock release failed: {}",
+                task_id,
+                e
+            );
+            false
+        }
+    };
 
     let mut seen = std::collections::HashSet::new();
     let mut worktrees_removed = Vec::new();
@@ -793,6 +808,7 @@ pub fn delete_task(project_id: &str, task_id: &str) -> io::Result<DeletedTask> {
         task_id: task_id.to_string(),
         project_id: project_id.to_string(),
         orchestrator_killed,
+        lock_released,
         state_removed,
         worktrees_removed,
         worktree_errors,
@@ -1875,6 +1891,90 @@ mod tests {
 
         // Idempotent: a second call against an already-removed id is Ok.
         remove_project(&project_id).expect("idempotent remove");
+
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn delete_task_releases_merge_lock_when_held() {
+        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let project_root = home.path().join("proj-lock-held");
+        fs::create_dir_all(&project_root).expect("mkdir project root");
+        let project_id = ensure_project_registered(&project_root, "proj").expect("register");
+
+        let mut state = TaskState::new(project_id.clone(), project_root.clone(), "do thing".into());
+        state.orchestrator_tmux = None;
+        let task_id = state.task_id.clone();
+        write_task_state(&state).expect("write seed task state");
+
+        match crate::merge_lock::acquire(&project_id, &task_id, None).expect("acquire lock") {
+            crate::merge_lock::AcquireOutcome::Acquired => {}
+            other => panic!("expected Acquired, got {:?}", other),
+        }
+        assert!(
+            crate::merge_lock::current_holder(&project_id)
+                .expect("current_holder")
+                .is_some(),
+            "lock should be held before delete"
+        );
+
+        let deleted = delete_task(&project_id, &task_id).expect("delete_task");
+        assert!(
+            deleted.lock_released,
+            "lock_released should be true when this task held the lock"
+        );
+        assert!(
+            crate::merge_lock::current_holder(&project_id)
+                .expect("current_holder")
+                .is_none(),
+            "lock should be released after delete"
+        );
+
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn delete_task_no_lock_held_returns_false() {
+        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let project_root = home.path().join("proj-no-lock");
+        fs::create_dir_all(&project_root).expect("mkdir project root");
+        let project_id = ensure_project_registered(&project_root, "proj").expect("register");
+
+        let mut state = TaskState::new(project_id.clone(), project_root.clone(), "do thing".into());
+        state.orchestrator_tmux = None;
+        let task_id = state.task_id.clone();
+        write_task_state(&state).expect("write seed task state");
+
+        let state_dir = task_state_dir(&project_id, &task_id).expect("task_state_dir");
+        assert!(state_dir.exists(), "state dir should exist before delete");
+
+        let deleted = delete_task(&project_id, &task_id).expect("delete_task");
+        assert!(
+            !deleted.lock_released,
+            "lock_released should be false when no lock was held"
+        );
+        assert!(
+            deleted.state_removed,
+            "rest of delete should still succeed"
+        );
+        assert!(
+            !state_dir.exists(),
+            "state dir should be gone after delete"
+        );
 
         match prev_home {
             Some(v) => std::env::set_var("HOME", v),
