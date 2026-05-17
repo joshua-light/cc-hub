@@ -254,7 +254,10 @@ struct Flags {
     /// that second.
     comments_since: Option<i64>,
     /// `worker wait` flags. Repeatable `--tmux NAME`, `--all`,
-    /// `--timeout-secs N`.
+    /// `--timeout-secs N`. `worktree_targets` is populated alongside
+    /// `worktree` (Option) by the `--worktree` parser arm: single-use
+    /// callers like `spawn-worker` / `pr create` read `worktree`,
+    /// `worker wait` reads `worktree_targets` so it can take repeats.
     tmux_targets: Vec<String>,
     worktree_targets: Vec<String>,
     all: bool,
