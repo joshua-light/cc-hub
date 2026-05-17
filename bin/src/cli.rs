@@ -165,9 +165,13 @@ const WORKER_HELP: &str = r#"cc-hub worker
 
 Usage:
   cc-hub worker wait --task ID (--tmux NAME ... | --all) [--timeout-secs N]
+                     [--progress [--progress-interval-secs N]]
 
 Polls cc-hub's session scanner until selected workers reach WaitingForInput or
 Inactive. Emits one JSON line with per-worker completion state.
+
+With --progress, emits one JSON line every N seconds (default 5) describing
+which targets are still pending vs. done. The final summary line is unchanged.
 "#;
 
 const PROJECT_HELP: &str = r#"cc-hub project
@@ -243,6 +247,8 @@ struct Flags {
     tmux_targets: Vec<String>,
     all: bool,
     timeout_secs: Option<u64>,
+    progress: bool,
+    progress_interval_secs: Option<u64>,
     json: bool,
     wait: bool,
 }
@@ -347,6 +353,17 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
                 f.timeout_secs = Some(
                     v.parse()
                         .map_err(|e| CliError::Usage(format!("--timeout-secs: {}", e)))?,
+                );
+            }
+            "--progress" => {
+                f.progress = true;
+                i += 1;
+            }
+            "--progress-interval-secs" => {
+                let v = next_value(args, &mut i, "--progress-interval-secs")?;
+                f.progress_interval_secs = Some(
+                    v.parse()
+                        .map_err(|e| CliError::Usage(format!("--progress-interval-secs: {}", e)))?,
                 );
             }
             "--json" => {
@@ -1899,6 +1916,15 @@ fn worker_wait(args: &[String]) -> Result<(), CliError> {
     let started = Instant::now();
     let deadline = started + timeout;
 
+    let progress_interval = if f.progress {
+        Some(Duration::from_secs(
+            f.progress_interval_secs.unwrap_or(5).max(1),
+        ))
+    } else {
+        None
+    };
+    let mut last_emit: Option<Instant> = None;
+
     let mut done: std::collections::HashMap<String, serde_json::Value> =
         std::collections::HashMap::new();
     // A target that disappears from the scanner *after* having been seen
@@ -1945,6 +1971,29 @@ fn worker_wait(args: &[String]) -> Result<(), CliError> {
         }
         if Instant::now() >= deadline {
             break true;
+        }
+        if let Some(interval) = progress_interval {
+            let should_emit = match last_emit {
+                None => true,
+                Some(t) => t.elapsed() >= interval,
+            };
+            if should_emit {
+                let mut done_names: Vec<String> = done.keys().cloned().collect();
+                done_names.sort();
+                let mut pending_names: Vec<String> = targets
+                    .iter()
+                    .filter(|n| !done.contains_key(n.as_str()))
+                    .cloned()
+                    .collect();
+                pending_names.sort();
+                print_json(&serde_json::json!({
+                    "event": "progress",
+                    "elapsed_secs": started.elapsed().as_secs(),
+                    "pending": pending_names,
+                    "done": done_names,
+                }));
+                last_emit = Some(Instant::now());
+            }
         }
         std::thread::sleep(Duration::from_millis(500));
     };
