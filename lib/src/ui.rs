@@ -497,41 +497,37 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), list_area);
 
-    if let Some(body_area) = body_area {
-        if let Some(task) = tasks.get(sel) {
-            let separator = Block::default()
-                .borders(Borders::LEFT)
-                .border_style(Style::default().fg(Color::Rgb(60, 60, 80)));
-            let body_inner = separator.inner(body_area);
-            frame.render_widget(separator, body_area);
+    if let (Some(body_area), Some(task)) = (body_area, tasks.get(sel)) {
+        let separator = Block::default()
+            .borders(Borders::LEFT)
+            .border_style(Style::default().fg(Color::Rgb(60, 60, 80)));
+        let body_inner = separator.inner(body_area);
+        frame.render_widget(separator, body_area);
 
-            let mut body_lines: Vec<Line> = Vec::new();
-            if let Some(title) = task.title.as_deref() {
-                if !title.is_empty() {
-                    body_lines.push(Line::from(Span::styled(
-                        title.to_string(),
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    )));
-                }
-            }
+        let mut body_lines: Vec<Line> = Vec::new();
+        if let Some(title) = task.title.as_deref().filter(|s| !s.is_empty()) {
             body_lines.push(Line::from(Span::styled(
-                crate::orchestrator::short_task_id(&task.task_id),
-                Style::default().fg(Color::DarkGray),
+                title,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             )));
-            body_lines.push(Line::raw(""));
-            for line in task.prompt.lines() {
-                body_lines.push(Line::from(Span::styled(
-                    line.to_string(),
-                    Style::default().fg(Color::Rgb(180, 180, 200)),
-                )));
-            }
-            frame.render_widget(
-                Paragraph::new(body_lines).wrap(Wrap { trim: false }),
-                body_inner,
-            );
         }
+        body_lines.push(Line::from(Span::styled(
+            crate::orchestrator::short_task_id(&task.task_id),
+            Style::default().fg(Color::DarkGray),
+        )));
+        body_lines.push(Line::raw(""));
+        for line in task.prompt.lines() {
+            body_lines.push(Line::from(Span::styled(
+                line,
+                Style::default().fg(Color::Rgb(180, 180, 200)),
+            )));
+        }
+        frame.render_widget(
+            Paragraph::new(body_lines).wrap(Wrap { trim: false }),
+            body_inner,
+        );
     }
 }
 
@@ -5989,20 +5985,22 @@ Acceptance:\n\
         let titles: [Option<&str>; 3] = [None, None, None];
         let plain = render_popup(&prompts, &titles);
 
-        // No prompt should appear more than twice. The split-pane layout
-        // renders the focused task's full prompt in the right-hand body pane
-        // and a (possibly truncated) preview in the left list — so the
-        // selected prompt may legitimately appear twice. Non-selected list
-        // previews are truncated and won't match the full string. Before the
-        // original fix, untitled tasks doubled the prompt within the list
-        // itself (title fallback row + preview row), which would push the
-        // count to 3+ for the selected task.
-        for p in prompts.iter() {
+        // The list pane is 40 cols wide and `first_line_preview` ellipsises
+        // anything past ~26 chars, so these 34-char prompts are truncated in
+        // the list for every task. The body pane (right half) renders the
+        // *selected* task's full prompt untouched. Therefore:
+        //   - selected (index 0, since backlog_sel defaults to 0): count == 1
+        //   - non-selected: count == 0
+        // This still catches both regressions of interest: the body pane
+        // silently dropping the prompt (selected → 0) and a list-pane
+        // re-introduction of the original doubling bug (selected → 2+).
+        for (i, p) in prompts.iter().enumerate() {
             let count = plain.matches(p).count();
-            assert!(
-                count <= 2,
-                "prompt {:?} should appear at most twice (list preview + body), got {}:\n{}",
-                p, count, plain
+            let expected = if i == 0 { 1 } else { 0 };
+            assert_eq!(
+                count, expected,
+                "prompt {:?} (selected={}) should appear {} time(s), got {}:\n{}",
+                p, i == 0, expected, count, plain
             );
         }
         // The pending-title placeholder should appear once per untitled task.
