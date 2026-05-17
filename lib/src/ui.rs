@@ -366,7 +366,7 @@ fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
-    let popup = centered_fixed(area, 90, 22);
+    let popup = centered_fixed(area, 120, 30);
     frame.render_widget(Clear, popup);
 
     let tasks = app.backlog_tasks();
@@ -417,9 +417,19 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let max_w = inner.width.saturating_sub(4) as usize;
+    let (list_area, body_area) = if inner.width >= 60 {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(40), Constraint::Min(0)])
+            .split(inner);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (inner, None)
+    };
+
+    let max_w = list_area.width.saturating_sub(4) as usize;
     let rows_per_task = 3usize;
-    let visible_tasks = ((inner.height as usize) / rows_per_task).max(1);
+    let visible_tasks = ((list_area.height as usize) / rows_per_task).max(1);
     let sel = app.backlog_sel.min(tasks.len() - 1);
     let scroll_top = if tasks.len() <= visible_tasks || sel < visible_tasks {
         0
@@ -485,7 +495,40 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
         }
         lines.push(Line::from(""));
     }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), list_area);
+
+    if let (Some(body_area), Some(task)) = (body_area, tasks.get(sel)) {
+        let separator = Block::default()
+            .borders(Borders::LEFT)
+            .border_style(Style::default().fg(Color::Rgb(60, 60, 80)));
+        let body_inner = separator.inner(body_area);
+        frame.render_widget(separator, body_area);
+
+        let mut body_lines: Vec<Line> = Vec::new();
+        if let Some(title) = task.title.as_deref().filter(|s| !s.is_empty()) {
+            body_lines.push(Line::from(Span::styled(
+                title,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        }
+        body_lines.push(Line::from(Span::styled(
+            crate::orchestrator::short_task_id(&task.task_id),
+            Style::default().fg(Color::DarkGray),
+        )));
+        body_lines.push(Line::raw(""));
+        for line in task.prompt.lines() {
+            body_lines.push(Line::from(Span::styled(
+                line,
+                Style::default().fg(Color::Rgb(180, 180, 200)),
+            )));
+        }
+        frame.render_widget(
+            Paragraph::new(body_lines).wrap(Wrap { trim: false }),
+            body_inner,
+        );
+    }
 }
 
 fn render_tmux_pane(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -5900,6 +5943,38 @@ mod backlog_popup_tests {
         std::fs::write(&dest, plain).expect("write dump");
     }
 
+    /// Like `dump_render_for_artifact`, but the focused task carries a
+    /// realistic multi-line prompt (bug repro / fix sketch / acceptance
+    /// criteria) — the case the split-pane refactor was motivated by.
+    /// Dump path comes from `CC_HUB_BACKLOG_RENDER_DUMP_MULTILINE`.
+    #[test]
+    #[ignore]
+    fn dump_render_for_artifact_multiline() {
+        let Some(dest) = std::env::var_os("CC_HUB_BACKLOG_RENDER_DUMP_MULTILINE") else {
+            return;
+        };
+        let multiline = "\
+In lib/src/ui.rs::render_backlog, each backlog entry only shows a one-line\n\
+preview. Explorer-loop tasks carry full repro + fix sketch + acceptance\n\
+criteria — none of which is visible.\n\
+\n\
+Fix: split the popup into list (left) + body (right). Reuse j/k.\n\
+\n\
+Acceptance:\n\
+- Full prompt visible without leaving the popup.\n\
+- Narrow terminals clip gracefully.\n\
+- Existing keybinds keep working.";
+        let prompts = [
+            multiline,
+            "refactor the merge-lock retry policy",
+            "investigate flaky CI on macOS runners",
+        ];
+        let titles: [Option<&str>; 3] =
+            [Some("Backlog popup: show full prompt"), None, None];
+        let plain = render_popup(&prompts, &titles);
+        std::fs::write(&dest, plain).expect("write dump");
+    }
+
     #[test]
     fn untitled_entries_do_not_duplicate_prompt_preview() {
         let prompts = [
@@ -5910,16 +5985,22 @@ mod backlog_popup_tests {
         let titles: [Option<&str>; 3] = [None, None, None];
         let plain = render_popup(&prompts, &titles);
 
-        // Each unique prompt-preview substring must appear exactly once in
-        // the rendered popup. Before the fix, untitled tasks rendered the
-        // prompt on row 1 (title fallback) AND row 2 (id + prompt preview),
-        // doubling each line.
-        for p in prompts.iter() {
+        // The list pane is 40 cols wide and `first_line_preview` ellipsises
+        // anything past ~26 chars, so these 34-char prompts are truncated in
+        // the list for every task. The body pane (right half) renders the
+        // *selected* task's full prompt untouched. Therefore:
+        //   - selected (index 0, since backlog_sel defaults to 0): count == 1
+        //   - non-selected: count == 0
+        // This still catches both regressions of interest: the body pane
+        // silently dropping the prompt (selected → 0) and a list-pane
+        // re-introduction of the original doubling bug (selected → 2+).
+        for (i, p) in prompts.iter().enumerate() {
             let count = plain.matches(p).count();
+            let expected = if i == 0 { 1 } else { 0 };
             assert_eq!(
-                count, 1,
-                "prompt {:?} should appear exactly once, got {}:\n{}",
-                p, count, plain
+                count, expected,
+                "prompt {:?} (selected={}) should appear {} time(s), got {}:\n{}",
+                p, i == 0, expected, count, plain
             );
         }
         // The pending-title placeholder should appear once per untitled task.
