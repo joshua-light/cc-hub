@@ -548,15 +548,8 @@ fn spawn_worker(args: &[String]) -> Result<(), CliError> {
         readonly: f.readonly,
         spawned_at: orchestrator::now_unix_secs(),
     };
-    let prompt_preview = f.prompt.as_ref().map(|p| {
-        let preview: String = p.chars().take(80).collect();
-        format!("spawned worker: {}", preview)
-    });
     orchestrator::update_task_state(&project_id, &task_id, move |s| {
         s.workers.push(worker);
-        if let Some(note) = prompt_preview {
-            s.note = Some(note);
-        }
     })
     .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
 
@@ -1039,15 +1032,9 @@ fn task_artifact_add(args: &[String]) -> Result<(), CliError> {
     let _ = orchestrator::read_task_state(&project_id, &task_id)
         .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
 
-    let (kind, stored_path, basename_for_note) = if looks_like_url(&raw_path) {
+    let (kind, stored_path) = if looks_like_url(&raw_path) {
         let kind = f.kind.clone().unwrap_or_else(|| "url".into());
-        // Last URL segment is the closest thing to a "basename" for note text.
-        let basename = raw_path
-            .rsplit_once('/')
-            .map(|(_, tail)| tail.to_string())
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| raw_path.clone());
-        (kind, raw_path.clone(), basename)
+        (kind, raw_path.clone())
     } else {
         let kind = f.kind.clone().unwrap_or_else(|| "file".into());
         let src = std::fs::canonicalize(&raw_path).map_err(|e| {
@@ -1085,7 +1072,7 @@ fn task_artifact_add(args: &[String]) -> Result<(), CliError> {
                 e
             ))
         })?;
-        (kind, dest.to_string_lossy().into_owned(), basename)
+        (kind, dest.to_string_lossy().into_owned())
     };
 
     let artifact = Artifact {
@@ -1095,18 +1082,12 @@ fn task_artifact_add(args: &[String]) -> Result<(), CliError> {
         caption: f.caption.clone(),
         added_at: orchestrator::now_unix_secs(),
     };
-    let lead_note_suffix = if f.lead { " (lead)" } else { "" };
-    let note = format!(
-        "artifact added: {} {}{}",
-        kind, basename_for_note, lead_note_suffix
-    );
     let mark_lead = f.lead;
     let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
         s.artifacts.push(artifact.clone());
         if mark_lead {
             s.lead_artifact = Some(s.artifacts.len() - 1);
         }
-        s.note = Some(note);
     })
     .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
 
