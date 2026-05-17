@@ -175,6 +175,36 @@ pub fn set_phase(project_id: &str, task_id: &str, phase: MergePhase) -> io::Resu
     Ok(true)
 }
 
+/// Blocking variant of [`acquire`] for orchestrators that want to wait
+/// rather than poll from outside. Loops in-process, retrying [`acquire`]
+/// at `poll` cadence until it returns [`AcquireOutcome::Acquired`] or
+/// `timeout` elapses; on timeout, returns the latest [`AcquireOutcome::Held`]
+/// so the caller can surface the holder.
+///
+/// Re-uses [`acquire`] (rather than a bare `fs::metadata` watch) so each
+/// poll inherits stale-lock recovery — a wait against a dead holder will
+/// steal the lock on the first iteration instead of waiting out the
+/// timeout.
+pub fn acquire_blocking(
+    project_id: &str,
+    task_id: &str,
+    orchestrator_tmux: Option<&str>,
+    timeout: std::time::Duration,
+    poll: std::time::Duration,
+) -> io::Result<AcquireOutcome> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let outcome = acquire(project_id, task_id, orchestrator_tmux)?;
+        if matches!(outcome, AcquireOutcome::Acquired) {
+            return Ok(outcome);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(outcome);
+        }
+        std::thread::sleep(poll);
+    }
+}
+
 /// Release the lock if `task_id` is the current holder. Returns `Ok(false)`
 /// if the lock didn't exist or is held by someone else (idempotent — a
 /// double-release is not an error). Returns `Ok(true)` on actual release.
@@ -391,6 +421,55 @@ mod tests {
             let _ = acquire("p1", "t-1", None).expect("refresh");
             let lock = current_holder("p1").expect("read").expect("present");
             assert_eq!(lock.phase, MergePhase::Simplify);
+        });
+    }
+
+    #[test]
+    fn acquire_blocking_waits_for_release() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        with_tempdir(|| {
+            // t-1 holds the lock.
+            let _ = acquire("p1", "t-1", None).expect("first acquire");
+
+            // Release after ~100ms in a background thread. We snapshot HOME
+            // before spawning since the thread won't see env mutations from
+            // its parent reliably.
+            let released = Arc::new(AtomicBool::new(false));
+            let released_clone = released.clone();
+            let home = std::env::var("HOME").expect("HOME set by with_tempdir");
+            let handle = std::thread::spawn(move || {
+                std::env::set_var("HOME", &home);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let _ = release("p1", "t-1").expect("release");
+                released_clone.store(true, Ordering::SeqCst);
+            });
+
+            let started = std::time::Instant::now();
+            let outcome = acquire_blocking(
+                "p1",
+                "t-2",
+                None,
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_millis(20),
+            )
+            .expect("acquire_blocking");
+            let elapsed = started.elapsed();
+
+            handle.join().expect("release thread");
+            assert!(released.load(Ordering::SeqCst), "releaser ran");
+            assert!(
+                matches!(outcome, AcquireOutcome::Acquired),
+                "got {:?}",
+                outcome
+            );
+            assert!(
+                elapsed < std::time::Duration::from_secs(1),
+                "elapsed {:?}",
+                elapsed
+            );
+            let lock = current_holder("p1").expect("read").expect("present");
+            assert_eq!(lock.task_id, "t-2");
         });
     }
 }
