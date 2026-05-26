@@ -913,8 +913,12 @@ fn render_card(
 
     let border_color = if selected {
         Color::White
-    } else if session.needs_attention() {
-        Color::Yellow
+    } else if session.needs_attention() || session.state == SessionState::Processing {
+        // Question gets its own blue accent so it's visually distinct from
+        // a generic WaitingForInput card — same source of truth as the
+        // state indicator icon. Processing mirrors that (green frame) so
+        // active sessions read as "alive" at a glance, not as ambient.
+        state_color(&session.state)
     } else {
         Color::Rgb(60, 60, 70)
     };
@@ -2890,8 +2894,9 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
 
 fn state_indicator(state: &SessionState) -> (&'static str, Color) {
     match state {
-        SessionState::Processing => ("󰑮", Color::Green),
+        SessionState::Processing => ("󰒓", Color::Green),
         SessionState::WaitingForInput => ("󰂞", Color::Yellow),
+        SessionState::Question => ("󰋗", Color::LightBlue),
         SessionState::Idle => ("󰒲", Color::Rgb(100, 100, 120)),
         SessionState::Inactive => ("󰜎", Color::Rgb(80, 80, 90)),
     }
@@ -3250,7 +3255,7 @@ fn kanban_column_meta(col: usize) -> (&'static str, &'static str, Color) {
     // (label, status icon, accent color). Indices match `kanban_column_tasks`.
     let (icon, accent) = match col {
         0 => ("󰟶", Color::Rgb(170, 140, 210)),
-        1 => ("󰑮", Color::LightYellow),
+        1 => ("󰒓", Color::LightYellow),
         2 => ("󱋲", Color::LightCyan),
         3 => ("", Color::LightMagenta),
         _ => ("󰸞", Color::LightGreen),
@@ -3482,7 +3487,9 @@ fn collect_agent_summary(
                 sum.processing += 1;
                 sum.alive += 1;
             }
-            SessionState::WaitingForInput => {
+            // Question is the AskUserQuestion form of waiting — projects view
+            // doesn't distinguish, so it rolls up into the waiting bucket.
+            SessionState::WaitingForInput | SessionState::Question => {
                 sum.waiting += 1;
                 sum.alive += 1;
             }
@@ -3508,7 +3515,7 @@ fn collect_agent_summary(
         sum.tool_uses = sum.tool_uses.saturating_add(s.tool_uses_count);
         let pri = match s.state {
             SessionState::Processing => 3,
-            SessionState::WaitingForInput => 2,
+            SessionState::WaitingForInput | SessionState::Question => 2,
             SessionState::Idle => 1,
             SessionState::Inactive => 0,
         };
@@ -3787,7 +3794,7 @@ fn render_task_card_active(
     let (accent, title_icon) = if col_idx == 0 {
         (Color::Rgb(170, 140, 210), "󰟶")
     } else {
-        (Color::LightYellow, "󰑮")
+        (Color::LightYellow, "󰒓")
     };
     let (border_type, border_color) = if selected {
         (BorderType::Double, Color::White)

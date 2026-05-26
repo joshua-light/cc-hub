@@ -264,9 +264,26 @@ fn is_meaningful_entry(entry: &Value) -> bool {
 /// waiting for user input, not actively processing.
 const USER_INPUT_TOOLS: &[&str] = &["EnterPlanMode", "ExitPlanMode", "AskUserQuestion"];
 
+/// Subset of [`USER_INPUT_TOOLS`] that surfaces as the distinct `Question`
+/// state instead of generic `WaitingForInput`. Right now it's just
+/// `AskUserQuestion` — a structured question vs. plan-mode review needs its
+/// own visual treatment so users can tell them apart at a glance.
+const QUESTION_TOOLS: &[&str] = &["AskUserQuestion"];
+
 /// Returns true if the assistant message contains a tool_use block for a tool
 /// that requires user interaction.
 fn assistant_awaits_user_input(entry: &Value) -> bool {
+    assistant_has_blocking_tool(entry, USER_INPUT_TOOLS)
+}
+
+/// Returns true if the assistant message contains an unresolved `AskUserQuestion`
+/// tool_use — the agent is blocked on a structured question, not just any
+/// review/permission prompt.
+fn assistant_asks_question(entry: &Value) -> bool {
+    assistant_has_blocking_tool(entry, QUESTION_TOOLS)
+}
+
+fn assistant_has_blocking_tool(entry: &Value, tools: &[&str]) -> bool {
     let content = match entry
         .get("message")
         .and_then(|m| m.get("content"))
@@ -280,7 +297,7 @@ fn assistant_awaits_user_input(entry: &Value) -> bool {
             && block
                 .get("name")
                 .and_then(|n| n.as_str())
-                .is_some_and(|name| USER_INPUT_TOOLS.contains(&name))
+                .is_some_and(|name| tools.contains(&name))
     })
 }
 
@@ -381,12 +398,18 @@ pub fn extract_state(entries: &[Value]) -> SessionState {
                 // Some tools block on user interaction — treat those as
                 // WaitingForInput so the UI shows them correctly.
                 "tool_use" => {
+                    // QUESTION_TOOLS ⊂ USER_INPUT_TOOLS, so awaits is the
+                    // single source of truth for "blocked on user"; the extra
+                    // asks_question check just routes the variant.
                     let awaits = assistant_awaits_user_input(last);
+                    let asks_question = awaits && assistant_asks_question(last);
                     debug!(
-                        "extract_state: last=assistant stop=tool_use awaits_input={}",
-                        awaits
+                        "extract_state: last=assistant stop=tool_use asks_question={} awaits_input={}",
+                        asks_question, awaits
                     );
-                    if awaits {
+                    if asks_question {
+                        SessionState::Question
+                    } else if awaits {
                         SessionState::WaitingForInput
                     } else {
                         SessionState::Processing
@@ -802,13 +825,21 @@ fn explain_last_meaningful(entries: &[Value]) -> (ExplanationStep, SessionState)
             }
             "tool_use" => {
                 let awaits = assistant_awaits_user_input(last);
+                let asks_question = awaits && assistant_asks_question(last);
                 let tool_names = collect_tool_names(last);
                 details.push(format!("tool_use blocks: {:?}", tool_names));
                 details.push(format!(
                     "USER_INPUT_TOOLS = {:?} → awaits_user_input={}",
                     USER_INPUT_TOOLS, awaits
                 ));
-                if awaits {
+                details.push(format!(
+                    "QUESTION_TOOLS = {:?} → asks_question={}",
+                    QUESTION_TOOLS, asks_question
+                ));
+                if asks_question {
+                    details.push("AskUserQuestion tool → Question".into());
+                    SessionState::Question
+                } else if awaits {
                     details.push("blocking tool → WaitingForInput".into());
                     SessionState::WaitingForInput
                 } else {
@@ -1499,6 +1530,30 @@ mod tests {
         let got = extract_current_tool(&entries).unwrap();
         assert_eq!(got.name, "Grep");
     }
+
+    #[test]
+    fn extract_state_ask_user_question_yields_question() {
+        let entries = vec![serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "stop_reason": "tool_use",
+                "content": [{"type": "tool_use", "id": "t1", "name": "AskUserQuestion",
+                    "input": {"questions": []}}]}
+        })];
+        assert_eq!(extract_state(&entries), SessionState::Question);
+    }
+
+    #[test]
+    fn extract_state_exit_plan_mode_stays_waiting_for_input() {
+        // ExitPlanMode is blocking but not a "question" — keep yellow bell.
+        let entries = vec![serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "stop_reason": "tool_use",
+                "content": [{"type": "tool_use", "id": "t1", "name": "ExitPlanMode",
+                    "input": {"plan": "do stuff"}}]}
+        })];
+        assert_eq!(extract_state(&entries), SessionState::WaitingForInput);
+    }
+
 }
 
 /// Strip XML-like tags (e.g. `<bash-stdout>`, `<system-reminder>`) that leak

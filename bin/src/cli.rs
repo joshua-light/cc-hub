@@ -173,8 +173,8 @@ Usage:
   cc-hub worker wait --task ID (--tmux NAME ... | --worktree NAME ... | --all)
                      [--timeout-secs N] [--progress [--progress-interval-secs N]]
 
-Polls cc-hub's session scanner until selected workers reach WaitingForInput or
-Inactive. Emits one JSON line with per-worker completion state.
+Polls cc-hub's session scanner until selected workers reach WaitingForInput,
+Question, or Inactive. Emits one JSON line with per-worker completion state.
 
 With --progress, emits one JSON line every N seconds (default 5) describing
 which targets are still pending vs. done. The final summary line is unchanged.
@@ -2475,10 +2475,11 @@ fn resolve_worktree_path(state: &TaskState, branch: &str) -> Option<PathBuf> {
 // `cc-hub worker wait --task ID [--tmux NAME ...] [--worktree NAME ...] [--all] [--timeout-secs N]`
 //
 // Blocks until the named worker tmux session(s) reach a terminal-for-the-
-// orchestrator state — WaitingForInput (Claude end_turn) or Inactive
-// (process gone). Replaces the orchestrator's tmux capture-pane polling
-// loop, which paid 60–90s of LLM-driven latency per spawn; this verb polls
-// scan_sessions() at 500 ms and returns within seconds.
+// orchestrator state — WaitingForInput (Claude end_turn), Question (agent
+// blocked on AskUserQuestion), or Inactive (process gone). Replaces the
+// orchestrator's tmux capture-pane polling loop, which paid 60–90s of
+// LLM-driven latency per spawn; this verb polls scan_sessions() at 500 ms
+// and returns within seconds.
 
 fn worker_subcommand(args: &[String]) -> Result<(), CliError> {
     let (verb, rest) = args
@@ -2622,7 +2623,9 @@ fn worker_wait(args: &[String]) -> Result<(), CliError> {
                 ever_seen.insert(name.clone());
                 if matches!(
                     s.state,
-                    models::SessionState::WaitingForInput | models::SessionState::Inactive
+                    models::SessionState::WaitingForInput
+                        | models::SessionState::Question
+                        | models::SessionState::Inactive
                 ) {
                     done.insert(
                         name.clone(),

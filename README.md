@@ -40,7 +40,7 @@ Project state lives at `~/.cc-hub/projects.toml` and
 | Multiplexer | [`tmux`](https://github.com/tmux/tmux) on `PATH` | [`psmux`](https://github.com/psmux/psmux) on `PATH`, invoked as `tmux` |
 | Claude Code | `claude` on `PATH` | `claude.exe` on `PATH` |
 | Launch command | `cc-hub-new` resolvable in an interactive shell (alias/function in your rc) | `cc-hub-new` resolvable in PowerShell (function in `$PROFILE`) |
-| Terminal font | Nerd Font (for state glyphs `󰑮 󰂞 󰒲`) | Nerd Font (for state glyphs `󰑮 󰂞 󰒲`) |
+| Terminal font | Nerd Font (for state glyphs `󰒓 󰂞 󰒲`) | Nerd Font (for state glyphs `󰒓 󰂞 󰒲`) |
 | Terminal emulator | one of `kitty`, `foot`, `alacritty`, `wezterm`, `ghostty` on `PATH` (only used for external reattach) | any ConPTY-capable terminal; reattach is embedded, not external |
 | Window manager (optional) | Hyprland (`HYPRLAND_INSTANCE_SIGNATURE` set) or `xdotool` for focus/close | — |
 

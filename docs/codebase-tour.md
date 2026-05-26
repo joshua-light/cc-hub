@@ -88,7 +88,8 @@ matching its tmux name against `ProjectsSnapshot::roles_by_tmux`.
 - **`conversation.rs`** — JSONL parsing + state classification. Reads a
   growing tail until at least one assistant entry is in window
   (`read_jsonl_tail_for_state` at `lib/src/conversation.rs:17`), then
-  extracts the current state (`Processing | WaitingForInput | Idle`) and
+  extracts the current state (`Processing | WaitingForInput | Question |
+  Idle | Inactive`) and
   decorates `SessionInfo` with last user message, current tool, model,
   context tokens.
 - **`models.rs`** — `SessionInfo`, `SessionState`, `SessionDetail`,

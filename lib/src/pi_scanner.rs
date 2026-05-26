@@ -67,7 +67,9 @@ fn build_session_info(
     match state {
         SessionState::Inactive => parsed_state = SessionState::Inactive,
         SessionState::Processing => parsed_state = SessionState::Processing,
-        SessionState::Idle | SessionState::WaitingForInput => {}
+        // Pi sessions can't reach Question (no AskUserQuestion tool), but the
+        // match must be exhaustive — fall through like WaitingForInput.
+        SessionState::Idle | SessionState::WaitingForInput | SessionState::Question => {}
     }
     let last_user_message = pi_conversation::extract_last_user_message(&tail);
     let last_activity = pi_conversation::extract_last_activity(&tail);

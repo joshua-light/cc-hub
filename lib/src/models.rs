@@ -21,6 +21,11 @@ pub struct RawSession {
 pub enum SessionState {
     Processing,
     WaitingForInput,
+    /// Agent's latest unresolved tool_use is `AskUserQuestion` — it is
+    /// specifically waiting on a structured answer, not just "any input".
+    /// Treated like WaitingForInput everywhere except in the UI, where it
+    /// gets a distinct blue question-mark indicator.
+    Question,
     Idle,
     Inactive,
 }
@@ -28,10 +33,11 @@ pub enum SessionState {
 impl SessionState {
     pub fn sort_key(&self) -> u8 {
         match self {
-            SessionState::WaitingForInput => 0,
-            SessionState::Idle => 1,
-            SessionState::Processing => 2,
-            SessionState::Inactive => 3,
+            SessionState::Question => 0,
+            SessionState::WaitingForInput => 1,
+            SessionState::Idle => 2,
+            SessionState::Processing => 3,
+            SessionState::Inactive => 4,
         }
     }
 }
@@ -41,6 +47,7 @@ impl fmt::Display for SessionState {
         match self {
             SessionState::Processing => write!(f, "processing"),
             SessionState::WaitingForInput => write!(f, "waiting for input"),
+            SessionState::Question => write!(f, "question"),
             SessionState::Idle => write!(f, "idle"),
             SessionState::Inactive => write!(f, "inactive"),
         }
@@ -75,7 +82,10 @@ pub struct SessionInfo {
 
 impl SessionInfo {
     pub fn needs_attention(&self) -> bool {
-        self.state == SessionState::WaitingForInput
+        matches!(
+            self.state,
+            SessionState::WaitingForInput | SessionState::Question
+        )
     }
 
     pub fn agent_badge(&self) -> String {

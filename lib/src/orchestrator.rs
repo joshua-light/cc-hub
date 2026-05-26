@@ -914,7 +914,7 @@ All edits happen inside a worktree branch. You **do not** edit the project's mai
 
 # Waiting for workers to finish
 
-The fastest way to know a worker is done is to block on `cc-hub worker wait`. It polls the scanner at sub-second cadence and returns as soon as the worker reaches `WaitingForInput` (turn ended) or `Inactive` (process gone). Use this instead of shell sleep loops or repeated tmux captures — those add 60–90s of LLM-driven latency per spawn.
+The fastest way to know a worker is done is to block on `cc-hub worker wait`. It polls the scanner at sub-second cadence and returns as soon as the worker reaches `WaitingForInput` (turn ended), `Question` (agent blocked on AskUserQuestion), or `Inactive` (process gone). Use this instead of shell sleep loops or repeated tmux captures — those add 60–90s of LLM-driven latency per spawn.
 
 - Wait on a single worker (most common):
   `{bin} worker wait --task {task_id} --worktree NAME`
