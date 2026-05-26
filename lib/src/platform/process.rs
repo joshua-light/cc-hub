@@ -72,15 +72,41 @@ mod imp {
     use super::ProcessInfo;
     use libproc::bsd_info::BSDInfo;
     use libproc::proc_pid;
+    use log::debug;
     use std::path::Path;
+    use std::process::Command;
 
     pub struct Process;
 
+    /// `ps` fallback for [`Process::parent_pid`]. `libproc::pidinfo` returns
+    /// `Err` for some processes the caller doesn't own — notably
+    /// `/usr/bin/login`, which is setuid-root and which kitty / Terminal.app
+    /// insert between the emulator and the user's shell. Without this
+    /// fallback, [`super::walk_ancestors`] stops at the login process and
+    /// never reaches the terminal emulator that owns the on-screen window.
+    /// `ps` reads ppids through sysctl(`KERN_PROC_PID`), which has no such
+    /// restriction.
+    fn parent_pid_ps(pid: u32) -> Option<u32> {
+        let out = Command::new("/bin/ps")
+            .args(["-o", "ppid=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout);
+        s.trim().parse::<u32>().ok()
+    }
+
     impl ProcessInfo for Process {
         fn parent_pid(pid: u32) -> Option<u32> {
-            proc_pid::pidinfo::<BSDInfo>(pid as i32, 0)
-                .ok()
-                .map(|info| info.pbi_ppid)
+            if let Ok(info) = proc_pid::pidinfo::<BSDInfo>(pid as i32, 0) {
+                return Some(info.pbi_ppid);
+            }
+            // libproc denied us (cross-user / setuid-root). Try ps.
+            let p = parent_pid_ps(pid);
+            debug!("parent_pid: libproc failed for pid {}, ps -> {:?}", pid, p);
+            p
         }
 
         fn name(pid: u32) -> String {
