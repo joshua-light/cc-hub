@@ -1,7 +1,8 @@
 use crate::acks::Acks;
+use crate::bookmarks::Bookmarks;
 use crate::config;
 use crate::conversation::StateExplanation;
-use crate::folder_picker::FolderPicker;
+use crate::folder_picker::{FolderPicker, PickerMode};
 use crate::live_view::LiveView;
 use crate::metrics::{MetricsAnalysis, SelectableSession};
 use crate::models::{ProjectGroup, SessionDetail, SessionInfo, SessionState};
@@ -173,6 +174,10 @@ pub struct App {
     pub dispatch_target: Option<(u32, String, String)>,
     pub tmux_pane: Option<TmuxPaneView>,
     pub folder_picker: Option<FolderPicker>,
+    /// Persistent folder bookmarks shown by the bookmarks picker (`M`) and
+    /// queried while rendering the regular picker so already-bookmarked
+    /// entries get a marker. Loaded once on startup.
+    pub bookmarks: Bookmarks,
     pub gh_create_input: Option<GhCreateInput>,
     pub current_tab: Tab,
     pub metrics: Option<MetricsAnalysis>,
@@ -297,6 +302,7 @@ impl App {
             dispatch_target: None,
             tmux_pane: None,
             folder_picker: None,
+            bookmarks: Bookmarks::load(),
             gh_create_input: None,
             current_tab: Tab::Sessions,
             metrics: None,
@@ -799,6 +805,35 @@ impl App {
             .unwrap_or_else(|| PathBuf::from("/"));
         self.folder_picker = Some(FolderPicker::new(start));
         self.view = View::FolderPicker;
+    }
+
+    /// Open the picker pre-loaded with the user's bookmarked folders.
+    /// Returns `false` (no-op) when no bookmarks exist so the caller can
+    /// show a hint instead of silently opening an empty popup.
+    pub fn enter_bookmarks_picker(&mut self) -> bool {
+        let entries = self.bookmarks.list();
+        if entries.is_empty() {
+            return false;
+        }
+        self.folder_picker = Some(FolderPicker::new_bookmarks(entries));
+        self.view = View::FolderPicker;
+        true
+    }
+
+    /// Toggle the bookmark on the highlighted picker entry. Returns the
+    /// new state plus a display path the caller can use for status text,
+    /// or `None` when no entry is selected. Also keeps the picker view
+    /// in sync: a toggle-off in Bookmarks mode removes the row so the
+    /// list doesn't show stale entries.
+    pub fn toggle_selected_bookmark(&mut self) -> Option<(bool, String)> {
+        let picker = self.folder_picker.as_mut()?;
+        let path = picker.selected_path()?;
+        let display = path.display().to_string();
+        let added = self.bookmarks.toggle(path);
+        if !added && picker.mode == PickerMode::Bookmarks {
+            picker.remove_selected();
+        }
+        Some((added, display))
     }
 
     /// Open the folder picker rooted at the most useful starting point for

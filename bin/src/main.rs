@@ -1,11 +1,13 @@
 #![allow(clippy::collapsible_match)]
 
 use cc_hub_lib::{
-    app, auto_review, clipboard, config, conversation, focus, gh, live_view, metrics, models,
-    platform, projects_scan, scanner, send, spawn, title, tmux_pane, triage, ui, usage, watcher,
+    app, auto_review, clipboard, config, conversation, focus, folder_picker, gh, live_view,
+    metrics, models, platform, projects_scan, scanner, send, spawn, title, tmux_pane, triage, ui,
+    usage, watcher,
 };
 
 use app::{App, Tab, View};
+use folder_picker::PickerMode;
 
 mod cli;
 
@@ -324,6 +326,46 @@ fn open_path_detached(path: &str) -> io::Result<()> {
         .stderr(Stdio::null())
         .spawn()?;
     Ok(())
+}
+
+/// Spawn a session / project task at `cwd` from the folder picker,
+/// routing through the right App method based on the picker mode flags.
+/// Closes the picker on completion (the App helpers handle that for the
+/// register/projects branches).
+fn dispatch_picked_cwd(app: &mut App, cwd: &str) {
+    if app.registering_project_only {
+        let status = match app.register_picked_project(cwd) {
+            Ok(name) => format!("registered project: {}", name),
+            Err(e) => format!("register failed: {}", e),
+        };
+        app.set_status(status);
+    } else if app.creating_project_task {
+        app.enter_project_task_prompt(cwd.to_string());
+    } else {
+        app.close_folder_picker();
+        let agent_id = config::get().default_session_agent_id();
+        let status = match spawn::spawn_agent_session(&agent_id, cwd, None, None, false) {
+            Ok(name) => format!("started {} [{}]", agent_id, name),
+            Err(e) => format!("spawn failed: {}", e),
+        };
+        app.set_status(status);
+    }
+}
+
+/// Resolve the highlighted picker entry and dispatch it via
+/// [`dispatch_picked_cwd`]. Works in both Browse and Bookmarks mode since
+/// the lookup goes through `FolderPicker::selected_path`. No-ops by
+/// closing the picker when nothing is selected.
+fn pick_from_folder_picker(app: &mut App) {
+    let cwd = app
+        .folder_picker
+        .as_ref()
+        .and_then(|p| p.selected_path())
+        .map(|p| p.display().to_string());
+    match cwd {
+        Some(cwd) => dispatch_picked_cwd(app, &cwd),
+        None => app.close_folder_picker(),
+    }
 }
 
 /// Size for a popup tmux pane: terminal minus a margin, with floor. The
@@ -1431,6 +1473,13 @@ async fn run(
                     (View::Grid, KeyCode::Char('N')) if on_sessions => {
                         app.enter_folder_picker();
                     }
+                    (View::Grid, KeyCode::Char('M')) if on_sessions => {
+                        if !app.enter_bookmarks_picker() {
+                            app.set_status(
+                                "no bookmarks — press N then m on a folder to add one".into(),
+                            );
+                        }
+                    }
                     (View::FolderPicker, KeyCode::Esc | KeyCode::Char('q')) => {
                         app.close_folder_picker();
                     }
@@ -1444,8 +1493,25 @@ async fn run(
                             p.move_up();
                         }
                     }
+                    (View::FolderPicker, KeyCode::Char('m')) => {
+                        match app.toggle_selected_bookmark() {
+                            Some((true, path)) => {
+                                app.set_status(format!("bookmarked {}", path))
+                            }
+                            Some((false, path)) => {
+                                app.set_status(format!("unbookmarked {}", path))
+                            }
+                            None => app.set_status("no folder selected".into()),
+                        }
+                    }
                     (View::FolderPicker, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) => {
-                        if let Some(p) = app.folder_picker.as_mut() {
+                        let bookmarks_mode = app
+                            .folder_picker
+                            .as_ref()
+                            .is_some_and(|p| p.mode == PickerMode::Bookmarks);
+                        if bookmarks_mode {
+                            pick_from_folder_picker(&mut app);
+                        } else if let Some(p) = app.folder_picker.as_mut() {
                             p.descend();
                         }
                     }
@@ -1458,73 +1524,47 @@ async fn run(
                         }
                     }
                     (View::FolderPicker, KeyCode::Char(' ')) => {
-                        let cwd = app.folder_picker.as_ref().and_then(|p| {
-                            p.entries
-                                .get(p.selection)
-                                .map(|name| p.current_dir.join(name).display().to_string())
-                        });
-                        let projects_mode = app.creating_project_task;
-                        let register_mode = app.registering_project_only;
-                        if let Some(cwd) = cwd {
-                            if register_mode {
-                                let status = match app.register_picked_project(&cwd) {
-                                    Ok(name) => format!("registered project: {}", name),
-                                    Err(e) => format!("register failed: {}", e),
-                                };
-                                app.set_status(status);
-                            } else if projects_mode {
-                                app.enter_project_task_prompt(cwd);
-                            } else {
-                                app.close_folder_picker();
-                                let agent_id = config::get().default_session_agent_id();
-                                let status = match spawn::spawn_agent_session(
-                                    &agent_id, &cwd, None, None, false,
-                                ) {
-                                    Ok(name) => format!("started {} [{}]", agent_id, name),
-                                    Err(e) => format!("spawn failed: {}", e),
-                                };
-                                app.set_status(status);
-                            }
-                        } else {
-                            app.close_folder_picker();
-                        }
+                        pick_from_folder_picker(&mut app);
                     }
                     (View::FolderPicker, KeyCode::Char('.')) => {
-                        let cwd = app
+                        // Bookmarks mode has no meaningful "current dir" —
+                        // the entries are absolute paths from disk — so
+                        // collapse `.` into the same action as space/Enter.
+                        let bookmarks_mode = app
                             .folder_picker
                             .as_ref()
-                            .map(|p| p.current_dir.display().to_string());
-                        let projects_mode = app.creating_project_task;
-                        let register_mode = app.registering_project_only;
-                        if let Some(cwd) = cwd {
-                            if register_mode {
-                                let status = match app.register_picked_project(&cwd) {
-                                    Ok(name) => format!("registered project: {}", name),
-                                    Err(e) => format!("register failed: {}", e),
-                                };
-                                app.set_status(status);
-                            } else if projects_mode {
-                                app.enter_project_task_prompt(cwd);
+                            .is_some_and(|p| p.mode == PickerMode::Bookmarks);
+                        if bookmarks_mode {
+                            pick_from_folder_picker(&mut app);
+                        } else {
+                            let cwd = app
+                                .folder_picker
+                                .as_ref()
+                                .map(|p| p.current_dir.display().to_string());
+                            if let Some(cwd) = cwd {
+                                dispatch_picked_cwd(&mut app, &cwd);
                             } else {
                                 app.close_folder_picker();
-                                let agent_id = config::get().default_session_agent_id();
-                                let status = match spawn::spawn_agent_session(
-                                    &agent_id, &cwd, None, None, false,
-                                ) {
-                                    Ok(name) => format!("started {} [{}]", agent_id, name),
-                                    Err(e) => format!("spawn failed: {}", e),
-                                };
-                                app.set_status(status);
                             }
-                        } else {
-                            app.close_folder_picker();
                         }
                     }
                     (View::FolderPicker, KeyCode::Char('c')) => {
-                        app.enter_gh_create_input(false);
+                        if !app
+                            .folder_picker
+                            .as_ref()
+                            .is_some_and(|p| p.mode == PickerMode::Bookmarks)
+                        {
+                            app.enter_gh_create_input(false);
+                        }
                     }
                     (View::FolderPicker, KeyCode::Char('C')) => {
-                        app.enter_gh_create_input(true);
+                        if !app
+                            .folder_picker
+                            .as_ref()
+                            .is_some_and(|p| p.mode == PickerMode::Bookmarks)
+                        {
+                            app.enter_gh_create_input(true);
+                        }
                     }
                     (View::GhCreateInput, KeyCode::Esc) => {
                         app.close_gh_create_input();

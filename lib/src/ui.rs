@@ -1,5 +1,6 @@
 use crate::app::{status_msg_ttl, App, Tab, View, TABS};
 use crate::config;
+use crate::folder_picker::PickerMode;
 use crate::conversation::{StateExplanation, Verdict};
 use crate::metrics::{MetricsAnalysis, ModelStats, SessionSummary, ToolStats};
 use crate::models::{short_sid, SessionDetail, SessionInfo, SessionState};
@@ -117,18 +118,33 @@ fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
     let Some(picker) = app.folder_picker.as_ref() else {
         return;
     };
+    let bookmarks_mode = picker.mode == PickerMode::Bookmarks;
 
     let popup = centered_fixed(area, 80, 24);
     frame.render_widget(Clear, popup);
 
+    let (title_text, footer_text, empty_text) = if bookmarks_mode {
+        (
+            " New session · bookmarks ",
+            " j/k:move · enter/space:pick · m:unbookmark · esc:cancel ",
+            "  (no bookmarks — press N to browse, then m on a folder)",
+        )
+    } else {
+        (
+            " New session · pick folder ",
+            " enter:descend · bksp:parent · space:pick · .:pick cwd · m:bookmark · c/C:gh new · esc:cancel ",
+            "  (no subdirectories)",
+        )
+    };
+
     let block = popup_block(Span::styled(
-        " New session · pick folder ",
+        title_text,
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
     ))
     .title_bottom(Span::styled(
-        " enter:descend · bksp:parent · space:pick · .:pick cwd · c/C:gh new · esc:cancel ",
+        footer_text,
         Style::default().fg(Color::Rgb(110, 110, 130)),
     ));
     let inner = block.inner(popup);
@@ -139,17 +155,28 @@ fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let path_area = Rect::new(inner.x, inner.y, inner.width, 1);
-    let path_str = picker.current_dir.display().to_string();
-    let path_line = Line::from(vec![
-        Span::styled(" 󰉋 ", Style::default().fg(Color::Cyan)),
-        Span::styled(
-            path_str,
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(path_line), path_area);
+    let header_line = if bookmarks_mode {
+        Line::from(vec![
+            Span::styled(" ★ ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{} bookmark(s)", picker.entries.len()),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" 󰉋 ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                picker.current_dir.display().to_string(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+    };
+    frame.render_widget(Paragraph::new(header_line), path_area);
 
     let list_h = inner.height - 2;
     let list_area = Rect::new(inner.x, inner.y + 2, inner.width, list_h);
@@ -157,7 +184,7 @@ fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     if picker.entries.is_empty() {
         lines.push(Line::from(Span::styled(
-            "  (no subdirectories)",
+            empty_text,
             Style::default().fg(Color::DarkGray),
         )));
     } else {
@@ -165,7 +192,7 @@ fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
         let start = picker.selection.saturating_sub(visible.saturating_sub(1));
         for (i, name) in picker.entries.iter().enumerate().skip(start).take(visible) {
             let selected = i == picker.selection;
-            let (marker, style) = if selected {
+            let (cursor_marker, style) = if selected {
                 (
                     "▶ ",
                     Style::default()
@@ -176,9 +203,31 @@ fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 ("  ", Style::default().fg(Color::Rgb(200, 200, 210)))
             };
+            let display = if bookmarks_mode {
+                name.clone()
+            } else {
+                format!("{}/", name)
+            };
+            // In browse mode, mark already-bookmarked subdirs with a star
+            // so the user doesn't re-bookmark by accident.
+            let star_span = if !bookmarks_mode
+                && app
+                    .bookmarks
+                    .contains(&picker.current_dir.join(name))
+            {
+                Span::styled(
+                    "★ ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::raw("")
+            };
             lines.push(Line::from(vec![
-                Span::styled(marker, style),
-                Span::styled(format!("{}/", name), style),
+                Span::styled(cursor_marker, style),
+                star_span,
+                Span::styled(display, style),
             ]));
         }
     }
@@ -2822,7 +2871,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         let keybinds: &str = match app.view {
             View::Grid => match app.current_tab {
                 Tab::Projects => "tab:next  H/L:project  h/l:col  j/k:task  enter:focus orch  f:agent terminal/resurrect  R:restart  n:new task  N:register project  b:backlog  r:result  c:copy id  x:delete task  X:remove project  q:quit",
-                Tab::Sessions => "tab:next  h/j/k/l:nav  n:new  N:new in…  i:info  D:why?  enter/f:focus/resume  o:shell  x:close  H:inactive  W:workers  q:quit",
+                Tab::Sessions => "tab:next  h/j/k/l:nav  n:new  N:new in…  M:bookmarks  i:info  D:why?  enter/f:focus/resume  o:shell  x:close  H:inactive  W:workers  q:quit",
                 Tab::Metrics => "tab:next  j/k:select  enter:view transcript  r:refresh  q:quit",
             },
             View::Popup => "j/k:scroll  esc:close  q:close",
@@ -2831,7 +2880,17 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             View::StateDebug => "j/k:scroll  esc:close  q:close",
             View::PromptInput => "type prompt  enter:dispatch  esc:cancel",
             View::TmuxPane => "forwarding keys to tmux · F1: detach & close",
-            View::FolderPicker => "j/k:move  enter:descend  bksp:parent  space:pick  .:pick cwd  c/C:gh new (pub/priv)  esc:cancel",
+            View::FolderPicker => {
+                if app
+                    .folder_picker
+                    .as_ref()
+                    .is_some_and(|p| p.mode == PickerMode::Bookmarks)
+                {
+                    "j/k:move  enter/space:pick  m:unbookmark  esc:cancel"
+                } else {
+                    "j/k:move  enter:descend  bksp:parent  space:pick  .:pick cwd  m:bookmark  c/C:gh new (pub/priv)  esc:cancel"
+                }
+            }
             View::GhCreateInput => "type name  tab:toggle public/private  enter:create  esc:cancel",
             View::ProjectsResult => "j/k:artifact  e:expand  PgUp/PgDn:scroll  c:copy path  o:xdg-open  esc/r:close",
             View::Backlog => "j/k:select  s/enter:start  esc/q:close",
