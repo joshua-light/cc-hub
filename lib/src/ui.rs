@@ -726,7 +726,17 @@ fn render_title_bar(frame: &mut Frame, area: Rect, app: &App) {
 
     let bg = Style::default().bg(Color::Rgb(30, 30, 40)).fg(Color::White);
     let left_line = Line::from(left_spans);
-    let right_line = app.usage_line.clone();
+
+    let mut right_spans = build_session_count_spans(&app.session_counts);
+    let usage_spans = app.usage_line.spans.iter().cloned();
+    if !right_spans.is_empty() && app.usage_line.width() > 0 {
+        right_spans.push(Span::styled(
+            " │ ",
+            Style::default().fg(Color::Rgb(60, 60, 70)),
+        ));
+    }
+    right_spans.extend(usage_spans);
+    let right_line = Line::from(right_spans);
     let right_w = right_line.width() as u16;
     let left_w = left_line.width() as u16;
 
@@ -748,6 +758,24 @@ fn render_title_bar(frame: &mut Frame, area: Rect, app: &App) {
             .alignment(Alignment::Right),
         chunks[1],
     );
+}
+
+fn build_session_count_spans(c: &crate::session_count::SessionCounts) -> Vec<Span<'static>> {
+    if c.today == 0 && c.week == 0 {
+        return Vec::new();
+    }
+    let label_style = Style::default().fg(Color::DarkGray);
+    let num_style = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    let sep_style = Style::default().fg(Color::Rgb(60, 60, 70));
+    vec![
+        Span::styled(" today ", label_style),
+        Span::styled(c.today.to_string(), num_style),
+        Span::styled(" │ ", sep_style),
+        Span::styled("this wk ", label_style),
+        Span::styled(c.week.to_string(), num_style),
+    ]
 }
 
 pub fn build_usage_line(u: &UsageInfo) -> Line<'static> {

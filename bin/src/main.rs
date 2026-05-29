@@ -2,8 +2,8 @@
 
 use cc_hub_lib::{
     app, auto_review, clipboard, config, conversation, focus, folder_picker, gh, live_view,
-    metrics, models, platform, projects_scan, scanner, send, spawn, title, tmux_pane, triage, ui,
-    usage, watcher,
+    metrics, models, platform, projects_scan, scanner, send, session_count, spawn, title,
+    tmux_pane, triage, ui, usage, watcher,
 };
 
 use app::{App, Tab, View};
@@ -276,6 +276,7 @@ enum ScanMsg {
     Detail(models::SessionDetail),
     StateDebug(models::SessionInfo, conversation::StateExplanation),
     Usage(usage::UsageInfo),
+    SessionCounts(session_count::SessionCounts),
     Metrics(metrics::MetricsAnalysis),
     MetricsProgress {
         scanned: usize,
@@ -537,11 +538,13 @@ async fn run(
         let mut interval = tokio::time::interval(config::get().scan.usage_refresh_interval());
         loop {
             interval.tick().await;
-            if let Some(u) = tokio::task::spawn_blocking(usage::fetch_usage)
-                .await
-                .ok()
-                .flatten()
-            {
+            let (usage_opt, counts) = tokio::task::spawn_blocking(|| {
+                (usage::fetch_usage(), session_count::count_recent_sessions())
+            })
+            .await
+            .unwrap_or((None, session_count::SessionCounts::default()));
+            let _ = usage_tx.send(ScanMsg::SessionCounts(counts)).await;
+            if let Some(u) = usage_opt {
                 let _ = usage_tx.send(ScanMsg::Usage(u)).await;
             }
         }
@@ -1799,6 +1802,9 @@ async fn run(
                 ScanMsg::Usage(u) => {
                     let line = ui::build_usage_line(&u);
                     app.update_usage(u, line);
+                }
+                ScanMsg::SessionCounts(c) => {
+                    app.update_session_counts(c);
                 }
                 ScanMsg::Metrics(m) => {
                     app.update_metrics(m);

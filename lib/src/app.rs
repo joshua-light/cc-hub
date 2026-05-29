@@ -7,6 +7,7 @@ use crate::live_view::LiveView;
 use crate::metrics::{MetricsAnalysis, SelectableSession};
 use crate::models::{ProjectGroup, SessionDetail, SessionInfo, SessionState};
 use crate::projects_scan::ProjectsSnapshot;
+use crate::session_count::SessionCounts;
 use crate::tmux_pane::TmuxPaneView;
 use crate::usage::UsageInfo;
 use ratatui::text::Line;
@@ -170,6 +171,7 @@ pub struct App {
     pub state_debug_scroll: u16,
     pub usage: Option<UsageInfo>,
     pub usage_line: Line<'static>,
+    pub session_counts: SessionCounts,
     pub prompt_buffer: String,
     pub dispatch_target: Option<(u32, String, String)>,
     pub tmux_pane: Option<TmuxPaneView>,
@@ -298,6 +300,7 @@ impl App {
             state_debug_scroll: 0,
             usage: None,
             usage_line: Line::default(),
+            session_counts: SessionCounts::default(),
             prompt_buffer: String::new(),
             dispatch_target: None,
             tmux_pane: None,
@@ -1146,6 +1149,10 @@ impl App {
     pub fn update_usage(&mut self, usage: UsageInfo, rendered: Line<'static>) {
         self.usage = Some(usage);
         self.usage_line = rendered;
+    }
+
+    pub fn update_session_counts(&mut self, counts: SessionCounts) {
+        self.session_counts = counts;
     }
 
     pub fn enter_confirm_close(&mut self) {

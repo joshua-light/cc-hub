@@ -31,6 +31,7 @@ pub(crate) mod test_util {
 }
 pub mod scanner;
 pub mod send;
+pub mod session_count;
 pub mod spawn;
 pub mod title;
 pub mod tmux_pane;
