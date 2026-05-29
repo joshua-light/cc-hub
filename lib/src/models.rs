@@ -15,6 +15,14 @@ pub struct RawSession {
     pub cwd: String,
     #[serde(rename = "startedAt")]
     pub started_at: u64,
+    /// Live status Claude Code writes to the session file: `"busy"`,
+    /// `"idle"`, or `"waiting"`. `"waiting"` means the agent is blocked on an
+    /// interactive prompt (AskUserQuestion, permission prompt, or plan
+    /// review) — and crucially, it is set the moment the prompt opens, before
+    /// the prompt's tool_use is flushed to the transcript. Absent on older
+    /// clients that don't write it.
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

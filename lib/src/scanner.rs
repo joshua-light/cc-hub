@@ -522,6 +522,35 @@ fn read_raw_sessions() -> Vec<RawSession> {
     by_session_id.into_values().collect()
 }
 
+/// Reconcile the transcript-derived state with the live `status` Claude Code
+/// writes to the session file.
+///
+/// When the agent blocks on an interactive prompt (AskUserQuestion, permission
+/// prompt, plan review) it sets `status="waiting"` immediately — but the
+/// prompt's `tool_use` block isn't flushed to the JSONL transcript until the
+/// user answers it. So while the prompt is open, the transcript's last
+/// meaningful entry is the *previous* (already-resolved) turn, and
+/// [`conversation::extract_state`] reads it as `Processing`. That's why a card
+/// only turned blue *after* the user answered.
+///
+/// Trusting the session file's `waiting` status lets us surface the blue
+/// `Question` state while the prompt is actually open. We can't tell *which*
+/// kind of prompt it is (the session file labels even AskUserQuestion as a
+/// "permission prompt"), so every live `waiting` session shows as `Question`.
+/// Only `waiting` is overridden; every other status defers to the transcript,
+/// which handles the many edge cases (interrupts, thinking, sub-agents, …).
+fn reconcile_with_session_status(
+    transcript_state: SessionState,
+    is_alive: bool,
+    status: Option<&str>,
+) -> SessionState {
+    if is_alive && status == Some("waiting") {
+        SessionState::Question
+    } else {
+        transcript_state
+    }
+}
+
 /// Extracted JSONL data for a session, avoiding a 7-element tuple.
 struct JsonlData {
     state: SessionState,
@@ -833,6 +862,19 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
                 }
             };
 
+            // The transcript can't see a prompt that's open but not yet
+            // answered; the session file's live status can. Surface `waiting`
+            // as the blue Question state while the prompt is open.
+            let reconciled =
+                reconcile_with_session_status(data.state.clone(), is_alive, raw.status.as_deref());
+            if reconciled != data.state {
+                debug!(
+                    "  sid={} status={:?} overrides {} → {}",
+                    sid_short, raw.status, data.state, reconciled
+                );
+                data.state = reconciled;
+            }
+
             if !is_alive {
                 data.state = SessionState::Inactive;
             }
@@ -1041,5 +1083,63 @@ mod tests {
                 find_orchestrator_session_id(std::path::Path::new("/tmp/project"), task_id, None);
             assert_eq!(sid.as_deref(), Some("good-session"));
         });
+    }
+
+    // While an AskUserQuestion / permission prompt is open, Claude Code sets
+    // the session file's status to "waiting" but hasn't yet written the
+    // prompt's tool_use to the transcript, so the transcript reads as
+    // Processing. A live "waiting" session must show as Question (blue) anyway.
+    #[test]
+    fn live_waiting_status_overrides_processing_to_question() {
+        assert_eq!(
+            reconcile_with_session_status(SessionState::Processing, true, Some("waiting")),
+            SessionState::Question
+        );
+    }
+
+    // Other statuses defer entirely to the transcript-derived state.
+    #[test]
+    fn non_waiting_status_defers_to_transcript_state() {
+        for status in [Some("busy"), Some("idle"), None] {
+            assert_eq!(
+                reconcile_with_session_status(SessionState::Processing, true, status),
+                SessionState::Processing
+            );
+            assert_eq!(
+                reconcile_with_session_status(SessionState::WaitingForInput, true, status),
+                SessionState::WaitingForInput
+            );
+        }
+    }
+
+    // A dead process's stale "waiting" status must not resurrect it as a
+    // pending question — liveness gates the override.
+    #[test]
+    fn dead_session_waiting_status_is_not_question() {
+        assert_eq!(
+            reconcile_with_session_status(SessionState::Processing, false, Some("waiting")),
+            SessionState::Processing
+        );
+    }
+
+    // Guard the serde wiring: the override is only reachable if `status`
+    // actually deserializes off the real session-file shape Claude Code writes.
+    #[test]
+    fn raw_session_deserializes_waiting_status() {
+        let json = r#"{"pid":61091,"sessionId":"1e391030","cwd":"/x","startedAt":1780046464303,
+            "procStart":"Fri May 29 09:21:03 2026","version":"2.1.156","peerProtocol":1,
+            "kind":"interactive","entrypoint":"cli","status":"waiting","updatedAt":1780048108142,
+            "waitingFor":"permission prompt"}"#;
+        let raw: RawSession = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(raw.status.as_deref(), Some("waiting"));
+    }
+
+    // Older clients omit `status` entirely — must still deserialize, leaving
+    // the transcript as the sole source of truth.
+    #[test]
+    fn raw_session_without_status_defaults_to_none() {
+        let json = r#"{"pid":1,"sessionId":"s","cwd":"/x","startedAt":1}"#;
+        let raw: RawSession = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(raw.status, None);
     }
 }
