@@ -1,4 +1,4 @@
-use crate::app::{status_msg_ttl, App, Tab, View, TABS};
+use crate::app::{status_msg_ttl, App, PendingConfirm, Tab, View, TABS};
 use crate::config;
 use crate::conversation::{StateExplanation, Verdict};
 use crate::folder_picker::PickerMode;
@@ -619,38 +619,34 @@ fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
     // registry-level project removal, project-task deletion, orchestrator
     // restart, and session close. Project-delete wins precedence because
     // it's the biggest blast radius if multiple actions somehow got staged.
-    let (title, display, consequence, action_color) = if let Some(pending) =
-        app.pending_project_delete.as_ref()
-    {
-        (
+    let (title, display, consequence, action_color) = match app.pending_confirm.as_ref() {
+        Some(PendingConfirm::ProjectDelete(pending)) => (
             " Delete project? ",
             pending.display.clone(),
             "Removes this project from cc-hub and deletes its hub state. The repository directory is not deleted.",
             Color::Red,
-        )
-    } else if let Some(pending) = app.pending_task_delete.as_ref() {
-        (
+        ),
+        Some(PendingConfirm::TaskDelete(pending)) => (
             " Delete task? ",
             pending.display.clone(),
             "Kills the orchestrator if it is live and removes this task's state directory. Worker sessions are left alone.",
             Color::Red,
-        )
-    } else if let Some(pending) = app.pending_task_restart.as_ref() {
-        (
+        ),
+        Some(PendingConfirm::TaskRestart(pending)) => (
             " Restart orchestrator? ",
             pending.display.clone(),
             "Kills the current orchestrator if it is live, then starts a new one from the original task prompt. Task history is preserved.",
             Color::Yellow,
-        )
-    } else if let Some(pending) = app.pending_close.as_ref() {
-        (
+        ),
+        Some(PendingConfirm::Close(pending)) => (
             " Close terminal? ",
             pending.display.clone(),
             "Closes the OS terminal window hosting this session when the platform can resolve it. The tmux session may survive.",
             Color::Red,
-        )
-    } else {
-        return;
+        ),
+        None => {
+            return;
+        }
     };
 
     let popup = centered_fixed(area, 76, 8);

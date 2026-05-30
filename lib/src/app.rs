@@ -96,8 +96,8 @@ pub struct PendingClose {
 }
 
 /// Pending project-task deletion. Shown via the same `ConfirmClose` view
-/// as session close, distinguished by [`App::pending_task_delete`] being
-/// `Some` (vs. [`App::pending_close`]).
+/// as session close, distinguished by the [`PendingConfirm::TaskDelete`]
+/// variant (vs. [`PendingConfirm::Close`]).
 #[derive(Clone, Debug)]
 pub struct PendingTaskDelete {
     pub project_id: String,
@@ -112,8 +112,8 @@ pub struct PendingTaskDelete {
 }
 
 /// Pending registry-level project removal. Shown via the same
-/// `ConfirmClose` view as task delete, distinguished by
-/// [`App::pending_project_delete`] being `Some`.
+/// `ConfirmClose` view as task delete, distinguished by the
+/// [`PendingConfirm::ProjectDelete`] variant.
 #[derive(Clone, Debug)]
 pub struct PendingProjectDelete {
     pub project_id: String,
@@ -128,6 +128,18 @@ pub struct PendingTaskRestart {
     pub project_id: String,
     pub task_id: String,
     pub display: String,
+}
+
+/// The single destructive/interrupting action staged behind
+/// [`View::ConfirmClose`]. Replaces four parallel `Option<…>` fields whose
+/// "exactly one is `Some`" invariant used to live only in convention: with
+/// one `Option<PendingConfirm>` that invariant is unrepresentable.
+#[derive(Clone, Debug)]
+pub enum PendingConfirm {
+    Close(PendingClose),
+    TaskDelete(PendingTaskDelete),
+    ProjectDelete(PendingProjectDelete),
+    TaskRestart(PendingTaskRestart),
 }
 
 /// A prompt queued for a freshly-spawned tmux session that isn't yet Idle.
@@ -162,10 +174,10 @@ pub struct App {
     pub live_view: Option<LiveView>,
     pub acks: Acks,
     pub status_msg: Option<(String, Instant)>,
-    pub pending_close: Option<PendingClose>,
-    pub pending_task_delete: Option<PendingTaskDelete>,
-    pub pending_project_delete: Option<PendingProjectDelete>,
-    pub pending_task_restart: Option<PendingTaskRestart>,
+    /// The single staged destructive/interrupting action behind
+    /// [`View::ConfirmClose`]. At most one can be pending at a time, which
+    /// the [`PendingConfirm`] enum makes structural rather than conventional.
+    pub pending_confirm: Option<PendingConfirm>,
     pub state_debug: Option<(SessionInfo, StateExplanation)>,
     pub state_debug_lines: Vec<Line<'static>>,
     pub state_debug_scroll: u16,
@@ -297,10 +309,7 @@ impl App {
             live_view: None,
             acks: Acks::new(),
             status_msg: None,
-            pending_close: None,
-            pending_task_delete: None,
-            pending_project_delete: None,
-            pending_task_restart: None,
+            pending_confirm: None,
             state_debug: None,
             state_debug_lines: Vec::new(),
             state_debug_scroll: 0,
@@ -1207,23 +1216,19 @@ impl App {
         let Some(session) = self.selected_session_info() else {
             return;
         };
-        self.pending_close = Some(PendingClose {
+        self.pending_confirm = Some(PendingConfirm::Close(PendingClose {
             pid: session.pid,
             display: format!("{} (PID {})", session.project_name, session.pid),
-        });
+        }));
         self.view = View::ConfirmClose;
     }
 
     pub fn cancel_confirm_close(&mut self) {
-        let from_backlog = self
-            .pending_task_delete
-            .as_ref()
-            .map(|p| p.from_backlog)
-            .unwrap_or(false);
-        self.pending_close = None;
-        self.pending_task_delete = None;
-        self.pending_project_delete = None;
-        self.pending_task_restart = None;
+        let from_backlog = matches!(
+            &self.pending_confirm,
+            Some(PendingConfirm::TaskDelete(p)) if p.from_backlog
+        );
+        self.pending_confirm = None;
         self.view = if from_backlog {
             View::Backlog
         } else {
@@ -1233,7 +1238,12 @@ impl App {
 
     pub fn take_pending_close(&mut self) -> Option<PendingClose> {
         self.view = View::Grid;
-        self.pending_close.take()
+        if matches!(self.pending_confirm, Some(PendingConfirm::Close(_))) {
+            if let Some(PendingConfirm::Close(p)) = self.pending_confirm.take() {
+                return Some(p);
+            }
+        }
+        None
     }
 
     /// Stage a project-task deletion behind the same ConfirmClose flow used
@@ -1255,13 +1265,13 @@ impl App {
             status_label,
             crate::orchestrator::short_task_id(&task.task_id),
         );
-        self.pending_task_delete = Some(PendingTaskDelete {
+        self.pending_confirm = Some(PendingConfirm::TaskDelete(PendingTaskDelete {
             project_id: p.id.clone(),
             task_id: task.task_id.clone(),
             display,
             orchestrator_tmux: task.orchestrator_tmux.clone(),
             from_backlog: false,
-        });
+        }));
         self.view = View::ConfirmClose;
     }
 
@@ -1289,28 +1299,32 @@ impl App {
             p.name,
             crate::orchestrator::short_task_id(&task.task_id),
         );
-        self.pending_task_delete = Some(PendingTaskDelete {
+        self.pending_confirm = Some(PendingConfirm::TaskDelete(PendingTaskDelete {
             project_id: p.id.clone(),
             task_id: task.task_id.clone(),
             display,
             orchestrator_tmux: task.orchestrator_tmux.clone(),
             from_backlog: true,
-        });
+        }));
         self.view = View::ConfirmClose;
     }
 
     pub fn take_pending_task_delete(&mut self) -> Option<PendingTaskDelete> {
-        let from_backlog = self
-            .pending_task_delete
-            .as_ref()
-            .map(|p| p.from_backlog)
-            .unwrap_or(false);
+        let from_backlog = matches!(
+            &self.pending_confirm,
+            Some(PendingConfirm::TaskDelete(p)) if p.from_backlog
+        );
         self.view = if from_backlog {
             View::Backlog
         } else {
             View::Grid
         };
-        self.pending_task_delete.take()
+        if matches!(self.pending_confirm, Some(PendingConfirm::TaskDelete(_))) {
+            if let Some(PendingConfirm::TaskDelete(p)) = self.pending_confirm.take() {
+                return Some(p);
+            }
+        }
+        None
     }
 
     /// Stage removal of the currently-selected project from the cc-hub
@@ -1323,16 +1337,21 @@ impl App {
         };
         let n = self.projects.tasks.get(&p.id).map(|v| v.len()).unwrap_or(0);
         let display = format!("{} ({} task{})", p.name, n, if n == 1 { "" } else { "s" });
-        self.pending_project_delete = Some(PendingProjectDelete {
+        self.pending_confirm = Some(PendingConfirm::ProjectDelete(PendingProjectDelete {
             project_id: p.id.clone(),
             display,
-        });
+        }));
         self.view = View::ConfirmClose;
     }
 
     pub fn take_pending_project_delete(&mut self) -> Option<PendingProjectDelete> {
         self.view = View::Grid;
-        self.pending_project_delete.take()
+        if matches!(self.pending_confirm, Some(PendingConfirm::ProjectDelete(_))) {
+            if let Some(PendingConfirm::ProjectDelete(p)) = self.pending_confirm.take() {
+                return Some(p);
+            }
+        }
+        None
     }
 
     /// Stage an orchestrator restart behind a confirmation prompt. The
@@ -1354,17 +1373,22 @@ impl App {
             status_label,
             crate::orchestrator::short_task_id(&task.task_id),
         );
-        self.pending_task_restart = Some(PendingTaskRestart {
+        self.pending_confirm = Some(PendingConfirm::TaskRestart(PendingTaskRestart {
             project_id: p.id.clone(),
             task_id: task.task_id.clone(),
             display,
-        });
+        }));
         self.view = View::ConfirmClose;
     }
 
     pub fn take_pending_task_restart(&mut self) -> Option<PendingTaskRestart> {
         self.view = View::Grid;
-        self.pending_task_restart.take()
+        if matches!(self.pending_confirm, Some(PendingConfirm::TaskRestart(_))) {
+            if let Some(PendingConfirm::TaskRestart(p)) = self.pending_confirm.take() {
+                return Some(p);
+            }
+        }
+        None
     }
 
     pub fn set_status(&mut self, msg: String) {
@@ -1707,7 +1731,7 @@ impl App {
         if let Some((msg, _)) = &self.status_msg {
             log::info!("status_msg: {}", msg);
         }
-        if let Some(pc) = &self.pending_close {
+        if let Some(PendingConfirm::Close(pc)) = &self.pending_confirm {
             log::info!("pending_close: pid={} display={}", pc.pid, pc.display);
         }
         if let Some((target_pid, name, tmux)) = &self.dispatch_target {
