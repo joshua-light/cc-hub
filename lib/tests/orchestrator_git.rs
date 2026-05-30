@@ -5,10 +5,15 @@
 //! These run only when `git` is on `PATH` — skipped silently otherwise so
 //! the suite stays passable on bare CI images.
 
-use cc_hub_lib::orchestrator::{self, MergeOutcome};
+use cc_hub_lib::orchestrator::{self, MergeOutcome, TaskState, TaskStatus, Worker};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Mutex;
+
+/// `$HOME` is process-global; the gc tests redirect it to read task state from
+/// a tempdir-backed `~/.cc-hub`. Serialise any test that does so.
+static HOME_LOCK: Mutex<()> = Mutex::new(());
 
 fn git_available() -> bool {
     Command::new("git")
@@ -238,4 +243,105 @@ fn detect_main_branch_picks_master_when_only_master_exists() {
     run(root, &["commit", "-q", "-m", "init"]);
 
     assert_eq!(orchestrator::detect_main_branch(root), "master");
+}
+
+/// Seed a task state under `~/.cc-hub` whose single worker owns the worktree
+/// `<task_id>-<name>` in `project_root`. Returns the worktree path.
+fn seed_task(
+    project_id: &str,
+    project_root: &Path,
+    task_id: &str,
+    name: &str,
+    status: TaskStatus,
+) -> std::path::PathBuf {
+    let wt = orchestrator::create_worktree(project_root, task_id, name, "main")
+        .expect("create_worktree");
+    let mut state = TaskState::new(
+        project_id.to_string(),
+        project_root.to_path_buf(),
+        "do thing".into(),
+    );
+    state.task_id = task_id.to_string();
+    state.status = status;
+    state.workers.push(Worker {
+        agent_id: "claude".into(),
+        agent_kind: cc_hub_lib::agent::AgentKind::Claude,
+        tmux_name: format!("cchub-{}", task_id),
+        cwd: wt.clone(),
+        worktree: Some(name.to_string()),
+        readonly: false,
+        spawned_at: 0,
+    });
+    orchestrator::write_task_state(&state).expect("write state");
+    wt
+}
+
+#[test]
+fn gc_removes_orphan_worktree_and_keeps_live_one() {
+    if !git_available() {
+        eprintln!("skipping: git not on PATH");
+        return;
+    }
+    let _g = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().expect("home tempdir");
+    let prev_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", home.path());
+
+    let repo = init_repo();
+    let root = repo.path();
+    let project_id = orchestrator::project_id_for_path(root);
+
+    // A live (Running) task keeps its worktree; a Done task and a deleted
+    // task (state never written) are both orphans.
+    let live_wt = seed_task(&project_id, root, "t-live", "keep", TaskStatus::Running);
+    let done_wt = seed_task(&project_id, root, "t-done", "gone", TaskStatus::Done);
+    // Orphan with no task state at all: create the worktree but no state.json.
+    let dangling_wt =
+        orchestrator::create_worktree(root, "t-dangling", "drop", "main").expect("create dangling");
+
+    assert!(live_wt.exists() && done_wt.exists() && dangling_wt.exists());
+
+    // Dry run first: must classify but not touch anything.
+    let plan = orchestrator::gc_worktrees(&project_id, root, true).expect("gc dry-run");
+    assert_eq!(plan.live.len(), 1, "exactly one live worktree");
+    assert_eq!(plan.live[0].dir_name, "t-live-keep");
+    let orphan_names: Vec<&str> = plan.orphans.iter().map(|w| w.dir_name.as_str()).collect();
+    assert!(orphan_names.contains(&"t-done-gone"));
+    assert!(orphan_names.contains(&"t-dangling-drop"));
+    assert!(plan.worktrees_removed.is_empty(), "dry-run removes nothing");
+    assert!(!plan.pruned, "dry-run does not prune");
+    assert!(done_wt.exists() && dangling_wt.exists(), "dry-run is a no-op");
+
+    // Real run: orphans gone, live survives, branches cleaned, prune ran.
+    let outcome = orchestrator::gc_worktrees(&project_id, root, false).expect("gc");
+    assert!(live_wt.exists(), "live worktree must survive gc");
+    assert!(!done_wt.exists(), "Done task's worktree must be removed");
+    assert!(!dangling_wt.exists(), "dangling worktree must be removed");
+    assert_eq!(outcome.worktrees_removed.len(), 2, "two orphans removed");
+    assert!(outcome.pruned, "git worktree prune should have run");
+
+    // The orphan branches are gone; the live branch remains.
+    let branch_exists = |b: &str| {
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", "--verify", "--quiet", b])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    assert!(branch_exists("cc-hub/t-live-keep"), "live branch must remain");
+    assert!(
+        !branch_exists("cc-hub/t-done-gone"),
+        "Done orphan branch must be deleted"
+    );
+    assert!(
+        !branch_exists("cc-hub/t-dangling-drop"),
+        "dangling orphan branch must be deleted"
+    );
+
+    match prev_home {
+        Some(v) => std::env::set_var("HOME", v),
+        None => std::env::remove_var("HOME"),
+    }
 }

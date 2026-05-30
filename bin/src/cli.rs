@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 /// genuinely broken spawns, not to bound happy-path latency.
 const DEFAULT_PROMPT_WAIT_SECS: u64 = 120;
 const TASK_VERBS_HELP: &str =
-    "`report`, `create`, `start`, `list`, `show`, `delete`, `auto-review`, `artifact`, or `todos`";
+    "`report`, `create`, `start`, `list`, `show`, `delete`, `gc`, `auto-review`, `artifact`, or `todos`";
 
 pub fn dispatch(args: &[String]) -> Option<i32> {
     let (verb, rest) = args.split_first()?;
@@ -128,6 +128,7 @@ Usage:
   cc-hub task report --task ID [--status running|review|merging|done|backlog] [--note TEXT] [--summary TEXT]
   cc-hub task show --task ID [--project-id ID] [--json]
   cc-hub task delete --task ID [--project-id ID] [--force]
+  cc-hub task gc [--project-id ID] [--dry-run]
   cc-hub task auto-review --task ID [--project-id ID]
   cc-hub task list [--status backlog|running|review|merging|done] [--project-id ID] [--json]
   cc-hub task artifact add --task ID --path PATH_OR_URL [--kind KIND] [--caption TEXT] [--lead]
@@ -160,6 +161,7 @@ Usage:
   cc-hub pr comment --task ID --comment TEXT [--author NAME]
   cc-hub pr close --task ID [--project-id ID] [--comment TEXT] [--author NAME]
   cc-hub pr merge --task ID [--wait [--timeout-secs N]]
+  cc-hub pr continue --task ID [--project-id ID]
   cc-hub pr lock-phase --task ID --phase merging|simplify|bump|finalize-pending
   cc-hub pr finalize --task ID [--build-cmd CMD] [--skip-build] [--keep-tmux]
 
@@ -169,6 +171,11 @@ project merge lock; `finalize` releases the lock and marks the task Done.
 `pr merge` acquires the project merge lock. If another task holds it, the
 default is to fail fast with `{ok:false, locked:true, ...}`; pass `--wait` to
 block until the lock frees (bounded by `--timeout-secs N`, default 1800).
+
+`pr continue` re-pings the task's orchestrator with the merge-flow prompt
+(the same one the TUI sends on approve). Idempotent — safe to re-run. If the
+orchestrator session is dead it reports `{ok:false, orchestrator_alive:false}`
+with a recipe to resurrect or `task delete --force` the wedged task.
 "#;
 
 const WORKER_HELP: &str = r#"cc-hub worker
@@ -355,8 +362,9 @@ struct Flags {
     json: bool,
     /// `pr lock-phase` — one of merging|simplify|bump|finalize-pending.
     phase: Option<String>,
-    /// `task delete --force` — required for Running/Review tasks. Merging is
-    /// refused outright even with `--force`.
+    /// `task delete --force` — required for Running/Review/Merging tasks.
+    /// Deleting a Merging task releases the project merge lock (recovery path
+    /// for a wedged merge with a dead orchestrator).
     force: bool,
     /// `pr finalize` flags: override the build command, skip the build
     /// gate entirely, or keep the orchestrator tmux session alive.
@@ -954,6 +962,7 @@ fn task_subcommand(args: &[String]) -> Result<(), CliError> {
         "show" => task_show(rest),
         "list" => task_list(rest),
         "delete" => task_delete(rest),
+        "gc" => task_gc(rest),
         "auto-review" => task_auto_review(rest),
         "artifact" => task_artifact_subcommand(rest),
         "todos" => task_todos_subcommand(rest),
@@ -968,9 +977,11 @@ fn task_subcommand(args: &[String]) -> Result<(), CliError> {
 ///
 /// End-to-end teardown: kills the orchestrator tmux (best-effort), removes
 /// every worktree the task owns, then deletes the on-disk task state dir.
-/// Refuses `Merging` outright (merge lock held → user must finalize or
-/// release first); requires `--force` for `Running` / `Review` so the user
-/// has to acknowledge they're killing live work.
+/// Requires `--force` for `Running` / `Review` / `Merging` so the user has to
+/// acknowledge they're killing live work. `Merging` is recoverable under
+/// `--force`: `delete_task` releases the merge lock so a wedged task (e.g. a
+/// dead orchestrator that never ran `pr finalize`) doesn't leave the project
+/// merge lock held forever.
 fn task_delete(args: &[String]) -> Result<(), CliError> {
     let f = parse_flags(args)?;
     let task_id = require_task(&f)?;
@@ -987,17 +998,24 @@ fn task_delete(args: &[String]) -> Result<(), CliError> {
         Err(e) => return Err(CliError::Other(format!("load state: {}", e))),
     };
 
-    if state.status == TaskStatus::Merging {
+    // Active states require --force. Merging is included so the user has to
+    // acknowledge they're tearing down an in-flight merge — but it CAN be
+    // deleted (delete_task releases the merge lock below), which is the only
+    // recovery path when the merging orchestrator has died.
+    if matches!(
+        state.status,
+        TaskStatus::Running | TaskStatus::Review | TaskStatus::Merging
+    ) && !f.force
+    {
         return Err(CliError::Other(format!(
-            "task {} is Merging (merge lock held); finalize or release the lock before deleting",
-            task_id
-        )));
-    }
-
-    if matches!(state.status, TaskStatus::Running | TaskStatus::Review) && !f.force {
-        return Err(CliError::Other(format!(
-            "task {} is {}; pass --force to delete an active task (orchestrator tmux will be killed)",
-            task_id, status_str(&state.status)
+            "task {} is {}; pass --force to delete an active task (orchestrator tmux will be killed{})",
+            task_id,
+            status_str(&state.status),
+            if state.status == TaskStatus::Merging {
+                ", merge lock released"
+            } else {
+                ""
+            }
         )));
     }
 
@@ -1026,6 +1044,87 @@ fn task_delete(args: &[String]) -> Result<(), CliError> {
         "worktree_errors": worktree_errors,
     }));
     Ok(())
+}
+
+/// `cc-hub task gc [--project-id ID] [--dry-run]`
+///
+/// Sweep orphaned worktrees under `<root>/.cc-hub-wt/`. Worktrees + their
+/// `cc-hub/*` branches are otherwise only torn down on the Done path, so
+/// Review / abandoned / wedged tasks leak them. This removes every worktree
+/// no live (present, non-Done) task owns, deletes their dangling branches, and
+/// runs `git worktree prune`. `--dry-run` prints the plan as JSON without
+/// acting.
+fn task_gc(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    // No `--task` for gc; resolve_project_id falls back to the cwd-derived id.
+    let project_id = resolve_project_id(&f)?;
+    let project_root = resolve_project_root(&project_id)?;
+
+    let outcome = orchestrator::gc_worktrees(&project_id, &project_root, f.dry_run)
+        .map_err(|e| CliError::Other(format!("gc worktrees: {}", e)))?;
+
+    let orphans: Vec<serde_json::Value> = outcome
+        .orphans
+        .iter()
+        .map(|w| {
+            serde_json::json!({
+                "dir_name": w.dir_name,
+                "path": w.path.to_string_lossy(),
+                "branch": w.branch,
+            })
+        })
+        .collect();
+    let live: Vec<serde_json::Value> = outcome
+        .live
+        .iter()
+        .map(|w| {
+            serde_json::json!({
+                "dir_name": w.dir_name,
+                "path": w.path.to_string_lossy(),
+                "branch": w.branch,
+            })
+        })
+        .collect();
+    let errors: Vec<serde_json::Value> = outcome
+        .errors
+        .iter()
+        .map(|(path, err)| serde_json::json!({ "path": path, "error": err }))
+        .collect();
+
+    print_json(&serde_json::json!({
+        "ok": true,
+        "project_id": project_id,
+        "dry_run": f.dry_run,
+        "orphans": orphans,
+        "live": live,
+        "worktrees_removed": outcome.worktrees_removed,
+        "branches_removed": outcome.branches_removed,
+        "errors": errors,
+        "pruned": outcome.pruned,
+    }));
+    Ok(())
+}
+
+/// Resolve a registered project's root by id, falling back to the cwd when the
+/// id matches the cwd-derived id (so `task gc` works from a project dir that
+/// hasn't been explicitly registered yet, mirroring `resolve_project_id`'s
+/// cwd fallback).
+fn resolve_project_root(project_id: &str) -> Result<PathBuf, CliError> {
+    if let Some(p) = orchestrator::load_projects()
+        .projects
+        .into_iter()
+        .find(|p| p.id == project_id)
+    {
+        return Ok(p.root);
+    }
+    let cwd = std::env::current_dir().map_err(|e| CliError::Other(format!("cwd: {}", e)))?;
+    if orchestrator::project_id_for_path(&cwd) == project_id {
+        return Ok(cwd);
+    }
+    Err(CliError::NotFound(format!(
+        "project {} is not registered and does not match the current directory; pass --project-id for a registered project",
+        project_id
+    )))
 }
 
 /// `cc-hub task start --task ID [--project-id ID] [--agent ID] [--wait-secs N]`
@@ -1785,7 +1884,7 @@ fn task_create(args: &[String]) -> Result<(), CliError> {
 fn pr_subcommand(args: &[String]) -> Result<(), CliError> {
     let (verb, rest) = args.split_first().ok_or_else(|| {
         CliError::Usage(
-            "pr <verb>: missing verb (try `create`, `show`, `approve`, `request-changes`, `reopen`, `comment`, `close`, `merge`, `lock-phase`, `finalize`)".into(),
+            "pr <verb>: missing verb (try `create`, `show`, `approve`, `request-changes`, `reopen`, `comment`, `close`, `merge`, `continue`, `lock-phase`, `finalize`)".into(),
         )
     })?;
     match verb.as_str() {
@@ -1797,10 +1896,11 @@ fn pr_subcommand(args: &[String]) -> Result<(), CliError> {
         "comment" => pr_comment(rest),
         "close" => pr_close(rest),
         "merge" => pr_merge(rest),
+        "continue" => pr_continue(rest),
         "lock-phase" => pr_lock_phase(rest),
         "finalize" => pr_finalize(rest),
         other => Err(CliError::Usage(format!(
-            "unknown pr verb: {} (try `create`, `show`, `approve`, `request-changes`, `reopen`, `comment`, `close`, `merge`, `lock-phase`, `finalize`)",
+            "unknown pr verb: {} (try `create`, `show`, `approve`, `request-changes`, `reopen`, `comment`, `close`, `merge`, `continue`, `lock-phase`, `finalize`)",
             other
         ))),
     }
@@ -2199,6 +2299,7 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
     let worktree_path = match resolve_worktree_path(&state, &pr.branch) {
         Some(p) => p,
         None => {
+            let _ = cc_hub_lib::merge_lock::release(&project_id, &task_id);
             return Err(CliError::Other(format!(
                 "could not resolve worktree path for branch {} \
                  (no Worker record matches; was the worktree removed?)",
@@ -2206,6 +2307,50 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
             )));
         }
     };
+
+    // The worktree dir must still exist before we operate on it: a gc / manual
+    // cleanup may have removed it while the task sat in Review. Treat a missing
+    // worktree as a distinct outcome rather than letting `git -C <gone>` fail
+    // with an opaque error.
+    if !worktree_path.exists() {
+        let _ = cc_hub_lib::merge_lock::release(&project_id, &task_id);
+        print_json(&serde_json::json!({
+            "ok": false,
+            "phase": "preflight",
+            "kind": "missing_worktree",
+            "worktree": worktree_path.to_string_lossy(),
+            "recipe": "The feature branch worktree no longer exists (removed by gc or manual cleanup). Recreate it (`cc-hub spawn-worker`) on the same branch before re-running `cc-hub pr merge`, or close the PR. The merge lock has been released.",
+        }));
+        return Err(CliError::Reported(format!(
+            "worktree for branch {} no longer exists",
+            pr.branch
+        )));
+    }
+
+    // Clean-tree preflight on the worktree itself. Step 1 merges base INTO the
+    // feature branch inside this worktree; if it's dirty, git either aborts
+    // ("would be overwritten") or auto-stashes and produces conflict markers on
+    // pop — which downstream misclassifies as a content conflict and wrongly
+    // demotes the approved PR with a misleading "0 files" message. Refuse up
+    // front with a distinct outcome so the orchestrator gets an actionable
+    // recipe instead of a phantom conflict.
+    let worktree_dirty = orchestrator::dirty_paths(&worktree_path)
+        .map_err(|e| CliError::Other(format!("git status (worktree): {}", e)))?;
+    if !worktree_dirty.is_empty() {
+        let _ = cc_hub_lib::merge_lock::release(&project_id, &task_id);
+        print_json(&serde_json::json!({
+            "ok": false,
+            "phase": "preflight",
+            "kind": "dirty_worktree",
+            "worktree": worktree_path.to_string_lossy(),
+            "dirty": worktree_dirty,
+            "recipe": "The feature-branch worktree has uncommitted changes; cc-hub won't merge base into a dirty tree. Commit or stash the listed paths in the worktree, then re-run `cc-hub pr merge`. The merge lock has been released.",
+        }));
+        return Err(CliError::Reported(format!(
+            "merge blocked: feature-branch worktree has {} uncommitted path(s)",
+            worktree_dirty.len()
+        )));
+    }
 
     let merge_into_feature = orchestrator::run_git(
         &worktree_path,
@@ -2307,6 +2452,12 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
         ));
     }
 
+    // Capture which ref the project root was on before we check out `base` to
+    // run the merge, so we can put the user's branch back afterward instead of
+    // silently leaving them on main. `None` means we couldn't determine it
+    // (detached / git error) — we then skip the restore rather than guess.
+    let prior_ref = capture_head_ref(&project_root);
+
     // Step 3: merge feature branch into main. Should be conflict-free
     // since we already merged main into the branch in step 1.
     let checkout = orchestrator::run_git(&project_root, &["checkout", &pr.base])
@@ -2345,6 +2496,33 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
         return Err(CliError::Reported("conflict merging into main".into()));
     }
 
+    // Restore the project root to whatever ref it was on before step 3's
+    // checkout, so the user isn't silently left on `base`. Skip when we were
+    // already on `base` (the merge advanced it; nothing to do) or couldn't
+    // determine the prior ref. Best-effort: a failure is reported, not fatal —
+    // the merge already landed.
+    let restored_ref = match &prior_ref {
+        Some(r) if r != &pr.base => {
+            let out = orchestrator::run_git(&project_root, &["checkout", r]);
+            match out {
+                Ok(o) if o.status_ok => Some(r.clone()),
+                Ok(o) => {
+                    log::warn!(
+                        "pr merge: restore HEAD to {} failed: {}",
+                        r,
+                        o.stderr.trim()
+                    );
+                    None
+                }
+                Err(e) => {
+                    log::warn!("pr merge: restore HEAD to {} errored: {}", r, e);
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+
     // Transition task to Merging. /simplify and /bump still need to run;
     // `pr finalize` flips to Done afterwards.
     orchestrator::update_task_state(&project_id, &task_id, |s| {
@@ -2368,9 +2546,111 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
         "branch": pr.branch,
         "base": pr.base,
         "stdout": merge_into_main.stdout,
+        "restored_ref": restored_ref,
         "next": "Run /simplify, then /bump, then `cc-hub pr finalize --task <id>` to release the merge lock and mark the task done.",
     }));
     Ok(())
+}
+
+/// The branch HEAD points to in `root`, or `None` when detached or git fails.
+/// Used by `pr merge` to remember the user's branch before checking out `base`
+/// so it can restore it afterward.
+fn capture_head_ref(root: &std::path::Path) -> Option<String> {
+    let out = orchestrator::run_git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()?;
+    if !out.status_ok {
+        return None;
+    }
+    let name = out.stdout.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// `cc-hub pr continue --task ID [--project-id ID]`
+///
+/// Recovery / re-ping verb. Re-sends [`build_review_approval_prompt`] (the
+/// same merge-flow nudge the TUI dispatches when a human approves a PR) to the
+/// task's orchestrator. The common failure mode this recovers from: the user
+/// approved a PR but the orchestrator never picked up the merge (it was busy,
+/// the notify was dropped, or the session was restarted).
+///
+/// Idempotent — re-running just re-pings; nothing destructive happens. When
+/// the orchestrator session is dead it returns
+/// `{ok:false, orchestrator_alive:false}` with a recipe telling the user to
+/// resurrect the orchestrator or `task delete --force` the wedged task. When
+/// the pane is busy the prompt cannot be injected; the verb reports that
+/// (`sent:false, pane_busy:true`) so the caller knows to retry once idle.
+fn pr_continue(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = require_task(&f)?;
+    let project_id = resolve_project_id(&f)?;
+
+    let state = orchestrator::read_task_state(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
+
+    let Some(tmux_name) = state.orchestrator_tmux.clone() else {
+        print_json(&serde_json::json!({
+            "ok": false,
+            "task_id": task_id,
+            "orchestrator_alive": false,
+            "reason": "no_orchestrator_tmux",
+            "recipe": "This task has no orchestrator tmux recorded — it was never started or its session name was cleared. Resurrect the orchestrator (`cc-hub orchestrate start --task <id>`), or if the merge is wedged, `cc-hub task delete --force --task <id>` to recover.",
+        }));
+        return Err(CliError::Reported(format!(
+            "task {} has no orchestrator tmux to continue",
+            task_id
+        )));
+    };
+
+    if !send::tmux_session_exists(&tmux_name) {
+        print_json(&serde_json::json!({
+            "ok": false,
+            "task_id": task_id,
+            "orchestrator_tmux": tmux_name,
+            "orchestrator_alive": false,
+            "reason": "orchestrator_dead",
+            "recipe": "The orchestrator session is dead. Resurrect it (`cc-hub orchestrate start --task <id>`) then re-run `cc-hub pr continue`, or `cc-hub task delete --force --task <id>` to tear down a wedged merge (releases the merge lock).",
+        }));
+        return Err(CliError::Reported(format!(
+            "orchestrator [{}] is not live",
+            tmux_name
+        )));
+    }
+
+    let prompt =
+        orchestrator::build_review_approval_prompt(&task_id, &orchestrator::resolve_cc_hub_bin());
+
+    if !send::pane_ready_for_input(&tmux_name) {
+        print_json(&serde_json::json!({
+            "ok": true,
+            "task_id": task_id,
+            "orchestrator_tmux": tmux_name,
+            "orchestrator_alive": true,
+            "sent": false,
+            "pane_busy": true,
+            "recipe": "The orchestrator is alive but its pane is busy (mid-turn). Re-run `cc-hub pr continue` once it's idle.",
+        }));
+        return Ok(());
+    }
+
+    match send::send_prompt(&tmux_name, &prompt) {
+        Ok(()) => {
+            print_json(&serde_json::json!({
+                "ok": true,
+                "task_id": task_id,
+                "orchestrator_tmux": tmux_name,
+                "orchestrator_alive": true,
+                "sent": true,
+            }));
+            Ok(())
+        }
+        Err(e) => Err(CliError::Other(format!(
+            "send merge-flow prompt to [{}]: {}",
+            tmux_name, e
+        ))),
+    }
 }
 
 fn pr_lock_phase(args: &[String]) -> Result<(), CliError> {
@@ -4289,7 +4569,7 @@ mod tests {
     }
 
     #[test]
-    fn task_delete_refuses_merging_even_with_force() {
+    fn task_delete_refuses_merging_without_force() {
         with_tempdir_home(|| {
             let project_id = "p-merging".to_string();
             let task_id = "t-merging".to_string();
@@ -4312,16 +4592,63 @@ mod tests {
                 task_id.clone(),
                 "--project-id".into(),
                 project_id.clone(),
-                "--force".into(),
             ]);
-            assert_ne!(
-                code,
-                Some(0),
-                "Merging must refuse delete even with --force"
-            );
+            assert_ne!(code, Some(0), "Merging must refuse delete without --force");
             assert!(
                 state_dir.exists(),
                 "state dir must survive a refused delete"
+            );
+        });
+    }
+
+    #[test]
+    fn task_delete_merging_succeeds_with_force_and_releases_lock() {
+        // A task wedged in Merging (e.g. its orchestrator died before
+        // `pr finalize`) must be deletable under --force, and that delete
+        // must release the project merge lock so the project isn't blocked
+        // forever.
+        with_tempdir_home(|| {
+            let project_id = "p-merging-force".to_string();
+            let task_id = "t-merging-force".to_string();
+
+            let mut state = TaskState::new(
+                project_id.clone(),
+                PathBuf::from("/tmp/nonexistent"),
+                "do thing".into(),
+            );
+            state.task_id = task_id.clone();
+            state.status = TaskStatus::Merging;
+            orchestrator::write_task_state(&state).expect("write state");
+
+            cc_hub_lib::merge_lock::acquire(&project_id, &task_id, None).expect("acquire lock");
+            assert!(
+                cc_hub_lib::merge_lock::current_holder(&project_id)
+                    .expect("current_holder")
+                    .is_some(),
+                "lock should be held before delete"
+            );
+
+            let state_dir = orchestrator::task_state_dir(&project_id, &task_id).unwrap();
+
+            let code = dispatch(&[
+                "task".into(),
+                "delete".into(),
+                "--task".into(),
+                task_id.clone(),
+                "--project-id".into(),
+                project_id.clone(),
+                "--force".into(),
+            ]);
+            assert_eq!(code, Some(0), "Merging delete --force should exit 0");
+            assert!(
+                !state_dir.exists(),
+                "state dir should be gone after --force delete"
+            );
+            assert!(
+                cc_hub_lib::merge_lock::current_holder(&project_id)
+                    .expect("current_holder")
+                    .is_none(),
+                "merge lock must be released when a Merging task is deleted"
             );
         });
     }
@@ -4369,6 +4696,74 @@ mod tests {
                     .is_none(),
                 "merge lock must be released by task delete"
             );
+        });
+    }
+
+    #[test]
+    fn pr_merge_refuses_dirty_worktree_without_demoting() {
+        // A dirty feature-branch worktree must trip the step-1 preflight and
+        // return a distinct `dirty_worktree` outcome — NOT proceed into the
+        // merge (which would misclassify as a phantom conflict and demote the
+        // approved PR). The PR stays Approved and the merge lock is released.
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        with_tempdir_home(|| {
+            let repo = init_repo();
+            let (project_id, task_id, wt_path) =
+                seed_task_with_worktree(repo.path(), TaskStatus::Review);
+
+            // Approved PR on the worktree's branch.
+            let state = orchestrator::read_task_state(&project_id, &task_id).expect("read state");
+            let branch = orchestrator::worktree_branch(&task_id, "wt");
+            pr::create_pr(&state, branch, "main".into(), "title".into(), "desc".into())
+                .expect("create pr");
+            pr::update_pr(&project_id, &task_id, |p| {
+                p.review_state = pr::ReviewState::Approved;
+            })
+            .expect("approve pr");
+
+            // Dirty the worktree: an uncommitted edit to a tracked file.
+            std::fs::write(wt_path.join("seed.txt"), "dirtied in worktree\n")
+                .expect("dirty worktree");
+
+            let result = pr_merge(&[
+                "--task".into(),
+                task_id.clone(),
+                "--project-id".into(),
+                project_id.clone(),
+            ]);
+            match result {
+                Err(CliError::Reported(msg)) => assert!(
+                    msg.contains("worktree") && msg.contains("uncommitted"),
+                    "expected dirty-worktree refusal, got: {}",
+                    msg
+                ),
+                other => panic!("expected dirty-worktree refusal, got {:?}", other),
+            }
+
+            // PR must remain Approved (not demoted to Open).
+            let after_pr = pr::read_pr(&project_id, &task_id)
+                .expect("read pr")
+                .expect("pr present");
+            assert_eq!(
+                after_pr.review_state,
+                pr::ReviewState::Approved,
+                "dirty-worktree refusal must not demote the PR"
+            );
+
+            // Merge lock released so the project isn't blocked.
+            assert!(
+                cc_hub_lib::merge_lock::current_holder(&project_id)
+                    .expect("current_holder")
+                    .is_none(),
+                "merge lock must be released after a dirty-worktree refusal"
+            );
+
+            // The dirty edit is untouched — preflight must not mutate the tree.
+            let body = std::fs::read_to_string(wt_path.join("seed.txt")).unwrap();
+            assert_eq!(body, "dirtied in worktree\n");
         });
     }
 
