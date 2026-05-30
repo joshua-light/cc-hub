@@ -2891,9 +2891,14 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         let keybinds: &str = match app.view {
             View::Grid => match app.current_tab {
-                Tab::Projects => "tab:next  H/L:project  h/l:col  j/k:task  enter:focus orch  f:agent terminal/resurrect  R:restart  n:new task  N:register project  b:backlog  r:result  c:copy id  x:delete task  X:remove project  q:quit",
-                Tab::Sessions => "tab:next  h/j/k/l:nav  n:new  N:new in…  M:bookmarks  i:info  D:why?  enter/f:focus/resume  o:shell  x:close  H:inactive  W:workers  q:quit",
-                Tab::Metrics => "tab:next  j/k:select  enter:view transcript  r:refresh  q:quit",
+                // High-value Review verbs lead so they survive the right-edge
+                // truncation at narrow widths (the status bar is one row, no
+                // wrap); rare project-management verbs trail. The Space:approve
+                // chip is rendered separately *ahead* of this string below so
+                // it is never the first thing clipped.
+                Tab::Projects => "enter:focus orch  n:new task  r:result  f:agent terminal/resurrect  R:restart  b:backlog  h/l:col  j/k:task  H/L:project  N:register project  c:copy id  x:delete task  X:remove project  tab:next  q:quit",
+                Tab::Sessions => "enter/f:focus/resume  n:new  i:info  o:shell  N:new in…  M:bookmarks  D:why?  h/j/k/l:nav  x:close  H:inactive  W:workers  tab:next  q:quit",
+                Tab::Metrics => "enter:view transcript  j/k:select  r:refresh  tab:next  q:quit",
             },
             View::Popup => "j/k:scroll  esc:close  q:close",
             View::LiveTail => "j/k:scroll  G:bottom  esc:close",
@@ -2916,10 +2921,9 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             View::ProjectsResult => "j/k:artifact  e:expand  PgUp/PgDn:scroll  c:copy path  o:xdg-open  esc/r:close",
             View::Backlog => "j/k:select  s/enter:start  x:delete  esc/q:close",
         };
-        spans.push(Span::styled(
-            format!(" {} ", keybinds),
-            Style::default().fg(Color::DarkGray),
-        ));
+        // Render the Space chip *first* so the single highest-value verb
+        // (approve on Projects, ack on Sessions) is never the first thing
+        // clipped off the right edge of this one-row, no-wrap status bar.
         let space_verb = match (&app.view, app.current_tab) {
             (View::Grid, Tab::Projects) => Some("approve "),
             (View::Grid, Tab::Sessions) => Some("ack "),
@@ -2927,7 +2931,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         };
         if let Some(verb) = space_verb {
             spans.push(Span::styled(
-                "Space ",
+                " Space ",
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
@@ -2939,6 +2943,10 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                     .add_modifier(Modifier::BOLD),
             ));
         }
+        spans.push(Span::styled(
+            format!(" {} ", keybinds),
+            Style::default().fg(Color::DarkGray),
+        ));
     }
 
     // Pending dispatch indicator — visible when a freshly-spawned session

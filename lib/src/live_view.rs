@@ -3,11 +3,20 @@ use crate::conversation;
 use crate::models::ConversationMessage;
 use crate::pi_conversation;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+/// Minimum spacing between filesystem polls while a LiveTail is open. The
+/// render loop wakes every ~50ms, but re-`stat`ing the JSONL (and, when it
+/// grew, re-reading + re-parsing up to 128KB) that often is pure overhead on
+/// the draw thread for a transcript that appends at most a few lines a
+/// second. Polling at ~4Hz keeps the tail feeling live without the churn.
+const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 pub struct LiveView {
     path: PathBuf,
     agent_kind: AgentKind,
     file_len: u64,
+    last_poll: Option<Instant>,
     pub messages: Vec<ConversationMessage>,
     pub scroll: u16,
     pub auto_scroll: bool,
@@ -28,6 +37,7 @@ impl LiveView {
             path: jsonl_path,
             agent_kind,
             file_len,
+            last_poll: None,
             messages,
             scroll: 0,
             auto_scroll: true,
@@ -54,6 +64,7 @@ impl LiveView {
             path: jsonl_path,
             agent_kind,
             file_len,
+            last_poll: None,
             messages,
             scroll: 0,
             auto_scroll: false,
@@ -68,6 +79,18 @@ impl LiveView {
         if self.review_mode {
             return false;
         }
+        // Throttle to ~4Hz: the draw loop calls this every frame, but a
+        // `stat` + possible 128KB re-parse per frame is wasteful for a
+        // transcript that grows slowly. Skipping a poll just defers picking
+        // up new lines by at most `POLL_INTERVAL`, which is imperceptible.
+        let now = Instant::now();
+        if let Some(last) = self.last_poll {
+            if now.duration_since(last) < POLL_INTERVAL {
+                return false;
+            }
+        }
+        self.last_poll = Some(now);
+
         let new_len = match std::fs::metadata(&self.path) {
             Ok(m) => m.len(),
             Err(_) => return false,
@@ -114,5 +137,80 @@ fn extract_messages(
     match agent_kind {
         AgentKind::Claude => conversation::extract_messages(entries, count),
         AgentKind::Pi => pi_conversation::extract_messages(entries, count),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    const ASSISTANT_LINE: &str =
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#;
+
+    fn write_lines(path: &std::path::Path, n: usize) {
+        let mut f = std::fs::File::create(path).expect("create");
+        for _ in 0..n {
+            writeln!(f, "{}", ASSISTANT_LINE).expect("write");
+        }
+        f.flush().expect("flush");
+    }
+
+    fn append_line(path: &std::path::Path) {
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("open append");
+        writeln!(f, "{}", ASSISTANT_LINE).expect("append");
+        f.flush().expect("flush");
+    }
+
+    #[test]
+    fn poll_throttles_back_to_back_calls() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        write_lines(&path, 1);
+
+        let mut lv = LiveView::new(path.clone(), AgentKind::Claude);
+        assert_eq!(lv.messages.len(), 1);
+
+        // First poll consumes the throttle gate (no growth → false).
+        assert!(!lv.poll());
+
+        // Even though the file just grew, a poll within POLL_INTERVAL is
+        // skipped and the new line is not yet reflected.
+        append_line(&path);
+        assert!(!lv.poll());
+        assert_eq!(lv.messages.len(), 1);
+    }
+
+    #[test]
+    fn poll_picks_up_growth_after_interval() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        write_lines(&path, 1);
+
+        let mut lv = LiveView::new(path.clone(), AgentKind::Claude);
+        assert!(!lv.poll());
+
+        // Simulate the throttle window having elapsed, then grow the file.
+        lv.last_poll = Some(Instant::now() - POLL_INTERVAL - Duration::from_millis(1));
+        append_line(&path);
+        assert!(lv.poll());
+        assert_eq!(lv.messages.len(), 2);
+    }
+
+    #[test]
+    fn review_mode_never_polls() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        write_lines(&path, 1);
+
+        let mut lv = LiveView::review(path.clone(), AgentKind::Claude, None);
+        append_line(&path);
+        // Backdate so the throttle would otherwise allow a poll.
+        lv.last_poll = Some(Instant::now() - POLL_INTERVAL - Duration::from_millis(1));
+        assert!(!lv.poll());
+        assert_eq!(lv.messages.len(), 1);
     }
 }

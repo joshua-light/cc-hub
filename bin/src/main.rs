@@ -739,16 +739,30 @@ async fn run(
     // terminal's native wheel scroll keeps working elsewhere.
     let mut mouse_captured = false;
 
+    // Redraw gating (issue #18a). The loop wakes every ~50ms but the widget
+    // tree only changes on input, on a drained ScanMsg, on a LiveTail poll
+    // that picked up new entries, or on the once-per-second elapsed clock.
+    // We draw immediately on the first three (so input latency is unchanged)
+    // and throttle the purely time-driven "refreshed Ns ago" / elapsed-card
+    // repaint to ~1Hz. `dirty` starts true so the first frame always renders.
+    // The embedded tmux pane is the exception: its content is fed by a
+    // background reader, so while it's open we redraw every loop tick.
+    let mut dirty = true;
+    let mut last_clock_redraw = Instant::now();
+
     loop {
         // Poll live view for new JSONL entries
         if app.view == View::LiveTail {
             if let Some(ref mut lv) = app.live_view {
-                lv.poll();
+                if lv.poll() {
+                    dirty = true;
+                }
             }
         }
 
         if app.view == View::TmuxPane && app.tmux_pane.as_ref().is_some_and(|p| p.is_exited()) {
             app.close_tmux_pane();
+            dirty = true;
         }
 
         let want_mouse = app.view == View::TmuxPane;
@@ -763,14 +777,29 @@ async fn run(
                 Ok(()) => mouse_captured = want_mouse,
                 Err(e) => log::warn!("mouse capture toggle failed: {}", e),
             }
+            dirty = true;
         }
 
-        terminal.draw(|frame| hot::render(frame, &mut app))?;
+        // The embedded tmux pane streams content from a background reader, so
+        // its widget tree changes without any event we observe here — always
+        // repaint while it's open. Otherwise paint only when something
+        // changed, plus a ~1Hz tick so the elapsed clocks keep moving.
+        let in_tmux = app.view == View::TmuxPane;
+        let clock_tick = last_clock_redraw.elapsed() >= Duration::from_secs(1);
+        if dirty || in_tmux || clock_tick {
+            terminal.draw(|frame| hot::render(frame, &mut app))?;
+            dirty = false;
+            last_clock_redraw = Instant::now();
+        }
 
         let poll_ms = if app.view == View::TmuxPane { 16 } else { 50 };
 
         if event::poll(Duration::from_millis(poll_ms))? {
             let evt = event::read()?;
+            // Any input may mutate state (scroll, selection, view change,
+            // status line) — repaint on the next loop pass regardless of which
+            // arm handles it or whether it `continue`s out early.
+            dirty = true;
             if let Event::Mouse(m) = evt {
                 if app.view == View::TmuxPane {
                     if let Some(pane) = app.tmux_pane.as_mut() {
@@ -1827,6 +1856,9 @@ async fn run(
 
         // Drain channel messages
         while let Ok(msg) = scan_rx.try_recv() {
+            // Every scan message updates app state (session list, projects,
+            // usage, status line, …), so a drained message means repaint.
+            dirty = true;
             match msg {
                 ScanMsg::SessionList(mut sessions) => {
                     queue_missing_titles(
@@ -1930,6 +1962,7 @@ async fn run(
                     format!("dispatched queued prompt to [{}]", tmux),
                     "queued dispatch failed".to_string(),
                 );
+                dirty = true;
             }
             app::DispatchAction::Timeout { tmux } => {
                 log::warn!("dispatch: pending target [{}] never became idle", tmux);
@@ -1937,6 +1970,7 @@ async fn run(
                     "queued dispatch timed out — [{}] never became idle",
                     tmux
                 ));
+                dirty = true;
             }
             app::DispatchAction::Wait => {}
         }
