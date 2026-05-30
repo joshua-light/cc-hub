@@ -604,11 +604,9 @@ fn synthesize_inactive_from_jsonl(
         })
         .unwrap_or(0);
 
-    let tail_entries = conversation::read_jsonl_tail_for_state(path);
-    let last_user_message = conversation::extract_last_user_message(&tail_entries);
-    let last_activity = conversation::extract_last_activity(&tail_entries);
-    let (git_branch, model, version) = conversation::extract_metadata(&tail_entries);
-    let summary = conversation::extract_first_user_message(&head_entries);
+    // Memoized on (path, mtime); the immutable summary is cached permanently.
+    let derived = conversation::derive_state_cached(path)?;
+    let summary = conversation::first_user_message_cached(path);
     let title = titles.get(&session_id).cloned();
 
     let tool_uses_count = crate::tool_use_count::count_claude(path);
@@ -620,20 +618,20 @@ fn synthesize_inactive_from_jsonl(
         project_name: project_name(&cwd),
         cwd,
         started_at,
-        last_activity,
+        last_activity: derived.last_activity,
         state: SessionState::Inactive,
-        last_user_message,
+        last_user_message: derived.last_user_message.clone(),
         summary,
         title,
-        model,
-        git_branch,
-        version,
+        model: derived.model.clone(),
+        git_branch: derived.git_branch.clone(),
+        version: derived.version.clone(),
         jsonl_path: Some(path.to_path_buf()),
         tmux_session: None,
         current_tool: None,
         is_thinking: false,
         titling: false,
-        context_tokens: conversation::extract_context_tokens(&tail_entries),
+        context_tokens: derived.context_tokens,
         tool_uses_count,
     })
 }
@@ -783,25 +781,31 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
 
             let mut data = match &jsonl_path {
                 Some(path) => {
-                    let entries = conversation::read_jsonl_tail_for_state(path);
+                    // Memoized on (path, mtime): skips the whole tail-read +
+                    // extract pipeline when the JSONL hasn't changed this tick.
+                    let derived = conversation::derive_state_cached(path)
+                        .map(|d| (*d).clone())
+                        .unwrap_or_else(|| conversation::StateDerivation {
+                            state: SessionState::Idle,
+                            last_user_message: None,
+                            last_activity: None,
+                            git_branch: None,
+                            model: None,
+                            version: None,
+                            current_tool: None,
+                            is_thinking: false,
+                            context_tokens: None,
+                        });
                     let mtime_age_secs = mtime_age_secs(path);
-                    let mut state = conversation::extract_state(&entries);
-                    let last_msg = conversation::extract_last_user_message(&entries);
-                    let last_act = conversation::extract_last_activity(&entries);
-                    let (branch, mdl, ver) = conversation::extract_metadata(&entries);
-                    let head_entries = conversation::read_jsonl_head(path, 4096);
-                    let summary = conversation::extract_first_user_message(&head_entries);
-                    let current_tool = conversation::extract_current_tool(&entries);
-                    let is_thinking = conversation::is_currently_thinking(&entries);
-                    let context_tokens = conversation::extract_context_tokens(&entries);
+                    let mut state = derived.state;
+                    // First user message is immutable per session — cached
+                    // permanently, so the head is read at most once per path.
+                    let summary = conversation::first_user_message_cached(path);
                     let tool_uses_count = crate::tool_use_count::count_claude(path);
 
                     debug!(
-                        "  sid={} tail_entries={} raw_state={} last_activity={:?}",
-                        sid_short,
-                        entries.len(),
-                        state,
-                        last_act
+                        "  sid={} raw_state={} last_activity={:?}",
+                        sid_short, state, derived.last_activity
                     );
 
                     // If the JSONL was modified very recently but state
@@ -822,20 +826,20 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
 
                     debug!(
                         "  sid={} final_state={} model={:?} branch={:?}",
-                        sid_short, state, mdl, branch
+                        sid_short, state, derived.model, derived.git_branch
                     );
 
                     JsonlData {
                         state,
-                        last_user_message: last_msg,
-                        last_activity: last_act,
-                        git_branch: branch,
-                        model: mdl,
-                        version: ver,
+                        last_user_message: derived.last_user_message,
+                        last_activity: derived.last_activity,
+                        git_branch: derived.git_branch,
+                        model: derived.model,
+                        version: derived.version,
                         summary,
-                        current_tool,
-                        is_thinking,
-                        context_tokens,
+                        current_tool: derived.current_tool,
+                        is_thinking: derived.is_thinking,
+                        context_tokens: derived.context_tokens,
                         tool_uses_count,
                     }
                 }
@@ -922,6 +926,16 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
         config::get().inactive.max_per_project,
     );
     sessions.extend(orphans);
+
+    // Evict derived-state / summary cache entries for transcripts that didn't
+    // surface this scan (sessions aged out of the window, deleted JSONLs), so
+    // the caches don't grow unbounded. Mirrors projects_scan's retain-by-
+    // visited-set eviction.
+    let visited: HashSet<PathBuf> = sessions
+        .iter()
+        .filter_map(|s| s.jsonl_path.clone())
+        .collect();
+    conversation::retain_cached(&visited);
 
     sessions.sort_by(|a, b| {
         a.state
