@@ -26,9 +26,10 @@ scriptable CLI primitives:
 - `cc-hub task report --task ID [--status S] [--note N] [--summary S]`
 - `cc-hub task show --task ID [--json]` / `cc-hub task list [--status S] [--json]`
 - `cc-hub task delete --task ID [--force]` (kills the orchestrator, removes worktrees + state)
+- `cc-hub task gc [--project-id ID] [--dry-run]` (prune worktrees + branches no live task still owns)
 - `cc-hub task auto-review --task ID` (re-arm the background auto-reviewer for the current Review round)
 - `cc-hub task artifact add/list ...` and `cc-hub task todos set/check/uncheck/clear ...`
-- `cc-hub pr create/show/approve/request-changes/reopen/comment/close/merge/lock-phase/finalize ...`
+- `cc-hub pr create/show/approve/request-changes/reopen/comment/close/merge/lock-phase/continue/finalize ...` (`continue` re-pings a stuck orchestrator)
 - `cc-hub project list [--json]`
 
 Project state lives at `~/.cc-hub/projects.toml` and
