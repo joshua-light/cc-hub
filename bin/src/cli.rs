@@ -159,12 +159,16 @@ Usage:
   cc-hub pr reopen --task ID [--comment TEXT] [--author NAME]
   cc-hub pr comment --task ID --comment TEXT [--author NAME]
   cc-hub pr close --task ID [--project-id ID] [--comment TEXT] [--author NAME]
-  cc-hub pr merge --task ID
+  cc-hub pr merge --task ID [--wait [--timeout-secs N]]
   cc-hub pr lock-phase --task ID --phase merging|simplify|bump|finalize-pending
   cc-hub pr finalize --task ID [--build-cmd CMD] [--skip-build] [--keep-tmux]
 
 Local PR records live beside task state. Merges are serialized with the
 project merge lock; `finalize` releases the lock and marks the task Done.
+
+`pr merge` acquires the project merge lock. If another task holds it, the
+default is to fail fast with `{ok:false, locked:true, ...}`; pass `--wait` to
+block until the lock frees (bounded by `--timeout-secs N`, default 1800).
 "#;
 
 const WORKER_HELP: &str = r#"cc-hub worker
@@ -190,24 +194,105 @@ Lists registered projects. Plain output is tab-separated:
 With --json, includes per-status task counts.
 "#;
 
+/// Terminate a verb by emitting the orchestrator-facing contract and
+/// returning the process exit code.
+///
+/// The module contract is "one JSON line on stdout". On success the verb
+/// already printed its own JSON; on error we print a structured error line
+/// here — `{"ok":false,"error":"<msg>","kind":"<usage|notfound|conflict|
+/// other>"}` (plus `recipe` when the variant carries a hint) — so an
+/// orchestrator piping stdout to `jq` always sees a parseable result, even
+/// on the failures that matter most. A short human line still goes to
+/// stderr for interactive use.
 fn handle(result: Result<(), CliError>) -> i32 {
     match result {
         Ok(()) => 0,
-        Err(CliError::Usage(msg)) => {
-            eprintln!("usage error: {}", msg);
-            2
-        }
-        Err(CliError::Other(msg)) => {
+        // The verb already printed a richer `{"ok":false,...}` line (e.g. the
+        // merge-lock-held / merge-conflict payloads carrying domain fields the
+        // generic shape can't express). Don't double-print JSON — just emit a
+        // human line and the exit code.
+        Err(CliError::Reported(msg)) => {
             eprintln!("error: {}", msg);
             1
+        }
+        Err(err) => {
+            let kind = err.kind();
+            let (msg, recipe) = err.into_message_and_recipe();
+            let mut payload = serde_json::json!({
+                "ok": false,
+                "error": msg,
+                "kind": kind,
+            });
+            if let Some(recipe) = recipe.as_deref() {
+                payload["recipe"] = serde_json::Value::String(recipe.to_string());
+            }
+            print_json(&payload);
+            eprintln!("{} error: {}", kind, msg);
+            match kind {
+                "usage" => 2,
+                _ => 1,
+            }
         }
     }
 }
 
 #[derive(Debug)]
 enum CliError {
+    /// Bad invocation: missing/unknown flag, malformed value, illegal
+    /// transition the caller could have avoided. Exit 2, kind "usage".
     Usage(String),
+    /// Requested entity does not exist (no task / no PR). Exit 1,
+    /// kind "notfound".
+    NotFound(String),
+    /// State guard tripped: merge lock held, conflicting transition on a
+    /// terminal PR, etc. Exit 1, kind "conflict". Carries an optional
+    /// recipe the orchestrator can act on.
+    Conflict {
+        msg: String,
+        recipe: Option<String>,
+    },
+    /// Everything else (I/O, git failures, serialization). Exit 1,
+    /// kind "other".
     Other(String),
+    /// The verb already printed its own `{"ok":false,...}` JSON line (a rich,
+    /// domain-specific payload). `handle` must NOT print a second JSON line;
+    /// it only sets the nonzero exit code and a human stderr line. The string
+    /// is that stderr message.
+    Reported(String),
+}
+
+impl CliError {
+    /// Stable machine-readable category for the JSON error contract.
+    fn kind(&self) -> &'static str {
+        match self {
+            CliError::Usage(_) => "usage",
+            CliError::NotFound(_) => "notfound",
+            CliError::Conflict { .. } => "conflict",
+            CliError::Other(_) => "other",
+            // Never surfaced as a `kind` (handled before this is consulted),
+            // but map it for completeness.
+            CliError::Reported(_) => "other",
+        }
+    }
+
+    /// Decompose into the human message and an optional remediation recipe.
+    fn into_message_and_recipe(self) -> (String, Option<String>) {
+        match self {
+            CliError::Usage(msg)
+            | CliError::NotFound(msg)
+            | CliError::Other(msg)
+            | CliError::Reported(msg) => (msg, None),
+            CliError::Conflict { msg, recipe } => (msg, recipe),
+        }
+    }
+
+    /// A `conflict` error carrying a remediation recipe for the orchestrator.
+    fn conflict_with_recipe(msg: impl Into<String>, recipe: impl Into<String>) -> Self {
+        CliError::Conflict {
+            msg: msg.into(),
+            recipe: Some(recipe.into()),
+        }
+    }
 }
 
 impl From<String> for CliError {
@@ -242,6 +327,9 @@ struct Flags {
     wait_secs: Option<u64>,
     dry_run: bool,
     backlog: bool,
+    /// `task create --name NAME` — project display name when registering a
+    /// fresh project from the cwd. Ignored when `--project-id` is given.
+    name: Option<String>,
     /// PR-flow flags. `--title` / `--description` for `pr create`,
     /// `--comment` + `--author` for `pr request-changes` / `pr comment`.
     title: Option<String>,
@@ -289,6 +377,17 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
             }
             "--worktree" => {
                 let v = next_value(args, &mut i, "--worktree")?;
+                // Reject names that aren't `^[A-Za-z0-9][A-Za-z0-9._-]*$` at the
+                // chokepoint: the value is embedded into `git worktree add -b`
+                // and into the auto-reviewer's shell instructions an unattended
+                // LLM runs (a leading dash hits git as a flag; exotic chars open
+                // prompt/shell injection).
+                if !orchestrator::is_valid_worktree_name(&v) {
+                    return Err(CliError::Usage(format!(
+                        "--worktree {}: must match ^[A-Za-z0-9][A-Za-z0-9._-]*$ (letters, digits, '.', '_', '-'; no leading dash, slashes, or spaces)",
+                        v
+                    )));
+                }
                 f.worktree = Some(v.clone());
                 f.worktree_targets.push(v);
             }
@@ -351,6 +450,9 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
             "--backlog" => {
                 f.backlog = true;
                 i += 1;
+            }
+            "--name" => {
+                f.name = Some(next_value(args, &mut i, "--name")?);
             }
             "--title" => {
                 f.title = Some(next_value(args, &mut i, "--title")?);
@@ -894,8 +996,8 @@ fn task_delete(args: &[String]) -> Result<(), CliError> {
 
     if matches!(state.status, TaskStatus::Running | TaskStatus::Review) && !f.force {
         return Err(CliError::Other(format!(
-            "task {} is {:?}; pass --force to delete an active task (orchestrator tmux will be killed)",
-            task_id, state.status
+            "task {} is {}; pass --force to delete an active task (orchestrator tmux will be killed)",
+            task_id, status_str(&state.status)
         )));
     }
 
@@ -937,7 +1039,7 @@ fn task_start(args: &[String]) -> Result<(), CliError> {
     let project_id = resolve_project_id(&f)?;
     let agent_id = f.agent.clone();
 
-    let (_state, tmux_name, prompt) =
+    let (state, tmux_name, prompt) =
         orchestrator::start_backlog_task(&project_id, &task_id, agent_id.as_deref())
             .map_err(|e| CliError::Other(format!("start backlog task: {}", e)))?;
 
@@ -955,8 +1057,13 @@ fn task_start(args: &[String]) -> Result<(), CliError> {
         "sent"
     };
 
+    // Echo agent_id/agent_kind/cwd alongside the tmux name to match
+    // `spawn-worker`'s output shape so orchestrators get a uniform envelope.
     print_json(&serde_json::json!({
         "ok": true,
+        "agent_id": state.orchestrator_agent_id,
+        "agent_kind": state.orchestrator_agent_kind,
+        "cwd": state.project_root.to_string_lossy(),
         "tmux": tmux_name,
         "prompt_status": prompt_status,
         "task_id": task_id,
@@ -1070,7 +1177,7 @@ fn task_list(args: &[String]) -> Result<(), CliError> {
                 })
             })
             .collect();
-        print_json(&serde_json::Value::Array(arr));
+        print_json(&serde_json::json!({ "ok": true, "tasks": arr }));
     } else {
         for t in &tasks {
             let preview = match t.title.as_deref() {
@@ -1276,7 +1383,7 @@ fn task_show(args: &[String]) -> Result<(), CliError> {
     let todos_done = state.todos.iter().filter(|t| t.done).count();
     let todos_total = state.todos.len();
 
-    println!("status: {:?}", state.status);
+    println!("status: {}", status_str(&state.status));
     println!("prompt: {}", one_line(&state.prompt, 80));
     println!("note: {}", state.note.as_deref().unwrap_or("-"));
     println!(
@@ -1318,8 +1425,8 @@ fn task_auto_review(args: &[String]) -> Result<(), CliError> {
         .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
     if state.status != TaskStatus::Review {
         return Err(CliError::Usage(format!(
-            "auto-review is only meaningful in the Review state (task is currently {:?})",
-            state.status
+            "auto-review is only meaningful in the Review state (task is currently {})",
+            status_str(&state.status)
         )));
     }
 
@@ -1493,7 +1600,7 @@ fn task_artifact_list(args: &[String]) -> Result<(), CliError> {
             })
         })
         .collect();
-    print_json(&serde_json::Value::Array(arr));
+    print_json(&serde_json::json!({ "ok": true, "artifacts": arr }));
     Ok(())
 }
 
@@ -1609,21 +1716,8 @@ fn task_todos_clear(args: &[String]) -> Result<(), CliError> {
 /// Headless task creation — used by tests and tooling that wants to seed a
 /// task without going through the TUI's `N → folder → prompt` flow.
 fn task_create(args: &[String]) -> Result<(), CliError> {
-    let mut f = Flags::default();
-    let mut i = 0;
-    let mut name: Option<String> = None;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--prompt" => f.prompt = Some(next_value(args, &mut i, "--prompt")?),
-            "--project-id" => f.project_id = Some(next_value(args, &mut i, "--project-id")?),
-            "--name" => name = Some(next_value(args, &mut i, "--name")?),
-            "--backlog" => {
-                f.backlog = true;
-                i += 1;
-            }
-            other => return Err(CliError::Usage(format!("unknown flag: {}", other))),
-        }
-    }
+    let f = parse_flags(args)?;
+    let name = f.name.clone();
     let prompt = f
         .prompt
         .clone()
@@ -1803,12 +1897,30 @@ fn pr_show(args: &[String]) -> Result<(), CliError> {
     let project_id = resolve_project_id(&f)?;
     let pr = cc_hub_lib::pr::read_pr(&project_id, &task_id)
         .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
-        .ok_or_else(|| CliError::Other("no PR for this task".into()))?;
+        .ok_or_else(|| CliError::NotFound("no PR for this task".into()))?;
     print_json(&serde_json::json!({
         "ok": true,
         "pr": pr_to_json_filtered(&pr, f.comments_since),
     }));
     Ok(())
+}
+
+/// Guard a review-state mutation against terminal PRs. `pr approve` and
+/// `pr request-changes` must refuse a Merged/Closed PR — like their siblings
+/// `pr reopen`/`pr merge`/`pr close` — instead of silently resurrecting a
+/// finished task (forcing Done → Running and re-opening the merged PR).
+fn guard_pr_mutable(verb: &str, state: cc_hub_lib::pr::ReviewState) -> Result<(), CliError> {
+    match state {
+        cc_hub_lib::pr::ReviewState::Merged => Err(CliError::conflict_with_recipe(
+            format!("cannot {} a merged PR", verb),
+            "The PR is already merged; open a follow-up task instead of reopening finished work.",
+        )),
+        cc_hub_lib::pr::ReviewState::Closed => Err(CliError::conflict_with_recipe(
+            format!("cannot {} a closed PR", verb),
+            "The PR is closed; reopen it via the TUI before changing its review state.",
+        )),
+        _ => Ok(()),
+    }
 }
 
 fn pr_approve(args: &[String]) -> Result<(), CliError> {
@@ -1820,11 +1932,11 @@ fn pr_approve(args: &[String]) -> Result<(), CliError> {
         .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
     let project_root = state.project_root.clone();
 
-    let pr_branch = cc_hub_lib::pr::read_pr(&project_id, &task_id)
+    let pr = cc_hub_lib::pr::read_pr(&project_id, &task_id)
         .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
-        .ok_or_else(|| CliError::Other("no PR for this task".into()))?
-        .branch
-        .clone();
+        .ok_or_else(|| CliError::NotFound("no PR for this task".into()))?;
+    guard_pr_mutable("approve", pr.review_state)?;
+    let pr_branch = pr.branch.clone();
     let base_branch = orchestrator::detect_main_branch(&project_root);
 
     // Snapshot SHAs at approval — used by `pr merge` to detect whether
@@ -1855,6 +1967,11 @@ fn pr_request_changes(args: &[String]) -> Result<(), CliError> {
         .clone()
         .ok_or_else(|| CliError::Usage("--comment is required".into()))?;
     let author = f.author.clone().unwrap_or_else(|| "user".into());
+
+    let existing = cc_hub_lib::pr::read_pr(&project_id, &task_id)
+        .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
+        .ok_or_else(|| CliError::NotFound("no PR for this task".into()))?;
+    guard_pr_mutable("request changes on", existing.review_state)?;
 
     let now = orchestrator::now_unix_secs();
     let pr = cc_hub_lib::pr::update_pr(&project_id, &task_id, |p| {
@@ -1891,7 +2008,7 @@ fn pr_reopen(args: &[String]) -> Result<(), CliError> {
 
     let pr = cc_hub_lib::pr::read_pr(&project_id, &task_id)
         .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
-        .ok_or_else(|| CliError::Other("no PR for this task".into()))?;
+        .ok_or_else(|| CliError::NotFound("no PR for this task".into()))?;
 
     if pr.review_state != cc_hub_lib::pr::ReviewState::ChangesRequested {
         return Err(CliError::Other(format!(
@@ -1968,7 +2085,7 @@ fn pr_close(args: &[String]) -> Result<(), CliError> {
 
     let pr = cc_hub_lib::pr::read_pr(&project_id, &task_id)
         .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
-        .ok_or_else(|| CliError::Other("no PR for this task".into()))?;
+        .ok_or_else(|| CliError::NotFound("no PR for this task".into()))?;
 
     match pr.review_state {
         cc_hub_lib::pr::ReviewState::Merged => {
@@ -2026,12 +2143,12 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
     let project_root = state.project_root.clone();
     let pr = cc_hub_lib::pr::read_pr(&project_id, &task_id)
         .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
-        .ok_or_else(|| CliError::Other("no PR for this task".into()))?;
+        .ok_or_else(|| CliError::NotFound("no PR for this task".into()))?;
 
     if pr.review_state != cc_hub_lib::pr::ReviewState::Approved {
         return Err(CliError::Other(format!(
-            "PR is not approved (state: {:?}); approve it first via the TUI or `cc-hub pr approve`",
-            pr.review_state
+            "PR is not approved (state: {}); approve it first via the TUI or `cc-hub pr approve`",
+            pr.review_state.as_str()
         )));
     }
 
@@ -2070,7 +2187,7 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
             );
         }
         print_json(&payload);
-        return Err(CliError::Other(format!(
+        return Err(CliError::Reported(format!(
             "merge lock held by task {}",
             holder_task
         )));
@@ -2156,7 +2273,7 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
             "stderr": merge_into_feature.stderr,
             "recipe": "Resolve conflicts in the worktree, commit the resolution, then ask the reviewer to re-approve before re-running `cc-hub pr merge`. The merge lock has been released.",
         }));
-        return Err(CliError::Other(
+        return Err(CliError::Reported(
             "conflict merging main into the feature branch — PR demoted to Open".into(),
         ));
     }
@@ -2185,7 +2302,7 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
             "overlap": overlap,
             "recipe": "Commit, stash, or revert the listed paths on the target branch, then re-run `cc-hub pr merge`. The merge lock has been released.",
         }));
-        return Err(CliError::Other(
+        return Err(CliError::Reported(
             "merge blocked: working tree on target branch has overlapping uncommitted edits".into(),
         ));
     }
@@ -2225,7 +2342,7 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
             "stderr": merge_into_main.stderr,
             "recipe": "Unexpected conflict merging into main (the merge lock should have prevented this — investigate before retrying).",
         }));
-        return Err(CliError::Other("conflict merging into main".into()));
+        return Err(CliError::Reported("conflict merging into main".into()));
     }
 
     // Transition task to Merging. /simplify and /bump still need to run;
@@ -2357,8 +2474,8 @@ fn pr_finalize(args: &[String]) -> Result<(), CliError> {
     }
     if state.status != TaskStatus::Merging {
         return Err(CliError::Usage(format!(
-            "task {} must be in Merging to finalize (currently {:?}) — run `cc-hub pr merge --task {} --wait` first",
-            task_id, state.status, task_id
+            "task {} must be in Merging to finalize (currently {}) — run `cc-hub pr merge --task {} --wait` first",
+            task_id, status_str(&state.status), task_id
         )));
     }
 
@@ -2386,7 +2503,7 @@ fn pr_finalize(args: &[String]) -> Result<(), CliError> {
                 "stderr": tail,
                 "recipe": "Build failed on main after /simplify or /bump; fix in the working tree, commit, then re-run cc-hub pr finalize.",
             }));
-            return Err(CliError::Other("build gate failed".into()));
+            return Err(CliError::Reported("build gate failed".into()));
         }
     }
 
@@ -2725,9 +2842,9 @@ fn project_subcommand(args: &[String]) -> Result<(), CliError> {
 ///
 /// Enumerate registered projects from `~/.cc-hub/projects.toml`. Plain
 /// output is one tab-separated row per project: `<id>\t<name>\t<root>`.
-/// With `--json`, a single JSON array of `{id, name, root,
-/// task_counts:{backlog,running,review,merging,done}}`. Sorted by name
-/// (case-insensitive) so the listing is stable across machines.
+/// With `--json`, one `{ok:true, projects:[{id, name, root,
+/// task_counts:{backlog,running,review,merging,done}}]}` envelope. Sorted by
+/// name (case-insensitive) so the listing is stable across machines.
 fn project_list(args: &[String]) -> Result<(), CliError> {
     use cc_hub_lib::orchestrator::TaskStatus;
     use cc_hub_lib::projects_scan;
@@ -2771,7 +2888,7 @@ fn project_list(args: &[String]) -> Result<(), CliError> {
                 })
             })
             .collect();
-        print_json(&serde_json::Value::Array(arr));
+        print_json(&serde_json::json!({ "ok": true, "projects": arr }));
     } else {
         // Tab-separated so consumers can split on \t even if a name contains spaces.
         for p in &projects {
@@ -2944,7 +3061,7 @@ mod tests {
                 build_script.to_string_lossy().into_owned(),
             ]);
             match result {
-                Err(CliError::Other(msg)) => assert!(
+                Err(CliError::Reported(msg)) => assert!(
                     msg.contains("build gate failed"),
                     "unexpected error: {}",
                     msg
@@ -4344,5 +4461,136 @@ mod tests {
         let err = resolve_wait_targets(&state, &[], &[], false)
             .expect_err("must error when no selection flags given");
         assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    /// Helper: seed a Done task with a Merged PR, returning (project_id, task_id).
+    fn seed_merged_pr(project_id: &str, task_id: &str) {
+        let mut state = TaskState::new(
+            project_id.to_string(),
+            PathBuf::from("/tmp/proj"),
+            "do thing".into(),
+        );
+        state.task_id = task_id.to_string();
+        state.status = TaskStatus::Done;
+        orchestrator::write_task_state(&state).expect("write state");
+
+        pr::create_pr(
+            &state,
+            "feature".into(),
+            "main".into(),
+            "title".into(),
+            "desc".into(),
+        )
+        .expect("create pr");
+        pr::update_pr(project_id, task_id, |p| {
+            p.review_state = pr::ReviewState::Merged;
+        })
+        .expect("set merged");
+    }
+
+    #[test]
+    fn pr_approve_refuses_merged_pr_and_leaves_task_unchanged() {
+        with_tempdir_home(|| {
+            let project_id = "p-approve-merged";
+            let task_id = "t-approve-merged";
+            seed_merged_pr(project_id, task_id);
+
+            let argv = vec![
+                "pr".to_string(),
+                "approve".to_string(),
+                "--task".to_string(),
+                task_id.to_string(),
+                "--project-id".to_string(),
+                project_id.to_string(),
+            ];
+            // Nonzero exit via dispatch (exercises the JSON-error handler too).
+            let code = dispatch(&argv);
+            assert_eq!(code, Some(1), "approve on merged PR must exit nonzero");
+
+            // PR stays Merged, task stays Done.
+            let after_pr = pr::read_pr(project_id, task_id)
+                .expect("read pr")
+                .expect("pr present");
+            assert_eq!(after_pr.review_state, pr::ReviewState::Merged);
+            let after_state =
+                orchestrator::read_task_state(project_id, task_id).expect("read state");
+            assert_eq!(after_state.status, TaskStatus::Done);
+
+            // Direct call surfaces a Conflict error.
+            let err = pr_approve(&argv[2..]).expect_err("must error");
+            assert_eq!(err.kind(), "conflict");
+        });
+    }
+
+    #[test]
+    fn pr_request_changes_refuses_merged_pr_and_leaves_task_unchanged() {
+        with_tempdir_home(|| {
+            let project_id = "p-rc-merged";
+            let task_id = "t-rc-merged";
+            seed_merged_pr(project_id, task_id);
+
+            let argv = vec![
+                "pr".to_string(),
+                "request-changes".to_string(),
+                "--task".to_string(),
+                task_id.to_string(),
+                "--project-id".to_string(),
+                project_id.to_string(),
+                "--comment".to_string(),
+                "please change".to_string(),
+            ];
+            let code = dispatch(&argv);
+            assert_eq!(
+                code,
+                Some(1),
+                "request-changes on merged PR must exit nonzero"
+            );
+
+            // Critically: the merged PR must NOT be resurrected, and the Done
+            // task must NOT be forced back to Running.
+            let after_pr = pr::read_pr(project_id, task_id)
+                .expect("read pr")
+                .expect("pr present");
+            assert_eq!(after_pr.review_state, pr::ReviewState::Merged);
+            assert!(
+                after_pr.comments.is_empty(),
+                "no comment should be appended on a refused request-changes"
+            );
+            let after_state =
+                orchestrator::read_task_state(project_id, task_id).expect("read state");
+            assert_eq!(after_state.status, TaskStatus::Done);
+
+            let err = pr_request_changes(&argv[2..]).expect_err("must error");
+            assert_eq!(err.kind(), "conflict");
+        });
+    }
+
+    #[test]
+    fn parse_flags_rejects_unsafe_worktree_names() {
+        // Leading dash (would hit `git worktree add -b` as a flag), path
+        // traversal, and whitespace must all be rejected at the chokepoint.
+        for bad in ["-foo", "../x", "a b", ".hidden", "x/y"] {
+            let args = vec!["--worktree".to_string(), bad.to_string()];
+            match parse_flags(&args) {
+                Err(CliError::Usage(msg)) => assert!(
+                    msg.contains("--worktree"),
+                    "expected a --worktree usage error for {:?}, got: {msg}",
+                    bad
+                ),
+                Err(other) => panic!("expected Usage error for {:?}, got {:?}", bad, other),
+                Ok(_) => panic!("expected {:?} to be rejected", bad),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_flags_accepts_safe_worktree_names() {
+        for good in ["fix", "fix-123", "v1.2_x", "a"] {
+            let args = vec!["--worktree".to_string(), good.to_string()];
+            let f = parse_flags(&args).unwrap_or_else(|e| {
+                panic!("expected {:?} to parse, got {:?}", good, e);
+            });
+            assert_eq!(f.worktree.as_deref(), Some(good));
+        }
     }
 }

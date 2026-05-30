@@ -1247,6 +1247,25 @@ pub fn worktree_branch(task_id: &str, name: &str) -> String {
     format!("cc-hub/{}-{}", task_id, name)
 }
 
+/// Whether `name` is a safe `--worktree` value. The name flows into a derived
+/// branch (`worktree_branch`), into `git worktree add -b <branch>`, and into
+/// the auto-reviewer's shell instructions an unattended LLM runs — so a
+/// leading dash would be read as a git flag (argv injection) and exotic chars
+/// open a prompt-injection / shell-quoting hole. We require it to start with
+/// an alphanumeric and otherwise contain only `[A-Za-z0-9._-]`, matching
+/// `^[A-Za-z0-9][A-Za-z0-9._-]*$`. This also rejects path traversal (`../x`),
+/// whitespace, and empty names.
+pub fn is_valid_worktree_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphanumeric() {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
 /// Detect the project's primary branch. Tries `origin/HEAD`, then `main`,
 /// then `master`, falling back to `"main"` (which lets the caller's git
 /// command surface the real failure rather than us inventing one).
@@ -1475,6 +1494,21 @@ pub fn merge_branch(
 mod tests {
     use super::*;
     use crate::test_util::HOME_TEST_LOCK;
+
+    #[test]
+    fn worktree_name_validation_rejects_unsafe_and_accepts_safe() {
+        // Argv-injection / traversal / quoting hazards must be rejected.
+        for bad in ["", "-foo", "--bar", "../x", "a/b", "a b", ".hidden", "a$b", "a;b"] {
+            assert!(
+                !is_valid_worktree_name(bad),
+                "{:?} should be rejected",
+                bad
+            );
+        }
+        for good in ["fix", "a", "fix-123", "v1.2_x", "FixIt"] {
+            assert!(is_valid_worktree_name(good), "{:?} should be accepted", good);
+        }
+    }
 
     #[test]
     fn resolve_cc_hub_bin_strips_deleted_suffix_when_sibling_exists() {
