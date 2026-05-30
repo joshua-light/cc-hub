@@ -1498,12 +1498,8 @@ async fn run(
                     }
                     (View::FolderPicker, KeyCode::Char('m')) => {
                         match app.toggle_selected_bookmark() {
-                            Some((true, path)) => {
-                                app.set_status(format!("bookmarked {}", path))
-                            }
-                            Some((false, path)) => {
-                                app.set_status(format!("unbookmarked {}", path))
-                            }
+                            Some((true, path)) => app.set_status(format!("bookmarked {}", path)),
+                            Some((false, path)) => app.set_status(format!("unbookmarked {}", path)),
                             None => app.set_status("no folder selected".into()),
                         }
                     }

@@ -160,8 +160,8 @@ programmatically.
 | `cc-hub spawn-worker --task ID [--agent A] [--worktree NAME \| --readonly] [--prompt P]` | Spawn a worker session under the orchestrator. `--worktree` does `git -C <root> worktree add -b cc-hub/<branch> <path> main` |
 | `cc-hub merge-worktree --task ID --worktree NAME` | Merge the worker's branch back into main; appends `MergeRecord` |
 | `cc-hub task report --task ID [--status S] [--note N]` | Update the one-line note + optional status transition |
-| `cc-hub task artifact add ...` / `cc-hub task todo ...` | Append evidence / mutate the task checklist |
-| `cc-hub pr {create,merge,review,...}` | PR-flow CLI; pairs with `lib/src/pr.rs` schema |
+| `cc-hub task artifact add ...` / `cc-hub task todos ...` | Append evidence / mutate the task checklist |
+| `cc-hub pr {create,show,approve,merge,...}` | PR-flow CLI; pairs with `lib/src/pr.rs` schema |
 
 The TUI never invokes these directly — it calls the same `orchestrator::*`
 helpers in-process. The CLI exists so the orchestrator (a Claude or Pi

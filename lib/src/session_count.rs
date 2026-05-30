@@ -41,7 +41,10 @@ pub fn count_recent_sessions() -> SessionCounts {
             // `created()` returns birthtime on macOS / creationTime on
             // Windows; on Linux it may be `Err(Unsupported)`, in which
             // case we fall back to mtime.
-            let created: SystemTime = meta.created().or_else(|_| meta.modified()).unwrap_or(now.into());
+            let created: SystemTime = meta
+                .created()
+                .or_else(|_| meta.modified())
+                .unwrap_or(now.into());
             let Ok(dur) = created.duration_since(SystemTime::UNIX_EPOCH) else {
                 continue;
             };

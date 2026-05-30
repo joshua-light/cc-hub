@@ -349,8 +349,7 @@ mod macos {
     fn find_owner_and_window(pids: &[u32]) -> Option<(i32, CGWindowID)> {
         let list = unsafe {
             CGWindowListCopyWindowInfo(
-                K_CG_WINDOW_LIST_OPTION_ON_SCREEN_ONLY
-                    | K_CG_WINDOW_LIST_EXCLUDE_DESKTOP_ELEMENTS,
+                K_CG_WINDOW_LIST_OPTION_ON_SCREEN_ONLY | K_CG_WINDOW_LIST_EXCLUDE_DESKTOP_ELEMENTS,
                 K_CG_NULL_WINDOW_ID,
             )
         };
@@ -551,7 +550,10 @@ mod macos {
                     AXUIElementCopyAttributeValue(window, close_btn_attr.as_ref(), &mut btn)
                 };
                 if ge != K_AX_ERROR_SUCCESS || btn.is_null() {
-                    warn!("macos close: AXCopyAttributeValue(AXCloseButton) failed: {}", ge);
+                    warn!(
+                        "macos close: AXCopyAttributeValue(AXCloseButton) failed: {}",
+                        ge
+                    );
                     return false;
                 }
                 let press = CfString::new("AXPress");

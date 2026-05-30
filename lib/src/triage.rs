@@ -295,11 +295,8 @@ mod tests {
             created_at: 0,
             build_cmd: None,
         };
-        let task = orchestrator::TaskState::new_backlog(
-            "p1".into(),
-            PathBuf::from("/tmp/proj"),
-            prompt,
-        );
+        let task =
+            orchestrator::TaskState::new_backlog("p1".into(), PathBuf::from("/tmp/proj"), prompt);
         // Must not panic on the char boundary, and must truncate.
         let out = build_prompt(&project, &[&task]);
         assert!(out.contains('…'));

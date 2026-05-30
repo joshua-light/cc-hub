@@ -17,8 +17,23 @@ impl Drop for SessionGuard {
     }
 }
 
+/// The mux shim is driven through the `tmux` binary (psmux's `tmux.exe` shim
+/// on Windows). Skip the smoke test silently when it's not on `PATH` so the
+/// suite stays passable on bare CI images.
+fn tmux_available() -> bool {
+    Command::new("tmux")
+        .arg("-V")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 #[test]
 fn mux_roundtrip() {
+    if !tmux_available() {
+        eprintln!("mux_roundtrip: tmux not on PATH, skipping");
+        return;
+    }
     let name = format!("cchub-smoke-{}", std::process::id());
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())

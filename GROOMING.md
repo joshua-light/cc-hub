@@ -79,7 +79,7 @@ anything that mutates state outside `cc-hub task create --backlog` and
 
 4. **File them (3 min).** For each candidate:
    ```sh
-   /Users/j.light/git/self/cc-hub/target/release/cc-hub task create \
+   cc-hub task create \
      --backlog \
      --prompt "<the self-contained scoped prompt>"
    ```
@@ -89,7 +89,7 @@ anything that mutates state outside `cc-hub task create --backlog` and
 5. **Close the loop.** File **one** final backlog task whose prompt is
    exactly:
    ```
-   Read /Users/j.light/git/self/cc-hub/GROOMING.md and follow it. Do not
+   Read $(git rev-parse --show-toplevel)/GROOMING.md and follow it. Do not
    open a PR. Survey the project, file 3–7 fresh deduplicated backlog
    tasks for cc-hub Projects-layer improvements, and finish by re-filing
    this exact prompt as the last backlog task to keep the loop closed.
@@ -100,7 +100,7 @@ anything that mutates state outside `cc-hub task create --backlog` and
 
 6. **Report done.**
    ```sh
-   /Users/j.light/git/self/cc-hub/target/release/cc-hub task report \
+   cc-hub task report \
      --task <your-task-id> \
      --status done \
      --note "Filed N backlog tasks + loop continuation"

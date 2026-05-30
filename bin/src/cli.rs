@@ -395,10 +395,10 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
             }
             "--progress-interval-secs" => {
                 let v = next_value(args, &mut i, "--progress-interval-secs")?;
-                f.progress_interval_secs = Some(
-                    v.parse()
-                        .map_err(|e| CliError::Usage(format!("--progress-interval-secs: {}", e)))?,
-                );
+                f.progress_interval_secs =
+                    Some(v.parse().map_err(|e| {
+                        CliError::Usage(format!("--progress-interval-secs: {}", e))
+                    })?);
             }
             "--json" => {
                 f.json = true;
@@ -2260,10 +2260,9 @@ fn pr_lock_phase(args: &[String]) -> Result<(), CliError> {
     let f = parse_flags(args)?;
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
-    let phase_raw = f
-        .phase
-        .clone()
-        .ok_or_else(|| CliError::Usage("--phase is required (merging|simplify|bump|finalize-pending)".into()))?;
+    let phase_raw = f.phase.clone().ok_or_else(|| {
+        CliError::Usage("--phase is required (merging|simplify|bump|finalize-pending)".into())
+    })?;
     let phase = cc_hub_lib::merge_lock::MergePhase::parse(&phase_raw).ok_or_else(|| {
         CliError::Usage(format!(
             "--phase: unknown value '{}' (expected merging|simplify|bump|finalize-pending)",
@@ -2842,10 +2841,7 @@ mod tests {
                 "expected --task missing-value error, got: {msg}"
             ),
             Err(other) => panic!("expected CliError::Usage, got {other:?}"),
-            Ok(f) => panic!(
-                "expected --task to error, but parsed task={:?}",
-                f.task
-            ),
+            Ok(f) => panic!("expected --task to error, but parsed task={:?}", f.task),
         }
     }
 
@@ -2899,11 +2895,8 @@ mod tests {
             let project_root = project_dir.path().to_path_buf();
 
             // State: task is Merging, /simplify + /bump nominally complete.
-            let mut state = TaskState::new(
-                project_id.clone(),
-                project_root.clone(),
-                "do thing".into(),
-            );
+            let mut state =
+                TaskState::new(project_id.clone(), project_root.clone(), "do thing".into());
             state.task_id = task_id.clone();
             state.status = TaskStatus::Merging;
             orchestrator::write_task_state(&state).expect("write state");
@@ -2929,8 +2922,11 @@ mod tests {
 
             // Build script that fails with a known stderr signature.
             let build_script = project_root.join("build.sh");
-            std::fs::write(&build_script, "#!/bin/sh\necho 'build broke!' 1>&2\nexit 7\n")
-                .expect("write build script");
+            std::fs::write(
+                &build_script,
+                "#!/bin/sh\necho 'build broke!' 1>&2\nexit 7\n",
+            )
+            .expect("write build script");
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -3160,8 +3156,7 @@ mod tests {
             state.status = TaskStatus::Merging;
             orchestrator::write_task_state(&state).expect("write state");
 
-            cc_hub_lib::merge_lock::acquire(&project_id, &task_id, None)
-                .expect("acquire lock");
+            cc_hub_lib::merge_lock::acquire(&project_id, &task_id, None).expect("acquire lock");
 
             let result = pr_finalize(&[
                 "--task".into(),
@@ -3355,11 +3350,7 @@ mod tests {
                 orchestrator::read_task_state(&project_id, &task_id).expect("read state");
             assert_eq!(after_state.status, TaskStatus::Done);
             assert!(
-                after_state
-                    .note
-                    .as_deref()
-                    .unwrap_or("")
-                    .contains("closed"),
+                after_state.note.as_deref().unwrap_or("").contains("closed"),
                 "note should mention closed, got {:?}",
                 after_state.note
             );
@@ -3692,9 +3683,8 @@ mod tests {
         let task_id = "t-delete-test".to_string();
         let worktree_name = "wt".to_string();
 
-        let wt_path =
-            orchestrator::create_worktree(project_root, &task_id, &worktree_name, "main")
-                .expect("create worktree");
+        let wt_path = orchestrator::create_worktree(project_root, &task_id, &worktree_name, "main")
+            .expect("create worktree");
 
         let mut state = TaskState::new(
             project_id.clone(),
@@ -3998,8 +3988,7 @@ mod tests {
             )
             .expect("create pr");
 
-            cc_hub_lib::merge_lock::acquire(&project_id, &task_id, None)
-                .expect("acquire lock");
+            cc_hub_lib::merge_lock::acquire(&project_id, &task_id, None).expect("acquire lock");
 
             // Lock unlink requires write+exec on the parent dir; chmod 0o555
             // forces fs::remove_file to fail with EACCES, simulating the
@@ -4106,7 +4095,10 @@ mod tests {
             ]);
             assert_eq!(code, Some(0), "task delete should exit 0");
             assert!(!state_dir.exists(), "state dir should be gone after delete");
-            assert!(!wt_path.exists(), "worktree dir should be gone after delete");
+            assert!(
+                !wt_path.exists(),
+                "worktree dir should be gone after delete"
+            );
         });
     }
 
@@ -4303,8 +4295,7 @@ mod tests {
     #[test]
     fn resolve_wait_targets_resolves_worktree_to_tmux() {
         let state = make_state_with_three_workers();
-        let targets =
-            resolve_wait_targets(&state, &[], &["fix".to_string()], false).expect("ok");
+        let targets = resolve_wait_targets(&state, &[], &["fix".to_string()], false).expect("ok");
         assert_eq!(targets, vec!["cchub-1".to_string()]);
     }
 

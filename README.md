@@ -24,8 +24,11 @@ scriptable CLI primitives:
 - `cc-hub spawn-worker --task ID [--agent AGENT] [--worktree NAME | --readonly] [--prompt P]`
 - `cc-hub worker wait --task ID [--tmux NAME ... | --worktree NAME ... | --all]`
 - `cc-hub task report --task ID [--status S] [--note N] [--summary S]`
+- `cc-hub task show --task ID [--json]` / `cc-hub task list [--status S] [--json]`
+- `cc-hub task delete --task ID [--force]` (kills the orchestrator, removes worktrees + state)
+- `cc-hub task auto-review --task ID` (re-arm the background auto-reviewer for the current Review round)
 - `cc-hub task artifact add/list ...` and `cc-hub task todos set/check/uncheck/clear ...`
-- `cc-hub pr create/show/approve/request-changes/reopen/comment/close/merge/finalize ...`
+- `cc-hub pr create/show/approve/request-changes/reopen/comment/close/merge/lock-phase/finalize ...`
 - `cc-hub project list [--json]`
 
 Project state lives at `~/.cc-hub/projects.toml` and
@@ -260,9 +263,11 @@ Metrics**.
 | `i` | Session info popup |
 | `Enter` / `f` | Attach: embedded pane if the session is in a mux, else focus its terminal window. For an inactive session, spawn a new tmux session running `cc-hub-new --resume <id>` |
 | `H` | Toggle visibility of inactive sessions (hidden by default; window is 3 days) |
+| `W` | Toggle visibility of orchestrator/worker sessions (hidden by default — these belong to the Projects tab) |
 | `o` | Open an embedded shell pane in the selected session's cwd |
 | `n` | Spawn a new `cc-hub-new` session in the selected session's cwd |
 | `N` | Folder picker → spawn a new `cc-hub-new` session (`c` / `C` in the picker creates a public/private GitHub repo via `gh`) |
+| `M` | Bookmarks picker → spawn a new `cc-hub-new` session in a bookmarked folder (add one with `m` on a folder in the `N` picker) |
 | `p` | Dispatch a prompt to the first idle agent (auto-spawns if none) |
 | `x` | Close the selected session's window (Unix WM only) |
 | `Space` | Ack / mark selected session idle |
@@ -290,6 +295,7 @@ chip-level signal when there's pending work to triage.
 | `R` | Confirm, then restart the selected Running/Backlog task's orchestrator from the original prompt (blocked for Review/Done/Merging tasks) |
 | `Space` | Approve the focused Review PR → Merging/queued; PR-less Review tasks go Done |
 | `r` | Open the Result popup (artifacts + summary) for the focused task |
+| `c` | Copy the selected task's id to the clipboard |
 | `b` | Open the Backlog popup (`s`/`Enter` starts the selected backlog task; `x` deletes it) |
 | `n` | New task in the current project (prompt input — `Tab` cycles the orchestrator agent when more than one is configured) |
 | `N` | Folder picker → register a project, then prompt for a task |

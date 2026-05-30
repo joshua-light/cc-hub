@@ -1553,7 +1553,6 @@ mod tests {
         })];
         assert_eq!(extract_state(&entries), SessionState::WaitingForInput);
     }
-
 }
 
 /// Strip XML-like tags (e.g. `<bash-stdout>`, `<system-reminder>`) that leak

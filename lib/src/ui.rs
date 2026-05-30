@@ -1,7 +1,7 @@
 use crate::app::{status_msg_ttl, App, Tab, View, TABS};
 use crate::config;
-use crate::folder_picker::PickerMode;
 use crate::conversation::{StateExplanation, Verdict};
+use crate::folder_picker::PickerMode;
 use crate::metrics::{MetricsAnalysis, ModelStats, SessionSummary, ToolStats};
 use crate::models::{short_sid, SessionDetail, SessionInfo, SessionState};
 use crate::orchestrator::Artifact;
@@ -210,20 +210,17 @@ fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
             };
             // In browse mode, mark already-bookmarked subdirs with a star
             // so the user doesn't re-bookmark by accident.
-            let star_span = if !bookmarks_mode
-                && app
-                    .bookmarks
-                    .contains(&picker.current_dir.join(name))
-            {
-                Span::styled(
-                    "★ ",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Span::raw("")
-            };
+            let star_span =
+                if !bookmarks_mode && app.bookmarks.contains(&picker.current_dir.join(name)) {
+                    Span::styled(
+                        "★ ",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    Span::raw("")
+                };
             lines.push(Line::from(vec![
                 Span::styled(cursor_marker, style),
                 star_span,
@@ -495,11 +492,7 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
     {
         let selected = i == sel;
         let arrow = if selected { "▌ " } else { "  " };
-        let has_title = t
-            .title
-            .as_deref()
-            .map(|s| !s.is_empty())
-            .unwrap_or(false);
+        let has_title = t.title.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
         let id_short = crate::orchestrator::short_task_id(&t.task_id);
         let title_style = if selected {
             Style::default()
@@ -4151,9 +4144,8 @@ fn render_task_card_collapsed(
         // blocking and for how long instead.
         if let Some(h) = lock_holder {
             let body_max = inner.width.saturating_sub(4) as usize;
-            let lock_age = format_duration_secs(
-                now_secs.saturating_sub(h.acquired_at.max(0) as u64),
-            );
+            let lock_age =
+                format_duration_secs(now_secs.saturating_sub(h.acquired_at.max(0) as u64));
             let holder_short = crate::orchestrator::short_task_id(h.task_id);
             let age_suffix = format!(" · {}", lock_age);
             let holder_title = h.title.map(str::trim).filter(|s| !s.is_empty());
@@ -4162,7 +4154,12 @@ fn render_task_card_collapsed(
                     let prefix = format!("behind #{} · ", holder_short);
                     let reserved = prefix.chars().count() + age_suffix.chars().count();
                     let title_room = body_max.saturating_sub(reserved);
-                    format!("{}{}{}", prefix, first_line_preview(title, title_room), age_suffix)
+                    format!(
+                        "{}{}{}",
+                        prefix,
+                        first_line_preview(title, title_room),
+                        age_suffix
+                    )
                 }
                 None => format!("behind #{}{}", holder_short, age_suffix),
             };
@@ -5969,11 +5966,8 @@ mod backlog_popup_tests {
             .iter()
             .zip(titles.iter())
             .map(|(p, title)| {
-                let mut t = TaskState::new_backlog(
-                    project.id.clone(),
-                    project.root.clone(),
-                    (*p).into(),
-                );
+                let mut t =
+                    TaskState::new_backlog(project.id.clone(), project.root.clone(), (*p).into());
                 t.title = title.map(|s| s.to_string());
                 Arc::new(t)
             })
@@ -6045,8 +6039,7 @@ Acceptance:\n\
             "refactor the merge-lock retry policy",
             "investigate flaky CI on macOS runners",
         ];
-        let titles: [Option<&str>; 3] =
-            [Some("Backlog popup: show full prompt"), None, None];
+        let titles: [Option<&str>; 3] = [Some("Backlog popup: show full prompt"), None, None];
         let plain = render_popup(&prompts, &titles);
         std::fs::write(&dest, plain).expect("write dump");
     }
@@ -6074,9 +6067,14 @@ Acceptance:\n\
             let count = plain.matches(p).count();
             let expected = if i == 0 { 1 } else { 0 };
             assert_eq!(
-                count, expected,
+                count,
+                expected,
                 "prompt {:?} (selected={}) should appear {} time(s), got {}:\n{}",
-                p, i == 0, expected, count, plain
+                p,
+                i == 0,
+                expected,
+                count,
+                plain
             );
         }
         // The pending-title placeholder should appear once per untitled task.
