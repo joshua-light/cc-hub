@@ -190,6 +190,12 @@ pub struct App {
     /// [`Self::metrics`] is `None`. Cleared once analysis completes.
     pub metrics_progress: Option<(usize, usize)>,
     pub pending_dispatch: VecDeque<PendingDispatch>,
+    /// Last time [`Self::poll_pending_dispatch`] ran the `pane_ready_for_input`
+    /// probe (a `tmux capture-pane` fork+exec). The poll is called every render
+    /// frame (~50ms) while a dispatch is pending, but the pane only needs
+    /// checking a couple of times a second — this throttles the fork+exec so
+    /// the event loop isn't spending most frames waiting on tmux.
+    last_dispatch_probe_at: Option<Instant>,
     pub show_inactive: bool,
     /// When false, the Sessions view hides any session whose tmux name is
     /// claimed by an orchestrator or worker in the current projects
@@ -314,6 +320,7 @@ impl App {
             metrics_selected: None,
             metrics_progress: None,
             pending_dispatch: VecDeque::new(),
+            last_dispatch_probe_at: None,
             show_inactive: false,
             show_orch_workers: false,
             projects: ProjectsSnapshot::empty(),
@@ -728,6 +735,26 @@ impl App {
         ApproveOutcome::PrApproved
     }
 
+    /// Undo the `Review → Merging` transition written by
+    /// [`Self::approve_review_task`] when the post-approve notify discovers
+    /// there's no live orchestrator tmux to drive the merge. Without this the
+    /// card would strand in the Merging column with a dead orchestrator and no
+    /// way to act on it. Flipping it back to Review keeps the card actionable:
+    /// the user can re-approve (re-ping) or resurrect (`f`). The PR's
+    /// `review_state` stays `Approved` — only the task status rolls back —
+    /// because the approval itself is still valid; we're just no longer
+    /// claiming the merge is underway. Best-effort: a failed write leaves the
+    /// card in Merging, which is no worse than before.
+    pub fn rollback_merging_to_review(&mut self, project_id: &str, task_id: &str) {
+        use crate::orchestrator::TaskStatus;
+        let _ = crate::orchestrator::update_task_state(project_id, task_id, |s| {
+            if s.status == TaskStatus::Merging {
+                s.status = TaskStatus::Review;
+                s.note = Some("approved; orchestrator not live — re-approve or resurrect".into());
+            }
+        });
+    }
+
     /// `tmux_session_name → SessionInfo` over the latest scan. Built fresh
     /// per call so it always reflects [`Self::last_sessions`]. Used by the
     /// Projects view to enrich task cards with live agent state (context
@@ -1095,8 +1122,24 @@ impl App {
             s.tmux_session.as_deref() == Some(pd.tmux.as_str()) && s.state == SessionState::Idle
         });
         if scanner_idle {
-            let pane_ready = crate::send::pane_ready_for_input(&pd.tmux);
             let aged_in = pd.queued_at.elapsed() >= Duration::from_secs(5);
+            // The `pane_ready_for_input` probe is a `tmux capture-pane`
+            // fork+exec — too costly to run every ~50ms render frame. Throttle
+            // it to ~2x/sec; between probes treat the pane as not-yet-ready and
+            // keep waiting. The cold-boot fallback (`aged_in`) and the timeout
+            // below don't need the probe, so they still fire on schedule.
+            let probe_due = self
+                .last_dispatch_probe_at
+                .is_none_or(|t| t.elapsed() >= Duration::from_millis(500));
+            let pane_ready = if aged_in {
+                // aged_in already sends; don't burn a probe.
+                false
+            } else if probe_due {
+                self.last_dispatch_probe_at = Some(Instant::now());
+                crate::send::pane_ready_for_input(&pd.tmux)
+            } else {
+                false
+            };
             if pane_ready || aged_in {
                 if !pane_ready {
                     log::info!(
@@ -1105,6 +1148,7 @@ impl App {
                         pd.tmux
                     );
                 }
+                self.last_dispatch_probe_at = None;
                 return DispatchAction::Send {
                     tmux: pd.tmux,
                     prompt: pd.prompt,
@@ -1112,6 +1156,7 @@ impl App {
             }
         }
         if pd.queued_at.elapsed() > config::get().ui.pending_dispatch_timeout() {
+            self.last_dispatch_probe_at = None;
             return DispatchAction::Timeout { tmux: pd.tmux };
         }
         self.pending_dispatch.push_front(pd);
@@ -2022,6 +2067,79 @@ mod tests {
         assert!(crate::pr::read_pr("p-noPR", "t-noPR")
             .expect("read pr")
             .is_none());
+
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn backlog_tasks_absent_from_every_kanban_column() {
+        let mut app = App::new();
+        app.current_tab = Tab::Projects;
+
+        let p = project("p-bl");
+        // One task in each column-producing status, plus two Backlog tasks.
+        let tasks = vec![
+            task("p-bl", "t-plan", TaskStatus::Running, false), // col 0 (Planning)
+            task("p-bl", "t-run", TaskStatus::Running, true),   // col 1 (Running)
+            task("p-bl", "t-rev", TaskStatus::Review, false),   // col 2 (Review)
+            task("p-bl", "t-mrg", TaskStatus::Merging, false),  // col 3 (Merging)
+            task("p-bl", "t-done", TaskStatus::Done, false),    // col 4 (Done)
+            task("p-bl", "t-bl1", TaskStatus::Backlog, false),
+            task("p-bl", "t-bl2", TaskStatus::Backlog, true),
+        ];
+        app.update_projects(snapshot(p, tasks));
+
+        // No backlog task may appear in any of the five kanban columns.
+        for col in 0..5 {
+            for t in app.kanban_column_tasks(col) {
+                assert_ne!(
+                    t.status,
+                    TaskStatus::Backlog,
+                    "backlog task {} leaked into column {}",
+                    t.task_id,
+                    col
+                );
+            }
+        }
+
+        // They live only in the Backlog popup's task list.
+        let backlog: Vec<_> = app
+            .backlog_tasks()
+            .iter()
+            .map(|t| t.task_id.clone())
+            .collect();
+        assert_eq!(backlog, vec!["t-bl1".to_string(), "t-bl2".to_string()]);
+    }
+
+    #[test]
+    fn rollback_merging_to_review_restores_actionable_status() {
+        use crate::test_util::HOME_TEST_LOCK;
+        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        // A task stranded in Merging (e.g. approve wrote Merging but the
+        // orchestrator turned out to be dead).
+        let mut t = task("p-rb", "t-rb", TaskStatus::Merging, false);
+        t.project_root = home.path().join("repo");
+        std::fs::create_dir_all(&t.project_root).unwrap();
+        crate::orchestrator::write_task_state(&t).expect("write task");
+
+        let mut app = App::new();
+        app.rollback_merging_to_review("p-rb", "t-rb");
+
+        let reloaded = crate::orchestrator::read_task_state("p-rb", "t-rb").expect("read");
+        assert_eq!(reloaded.status, TaskStatus::Review);
+        assert!(reloaded.note.as_deref().is_some_and(|n| n.contains("resurrect")));
+
+        // Idempotent: a non-Merging task is left untouched.
+        app.rollback_merging_to_review("p-rb", "t-rb");
+        let again = crate::orchestrator::read_task_state("p-rb", "t-rb").expect("read");
+        assert_eq!(again.status, TaskStatus::Review);
 
         match prev {
             Some(v) => std::env::set_var("HOME", v),

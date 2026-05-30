@@ -295,6 +295,13 @@ enum ScanMsg {
         spawn: Option<auto_review::Spawn>,
         status: Option<String>,
     },
+    /// Result of a `send::send_prompt` run off the event-loop thread (see
+    /// [`spawn_dispatch`]). `send_prompt` forks+execs tmux twice and sleeps
+    /// ~80ms; running it inline froze render+input. `ok` carries the status
+    /// line built from the prompt's success/failure templates.
+    DispatchResult {
+        ok: Result<String, String>,
+    },
 }
 
 /// Spawn the OS-default opener for `path` and detach immediately. URLs work
@@ -351,6 +358,33 @@ fn dispatch_picked_cwd(app: &mut App, cwd: &str) {
         };
         app.set_status(status);
     }
+}
+
+/// Run `send::send_prompt` off the synchronous run() loop thread and report
+/// the outcome back over `tx` as a [`ScanMsg::DispatchResult`], drained in the
+/// same channel loop as every other scan message. `send_prompt` forks+execs
+/// tmux twice and sleeps ~80ms; called inline it froze render+input for
+/// 100-160ms during dispatch. On success the status line is `ok_msg`; on
+/// failure it is `"<err_prefix>: <error>"` (and the error is logged), matching
+/// the inline templates these call sites used before.
+fn spawn_dispatch(
+    tx: mpsc::Sender<ScanMsg>,
+    tmux: String,
+    prompt: String,
+    ok_msg: String,
+    err_prefix: String,
+) {
+    tokio::spawn(async move {
+        let ok = tokio::task::spawn_blocking(move || send::send_prompt(&tmux, &prompt))
+            .await
+            .unwrap_or_else(|e| Err(io::Error::other(format!("dispatch task panicked: {}", e))))
+            .map(|()| ok_msg)
+            .map_err(|e| {
+                log::warn!("dispatch: send_prompt failed: {}", e);
+                format!("{}: {}", err_prefix, e)
+            });
+        let _ = tx.send(ScanMsg::DispatchResult { ok }).await;
+    });
 }
 
 /// Resolve the highlighted picker entry and dispatch it via
@@ -839,15 +873,20 @@ async fn run(
                                 let Some(task) = target else { continue };
                                 let short = cc_hub_lib::orchestrator::short_task_id(&task.task_id);
                                 let Some(tmux_name) = task.orchestrator_tmux.clone() else {
+                                    // No orchestrator to drive the merge — roll
+                                    // the card back to Review so it stays
+                                    // actionable (re-approve / resurrect).
+                                    app.rollback_merging_to_review(&task.project_id, &task.task_id);
                                     app.set_status(format!(
-                                        "approved {} but task has no orchestrator tmux to notify",
+                                        "approved {} but no live orchestrator — back to Review (press f to resurrect)",
                                         short
                                     ));
                                     continue;
                                 };
                                 if !send::tmux_session_exists(&tmux_name) {
+                                    app.rollback_merging_to_review(&task.project_id, &task.task_id);
                                     app.set_status(format!(
-                                        "approved {} but orchestrator [{}] is not live",
+                                        "approved {} but orchestrator [{}] is not live — back to Review (press f to resurrect)",
                                         short, tmux_name
                                     ));
                                     continue;
@@ -857,20 +896,16 @@ async fn run(
                                     &cc_hub_lib::orchestrator::resolve_cc_hub_bin(),
                                 );
                                 if send::pane_ready_for_input(&tmux_name) {
-                                    let status = match send::send_prompt(&tmux_name, &prompt) {
-                                        Ok(()) => format!(
+                                    spawn_dispatch(
+                                        scan_tx_main.clone(),
+                                        tmux_name.clone(),
+                                        prompt,
+                                        format!(
                                             "approved {} and notified orchestrator [{}] to continue merge flow",
                                             short, tmux_name
                                         ),
-                                        Err(e) => {
-                                            log::warn!("approve: send_prompt failed: {}", e);
-                                            format!(
-                                                "approved {} but orchestrator notify failed: {}",
-                                                short, e
-                                            )
-                                        }
-                                    };
-                                    app.set_status(status);
+                                        format!("approved {} but orchestrator notify failed", short),
+                                    );
                                 } else {
                                     app.queue_pending_dispatch(tmux_name.clone(), prompt);
                                     app.set_status(format!(
@@ -985,6 +1020,10 @@ async fn run(
                                     task.status,
                                     cc_hub_lib::orchestrator::TaskStatus::Running
                                         | cc_hub_lib::orchestrator::TaskStatus::Review
+                                        // The merge-approval prompt is idempotent,
+                                        // so re-spawning the orchestrator and
+                                        // re-pinging a Merging task is safe.
+                                        | cc_hub_lib::orchestrator::TaskStatus::Merging
                                 ) {
                                 scanner::find_orchestrator_session(
                                     &task.project_root,
@@ -1026,6 +1065,21 @@ async fn run(
                                                 "resurrected [{}] but state write failed: {}",
                                                 new_tmux, e
                                             ));
+                                        }
+                                        // A Merging task's orchestrator died
+                                        // mid-merge; re-ping the (idempotent)
+                                        // approval prompt so the resumed session
+                                        // picks the merge flow back up. Fires
+                                        // once the session reports Idle.
+                                        if task.status
+                                            == cc_hub_lib::orchestrator::TaskStatus::Merging
+                                        {
+                                            let prompt =
+                                                cc_hub_lib::orchestrator::build_review_approval_prompt(
+                                                    &task.task_id,
+                                                    &cc_hub_lib::orchestrator::resolve_cc_hub_bin(),
+                                                );
+                                            app.queue_pending_dispatch(new_tmux.clone(), prompt);
                                         }
                                         let (cols, rows) = popup_pane_size(terminal);
                                         match tmux_pane::TmuxPaneView::spawn(&new_tmux, rows, cols)
@@ -1124,20 +1178,18 @@ async fn run(
                     (View::Backlog, KeyCode::Char('x')) => {
                         app.enter_confirm_backlog_task_delete();
                     }
-                    (View::Backlog, KeyCode::Char('s') | KeyCode::Enter)
-                    | (View::Grid, KeyCode::Char('s'))
-                        if on_projects || matches!(app.view, View::Backlog) =>
-                    {
+                    // `s`/Enter starts the selected backlog task. Only bound
+                    // inside the Backlog popup: backlog tasks are filtered out
+                    // of every kanban column (see `App::kanban_column_tasks`),
+                    // so a Grid 's' alias could never find one to start and
+                    // only ever showed a "not in backlog" toast. The kanban's
+                    // own start-affordance is `b` (open the Backlog popup).
+                    (View::Backlog, KeyCode::Char('s') | KeyCode::Enter) => {
                         let Some(p) = app.selected_project().cloned() else {
                             app.set_status("no project selected".into());
                             continue;
                         };
-                        let task_opt = if matches!(app.view, View::Backlog) {
-                            app.selected_backlog_task().cloned()
-                        } else {
-                            app.selected_project_task().cloned()
-                        };
-                        let Some(task) = task_opt else {
+                        let Some(task) = app.selected_backlog_task().cloned() else {
                             app.set_status("no task selected".into());
                             continue;
                         };
@@ -1166,9 +1218,7 @@ async fn run(
                                     "task started [{}], orchestrator [{}] starting…",
                                     state.task_id, tmux_name
                                 ));
-                                if matches!(app.view, View::Backlog) {
-                                    app.close_backlog();
-                                }
+                                app.close_backlog();
                                 app.pending_focus_task_id = Some(state.task_id.clone());
                                 app.pending_focus_budget = 5;
                             }
@@ -1690,16 +1740,13 @@ async fn run(
                                 tmux,
                                 prompt.len()
                             );
-                            let status = match send::send_prompt(&tmux, &prompt) {
-                                Ok(()) => {
-                                    format!("dispatched to {} (PID {}) [{}]", name, pid, tmux)
-                                }
-                                Err(e) => {
-                                    log::warn!("dispatch: send_prompt failed: {}", e);
-                                    format!("dispatch failed: {}", e)
-                                }
-                            };
-                            app.set_status(status);
+                            spawn_dispatch(
+                                scan_tx_main.clone(),
+                                tmux.clone(),
+                                prompt,
+                                format!("dispatched to {} (PID {}) [{}]", name, pid, tmux),
+                                "dispatch failed".to_string(),
+                            );
                             continue;
                         }
 
@@ -1859,6 +1906,11 @@ async fn run(
                         app.set_status(s);
                     }
                 }
+                ScanMsg::DispatchResult { ok } => {
+                    // Success and failure both already hold the rendered
+                    // status line; either way it goes straight to the bar.
+                    app.set_status(ok.unwrap_or_else(|e| e));
+                }
             }
         }
 
@@ -1871,14 +1923,13 @@ async fn run(
                     tmux,
                     prompt.len()
                 );
-                let status = match send::send_prompt(&tmux, &prompt) {
-                    Ok(()) => format!("dispatched queued prompt to [{}]", tmux),
-                    Err(e) => {
-                        log::warn!("dispatch: queued send_prompt failed: {}", e);
-                        format!("queued dispatch failed: {}", e)
-                    }
-                };
-                app.set_status(status);
+                spawn_dispatch(
+                    scan_tx_main.clone(),
+                    tmux.clone(),
+                    prompt,
+                    format!("dispatched queued prompt to [{}]", tmux),
+                    "queued dispatch failed".to_string(),
+                );
             }
             app::DispatchAction::Timeout { tmux } => {
                 log::warn!("dispatch: pending target [{}] never became idle", tmux);
