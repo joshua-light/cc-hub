@@ -3,6 +3,7 @@ use crate::config;
 use crate::conversation::{StateExplanation, Verdict};
 use crate::folder_picker::PickerMode;
 use crate::metrics::{MetricsAnalysis, ModelStats, SessionSummary, ToolStats};
+use crate::models;
 use crate::models::{short_sid, SessionDetail, SessionInfo, SessionState};
 use crate::orchestrator::Artifact;
 use crate::usage::UsageInfo;
@@ -502,14 +503,14 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::Gray)
         };
         let age_secs = now_secs.saturating_sub(t.created_at as u64);
-        let age = format!("{:>4}", format_age_short(age_secs));
+        let age = format!("{:>4}", models::relative_age_short(age_secs));
         if has_title {
             let title_text = t.title.as_deref().unwrap().to_string();
             lines.push(Line::from(vec![
                 Span::styled(arrow, Style::default().fg(Color::Rgb(120, 140, 200))),
                 Span::styled(title_text, title_style),
             ]));
-            let preview = first_line_preview(
+            let preview = models::first_line_truncated(
                 &t.prompt,
                 max_w.saturating_sub(id_short.len() + age.len() + 8),
             );
@@ -527,7 +528,7 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled(format!("#{}", id_short), title_style),
                 Span::styled(" · pending title", Style::default().fg(Color::DarkGray)),
             ]));
-            let preview = first_line_preview(&t.prompt, max_w.saturating_sub(age.len() + 6));
+            let preview = models::first_line_truncated(&t.prompt, max_w.saturating_sub(age.len() + 6));
             lines.push(Line::from(vec![
                 Span::raw("    "),
                 Span::styled(age, Style::default().fg(TASK_META_DIM)),
@@ -1589,7 +1590,7 @@ fn diff_row(
     } else {
         Cow::Borrowed(content)
     };
-    let body = truncate_str(&normalized, avail);
+    let body = models::first_line_truncated(&normalized, avail);
     let body_w = body.chars().count();
 
     let mut content_style = base.fg(content_fg);
@@ -1866,12 +1867,13 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     };
 
-    let (status_label, status_color) = match t.status {
-        crate::orchestrator::TaskStatus::Running => ("running", Color::LightYellow),
-        crate::orchestrator::TaskStatus::Review => ("review", Color::LightCyan),
-        crate::orchestrator::TaskStatus::Merging => ("merging", Color::LightMagenta),
-        crate::orchestrator::TaskStatus::Done => ("done", Color::LightGreen),
-        crate::orchestrator::TaskStatus::Backlog => ("backlog", Color::Rgb(120, 140, 200)),
+    let status_label = t.status.as_str();
+    let status_color = match t.status {
+        crate::orchestrator::TaskStatus::Running => Color::LightYellow,
+        crate::orchestrator::TaskStatus::Review => Color::LightCyan,
+        crate::orchestrator::TaskStatus::Merging => Color::LightMagenta,
+        crate::orchestrator::TaskStatus::Done => Color::LightGreen,
+        crate::orchestrator::TaskStatus::Backlog => Color::Rgb(120, 140, 200),
     };
     let title = match t.title.as_deref().filter(|s| !s.is_empty()) {
         Some(name) => format!(
@@ -1898,7 +1900,7 @@ fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let now_secs = now_ms() / 1000;
-    let age = format_age(now_secs.saturating_sub(t.updated_at as u64));
+    let age = models::relative_age(now_secs.saturating_sub(t.updated_at as u64));
 
     // ── Header (status badge · age · count) + note headline ────────────────
     let mut header_lines: Vec<Line<'static>> = Vec::new();
@@ -2870,7 +2872,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     let refresh_text = if elapsed < 2 {
         "just now".to_string()
     } else {
-        format!("{}s ago", elapsed)
+        models::relative_age(elapsed)
     };
 
     let fresh_status = app
@@ -3003,7 +3005,7 @@ fn short_model(model: &str) -> &str {
 /// cards.
 fn short_tool(tool: &str) -> String {
     // `mcp__<server>__<name>` → just the name (the leaf is what's distinctive).
-    let leaf = tool.rsplit("__").next().unwrap_or(tool);
+    let leaf = crate::models::mcp_leaf(tool);
     let chars: Vec<char> = leaf.chars().collect();
     if chars.len() <= 18 {
         return leaf.to_string();
@@ -3025,7 +3027,7 @@ fn format_tool_label(tool: &crate::conversation::CurrentTool, inner_w: usize) ->
     // Reserve: icon (2) + space (1) + name + ": " (2) + min elapsed gutter (8).
     let prefix_cols = 2 + 1 + name.chars().count() + 2;
     let budget = inner_w.saturating_sub(prefix_cols).saturating_sub(8);
-    let hint_short = truncate_str(hint, budget.max(6));
+    let hint_short = models::first_line_truncated(hint, budget.max(6));
     format!("󰖷 {}: {}", name, hint_short)
 }
 
@@ -3929,10 +3931,10 @@ fn render_task_card_active(
     let note_text = t
         .note
         .as_deref()
-        .map(|n| first_line_preview(n, inner.width.saturating_sub(4) as usize))
+        .map(|n| models::first_line_truncated(n, inner.width.saturating_sub(4) as usize))
         .unwrap_or_else(|| {
             let s = t.summary.as_deref().unwrap_or("");
-            first_line_preview(s, inner.width.saturating_sub(4) as usize)
+            models::first_line_truncated(s, inner.width.saturating_sub(4) as usize)
         });
     if !note_text.is_empty() {
         lines.push(Line::from(vec![
@@ -3962,7 +3964,7 @@ fn render_task_card_active(
     row2.extend(merge_progress_spans(t));
     lines.push(Line::from(row2));
 
-    let age = format_age(now_secs.saturating_sub(t.updated_at as u64));
+    let age = models::relative_age(now_secs.saturating_sub(t.updated_at as u64));
     let arts = t.artifacts.len();
     let mut row3: Vec<Span<'static>> = vec![
         Span::styled(
@@ -4016,7 +4018,7 @@ fn render_task_card_active(
             Some(h) => format!(
                 "󰖷 {}: {}",
                 name,
-                truncate_str(h, max.saturating_sub(name.len() + 4))
+                models::first_line_truncated(h, max.saturating_sub(name.len() + 4))
             ),
             None => format!("󰖷 {}", name),
         };
@@ -4165,7 +4167,7 @@ fn render_task_card_collapsed(
                     format!(
                         "{}{}{}",
                         prefix,
-                        first_line_preview(title, title_room),
+                        models::first_line_truncated(title, title_room),
                         age_suffix
                     )
                 }
@@ -4181,7 +4183,7 @@ fn render_task_card_collapsed(
             .summary
             .as_deref()
             .or(t.note.as_deref())
-            .map(|s| first_line_preview(s, inner.width.saturating_sub(4) as usize))
+            .map(|s| models::first_line_truncated(s, inner.width.saturating_sub(4) as usize))
             .unwrap_or_default();
         if !summary_text.is_empty() {
             lines.push(Line::from(vec![
@@ -4199,7 +4201,7 @@ fn render_task_card_collapsed(
 
     if queued {
         let banner = lock_holder.expect("queued implies holder");
-        let age = format_age(now_secs.saturating_sub(banner.acquired_at as u64));
+        let age = models::relative_age(now_secs.saturating_sub(banner.acquired_at as u64));
         let phase_label = match banner.phase {
             MergePhase::Merging => "merging",
             MergePhase::Simplify => "/simplify",
@@ -4221,7 +4223,7 @@ fn render_task_card_collapsed(
         ]));
     }
 
-    let age = format_age(now_secs.saturating_sub(t.updated_at as u64));
+    let age = models::relative_age(now_secs.saturating_sub(t.updated_at as u64));
     let arts = t.artifacts.len();
     let merged = t.workers.iter().filter(|w| worker_was_merged(w, t)).count();
     let total_w = t.workers.len();
@@ -4278,47 +4280,9 @@ fn task_card_header_text(
     prompt_max: usize,
 ) -> String {
     match t.title.as_deref().filter(|s| !s.is_empty()) {
-        Some(name) => first_line_preview(name, prompt_max),
-        None if titling_in_flight => first_line_preview("✎ …", prompt_max),
-        None => first_line_preview(&t.prompt, prompt_max),
-    }
-}
-
-fn first_line_preview(text: &str, max: usize) -> String {
-    let first = text.lines().next().unwrap_or("");
-    if first.chars().count() <= max {
-        first.to_string()
-    } else {
-        let mut out = String::new();
-        for ch in first.chars().take(max.saturating_sub(1)) {
-            out.push(ch);
-        }
-        out.push('…');
-        out
-    }
-}
-
-fn format_age(secs: u64) -> String {
-    if secs < 60 {
-        format!("{}s ago", secs)
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h ago", secs / 3600)
-    } else {
-        format!("{}d ago", secs / 86400)
-    }
-}
-
-fn format_age_short(secs: u64) -> String {
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h", secs / 3600)
-    } else {
-        format!("{}d", secs / 86400)
+        Some(name) => models::first_line_truncated(name, prompt_max),
+        None if titling_in_flight => models::first_line_truncated("✎ …", prompt_max),
+        None => models::first_line_truncated(&t.prompt, prompt_max),
     }
 }
 
@@ -4504,7 +4468,7 @@ fn build_metrics_content(
         let bar_w = ((s.cost / max_model_cost) * 26.0).round() as usize;
         let short = short_model(name);
         lines.push(Line::from(vec![
-            Span::styled(format!("  {:<22}", truncate_str(short, 22)), label),
+            Span::styled(format!("  {:<22}", models::first_line_truncated(short, 22)), label),
             Span::styled("━".repeat(bar_w), Style::default().fg(model_color(name))),
             Span::raw(" "),
             Span::styled(fmt_cost(s.cost), val),
@@ -4562,7 +4526,7 @@ fn build_metrics_content(
     for (name, s) in &m.top_projects {
         let bar_w = ((s.cost / max_proj) * 24.0).round() as usize;
         lines.push(Line::from(vec![
-            Span::styled(format!("  {:<26}", truncate_str(name, 26)), label),
+            Span::styled(format!("  {:<26}", models::first_line_truncated(name, 26)), label),
             Span::styled(
                 "━".repeat(bar_w),
                 Style::default().fg(Color::Rgb(120, 180, 220)),
@@ -4630,11 +4594,11 @@ fn build_metrics_content(
                 Span::styled(format!("  {:>3} orphan", entry.orphan_count), dim),
                 Span::raw("  "),
                 Span::styled(
-                    format!("{:<18}", truncate_str(&entry.last_tool_name, 18)),
+                    format!("{:<18}", models::first_line_truncated(&entry.last_tool_name, 18)),
                     Style::default().fg(Color::Rgb(180, 180, 200)),
                 ),
                 Span::styled(
-                    format!("{:<24}", truncate_str(&entry.project, 24)),
+                    format!("{:<24}", models::first_line_truncated(&entry.project, 24)),
                     Style::default().fg(Color::Rgb(180, 180, 200)),
                 ),
             ]));
@@ -4668,7 +4632,7 @@ fn build_metrics_content(
                 ),
                 Span::raw("  "),
                 Span::styled(
-                    format!("{:<24}", truncate_str(&f.project, 24)),
+                    format!("{:<24}", models::first_line_truncated(&f.project, 24)),
                     Style::default().fg(Color::Rgb(180, 180, 200)),
                 ),
             ]));
@@ -4722,7 +4686,7 @@ fn build_metrics_content(
                 ),
                 Span::raw("  "),
                 Span::styled(
-                    format!("{:<24}", truncate_str(&f.project, 24)),
+                    format!("{:<24}", models::first_line_truncated(&f.project, 24)),
                     Style::default().fg(Color::Rgb(180, 180, 200)),
                 ),
             ]));
@@ -4785,7 +4749,7 @@ fn render_bar_chart_section(
                 0.0
             };
             lines.push(Line::from(vec![
-                Span::styled(format!("  {:<22}", truncate_str(name, 22)), label),
+                Span::styled(format!("  {:<22}", models::first_line_truncated(name, 22)), label),
                 Span::styled("━".repeat(bar_w), Style::default().fg(tool_color(name))),
                 Span::raw(" "),
                 Span::styled(format!("{:>6} calls", s.count), val),
@@ -4859,34 +4823,13 @@ fn format_session_row(s: &SessionSummary, dim: Style, val: Style, selected: bool
         Span::raw(" "),
         Span::styled(format!("{:>10}", toks), dim),
         Span::raw(" "),
-        Span::styled(format!("{:<22}", truncate_str(model, 22)), dim),
+        Span::styled(format!("{:<22}", models::first_line_truncated(model, 22)), dim),
         Span::raw(" "),
         Span::styled(
-            format!("{:<24}", truncate_str(&s.project, 24)),
+            format!("{:<24}", models::first_line_truncated(&s.project, 24)),
             Style::default().fg(Color::Rgb(180, 180, 200)),
         ),
     ])
-}
-
-fn truncate_str(s: &str, w: usize) -> String {
-    if s.is_ascii() && s.len() <= w {
-        return s.to_string();
-    }
-    if w == 0 {
-        return String::new();
-    }
-    if s.chars().count() <= w {
-        return s.to_string();
-    }
-    if w == 1 {
-        return "…".to_string();
-    }
-    let mut out = String::with_capacity(w * 4);
-    for c in s.chars().take(w - 1) {
-        out.push(c);
-    }
-    out.push('…');
-    out
 }
 
 fn section_header(title: &str) -> Line<'static> {
@@ -6062,7 +6005,7 @@ Acceptance:\n\
         let titles: [Option<&str>; 3] = [None, None, None];
         let plain = render_popup(&prompts, &titles);
 
-        // The list pane is 40 cols wide and `first_line_preview` ellipsises
+        // The list pane is 40 cols wide and `first_line_truncated` ellipsises
         // anything past ~26 chars, so these 34-char prompts are truncated in
         // the list for every task. The body pane (right half) renders the
         // *selected* task's full prompt untouched. Therefore:

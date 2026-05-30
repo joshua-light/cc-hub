@@ -1010,7 +1010,7 @@ fn task_delete(args: &[String]) -> Result<(), CliError> {
         return Err(CliError::Other(format!(
             "task {} is {}; pass --force to delete an active task (orchestrator tmux will be killed{})",
             task_id,
-            status_str(&state.status),
+            state.status.as_str(),
             if state.status == TaskStatus::Merging {
                 ", merge lock released"
             } else {
@@ -1171,27 +1171,22 @@ fn task_start(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-fn status_str(s: &TaskStatus) -> &'static str {
-    match s {
-        TaskStatus::Backlog => "backlog",
-        TaskStatus::Running => "running",
-        TaskStatus::Review => "review",
-        TaskStatus::Merging => "merging",
-        TaskStatus::Done => "done",
-    }
+/// Seconds since `unix_secs`, clamped at 0 for clock skew.
+fn age_secs(unix_secs: i64) -> u64 {
+    (orchestrator::now_unix_secs() - unix_secs).max(0) as u64
 }
 
-fn fmt_age(unix_secs: i64) -> String {
-    let now = orchestrator::now_unix_secs();
-    let delta = (now - unix_secs).max(0);
-    if delta < 60 {
-        format!("{}s", delta)
-    } else if delta < 3600 {
-        format!("{}m", delta / 60)
-    } else if delta < 86_400 {
-        format!("{}h", delta / 3600)
-    } else {
-        format!("{}d", delta / 86_400)
+/// Parse an optional `--status` flag into a `TaskStatus`, surfacing a uniform
+/// usage error for unknown values. `None` flag → `Ok(None)`.
+fn parse_status_flag(raw: Option<&str>) -> Result<Option<TaskStatus>, CliError> {
+    match raw {
+        None => Ok(None),
+        Some(s) => s.parse::<TaskStatus>().map(Some).map_err(|_| {
+            CliError::Usage(format!(
+                "--status must be backlog|running|review|merging|done (got {})",
+                s
+            ))
+        }),
     }
 }
 
@@ -1204,20 +1199,7 @@ fn task_list(args: &[String]) -> Result<(), CliError> {
     let f = parse_flags(args)?;
     let project_id = resolve_project_id(&f)?;
 
-    let filter = match f.status.as_deref() {
-        None => None,
-        Some("backlog") => Some(TaskStatus::Backlog),
-        Some("running") => Some(TaskStatus::Running),
-        Some("review") => Some(TaskStatus::Review),
-        Some("merging") => Some(TaskStatus::Merging),
-        Some("done") => Some(TaskStatus::Done),
-        Some(other) => {
-            return Err(CliError::Usage(format!(
-                "--status must be backlog|running|review|merging|done (got {})",
-                other
-            )));
-        }
-    };
+    let filter = parse_status_flag(f.status.as_deref())?;
 
     let Some(project_dir) = orchestrator::project_state_dir(&project_id) else {
         return Err(CliError::Other("no home dir".into()));
@@ -1294,9 +1276,9 @@ fn task_list(args: &[String]) -> Result<(), CliError> {
             println!(
                 "{}\t{}\t{}\t{}",
                 t.task_id,
-                status_str(&t.status),
+                t.status.as_str(),
                 preview,
-                fmt_age(t.updated_at)
+                models::relative_age_short(age_secs(t.updated_at))
             );
         }
     }
@@ -1309,20 +1291,7 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
 
-    let raw_status = match f.status.as_deref() {
-        None => None,
-        Some("running") => Some(TaskStatus::Running),
-        Some("review") => Some(TaskStatus::Review),
-        Some("merging") => Some(TaskStatus::Merging),
-        Some("done") => Some(TaskStatus::Done),
-        Some("backlog") => Some(TaskStatus::Backlog),
-        Some(other) => {
-            return Err(CliError::Usage(format!(
-                "--status must be running|review|merging|done|backlog (got {})",
-                other
-            )));
-        }
-    };
+    let raw_status = parse_status_flag(f.status.as_deref())?;
 
     let prev_status = orchestrator::read_task_state(&project_id, &task_id)
         .ok()
@@ -1420,28 +1389,6 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-fn format_age(now: i64, ts: i64) -> String {
-    let delta = now.saturating_sub(ts).max(0);
-    if delta < 60 {
-        format!("{}s ago", delta)
-    } else if delta < 3600 {
-        format!("{}m ago", delta / 60)
-    } else if delta < 86400 {
-        format!("{}h ago", delta / 3600)
-    } else {
-        format!("{}d ago", delta / 86400)
-    }
-}
-
-fn one_line(s: &str, max: usize) -> String {
-    let line = s.lines().next().unwrap_or("");
-    if line.chars().count() > max {
-        let truncated: String = line.chars().take(max - 1).collect();
-        format!("{}…", truncated)
-    } else {
-        line.to_string()
-    }
-}
 
 /// `cc-hub task show --task ID [--project-id ID] [--json]`
 ///
@@ -1478,23 +1425,22 @@ fn task_show(args: &[String]) -> Result<(), CliError> {
         return Ok(());
     }
 
-    let now = orchestrator::now_unix_secs();
     let todos_done = state.todos.iter().filter(|t| t.done).count();
     let todos_total = state.todos.len();
 
-    println!("status: {}", status_str(&state.status));
-    println!("prompt: {}", one_line(&state.prompt, 80));
+    println!("status: {}", state.status.as_str());
+    println!("prompt: {}", models::first_line_truncated(&state.prompt, 80));
     println!("note: {}", state.note.as_deref().unwrap_or("-"));
     println!(
         "summary: {}",
         state
             .summary
             .as_deref()
-            .map(|s| one_line(s, 120))
+            .map(|s| models::first_line_truncated(s, 120))
             .unwrap_or_else(|| "-".into())
     );
-    println!("created_at: {}", format_age(now, state.created_at));
-    println!("updated_at: {}", format_age(now, state.updated_at));
+    println!("created_at: {}", models::relative_age(age_secs(state.created_at)));
+    println!("updated_at: {}", models::relative_age(age_secs(state.updated_at)));
     println!("workers: {}", state.workers.len());
     println!("artifacts: {}", state.artifacts.len());
     println!("todos: {}/{}", todos_done, todos_total);
@@ -1525,7 +1471,7 @@ fn task_auto_review(args: &[String]) -> Result<(), CliError> {
     if state.status != TaskStatus::Review {
         return Err(CliError::Usage(format!(
             "auto-review is only meaningful in the Review state (task is currently {})",
-            status_str(&state.status)
+            state.status.as_str()
         )));
     }
 
@@ -2755,7 +2701,7 @@ fn pr_finalize(args: &[String]) -> Result<(), CliError> {
     if state.status != TaskStatus::Merging {
         return Err(CliError::Usage(format!(
             "task {} must be in Merging to finalize (currently {}) — run `cc-hub pr merge --task {} --wait` first",
-            task_id, status_str(&state.status), task_id
+            task_id, state.status.as_str(), task_id
         )));
     }
 

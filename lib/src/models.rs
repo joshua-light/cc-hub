@@ -7,6 +7,63 @@ pub fn short_sid(sid: &str) -> &str {
     &sid[..8.min(sid.len())]
 }
 
+/// Canonical relative-age formatting. `secs` is the elapsed time in seconds.
+/// Renders the largest whole unit (`s`/`m`/`h`/`d`) with an ` ago` suffix —
+/// e.g. `45s ago`, `3m ago`, `2h ago`, `5d ago`. Used wherever cc-hub shows
+/// "how long ago" a task/session/banner was updated.
+pub fn relative_age(secs: u64) -> String {
+    format!("{} ago", relative_age_short(secs))
+}
+
+/// Like [`relative_age`] but without the ` ago` suffix — `45s`, `3m`, `2h`,
+/// `5d`. For tight columns where the suffix doesn't fit.
+pub fn relative_age_short(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86_400)
+    }
+}
+
+/// Canonical first-line preview: take the first line of `text` and, if it
+/// exceeds `max` characters, truncate it to a `max`-char budget ending in a
+/// single-char ellipsis (`…`). The result is always at most `max` characters
+/// wide (counting the ellipsis), so it fits a `max`-column slot. Replaces the
+/// several drifted `one_line`/`first_line_preview`/`truncate_str` copies that
+/// disagreed on the ellipsis string and the boundary math.
+pub fn first_line_truncated(text: &str, max: usize) -> String {
+    let line = text.lines().next().unwrap_or(text);
+    if line.chars().count() <= max {
+        return line.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    if max == 1 {
+        return "…".to_string();
+    }
+    let mut out: String = line.chars().take(max - 1).collect();
+    out.push('…');
+    out
+}
+
+/// Leaf of an MCP tool name: `mcp__<server>__<tool>` → `<tool>` (the
+/// distinctive part). Plain tool names like `Bash` pass through unchanged.
+pub fn mcp_leaf(name: &str) -> &str {
+    name.rsplit("__").next().unwrap_or(name)
+}
+
+/// Server segment of an MCP tool name: `mcp__<server>__<tool>` → `<server>`.
+/// Returns `None` for non-MCP tool names (those without the `mcp__` prefix).
+pub fn mcp_server(name: &str) -> Option<&str> {
+    name.strip_prefix("mcp__")
+        .map(|rest| rest.split("__").next().unwrap_or(rest))
+}
+
 #[derive(Deserialize)]
 pub struct RawSession {
     pub pid: u32,
@@ -137,4 +194,65 @@ pub struct ProjectGroup {
     pub name: String,
     pub cwd: String,
     pub sessions: Vec<SessionInfo>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_age_units() {
+        assert_eq!(relative_age(0), "0s ago");
+        assert_eq!(relative_age(45), "45s ago");
+        assert_eq!(relative_age(60), "1m ago");
+        assert_eq!(relative_age(3599), "59m ago");
+        assert_eq!(relative_age(3600), "1h ago");
+        assert_eq!(relative_age(86_399), "23h ago");
+        assert_eq!(relative_age(86_400), "1d ago");
+        assert_eq!(relative_age_short(90), "1m");
+        assert_eq!(relative_age_short(7200), "2h");
+    }
+
+    #[test]
+    fn first_line_truncated_takes_only_first_line() {
+        assert_eq!(first_line_truncated("hello\nworld", 80), "hello");
+        assert_eq!(first_line_truncated("", 10), "");
+    }
+
+    #[test]
+    fn first_line_truncated_char_budget() {
+        // Fits exactly — no ellipsis.
+        assert_eq!(first_line_truncated("abcde", 5), "abcde");
+        // Over budget — total chars equals `max`, single ellipsis.
+        let out = first_line_truncated("abcdef", 5);
+        assert_eq!(out, "abcd…");
+        assert_eq!(out.chars().count(), 5);
+    }
+
+    #[test]
+    fn first_line_truncated_multibyte_safe() {
+        // Four 2-byte chars; budget 3 → 2 chars + ellipsis, on char boundaries.
+        let out = first_line_truncated("αααα", 3);
+        assert_eq!(out, "αα…");
+        assert_eq!(out.chars().count(), 3);
+    }
+
+    #[test]
+    fn first_line_truncated_tiny_budgets() {
+        assert_eq!(first_line_truncated("abcdef", 0), "");
+        assert_eq!(first_line_truncated("abcdef", 1), "…");
+    }
+
+    #[test]
+    fn mcp_leaf_and_server() {
+        assert_eq!(mcp_leaf("mcp__claude_ai_Notion__notion-search"), "notion-search");
+        assert_eq!(mcp_leaf("Bash"), "Bash");
+        assert_eq!(
+            mcp_server("mcp__claude_ai_Notion__notion-search"),
+            Some("claude_ai_Notion")
+        );
+        assert_eq!(mcp_server("Bash"), None);
+        // Malformed: prefix only, no second `__`.
+        assert_eq!(mcp_server("mcp__solo"), Some("solo"));
+    }
 }

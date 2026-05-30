@@ -1248,13 +1248,7 @@ impl App {
             self.set_status("no task selected — focus a task on the kanban first".into());
             return;
         };
-        let status_label = match task.status {
-            crate::orchestrator::TaskStatus::Running => "running",
-            crate::orchestrator::TaskStatus::Review => "review",
-            crate::orchestrator::TaskStatus::Merging => "merging",
-            crate::orchestrator::TaskStatus::Done => "done",
-            crate::orchestrator::TaskStatus::Backlog => "backlog",
-        };
+        let status_label = task.status.as_str();
         let display = format!(
             "{} — {} (task {})",
             p.name,
@@ -1353,13 +1347,7 @@ impl App {
             self.set_status("no task selected — focus a task on the kanban first".into());
             return;
         };
-        let status_label = match task.status {
-            crate::orchestrator::TaskStatus::Running => "running",
-            crate::orchestrator::TaskStatus::Review => "review",
-            crate::orchestrator::TaskStatus::Merging => "merging",
-            crate::orchestrator::TaskStatus::Done => "done",
-            crate::orchestrator::TaskStatus::Backlog => "backlog",
-        };
+        let status_label = task.status.as_str();
         let display = format!(
             "{} — {} (task {})",
             p.name,

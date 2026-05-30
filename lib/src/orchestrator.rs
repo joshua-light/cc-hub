@@ -140,6 +140,35 @@ pub enum TaskStatus {
     Done,
 }
 
+impl TaskStatus {
+    /// Lowercase wire/CLI name. Must match `#[serde(rename_all = "lowercase")]`
+    /// above so JSON round-trips and CLI `--status` agree.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TaskStatus::Backlog => "backlog",
+            TaskStatus::Running => "running",
+            TaskStatus::Review => "review",
+            TaskStatus::Merging => "merging",
+            TaskStatus::Done => "done",
+        }
+    }
+}
+
+impl std::str::FromStr for TaskStatus {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "backlog" => Ok(TaskStatus::Backlog),
+            "running" => Ok(TaskStatus::Running),
+            "review" => Ok(TaskStatus::Review),
+            "merging" => Ok(TaskStatus::Merging),
+            "done" => Ok(TaskStatus::Done),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Worker {
     #[serde(default = "default_claude_agent_id")]
@@ -1261,17 +1290,23 @@ Begin by exploring the relevant files, then open with your first `{bin} task rep
 /// This mirrors what `cc-hub orchestrate start` does, minus the synchronous
 /// idle-poll/dispatch — the TUI prefers async dispatch so the keystroke
 /// returns instantly.
-pub fn spawn_orchestrator_for_new_task(
-    project_root: &Path,
-    project_name: &str,
-    user_prompt: String,
+/// Resolve the orchestrator agent, stamp its identity onto `state`, build the
+/// orchestrator prompt, and spawn the detached agent session in the task's
+/// project root. Returns `(tmux_session_name, prompt_to_dispatch)` where
+/// `prompt_to_dispatch` is `Some` only for backends that can't take an initial
+/// prompt at spawn (they need a follow-up tmux paste); `None` when the prompt
+/// was delivered at spawn time. The caller is responsible for recording
+/// `tmux_name` onto `state.orchestrator_tmux`, `touch()`-ing, and persisting —
+/// this lets `restart_task` slot an old-tmux kill in between a successful spawn
+/// and the state commit.
+///
+/// Shared by `spawn_orchestrator_for_new_task`, `start_backlog_task`, and
+/// `restart_task` so the prompt build and the `supports_initial_prompt`
+/// dispatch logic can't drift apart.
+fn launch_orchestrator_session(
+    state: &mut TaskState,
     agent_id_override: Option<&str>,
-) -> io::Result<(TaskState, String, Option<String>)> {
-    let project_id = ensure_project_registered(project_root, project_name)?;
-    let canonical_root =
-        fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
-    let mut state = TaskState::new(project_id, canonical_root.clone(), user_prompt);
-
+) -> io::Result<(String, Option<String>)> {
     let agent_id = agent_id_override
         .map(str::to_string)
         .unwrap_or_else(|| crate::config::get().default_orchestrator_agent_id());
@@ -1282,10 +1317,11 @@ pub fn spawn_orchestrator_for_new_task(
     let cc_hub_bin = resolve_cc_hub_bin();
     state.orchestrator_agent_id = agent_id.clone();
     state.orchestrator_agent_kind = agent.kind;
-    let orchestrator_prompt = build_orchestrator_prompt(&state, &cc_hub_bin);
+    let orchestrator_prompt = build_orchestrator_prompt(state, &cc_hub_bin);
 
-    let cwd = canonical_root.to_string_lossy().into_owned();
-    let prompt_to_dispatch = if agent.supports_initial_prompt() {
+    let cwd = state.project_root.to_string_lossy().into_owned();
+    let supports_initial = agent.supports_initial_prompt();
+    let prompt_to_dispatch = if supports_initial {
         None
     } else {
         Some(orchestrator_prompt.clone())
@@ -1294,13 +1330,26 @@ pub fn spawn_orchestrator_for_new_task(
         &agent_id,
         &cwd,
         None,
-        if agent.supports_initial_prompt() {
-            Some(orchestrator_prompt.as_str())
-        } else {
-            None
-        },
+        supports_initial.then_some(orchestrator_prompt.as_str()),
         false,
     )?;
+
+    Ok((tmux_name, prompt_to_dispatch))
+}
+
+pub fn spawn_orchestrator_for_new_task(
+    project_root: &Path,
+    project_name: &str,
+    user_prompt: String,
+    agent_id_override: Option<&str>,
+) -> io::Result<(TaskState, String, Option<String>)> {
+    let project_id = ensure_project_registered(project_root, project_name)?;
+    let canonical_root =
+        fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    let mut state = TaskState::new(project_id, canonical_root, user_prompt);
+
+    let (tmux_name, prompt_to_dispatch) =
+        launch_orchestrator_session(&mut state, agent_id_override)?;
 
     state.orchestrator_tmux = Some(tmux_name.clone());
     state.touch();
@@ -1329,35 +1378,8 @@ pub fn start_backlog_task(
     }
     state.status = TaskStatus::Running;
 
-    let agent_id = agent_id_override
-        .map(str::to_string)
-        .unwrap_or_else(|| crate::config::get().default_orchestrator_agent_id());
-    let agent = crate::config::get()
-        .agent(&agent_id)
-        .ok_or_else(|| io::Error::other(format!("unknown orchestrator agent: {}", agent_id)))?;
-
-    let cc_hub_bin = resolve_cc_hub_bin();
-    state.orchestrator_agent_id = agent_id.clone();
-    state.orchestrator_agent_kind = agent.kind;
-    let orchestrator_prompt = build_orchestrator_prompt(&state, &cc_hub_bin);
-
-    let cwd = state.project_root.to_string_lossy().into_owned();
-    let prompt_to_dispatch = if agent.supports_initial_prompt() {
-        None
-    } else {
-        Some(orchestrator_prompt.clone())
-    };
-    let tmux_name = crate::spawn::spawn_agent_session(
-        &agent_id,
-        &cwd,
-        None,
-        if agent.supports_initial_prompt() {
-            Some(orchestrator_prompt.as_str())
-        } else {
-            None
-        },
-        false,
-    )?;
+    let (tmux_name, prompt_to_dispatch) =
+        launch_orchestrator_session(&mut state, agent_id_override)?;
 
     state.orchestrator_tmux = Some(tmux_name.clone());
     state.touch();
@@ -1398,40 +1420,13 @@ pub fn restart_task(
         TaskStatus::Backlog | TaskStatus::Running => {}
     }
 
-    let agent_id = agent_id_override
-        .map(str::to_string)
-        .unwrap_or_else(|| crate::config::get().default_orchestrator_agent_id());
-    let agent = crate::config::get()
-        .agent(&agent_id)
-        .ok_or_else(|| io::Error::other(format!("unknown orchestrator agent: {}", agent_id)))?;
-
-    let cc_hub_bin = resolve_cc_hub_bin();
-
     let old_tmux = state.orchestrator_tmux.clone();
     state.orchestrator_tmux = None;
     state.orchestrator_session_id = None;
     state.status = TaskStatus::Running;
-    state.orchestrator_agent_id = agent_id.clone();
-    state.orchestrator_agent_kind = agent.kind;
-    let orchestrator_prompt = build_orchestrator_prompt(&state, &cc_hub_bin);
 
-    let cwd = state.project_root.to_string_lossy().into_owned();
-    let prompt_to_dispatch = if agent.supports_initial_prompt() {
-        None
-    } else {
-        Some(orchestrator_prompt.clone())
-    };
-    let tmux_name = crate::spawn::spawn_agent_session(
-        &agent_id,
-        &cwd,
-        None,
-        if agent.supports_initial_prompt() {
-            Some(orchestrator_prompt.as_str())
-        } else {
-            None
-        },
-        false,
-    )?;
+    let (tmux_name, prompt_to_dispatch) =
+        launch_orchestrator_session(&mut state, agent_id_override)?;
 
     if let Some(tmux) = old_tmux.as_deref() {
         if crate::send::tmux_session_exists(tmux) {

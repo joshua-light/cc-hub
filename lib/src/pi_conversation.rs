@@ -508,16 +508,5 @@ fn tool_brief_arg(name: &str, args: &Value) -> Option<String> {
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
-    let s = s.trim();
-    let first_line = s.lines().next().unwrap_or(s);
-    if first_line.chars().count() <= max {
-        first_line.to_string()
-    } else {
-        let mut out = String::new();
-        for c in first_line.chars().take(max) {
-            out.push(c);
-        }
-        out.push_str("...");
-        out
-    }
+    crate::models::first_line_truncated(s.trim(), max)
 }

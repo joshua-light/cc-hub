@@ -810,8 +810,7 @@ pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> Metr
             let mut call_last_orphan: &str = "";
             for tu in &call.tool_uses {
                 let name = &tu.name;
-                if let Some(rest) = name.strip_prefix("mcp__") {
-                    let server = rest.split("__").next().unwrap_or(rest);
+                if let Some(server) = crate::models::mcp_server(name) {
                     let entry = by_mcp.entry(server.to_string()).or_default();
                     entry.count += 1;
                     session_mcp.insert(server);

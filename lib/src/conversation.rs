@@ -665,7 +665,7 @@ fn format_tool_hint(name: &str, input: Option<&Value>) -> Option<String> {
     let input = input?;
     // Strip `mcp__<server>__` prefixes so `mcp__claude_ai_Notion__notion-search`
     // dispatches by its leaf (`notion-search`).
-    let leaf = name.rsplit("__").next().unwrap_or(name);
+    let leaf = crate::models::mcp_leaf(name);
     let raw = match leaf {
         "Bash" => input
             .get("command")
@@ -1936,16 +1936,5 @@ fn tool_brief_arg(name: &str, input: &serde_json::Value) -> Option<String> {
 
 fn truncate_str(s: &str, max: usize) -> String {
     let s = strip_xml_tags(s);
-    let s = s.trim();
-    let first_line = s.lines().next().unwrap_or(s);
-    if first_line.len() <= max {
-        first_line.to_string()
-    } else {
-        // Find a char boundary at or before `max` to avoid splitting multi-byte chars.
-        let mut end = max.min(first_line.len());
-        while end > 0 && !first_line.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}...", &first_line[..end])
-    }
+    crate::models::first_line_truncated(s.trim(), max)
 }
