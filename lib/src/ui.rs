@@ -1198,7 +1198,7 @@ fn render_card(
                 Span::styled("󰍡 ", Style::default().fg(Color::Rgb(100, 100, 120))),
                 Span::styled(first_line, Style::default().fg(Color::Rgb(160, 160, 170))),
             ]));
-            let second = if chars.len() > max_w * 2 - 3 {
+            let second = if chars.len() > max_w.saturating_mul(2).saturating_sub(3) {
                 format!("{}...", remaining)
             } else {
                 remaining
@@ -2921,7 +2921,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             }
             View::GhCreateInput => "type name  tab:toggle public/private  enter:create  esc:cancel",
             View::ProjectsResult => "j/k:artifact  e:expand  PgUp/PgDn:scroll  c:copy path  o:xdg-open  esc/r:close",
-            View::Backlog => "j/k:select  s/enter:start  esc/q:close",
+            View::Backlog => "j/k:select  s/enter:start  x:delete  esc/q:close",
         };
         spans.push(Span::styled(
             format!(" {} ", keybinds),
@@ -4162,11 +4162,7 @@ fn render_task_card_collapsed(
                     let prefix = format!("behind #{} · ", holder_short);
                     let reserved = prefix.chars().count() + age_suffix.chars().count();
                     let title_room = body_max.saturating_sub(reserved);
-                    if title_room == 0 {
-                        format!("behind #{}{}", holder_short, age_suffix)
-                    } else {
-                        format!("{}{}{}", prefix, first_line_preview(title, title_room), age_suffix)
-                    }
+                    format!("{}{}{}", prefix, first_line_preview(title, title_room), age_suffix)
                 }
                 None => format!("behind #{}{}", holder_short, age_suffix),
             };
@@ -4271,20 +4267,6 @@ fn render_task_card_collapsed(
     frame.render_widget(para, inner);
 }
 
-// Runtime opt-out for Nerd-Font glyphs: terminals without a Nerd Font render
-// the badge cell as blank/tofu. Set CC_HUB_ASCII_ICONS=1 (or true/yes) to
-// substitute ASCII fallbacks. Cached so per-frame badge rendering doesn't
-// hit `env::var`'s global lock.
-#[allow(dead_code)]
-fn ascii_icons() -> bool {
-    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("CC_HUB_ASCII_ICONS")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
-            .unwrap_or(false)
-    })
-}
-
 fn task_card_header_text(
     t: &crate::orchestrator::TaskState,
     titling_in_flight: bool,
@@ -4303,7 +4285,7 @@ fn first_line_preview(text: &str, max: usize) -> String {
         first.to_string()
     } else {
         let mut out = String::new();
-        for ch in first.chars().take(max - 1) {
+        for ch in first.chars().take(max.saturating_sub(1)) {
             out.push(ch);
         }
         out.push('…');

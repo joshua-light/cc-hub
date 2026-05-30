@@ -784,12 +784,7 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
             let mut data = match &jsonl_path {
                 Some(path) => {
                     let entries = conversation::read_jsonl_tail_for_state(path);
-                    let mtime_age_secs = path
-                        .metadata()
-                        .ok()
-                        .and_then(|m| m.modified().ok())
-                        .and_then(|t| t.elapsed().ok())
-                        .map(|d| d.as_secs());
+                    let mtime_age_secs = mtime_age_secs(path);
                     let mut state = conversation::extract_state(&entries);
                     let last_msg = conversation::extract_last_user_message(&entries);
                     let last_act = conversation::extract_last_activity(&entries);

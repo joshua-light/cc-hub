@@ -512,19 +512,22 @@ impl App {
     }
 
     /// Move kanban cursor one column right (Planning → Running → Review
-    /// → Merging → Done). Clamps the row cursor to the new
-    /// column's length.
+    /// → Merging → Done). Clamps the row cursor to the destination
+    /// column's length so the selection is preserved where possible
+    /// instead of snapping back to the top card.
     pub fn projects_col_right(&mut self) {
         if self.projects_col < 4 {
             self.projects_col += 1;
-            self.projects_task_sel = 0;
+            self.clamp_projects_cursor();
         }
     }
 
+    /// Move kanban cursor one column left. Clamps the row cursor to the
+    /// destination column's length rather than resetting it to the top.
     pub fn projects_col_left(&mut self) {
         if self.projects_col > 0 {
             self.projects_col -= 1;
-            self.projects_task_sel = 0;
+            self.clamp_projects_cursor();
         }
     }
 

@@ -200,8 +200,9 @@ Output STRICT JSON on a single line, nothing else, no prose, no fences:\n\
     let visible = tasks.len().min(MAX_TASKS_IN_PROMPT);
     for t in tasks.iter().take(visible) {
         let title = t.title.as_deref().unwrap_or("(untitled)");
-        let prompt = if t.prompt.len() > 800 {
-            format!("{}…", &t.prompt[..800])
+        let prompt = if t.prompt.chars().count() > 800 {
+            let s: String = t.prompt.chars().take(800).collect();
+            format!("{}…", s)
         } else {
             t.prompt.clone()
         };
@@ -278,5 +279,29 @@ mod tests {
         assert_eq!(parse_response("{\"other\":1}"), None);
         // Empty string is treated as a parse failure, not a real id.
         assert_eq!(parse_response("{\"start_task_id\":\"\"}"), None);
+    }
+
+    #[test]
+    fn build_prompt_truncates_on_char_boundary() {
+        use std::path::PathBuf;
+        // 799 ASCII bytes then a 2-byte char `é` straddling byte 800: a byte
+        // slice `&prompt[..800]` would split the multibyte char and panic.
+        let prompt = format!("{}é{}", "a".repeat(799), "b".repeat(200));
+        assert!(prompt.chars().count() > 800);
+        let project = orchestrator::Project {
+            id: "p1".into(),
+            name: "proj".into(),
+            root: PathBuf::from("/tmp/proj"),
+            created_at: 0,
+            build_cmd: None,
+        };
+        let task = orchestrator::TaskState::new_backlog(
+            "p1".into(),
+            PathBuf::from("/tmp/proj"),
+            prompt,
+        );
+        // Must not panic on the char boundary, and must truncate.
+        let out = build_prompt(&project, &[&task]);
+        assert!(out.contains('…'));
     }
 }

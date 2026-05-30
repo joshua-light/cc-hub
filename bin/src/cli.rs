@@ -432,7 +432,9 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
 
 fn next_value(args: &[String], i: &mut usize, name: &str) -> Result<String, CliError> {
     *i += 1;
-    let Some(v) = args.get(*i).cloned() else {
+    // A value that looks like another flag means the caller omitted the value
+    // (e.g. `--task --status running` would otherwise bind task="--status").
+    let Some(v) = args.get(*i).cloned().filter(|v| !v.starts_with("--")) else {
         return Err(CliError::Usage(format!("{} requires a value", name)));
     };
     *i += 1;
@@ -2823,6 +2825,28 @@ mod tests {
             Some(0),
             "expected dispatch to handle 'project list --json' cleanly"
         );
+    }
+
+    #[test]
+    fn next_value_rejects_flag_shaped_value() {
+        // `--task --status running` must error (missing value for --task)
+        // rather than binding task="--status".
+        let args = vec![
+            "--task".to_string(),
+            "--status".to_string(),
+            "running".to_string(),
+        ];
+        match parse_flags(&args) {
+            Err(CliError::Usage(msg)) => assert!(
+                msg.contains("--task"),
+                "expected --task missing-value error, got: {msg}"
+            ),
+            Err(other) => panic!("expected CliError::Usage, got {other:?}"),
+            Ok(f) => panic!(
+                "expected --task to error, but parsed task={:?}",
+                f.task
+            ),
+        }
     }
 
     #[test]
