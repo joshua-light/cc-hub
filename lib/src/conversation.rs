@@ -1761,7 +1761,9 @@ mod tests {
         let mtime = std::fs::metadata(&p).unwrap().modified().unwrap();
         write_jsonl(
             &p,
-            &[r#"{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[]}}"#],
+            &[
+                r#"{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[]}}"#,
+            ],
         );
         let f = std::fs::File::options().write(true).open(&p).unwrap();
         f.set_modified(mtime).expect("restore mtime");
@@ -1815,7 +1817,9 @@ mod tests {
         // summary cache is not mtime-keyed, so it must keep the original.
         write_jsonl(
             &p,
-            &[r#"{"type":"user","message":{"role":"user","content":"a totally different message"}}"#],
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"a totally different message"}}"#,
+            ],
         );
         assert_eq!(
             first_user_message_cached(&p).as_deref(),

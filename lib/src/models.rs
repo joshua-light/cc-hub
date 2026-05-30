@@ -245,7 +245,10 @@ mod tests {
 
     #[test]
     fn mcp_leaf_and_server() {
-        assert_eq!(mcp_leaf("mcp__claude_ai_Notion__notion-search"), "notion-search");
+        assert_eq!(
+            mcp_leaf("mcp__claude_ai_Notion__notion-search"),
+            "notion-search"
+        );
         assert_eq!(mcp_leaf("Bash"), "Bash");
         assert_eq!(
             mcp_server("mcp__claude_ai_Notion__notion-search"),

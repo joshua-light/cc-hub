@@ -145,8 +145,7 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    const ASSISTANT_LINE: &str =
-        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#;
+    const ASSISTANT_LINE: &str = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#;
 
     fn write_lines(path: &std::path::Path, n: usize) {
         let mut f = std::fs::File::create(path).expect("create");

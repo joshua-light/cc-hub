@@ -2146,7 +2146,10 @@ mod tests {
 
         let reloaded = crate::orchestrator::read_task_state("p-rb", "t-rb").expect("read");
         assert_eq!(reloaded.status, TaskStatus::Review);
-        assert!(reloaded.note.as_deref().is_some_and(|n| n.contains("resurrect")));
+        assert!(reloaded
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("resurrect")));
 
         // Idempotent: a non-Merging task is left untouched.
         app.rollback_merging_to_review("p-rb", "t-rb");

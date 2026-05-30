@@ -310,7 +310,10 @@ fn gc_removes_orphan_worktree_and_keeps_live_one() {
     assert!(orphan_names.contains(&"t-dangling-drop"));
     assert!(plan.worktrees_removed.is_empty(), "dry-run removes nothing");
     assert!(!plan.pruned, "dry-run does not prune");
-    assert!(done_wt.exists() && dangling_wt.exists(), "dry-run is a no-op");
+    assert!(
+        done_wt.exists() && dangling_wt.exists(),
+        "dry-run is a no-op"
+    );
 
     // Real run: orphans gone, live survives, branches cleaned, prune ran.
     let outcome = orchestrator::gc_worktrees(&project_id, root, false).expect("gc");
@@ -330,7 +333,10 @@ fn gc_removes_orphan_worktree_and_keeps_live_one() {
             .map(|o| o.status.success())
             .unwrap_or(false)
     };
-    assert!(branch_exists("cc-hub/t-live-keep"), "live branch must remain");
+    assert!(
+        branch_exists("cc-hub/t-live-keep"),
+        "live branch must remain"
+    );
     assert!(
         !branch_exists("cc-hub/t-done-gone"),
         "Done orphan branch must be deleted"

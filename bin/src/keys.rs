@@ -162,10 +162,7 @@ pub(crate) async fn handle_key(
                 app.set_status("no task selected".into());
             }
         }
-        (
-            View::ProjectsResult,
-            KeyCode::Esc | KeyCode::Char('r') | KeyCode::Char('q'),
-        ) => {
+        (View::ProjectsResult, KeyCode::Esc | KeyCode::Char('r') | KeyCode::Char('q')) => {
             app.close_projects_result();
         }
         (View::ProjectsResult, KeyCode::Down | KeyCode::Char('j')) => {
@@ -237,9 +234,7 @@ pub(crate) async fn handle_key(
                         let (cols, rows) = crate::popup_pane_size(terminal);
                         match tmux_pane::TmuxPaneView::spawn(tmux_name, rows, cols) {
                             Ok(pane) => app.enter_tmux_pane(pane),
-                            Err(e) => {
-                                app.set_status(format!("open orchestrator failed: {}", e))
-                            }
+                            Err(e) => app.set_status(format!("open orchestrator failed: {}", e)),
                         }
                     }
                 }
@@ -331,20 +326,17 @@ pub(crate) async fn handle_key(
                         }
                         Err(e) => app.set_status(format!("resurrect failed: {}", e)),
                     }
-                } else if let Some(log_path) =
-                    cc_hub_lib::orchestrator::task_orchestrator_log_path(
-                        &task.project_id,
-                        &task.task_id,
-                    )
-                    .filter(|p| p.exists())
+                } else if let Some(log_path) = cc_hub_lib::orchestrator::task_orchestrator_log_path(
+                    &task.project_id,
+                    &task.task_id,
+                )
+                .filter(|p| p.exists())
                 {
                     let (cols, rows) = crate::popup_pane_size(terminal);
                     match spawn::spawn_log_viewer_tmux_session(&log_path) {
                         Ok(name) => match tmux_pane::TmuxPaneView::spawn_owned(&name, rows, cols) {
                             Ok(pane) => app.enter_tmux_pane(pane),
-                            Err(e) => {
-                                app.set_status(format!("log viewer attach failed: {}", e))
-                            }
+                            Err(e) => app.set_status(format!("log viewer attach failed: {}", e)),
                         },
                         Err(e) => app.set_status(format!("log viewer spawn failed: {}", e)),
                     }
@@ -420,7 +412,10 @@ pub(crate) async fn handle_key(
                 return KeyOutcome::Continue;
             };
             if task.status != cc_hub_lib::orchestrator::TaskStatus::Backlog {
-                app.set_status(format!("task is not in backlog (status = {:?})", task.status));
+                app.set_status(format!(
+                    "task is not in backlog (status = {:?})",
+                    task.status
+                ));
                 return KeyOutcome::Continue;
             }
             match cc_hub_lib::orchestrator::start_backlog_task(&p.id, &task.task_id, None) {
@@ -773,10 +768,7 @@ pub(crate) async fn handle_key(
                 p.descend();
             }
         }
-        (
-            View::FolderPicker,
-            KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h'),
-        ) => {
+        (View::FolderPicker, KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h')) => {
             if let Some(p) = app.folder_picker.as_mut() {
                 p.ascend();
             }

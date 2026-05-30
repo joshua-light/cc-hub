@@ -528,7 +528,8 @@ fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled(format!("#{}", id_short), title_style),
                 Span::styled(" · pending title", Style::default().fg(Color::DarkGray)),
             ]));
-            let preview = models::first_line_truncated(&t.prompt, max_w.saturating_sub(age.len() + 6));
+            let preview =
+                models::first_line_truncated(&t.prompt, max_w.saturating_sub(age.len() + 6));
             lines.push(Line::from(vec![
                 Span::raw("    "),
                 Span::styled(age, Style::default().fg(TASK_META_DIM)),
@@ -4464,7 +4465,10 @@ fn build_metrics_content(
         let bar_w = ((s.cost / max_model_cost) * 26.0).round() as usize;
         let short = short_model(name);
         lines.push(Line::from(vec![
-            Span::styled(format!("  {:<22}", models::first_line_truncated(short, 22)), label),
+            Span::styled(
+                format!("  {:<22}", models::first_line_truncated(short, 22)),
+                label,
+            ),
             Span::styled("━".repeat(bar_w), Style::default().fg(model_color(name))),
             Span::raw(" "),
             Span::styled(fmt_cost(s.cost), val),
@@ -4522,7 +4526,10 @@ fn build_metrics_content(
     for (name, s) in &m.top_projects {
         let bar_w = ((s.cost / max_proj) * 24.0).round() as usize;
         lines.push(Line::from(vec![
-            Span::styled(format!("  {:<26}", models::first_line_truncated(name, 26)), label),
+            Span::styled(
+                format!("  {:<26}", models::first_line_truncated(name, 26)),
+                label,
+            ),
             Span::styled(
                 "━".repeat(bar_w),
                 Style::default().fg(Color::Rgb(120, 180, 220)),
@@ -4590,7 +4597,10 @@ fn build_metrics_content(
                 Span::styled(format!("  {:>3} orphan", entry.orphan_count), dim),
                 Span::raw("  "),
                 Span::styled(
-                    format!("{:<18}", models::first_line_truncated(&entry.last_tool_name, 18)),
+                    format!(
+                        "{:<18}",
+                        models::first_line_truncated(&entry.last_tool_name, 18)
+                    ),
                     Style::default().fg(Color::Rgb(180, 180, 200)),
                 ),
                 Span::styled(
@@ -4745,7 +4755,10 @@ fn render_bar_chart_section(
                 0.0
             };
             lines.push(Line::from(vec![
-                Span::styled(format!("  {:<22}", models::first_line_truncated(name, 22)), label),
+                Span::styled(
+                    format!("  {:<22}", models::first_line_truncated(name, 22)),
+                    label,
+                ),
                 Span::styled("━".repeat(bar_w), Style::default().fg(tool_color(name))),
                 Span::raw(" "),
                 Span::styled(format!("{:>6} calls", s.count), val),
@@ -4819,7 +4832,10 @@ fn format_session_row(s: &SessionSummary, dim: Style, val: Style, selected: bool
         Span::raw(" "),
         Span::styled(format!("{:>10}", toks), dim),
         Span::raw(" "),
-        Span::styled(format!("{:<22}", models::first_line_truncated(model, 22)), dim),
+        Span::styled(
+            format!("{:<22}", models::first_line_truncated(model, 22)),
+            dim,
+        ),
         Span::raw(" "),
         Span::styled(
             format!("{:<24}", models::first_line_truncated(&s.project, 24)),

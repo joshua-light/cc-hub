@@ -577,7 +577,12 @@ fn apply_scan_msg(
             app.update_metrics_progress(scanned, total);
         }
         ScanMsg::Projects(mut snap) => {
-            queue_missing_task_titles(&mut snap, inflight_task_titles, active_task_titles, title_gate);
+            queue_missing_task_titles(
+                &mut snap,
+                inflight_task_titles,
+                active_task_titles,
+                title_gate,
+            );
             app.update_projects(snap);
         }
         ScanMsg::GhCreateDone { name, result } => {

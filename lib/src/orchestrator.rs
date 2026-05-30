@@ -859,7 +859,11 @@ pub fn list_task_states(project_id: &str) -> io::Result<Vec<TaskState>> {
             Ok(s) => s,
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             Err(e) => {
-                log::warn!("list_task_states: read {} failed: {}", state_path.display(), e);
+                log::warn!(
+                    "list_task_states: read {} failed: {}",
+                    state_path.display(),
+                    e
+                );
                 continue;
             }
         };
@@ -873,6 +877,34 @@ pub fn list_task_states(project_id: &str) -> io::Result<Vec<TaskState>> {
         }
     }
     Ok(out)
+}
+
+/// Task ids under `<project>/tasks/` whose `state.json` is PRESENT but failed
+/// to parse. These are distinct from absent tasks: a genuinely live task with a
+/// momentarily/persistently corrupt state would otherwise vanish from
+/// [`list_task_states`], so [`scan_worktrees`] must treat them as live and
+/// never gc their (possibly in-flight) worktrees. Best-effort: any IO error
+/// just yields a smaller set (fewer keep-alives), never a hard failure.
+fn unparsed_task_ids(project_id: &str) -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    let Some(tasks_dir) = project_state_dir(project_id).map(|d| d.join("tasks")) else {
+        return ids;
+    };
+    let Ok(rd) = fs::read_dir(&tasks_dir) else {
+        return ids;
+    };
+    for entry in rd.flatten() {
+        let state_path = entry.path().join("state.json");
+        let Ok(raw) = fs::read_to_string(&state_path) else {
+            continue; // absent state → handled as orphan elsewhere, not here
+        };
+        if serde_json::from_str::<TaskState>(&raw).is_err() {
+            if let Some(id) = entry.file_name().to_str() {
+                ids.insert(id.to_owned());
+            }
+        }
+    }
+    ids
 }
 
 /// One worktree directory found under `<root>/.cc-hub-wt/` during a gc scan,
@@ -919,18 +951,26 @@ pub struct GcOutcome {
 ///
 /// Returns an empty plan (no orphans, no live) when the `.cc-hub-wt/` dir
 /// doesn't exist yet.
-pub fn scan_worktrees(project_id: &str, project_root: &Path) -> io::Result<(Vec<WorktreeEntry>, Vec<WorktreeEntry>)> {
+pub fn scan_worktrees(
+    project_id: &str,
+    project_root: &Path,
+) -> io::Result<(Vec<WorktreeEntry>, Vec<WorktreeEntry>)> {
     let wt_root = project_root.join(".cc-hub-wt");
     if !wt_root.is_dir() {
         return Ok((Vec::new(), Vec::new()));
     }
 
     // Task ids that still own their worktrees: present and not Done.
-    let live_task_ids: std::collections::HashSet<String> = list_task_states(project_id)?
+    let mut live_task_ids: std::collections::HashSet<String> = list_task_states(project_id)?
         .into_iter()
         .filter(|s| s.status != TaskStatus::Done)
         .map(|s| s.task_id)
         .collect();
+    // Fail SAFE on corruption: a task whose state.json is present but won't parse
+    // is kept alive (its worktree is never orphaned), so a transient/permanent
+    // parse error can't make gc destroy in-flight work. Only a genuinely absent
+    // or Done task yields an orphan.
+    live_task_ids.extend(unparsed_task_ids(project_id));
 
     let mut orphans = Vec::new();
     let mut live = Vec::new();
@@ -997,10 +1037,7 @@ pub fn gc_worktrees(project_id: &str, project_root: &Path, dry_run: bool) -> io:
 
     for wt in &orphans {
         let path_str = wt.path.to_string_lossy().into_owned();
-        let git_result = run_git(
-            project_root,
-            &["worktree", "remove", "--force", &path_str],
-        );
+        let git_result = run_git(project_root, &["worktree", "remove", "--force", &path_str]);
         let removed = match &git_result {
             Ok(out) => {
                 let stderr_lower = out.stderr.to_lowercase();
@@ -1705,15 +1742,17 @@ mod tests {
     #[test]
     fn worktree_name_validation_rejects_unsafe_and_accepts_safe() {
         // Argv-injection / traversal / quoting hazards must be rejected.
-        for bad in ["", "-foo", "--bar", "../x", "a/b", "a b", ".hidden", "a$b", "a;b"] {
-            assert!(
-                !is_valid_worktree_name(bad),
-                "{:?} should be rejected",
-                bad
-            );
+        for bad in [
+            "", "-foo", "--bar", "../x", "a/b", "a b", ".hidden", "a$b", "a;b",
+        ] {
+            assert!(!is_valid_worktree_name(bad), "{:?} should be rejected", bad);
         }
         for good in ["fix", "a", "fix-123", "v1.2_x", "FixIt"] {
-            assert!(is_valid_worktree_name(good), "{:?} should be accepted", good);
+            assert!(
+                is_valid_worktree_name(good),
+                "{:?} should be accepted",
+                good
+            );
         }
     }
 

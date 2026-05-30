@@ -254,10 +254,7 @@ enum CliError {
     /// State guard tripped: merge lock held, conflicting transition on a
     /// terminal PR, etc. Exit 1, kind "conflict". Carries an optional
     /// recipe the orchestrator can act on.
-    Conflict {
-        msg: String,
-        recipe: Option<String>,
-    },
+    Conflict { msg: String, recipe: Option<String> },
     /// Everything else (I/O, git failures, serialization). Exit 1,
     /// kind "other".
     Other(String),
@@ -540,11 +537,35 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
     Ok(f)
 }
 
+/// Free-text flags whose value may legitimately begin with `--`
+/// (e.g. `--build-cmd "--release"`, `--prompt "--foo bar"`,
+/// `--summary "--wip notes"`). For these we accept the next token verbatim.
+const FREE_TEXT_FLAGS: &[&str] = &[
+    "--prompt",
+    "--note",
+    "--summary",
+    "--title",
+    "--description",
+    "--comment",
+    "--build-cmd",
+    "--name",
+    "--caption",
+    "--items",
+    "--author",
+];
+
 fn next_value(args: &[String], i: &mut usize, name: &str) -> Result<String, CliError> {
     *i += 1;
-    // A value that looks like another flag means the caller omitted the value
-    // (e.g. `--task --status running` would otherwise bind task="--status").
-    let Some(v) = args.get(*i).cloned().filter(|v| !v.starts_with("--")) else {
+    // For STRUCTURED flags (ids, enums, numbers, paths), a value that looks like
+    // another flag means the caller omitted the value (e.g. `--task --status
+    // running` would otherwise bind task="--status") — reject it. Free-text
+    // flags may legitimately take a `--`-prefixed value, so don't filter those.
+    let reject_flag_like = !FREE_TEXT_FLAGS.contains(&name);
+    let Some(v) = args
+        .get(*i)
+        .cloned()
+        .filter(|v| !(reject_flag_like && v.starts_with("--")))
+    else {
         return Err(CliError::Usage(format!("{} requires a value", name)));
     };
     *i += 1;
@@ -845,12 +866,15 @@ fn merge_worktree(args: &[String]) -> Result<(), CliError> {
     }
     print_json(&payload);
 
+    // The outcome payload was already printed above; use `Reported` so `handle()`
+    // doesn't emit a SECOND JSON line on stdout (which would break the
+    // one-line-per-call contract for an orchestrator piping to `jq`).
     match outcome {
         MergeOutcome::Ok => Ok(()),
-        MergeOutcome::Conflict { .. } => Err(CliError::Other(
+        MergeOutcome::Conflict { .. } => Err(CliError::Reported(
             "merge produced conflicts; resolve in the worktree or main".into(),
         )),
-        MergeOutcome::BlockedByDirtyTree { overlap } => Err(CliError::Other(format!(
+        MergeOutcome::BlockedByDirtyTree { overlap } => Err(CliError::Reported(format!(
             "merge blocked: working tree on `{}` has uncommitted edits in {} file(s) the branch also modified ({}); commit/stash/revert and retry",
             main,
             overlap.len(),
@@ -1389,7 +1413,6 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-
 /// `cc-hub task show --task ID [--project-id ID] [--json]`
 ///
 /// Read-only inspection of a single task. With `--json`, emits one JSON
@@ -1429,7 +1452,10 @@ fn task_show(args: &[String]) -> Result<(), CliError> {
     let todos_total = state.todos.len();
 
     println!("status: {}", state.status.as_str());
-    println!("prompt: {}", models::first_line_truncated(&state.prompt, 80));
+    println!(
+        "prompt: {}",
+        models::first_line_truncated(&state.prompt, 80)
+    );
     println!("note: {}", state.note.as_deref().unwrap_or("-"));
     println!(
         "summary: {}",
@@ -1439,8 +1465,14 @@ fn task_show(args: &[String]) -> Result<(), CliError> {
             .map(|s| models::first_line_truncated(s, 120))
             .unwrap_or_else(|| "-".into())
     );
-    println!("created_at: {}", models::relative_age(age_secs(state.created_at)));
-    println!("updated_at: {}", models::relative_age(age_secs(state.updated_at)));
+    println!(
+        "created_at: {}",
+        models::relative_age(age_secs(state.created_at))
+    );
+    println!(
+        "updated_at: {}",
+        models::relative_age(age_secs(state.updated_at))
+    );
     println!("workers: {}", state.workers.len());
     println!("artifacts: {}", state.artifacts.len());
     println!("todos: {}/{}", todos_done, todos_total);
@@ -2239,6 +2271,18 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
         )));
     }
 
+    // From here on the merge lock is HELD (released by `pr finalize`, or by the
+    // explicit demote/preflight paths below). Any fallible step that bubbles its
+    // error up via `?` must release the lock first — otherwise a mid-merge
+    // failure (corrupt index, permission error, git exec failure) strands the
+    // lock on an exited process and wedges every subsequent `pr merge` for the
+    // project. Funnel those errors through `unlock`. (Release is idempotent, so
+    // paths that already released explicitly are unaffected.)
+    let unlock = |msg: String| -> CliError {
+        let _ = cc_hub_lib::merge_lock::release(&project_id, &task_id);
+        CliError::Other(msg)
+    };
+
     // Step 1: bring main into the feature branch so the conflict
     // resolution happens on the feature branch (where the worker can
     // re-resolve cleanly), not on main itself.
@@ -2281,7 +2325,7 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
     // front with a distinct outcome so the orchestrator gets an actionable
     // recipe instead of a phantom conflict.
     let worktree_dirty = orchestrator::dirty_paths(&worktree_path)
-        .map_err(|e| CliError::Other(format!("git status (worktree): {}", e)))?;
+        .map_err(|e| unlock(format!("git status (worktree): {}", e)))?;
     if !worktree_dirty.is_empty() {
         let _ = cc_hub_lib::merge_lock::release(&project_id, &task_id);
         print_json(&serde_json::json!({
@@ -2308,7 +2352,7 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
             &pr.base,
         ],
     )
-    .map_err(|e| CliError::Other(format!("git merge {} into branch: {}", pr.base, e)))?;
+    .map_err(|e| unlock(format!("git merge {} into branch: {}", pr.base, e)))?;
 
     if !merge_into_feature.status_ok {
         // Conflicts merging main into the feature branch. By the
@@ -2373,9 +2417,9 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
     // conflicts (which the merge lock already handles) — this catches
     // the user's local uncommitted edits.
     let changed = orchestrator::branch_changed_paths(&project_root, &pr.base, &pr.branch)
-        .map_err(|e| CliError::Other(format!("diff branch: {}", e)))?;
+        .map_err(|e| unlock(format!("diff branch: {}", e)))?;
     let dirty: std::collections::BTreeSet<String> = orchestrator::dirty_paths(&project_root)
-        .map_err(|e| CliError::Other(format!("git status: {}", e)))?
+        .map_err(|e| unlock(format!("git status: {}", e)))?
         .into_iter()
         .collect();
     let branch_files: std::collections::BTreeSet<String> = changed.iter().cloned().collect();
@@ -2407,9 +2451,9 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
     // Step 3: merge feature branch into main. Should be conflict-free
     // since we already merged main into the branch in step 1.
     let checkout = orchestrator::run_git(&project_root, &["checkout", &pr.base])
-        .map_err(|e| CliError::Other(format!("git checkout: {}", e)))?;
+        .map_err(|e| unlock(format!("git checkout: {}", e)))?;
     if !checkout.status_ok {
-        return Err(CliError::Other(format!(
+        return Err(unlock(format!(
             "git checkout {} failed: {}",
             pr.base,
             checkout.stderr.trim()
@@ -2421,7 +2465,7 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
     );
     let merge_into_main =
         orchestrator::run_git(&project_root, &["merge", "--no-ff", "-m", &msg, &pr.branch])
-            .map_err(|e| CliError::Other(format!("git merge: {}", e)))?;
+            .map_err(|e| unlock(format!("git merge: {}", e)))?;
 
     if !merge_into_main.status_ok {
         // Should be rare given step 1, but possible if main moved
@@ -2484,7 +2528,7 @@ fn pr_merge(args: &[String]) -> Result<(), CliError> {
             outcome: MergeOutcome::Ok,
         });
     })
-    .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
+    .map_err(|e| unlock(format!("update state: {}", e)))?;
 
     print_json(&serde_json::json!({
         "ok": true,
@@ -3185,6 +3229,23 @@ mod tests {
             ),
             Err(other) => panic!("expected CliError::Usage, got {other:?}"),
             Ok(f) => panic!("expected --task to error, but parsed task={:?}", f.task),
+        }
+    }
+
+    #[test]
+    fn next_value_accepts_flag_shaped_value_for_free_text_flags() {
+        // Free-text flags must accept a `--`-prefixed value verbatim —
+        // e.g. `--build-cmd "--release"` is a legitimate build command.
+        let args = vec!["--build-cmd".to_string(), "--release".to_string()];
+        match parse_flags(&args) {
+            Ok(f) => assert_eq!(f.build_cmd.as_deref(), Some("--release")),
+            Err(e) => panic!("expected --build-cmd to accept '--release', got {e:?}"),
+        }
+        // And a free-text prompt that begins with dashes survives intact.
+        let args = vec!["--prompt".to_string(), "--foo bar".to_string()];
+        match parse_flags(&args) {
+            Ok(f) => assert_eq!(f.prompt.as_deref(), Some("--foo bar")),
+            Err(e) => panic!("expected --prompt to accept '--foo bar', got {e:?}"),
         }
     }
 
