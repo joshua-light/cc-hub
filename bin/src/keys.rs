@@ -11,7 +11,7 @@
 use crate::ScanMsg;
 use cc_hub_lib::app::{App, Tab, View};
 use cc_hub_lib::folder_picker::PickerMode;
-use cc_hub_lib::{config, focus, live_view, models, platform, send, spawn, tmux_pane};
+use cc_hub_lib::{config, focus, live_view, models, platform, send, spawn, title, tmux_pane};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -870,6 +870,30 @@ pub(crate) async fn handle_key(
         (View::Grid, KeyCode::Char('p')) if on_sessions => {
             app.enter_prompt_input();
         }
+        (View::Grid, KeyCode::Char('r')) if on_sessions => {
+            if !app.enter_rename_session() {
+                app.set_status("no session selected to rename".into());
+            }
+        }
+        (View::RenameSession, KeyCode::Esc) => {
+            app.close_rename_session();
+        }
+        (View::RenameSession, KeyCode::Backspace) => {
+            app.rename_buffer.pop();
+        }
+        (View::RenameSession, KeyCode::Char(c)) => {
+            app.rename_buffer.push(c);
+        }
+        (View::RenameSession, KeyCode::Enter) => match app.submit_session_rename() {
+            Some((sid, title)) => match title::persist_title(&sid, &title) {
+                Ok(()) => app.set_status(format!("renamed to “{}”", title)),
+                Err(e) => {
+                    log::warn!("rename: persist failed for {}: {}", sid, e);
+                    app.set_status(format!("rename failed: {}", e));
+                }
+            },
+            None => app.set_status("rename cancelled — empty title".into()),
+        },
         (View::PromptInput, KeyCode::Esc) => {
             app.close_prompt_input();
         }

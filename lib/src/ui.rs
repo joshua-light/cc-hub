@@ -62,6 +62,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         View::ConfirmClose => render_confirm_close(frame, frame.area(), app),
         View::StateDebug => render_state_debug(frame, frame.area(), app),
         View::PromptInput => render_prompt_input(frame, frame.area(), app),
+        View::RenameSession => render_rename_session(frame, frame.area(), app),
         View::TmuxPane => render_tmux_pane(frame, frame.area(), app),
         View::FolderPicker => render_folder_picker(frame, frame.area(), app),
         View::GhCreateInput => {
@@ -394,6 +395,76 @@ fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::DarkGray),
         ));
     }
+    let lines = vec![
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                input_line,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::raw(""),
+        Line::from(footer_spans),
+    ];
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn render_rename_session(frame: &mut Frame, area: Rect, app: &App) {
+    let mut input_line = app.rename_buffer.clone();
+    input_line.push('▎');
+
+    let desired_w = 70u16.min(area.width);
+    let desired_h = 9u16.min(area.height);
+    let popup = centered_fixed(area, desired_w, desired_h);
+    frame.render_widget(Clear, popup);
+
+    let original = app.rename_original_title();
+    let subtitle = match original {
+        Some(t) if !t.is_empty() => format!(" was “{}” ", t),
+        _ => " untitled ".to_string(),
+    };
+
+    let block = popup_block(Span::styled(
+        " Rename session ",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .title_bottom(Span::styled(
+        subtitle,
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    ));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let footer_spans = vec![
+        Span::raw("  "),
+        Span::styled(
+            "[enter]",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" rename   ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "[esc]",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+    ];
     let lines = vec![
         Line::raw(""),
         Line::from(vec![
@@ -2896,7 +2967,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 // chip is rendered separately *ahead* of this string below so
                 // it is never the first thing clipped.
                 Tab::Projects => "enter:focus orch  n:new task  r:result  f:agent terminal/resurrect  R:restart  b:backlog  h/l:col  j/k:task  H/L:project  N:register project  c:copy id  x:delete task  X:remove project  tab:next  q:quit",
-                Tab::Sessions => "enter/f:focus/resume  n:new  i:info  o:shell  N:new in…  M:bookmarks  D:why?  h/j/k/l:nav  x:close  H:inactive  W:workers  tab:next  q:quit",
+                Tab::Sessions => "enter/f:focus/resume  n:new  i:info  r:rename  o:shell  N:new in…  M:bookmarks  D:why?  h/j/k/l:nav  x:close  H:inactive  W:workers  tab:next  q:quit",
                 Tab::Metrics => "enter:view transcript  j/k:select  r:refresh  tab:next  q:quit",
             },
             View::Popup => "j/k:scroll  esc:close  q:close",
@@ -2904,6 +2975,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             View::ConfirmClose => "y:confirm  n/esc:cancel",
             View::StateDebug => "j/k:scroll  esc:close  q:close",
             View::PromptInput => "type prompt  enter:dispatch  esc:cancel",
+            View::RenameSession => "edit title  enter:rename  esc:cancel",
             View::TmuxPane => "forwarding keys to tmux · F1: detach & close",
             View::FolderPicker => {
                 if app
