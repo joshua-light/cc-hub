@@ -77,19 +77,32 @@ fn build_agent_command(
     let mut cmd = agent.command.clone();
 
     match agent.kind {
-        AgentKind::Claude => match resume {
-            Some(ResumeTarget::SessionId(sid)) => {
-                cmd.push_str(" --resume ");
-                cmd.push_str(&shell_quote(&sid));
+        AgentKind::Claude => {
+            match resume {
+                Some(ResumeTarget::SessionId(sid)) => {
+                    cmd.push_str(" --resume ");
+                    cmd.push_str(&shell_quote(&sid));
+                }
+                Some(ResumeTarget::SessionFile(path)) => {
+                    return Err(io::Error::other(format!(
+                        "claude backend cannot resume by session file: {}",
+                        path.display()
+                    )));
+                }
+                None => {}
             }
-            Some(ResumeTarget::SessionFile(path)) => {
-                return Err(io::Error::other(format!(
-                    "claude backend cannot resume by session file: {}",
-                    path.display()
-                )));
+            // Pin the spawned `claude` to this instance's account. The hub
+            // process already has CLAUDE_CONFIG_DIR set, but a detached mux
+            // session attaches to a possibly-pre-existing tmux server whose
+            // captured environment may not include it — so set it explicitly.
+            if let Some(dir) = paths::claude_config_dir() {
+                cmd = format!(
+                    "CLAUDE_CONFIG_DIR={} {}",
+                    shell_quote(&dir.to_string_lossy()),
+                    cmd
+                );
             }
-            None => {}
-        },
+        }
         AgentKind::Pi => {
             if agent.use_bridge {
                 let bridge = pi_bridge::ensure_bridge_file()?;
@@ -134,32 +147,41 @@ fn build_agent_command(
 }
 
 fn ensure_path_trusted(cwd: &str) -> io::Result<()> {
-    let Some(home) = dirs::home_dir() else {
+    // Must target the SAME `.claude.json` the spawned `claude` will read — i.e.
+    // the one under CLAUDE_CONFIG_DIR when set, not always `~/.claude.json`.
+    // Marking the wrong file leaves the real config untrusted, so claude blocks
+    // on its trust dialog at startup and never writes a session status file —
+    // making the session invisible to the hub watching that config dir.
+    let Some(config_path) = paths::claude_config_json() else {
         return Ok(());
     };
     let canon = std::fs::canonicalize(cwd).unwrap_or_else(|_| Path::new(cwd).to_path_buf());
-    let config_path = home.join(".claude.json");
     let data = match std::fs::read_to_string(&config_path) {
         Ok(s) => s,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
     };
-    let mut root: serde_json::Value = serde_json::from_str(&data)
-        .map_err(|e| io::Error::other(format!("parse ~/.claude.json: {}", e)))?;
-    let root_obj = root
-        .as_object_mut()
-        .ok_or_else(|| io::Error::other("~/.claude.json root is not an object"))?;
+    let mut root: serde_json::Value = serde_json::from_str(&data).map_err(|e| {
+        io::Error::other(format!("parse {}: {}", config_path.display(), e))
+    })?;
+    let root_obj = root.as_object_mut().ok_or_else(|| {
+        io::Error::other(format!("{} root is not an object", config_path.display()))
+    })?;
     let projects = root_obj
         .entry("projects".to_string())
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
-        .ok_or_else(|| io::Error::other("~/.claude.json projects is not an object"))?;
+        .ok_or_else(|| {
+            io::Error::other(format!("{} projects is not an object", config_path.display()))
+        })?;
     let path_key = canon.to_string_lossy().into_owned();
     let project = projects
         .entry(path_key)
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
-        .ok_or_else(|| io::Error::other("~/.claude.json project entry is not an object"))?;
+        .ok_or_else(|| {
+            io::Error::other(format!("{} project entry is not an object", config_path.display()))
+        })?;
     if project
         .get("hasTrustDialogAccepted")
         .and_then(|v| v.as_bool())
@@ -171,8 +193,9 @@ fn ensure_path_trusted(cwd: &str) -> io::Result<()> {
         "hasTrustDialogAccepted".to_string(),
         serde_json::Value::Bool(true),
     );
-    let body = serde_json::to_string_pretty(&root)
-        .map_err(|e| io::Error::other(format!("serialize ~/.claude.json: {}", e)))?;
+    let body = serde_json::to_string_pretty(&root).map_err(|e| {
+        io::Error::other(format!("serialize {}: {}", config_path.display(), e))
+    })?;
     let tmp = config_path.with_extension(format!("tmp.{}", std::process::id()));
     {
         let mut f = std::fs::File::create(&tmp)?;
@@ -181,8 +204,9 @@ fn ensure_path_trusted(cwd: &str) -> io::Result<()> {
     }
     std::fs::rename(&tmp, &config_path)?;
     log::info!(
-        "marked {} trusted in ~/.claude.json before spawning claude",
-        canon.display()
+        "marked {} trusted in {} before spawning claude",
+        canon.display(),
+        config_path.display()
     );
     Ok(())
 }

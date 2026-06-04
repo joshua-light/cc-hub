@@ -27,6 +27,7 @@ pub enum View {
     ConfirmClose,
     StateDebug,
     PromptInput,
+    RenameSession,
     TmuxPane,
     FolderPicker,
     GhCreateInput,
@@ -185,6 +186,14 @@ pub struct App {
     pub usage_line: Line<'static>,
     pub session_counts: SessionCounts,
     pub prompt_buffer: String,
+    /// In-progress edit buffer for the rename-session prompt (`r` on the
+    /// Sessions tab). Prefilled with the current title so the user edits
+    /// rather than retypes.
+    pub rename_buffer: String,
+    /// `session_id` being renamed while [`View::RenameSession`] is open, so
+    /// the submit can target the right session even if the selection moves
+    /// underneath the modal on a rescan.
+    pub rename_target: Option<String>,
     pub dispatch_target: Option<(u32, String, String)>,
     pub tmux_pane: Option<TmuxPaneView>,
     pub folder_picker: Option<FolderPicker>,
@@ -317,6 +326,8 @@ impl App {
             usage_line: Line::default(),
             session_counts: SessionCounts::default(),
             prompt_buffer: String::new(),
+            rename_buffer: String::new(),
+            rename_target: None,
             dispatch_target: None,
             tmux_pane: None,
             folder_picker: None,
@@ -1080,6 +1091,60 @@ impl App {
     pub fn submit_prompt_input(&mut self) -> String {
         self.view = View::Grid;
         std::mem::take(&mut self.prompt_buffer)
+    }
+
+    /// Open the rename-title modal for the currently selected session,
+    /// prefilling the edit buffer with its existing title. Returns `false`
+    /// (and changes nothing) when no session is selected.
+    pub fn enter_rename_session(&mut self) -> bool {
+        let Some(session) = self.selected_session_info() else {
+            return false;
+        };
+        let sid = session.session_id.clone();
+        let title = session.title.clone().unwrap_or_default();
+        self.rename_target = Some(sid);
+        self.rename_buffer = title;
+        self.view = View::RenameSession;
+        true
+    }
+
+    pub fn close_rename_session(&mut self) {
+        self.rename_buffer.clear();
+        self.rename_target = None;
+        self.view = View::Grid;
+    }
+
+    /// Title currently being edited, for the modal's "renaming X" header.
+    pub fn rename_original_title(&self) -> Option<&str> {
+        let sid = self.rename_target.as_deref()?;
+        self.groups
+            .iter()
+            .flat_map(|g| g.sessions.iter())
+            .find(|s| s.session_id == sid)
+            .and_then(|s| s.title.as_deref())
+    }
+
+    /// Commit the rename: apply the trimmed buffer to the in-memory session
+    /// for instant feedback and return `(session_id, title)` for the caller
+    /// to persist to the title cache. Returns `None` when the title is empty
+    /// (treated as cancel) or no rename is in flight; either way the modal
+    /// closes.
+    pub fn submit_session_rename(&mut self) -> Option<(String, String)> {
+        self.view = View::Grid;
+        let sid = self.rename_target.take()?;
+        let title = std::mem::take(&mut self.rename_buffer).trim().to_string();
+        if title.is_empty() {
+            return None;
+        }
+        for group in &mut self.groups {
+            for session in &mut group.sessions {
+                if session.session_id == sid {
+                    session.title = Some(title.clone());
+                    session.titling = false;
+                }
+            }
+        }
+        Some((sid, title))
     }
 
     pub fn dispatch_target(&self) -> Option<&(u32, String, String)> {

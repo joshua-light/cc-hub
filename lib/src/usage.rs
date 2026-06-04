@@ -103,8 +103,7 @@ fn fetch_via_curl() -> Option<UsageInfo> {
 }
 
 fn read_oauth_token() -> Option<String> {
-    let home = dirs::home_dir()?;
-    let data = fs::read_to_string(home.join(".claude").join(".credentials.json")).ok()?;
+    let data = fs::read_to_string(paths::claude_credentials_file()?).ok()?;
     let v: serde_json::Value = serde_json::from_str(&data).ok()?;
     v.get("claudeAiOauth")?
         .get("accessToken")?
