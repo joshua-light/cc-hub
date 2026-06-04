@@ -8,9 +8,10 @@ use crate::agent::{AgentConfig, AgentKind};
 use crate::config;
 use crate::pi_bridge;
 use crate::platform::mux;
-use crate::platform::terminal::shell_quote;
+use crate::platform::paths;
 #[cfg(not(windows))]
-use crate::platform::{paths, terminal};
+use crate::platform::terminal;
+use crate::platform::terminal::shell_quote;
 #[cfg(not(windows))]
 use log::info;
 use std::io;
@@ -160,9 +161,8 @@ fn ensure_path_trusted(cwd: &str) -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
     };
-    let mut root: serde_json::Value = serde_json::from_str(&data).map_err(|e| {
-        io::Error::other(format!("parse {}: {}", config_path.display(), e))
-    })?;
+    let mut root: serde_json::Value = serde_json::from_str(&data)
+        .map_err(|e| io::Error::other(format!("parse {}: {}", config_path.display(), e)))?;
     let root_obj = root.as_object_mut().ok_or_else(|| {
         io::Error::other(format!("{} root is not an object", config_path.display()))
     })?;
@@ -171,7 +171,10 @@ fn ensure_path_trusted(cwd: &str) -> io::Result<()> {
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
         .ok_or_else(|| {
-            io::Error::other(format!("{} projects is not an object", config_path.display()))
+            io::Error::other(format!(
+                "{} projects is not an object",
+                config_path.display()
+            ))
         })?;
     let path_key = canon.to_string_lossy().into_owned();
     let project = projects
@@ -179,7 +182,10 @@ fn ensure_path_trusted(cwd: &str) -> io::Result<()> {
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
         .ok_or_else(|| {
-            io::Error::other(format!("{} project entry is not an object", config_path.display()))
+            io::Error::other(format!(
+                "{} project entry is not an object",
+                config_path.display()
+            ))
         })?;
     if project
         .get("hasTrustDialogAccepted")
@@ -192,9 +198,8 @@ fn ensure_path_trusted(cwd: &str) -> io::Result<()> {
         "hasTrustDialogAccepted".to_string(),
         serde_json::Value::Bool(true),
     );
-    let body = serde_json::to_string_pretty(&root).map_err(|e| {
-        io::Error::other(format!("serialize {}: {}", config_path.display(), e))
-    })?;
+    let body = serde_json::to_string_pretty(&root)
+        .map_err(|e| io::Error::other(format!("serialize {}: {}", config_path.display(), e)))?;
     let tmp = config_path.with_extension(format!("tmp.{}", std::process::id()));
     {
         let mut f = std::fs::File::create(&tmp)?;

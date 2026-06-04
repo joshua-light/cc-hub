@@ -143,7 +143,10 @@ mod tests {
             assert_eq!(claude_home(), Some(base.clone()));
             // .claude.json lives INSIDE the config dir when overridden.
             assert_eq!(claude_config_json(), Some(base.join(".claude.json")));
-            assert_eq!(claude_credentials_file(), Some(base.join(".credentials.json")));
+            assert_eq!(
+                claude_credentials_file(),
+                Some(base.join(".credentials.json"))
+            );
             // /tmp usage cache is namespaced so parallel instances don't clash.
             assert_ne!(
                 usage_cache_file(),

@@ -3172,13 +3172,14 @@ fn project_list(args: &[String]) -> Result<(), CliError> {
 mod tests {
     use super::*;
     use cc_hub_lib::pr;
-    use std::sync::Mutex;
-
-    // $HOME is process-global; serialise tests that redirect it.
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_tempdir_home<F: FnOnce()>(f: F) {
-        let _g = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // $HOME / CLAUDE_CONFIG_DIR are process-global; serialise on the
+        // crate-wide lock so these tests don't race env-mutating tests in
+        // other modules (e.g. `extract_claude_config_dir`'s).
+        let _g = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().expect("tempdir");
         let prev = std::env::var_os("HOME");
         std::env::set_var("HOME", home.path());
@@ -4366,6 +4367,10 @@ mod tests {
     /// without flipping the task to `Done`. Otherwise a transient FS error
     /// strands a terminal-Done task holding the merge lock and blocks the
     /// project's merge queue until `STALE_TTL_SECS`.
+    // Unix-only: the failure is simulated by chmod 0o555 to force EACCES on
+    // lock removal — Windows has no equivalent permission semantics, and the
+    // unix-only APIs below would break `cargo check --all-targets` there.
+    #[cfg(unix)]
     #[test]
     fn pr_finalize_keeps_task_merging_when_release_fails() {
         use std::os::unix::fs::PermissionsExt;
