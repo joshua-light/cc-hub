@@ -93,7 +93,35 @@ cargo run --release
 
 # plain text listing of current sessions, no TUI
 cargo run --release -- --no-tui
+
+# point this instance at a non-default Claude account / config dir
+cargo run --release -- --claude-config-dir ~/.claude-personal
 ```
+
+### Running multiple accounts in parallel
+
+`--claude-config-dir <path>` mirrors Claude Code's own `CLAUDE_CONFIG_DIR`
+environment variable: when set, Claude relocates its entire user-data tree
+(`sessions/`, `projects/`, `history.jsonl`, `.credentials.json`) **and** its
+`.claude.json` state file into that directory. cc-hub honours the same variable
+for both *reading* (the session grid, usage, metrics, weekly counts) and
+*spawning* (every launched `claude` — interactive sessions, titles, backlog,
+auto-review — runs against that account), so one cc-hub instance maps cleanly to
+one account.
+
+To run two accounts side by side, launch one cc-hub per account:
+
+```bash
+# work (default ~/.claude)
+cc-hub
+
+# personal, in a second terminal
+cc-hub --claude-config-dir ~/.claude-personal
+```
+
+The flag is just sugar for the env var, so `CLAUDE_CONFIG_DIR=~/.claude-personal
+cc-hub` is equivalent. Each instance namespaces its `/tmp` usage cache by config
+dir, so the two don't clobber each other's cached usage numbers.
 
 Logs are written to `$XDG_CACHE_HOME/cc-hub/` (Linux), `~/Library/Caches/cc-hub/`
 (macOS), or `%LOCALAPPDATA%\cc-hub\` (Windows). The path is printed on exit.
@@ -318,9 +346,11 @@ chip-level signal when there's pending work to triage.
   by piping `cc-hub-new<Enter>` into the freshly-opened PowerShell
   (Windows). If your rc/profile doesn't define it, the pane will just
   print "command not found".
-- **Usage cache path is fixed.** Anthropic usage is cached at
-  `/tmp/claude-statusline-usage.json` — a cross-process contract with an
-  external statusline helper. Changing this path is a breaking change.
+- **Usage cache path is fixed (default account).** Anthropic usage is cached
+  at `/tmp/claude-statusline-usage.json` — a cross-process contract with an
+  external statusline helper. Changing this path is a breaking change, so it's
+  left untouched for the default account; a non-default `--claude-config-dir`
+  gets a per-account suffix instead, so parallel instances don't collide.
 - **Cleared sessions.** Claude Code's `/clear` command starts a new JSONL
   under a new session-id without updating the session metadata. cc-hub
   follows the `/clear` chain by matching clear-event timestamps against
