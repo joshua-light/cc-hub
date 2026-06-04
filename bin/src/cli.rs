@@ -3172,13 +3172,14 @@ fn project_list(args: &[String]) -> Result<(), CliError> {
 mod tests {
     use super::*;
     use cc_hub_lib::pr;
-    use std::sync::Mutex;
-
-    // $HOME is process-global; serialise tests that redirect it.
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_tempdir_home<F: FnOnce()>(f: F) {
-        let _g = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // $HOME / CLAUDE_CONFIG_DIR are process-global; serialise on the
+        // crate-wide lock so these tests don't race env-mutating tests in
+        // other modules (e.g. `extract_claude_config_dir`'s).
+        let _g = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().expect("tempdir");
         let prev = std::env::var_os("HOME");
         std::env::set_var("HOME", home.path());

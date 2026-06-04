@@ -1041,22 +1041,33 @@ async fn run(
     Ok(())
 }
 
+/// `HOME` and `CLAUDE_CONFIG_DIR` are process-global, so every test that mutates
+/// them — wherever it lives in this binary — must serialize on this one lock.
+/// A per-module lock let `cli`'s HOME-redirecting tests race the env-mutating
+/// tests here, poisoning the lock and cascading `PoisonError` under
+/// `cargo test --workspace`.
+#[cfg(test)]
+pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // CLAUDE_CONFIG_DIR is process-global; serialize the env-mutating tests.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_clean_env<F: FnOnce()>(f: F) {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let prev = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let _guard = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev_cfg = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let prev_home = std::env::var_os("HOME");
         std::env::remove_var("CLAUDE_CONFIG_DIR");
         f();
-        match prev {
+        match prev_cfg {
             Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
             None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
         }
     }
 
