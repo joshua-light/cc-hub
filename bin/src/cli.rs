@@ -4367,6 +4367,10 @@ mod tests {
     /// without flipping the task to `Done`. Otherwise a transient FS error
     /// strands a terminal-Done task holding the merge lock and blocks the
     /// project's merge queue until `STALE_TTL_SECS`.
+    // Unix-only: the failure is simulated by chmod 0o555 to force EACCES on
+    // lock removal — Windows has no equivalent permission semantics, and the
+    // unix-only APIs below would break `cargo check --all-targets` there.
+    #[cfg(unix)]
     #[test]
     fn pr_finalize_keeps_task_merging_when_release_fails() {
         use std::os::unix::fs::PermissionsExt;
