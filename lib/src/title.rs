@@ -215,19 +215,8 @@ fn resolve_spawn_command() -> Option<Vec<String>> {
 
 fn compute_resolve() -> Option<Vec<String>> {
     let cmd_name = &config::get().spawn.command;
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-    // `command -v` is POSIX and prints the path for a binary; if it isn't
-    // found we fall through to `alias`, which prints the body so we can
-    // recover an alias expansion. Redirecting stderr to /dev/null keeps
-    // shell chatter out of our stdout parse.
-    let script = format!(
-        "command -v {name} 2>/dev/null; alias {name} 2>/dev/null",
-        name = cmd_name
-    );
-    let mut cmd = Command::new(&shell);
-    cmd.arg("-ic")
-        .arg(&script)
-        .stdin(Stdio::null())
+    let mut cmd = resolve_command(cmd_name);
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let output = run_with_timeout(cmd, config::get().title.resolve_timeout())?;
@@ -248,14 +237,48 @@ fn compute_resolve() -> Option<Vec<String>> {
     argv
 }
 
+/// Build the subprocess whose stdout reveals how the configured spawn command
+/// `name` resolves. The output is fed to [`parse_resolution`].
+///
+/// - POSIX: ask the user's login shell. `command -v` prints a binary's path;
+///   we fall through to `alias`, which prints the body so an alias expansion
+///   can be recovered. `stderr` is dropped so shell chatter stays out of the
+///   stdout parse.
+/// - Windows: the spawn command is usually a function defined in the user's
+///   PowerShell `$PROFILE` (e.g. `cc-hub-new`), invisible to `command -v` and
+///   to a non-profile shell. So we let `powershell.exe` load the profile and
+///   print `(Get-Command name).Definition` — an application resolves to its
+///   exe path, a function/alias to its body (e.g. `claude --flag @args`).
+#[cfg(not(windows))]
+fn resolve_command(name: &str) -> Command {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+    let script = format!("command -v {name} 2>/dev/null; alias {name} 2>/dev/null");
+    let mut cmd = Command::new(shell);
+    cmd.arg("-ic").arg(script);
+    cmd
+}
+
+#[cfg(windows)]
+fn resolve_command(name: &str) -> Command {
+    let script = format!(
+        "$c = Get-Command {name} -ErrorAction SilentlyContinue; if ($c) {{ $c.Definition }}"
+    );
+    let mut cmd = Command::new("powershell.exe");
+    cmd.args(["-NoLogo", "-NonInteractive", "-Command", &script]);
+    cmd
+}
+
 /// Parse the output of `command -v <name>; alias <name>`. Prefers a full
 /// path on the first line; otherwise looks for an alias body between the
 /// first `=` and the trailing newline, stripping surrounding single or
 /// double quotes. Returns `None` if no usable line is present.
 fn parse_resolution(raw: &str) -> Option<Vec<String>> {
     for line in raw.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        // `command -v` emits an absolute path we can exec as-is.
-        if line.starts_with('/') {
+        // `command -v` (POSIX) emits an absolute path; PowerShell's
+        // `(Get-Command exe).Definition` emits a drive-letter `…\foo.exe`
+        // path. Either is a binary we exec verbatim — matched before the
+        // splits below since a Windows path may contain spaces.
+        if line.starts_with('/') || is_windows_exe_path(line) {
             return Some(vec![line.to_string()]);
         }
         // `alias cc-hub-new` emits `cc-hub-new='claude …'` (zsh) or
@@ -273,8 +296,34 @@ fn parse_resolution(raw: &str) -> Option<Vec<String>> {
                 return Some(argv);
             }
         }
+        // Windows: a PowerShell function/alias `.Definition` is its body, e.g.
+        // `claude --dangerously-skip-permissions @args`. Split it and drop the
+        // splat tokens; the head resolves against PATH at exec time.
+        #[cfg(windows)]
+        {
+            let argv: Vec<String> = line
+                .split_whitespace()
+                .filter(|t| !t.eq_ignore_ascii_case("@args") && !t.eq_ignore_ascii_case("$args"))
+                .map(str::to_string)
+                .collect();
+            if !argv.is_empty() {
+                return Some(argv);
+            }
+        }
     }
     None
+}
+
+/// True when `s` looks like an absolute Windows path to an `.exe` (drive-letter
+/// root such as `C:\…\foo.exe`). Lets [`parse_resolution`] exec the path
+/// verbatim instead of splitting it on any embedded spaces.
+fn is_windows_exe_path(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() > 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+        && s.to_ascii_lowercase().ends_with(".exe")
 }
 
 /// Run `<spawn.command> --model <model> -p <prompt>` in the scratch cwd
@@ -433,6 +482,30 @@ mod tests {
         assert_eq!(
             parse_resolution("/opt/bin/cc-hub-new\ncc-hub-new='claude'\n"),
             Some(vec!["/opt/bin/cc-hub-new".into()])
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parse_resolution_windows_function_body() {
+        // PowerShell `(Get-Command cc-hub-new).Definition` for a $PROFILE
+        // function prints its body; split it and drop the `@args` splat.
+        assert_eq!(
+            parse_resolution("claude --dangerously-skip-permissions @args\n"),
+            Some(vec![
+                "claude".into(),
+                "--dangerously-skip-permissions".into()
+            ])
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parse_resolution_windows_application_path() {
+        // An application resolves to its exe path, exec'd verbatim.
+        assert_eq!(
+            parse_resolution("C:\\Users\\me\\.local\\bin\\claude.exe\n"),
+            Some(vec!["C:\\Users\\me\\.local\\bin\\claude.exe".into()])
         );
     }
 
