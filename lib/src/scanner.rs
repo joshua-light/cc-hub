@@ -34,8 +34,14 @@ fn projects_dir() -> Option<PathBuf> {
     claude_dir().map(|d| d.join("projects"))
 }
 
+/// Encode a cwd into the directory name Claude Code uses under
+/// `~/.claude/projects/`. Claude replaces the path separators and other
+/// non-name characters with `-`: on POSIX that's `/` and `.`, but on Windows
+/// the cwd also carries `\` and a drive `:` (e.g. `C:\Users\me` →
+/// `C--Users-me`). Without the latter two, transcript lookup never matches on
+/// Windows and every session resolves to `jsonl=none`.
 fn encode_path(path: &str) -> String {
-    path.replace(['/', '.'], "-")
+    path.replace(['/', '.', '\\', ':'], "-")
 }
 
 pub fn find_jsonl(cwd: &str, session_id: &str) -> Option<PathBuf> {
@@ -1150,5 +1156,24 @@ mod tests {
         let json = r#"{"pid":1,"sessionId":"s","cwd":"/x","startedAt":1}"#;
         let raw: RawSession = serde_json::from_str(json).expect("deserialize");
         assert_eq!(raw.status, None);
+    }
+
+    // The encoded cwd must match the directory name Claude Code creates under
+    // ~/.claude/projects. POSIX separators and Windows `\`/`:` all map to `-`.
+    #[test]
+    fn encode_path_matches_claude_projects_dir_naming() {
+        // POSIX
+        assert_eq!(encode_path("/home/me/proj"), "-home-me-proj");
+        assert_eq!(encode_path("/home/me/.config"), "-home-me--config");
+        // Windows: drive colon + backslashes, e.g. observed real dirs.
+        assert_eq!(
+            encode_path("C:\\Users\\MykytaTaushanov"),
+            "C--Users-MykytaTaushanov"
+        );
+        assert_eq!(
+            encode_path("C:\\Users\\MykytaTaushanov\\.local\\bin"),
+            "C--Users-MykytaTaushanov--local-bin"
+        );
+        assert_eq!(encode_path("C:\\Projects\\TPS"), "C--Projects-TPS");
     }
 }
