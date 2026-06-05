@@ -1099,31 +1099,30 @@ fn render_card(
         None => None,
     };
     let prefix = role_prefix.as_deref().unwrap_or("");
-    let agent_badge = format!("[{}] ", session.agent_badge());
+    // Claude is the ~99% default — labelling every card "[Claude]" is pure
+    // noise — so the badge is shown only for non-Claude agents.
+    let agent_badge = if session.agent_id == "claude" {
+        String::new()
+    } else {
+        format!("[{}] ", session.agent_badge())
+    };
 
     // Border title is the primary skim surface — prepending the Haiku-
     // generated 2-3 word title when available lets users scan what each
     // session is about without having to read the (truncated, often mid-
     // sentence) last user message inside the card body. A `✎` placeholder
     // marks cards with an in-flight Haiku call so the user can tell a
-    // pending title from one that's never going to arrive.
+    // pending title from one that's never going to arrive. The project name
+    // is intentionally absent: it's already the header of the card's group.
+    //
+    // Every branch keeps a space immediately after `indicator`: the state
+    // glyph is a Nerd Font icon that renders two columns wide but measures as
+    // one, so without a trailing cell its second column collides with the
+    // border (the bare no-title case `󰂞` is where this bit).
     let title = match session.title.as_deref() {
-        Some(t) if !t.is_empty() => {
-            format!(
-                "{}{}{} {} — {}",
-                prefix, agent_badge, indicator, session.project_name, t
-            )
-        }
-        _ if session.titling => {
-            format!(
-                "{}{}{} {} — ✎ …",
-                prefix, agent_badge, indicator, session.project_name
-            )
-        }
-        _ => format!(
-            "{}{}{} {}",
-            prefix, agent_badge, indicator, session.project_name
-        ),
+        Some(t) if !t.is_empty() => format!("{}{}{} {}", prefix, agent_badge, indicator, t),
+        _ if session.titling => format!("{}{}{} ✎ …", prefix, agent_badge, indicator),
+        _ => format!("{}{}{} ", prefix, agent_badge, indicator),
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -4364,7 +4363,7 @@ fn shipped_version_span(v: &str) -> Span<'static> {
     )
 }
 
-fn render_metrics_body(frame: &mut Frame, area: Rect, app: &App) {
+fn render_metrics_body(frame: &mut Frame, area: Rect, app: &mut App) {
     if area.height < 2 {
         return;
     }
@@ -4395,10 +4394,13 @@ fn render_metrics_body(frame: &mut Frame, area: Rect, app: &App) {
 
     let (lines, row_lines) = build_metrics_content(m, app.metrics_selected);
     let total_lines = lines.len() as u16;
-
-    // Auto-scroll so the selected session row sits inside the body. Falls
-    // back to whatever raw scroll the user has when no selection is active.
     let body_height = area.height.saturating_sub(1);
+    let max_scroll = total_lines.saturating_sub(body_height);
+
+    // With a row selected, keep it inside the viewport; otherwise honour the
+    // user's free scroll. Either way clamp to the content height and write the
+    // result back, so selection and scroll stay in sync — releasing the
+    // selection (up past the first row) then resumes scrolling from here.
     let scroll = match app.metrics_selected.and_then(|i| row_lines.get(i).copied()) {
         Some(line_idx) => {
             let line = line_idx as u16;
@@ -4412,7 +4414,15 @@ fn render_metrics_body(frame: &mut Frame, area: Rect, app: &App) {
             }
         }
         None => app.metrics_scroll,
-    };
+    }
+    .min(max_scroll);
+
+    // Hand the row offsets and viewport height to the key handler so a downward
+    // press can tell "engage the first on-screen session" from "scroll toward
+    // the lists". Done after reading `row_lines` above (this moves it).
+    app.metrics_view_height = body_height;
+    app.metrics_row_lines = row_lines;
+    app.metrics_scroll = scroll;
 
     let scroll_info = format!(
         " {}/{} ",
@@ -5431,6 +5441,95 @@ mod kanban_card_tests {
             context_tokens: None,
             tool_uses_count: tool_uses,
         }
+    }
+
+    /// Render a session card's title row (y=0) as one string of cell symbols.
+    fn title_row(s: &super::SessionInfo, w: u16) -> String {
+        let backend = TestBackend::new(w, 6);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| super::render_card(f, f.area(), s, None, false, 1_000_000_000))
+            .expect("render");
+        let buf = terminal.backend().buffer();
+        (0..buf.area().width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect()
+    }
+
+    // The state-indicator glyph is a Nerd Font icon that renders two columns
+    // wide but measures as one, so the cell at its second-column position must
+    // belong to the title (a space), never the border — otherwise a
+    // border-only redraw overpaints the glyph's right half and it looks "cut".
+    // Worst case is a no-title Claude card, whose title is just the bare icon.
+    #[test]
+    fn card_title_keeps_a_blank_after_the_state_icon() {
+        use crate::models::SessionState;
+        let mut s = fake_session("wk-1", 0);
+        s.state = SessionState::WaitingForInput; // "󰂞"
+        s.project_name = "cc-hub".into();
+
+        for agent in ["claude", "codex"] {
+            for (titling, title) in [
+                (false, None),
+                (true, None),
+                (false, Some("Fix the parser".to_string())),
+            ] {
+                let mut s = s.clone();
+                s.agent_id = agent.into();
+                s.titling = titling;
+                s.title = title.clone();
+                for w in [42u16, 24, 16, 13] {
+                    let backend = TestBackend::new(w, 6);
+                    let mut terminal = Terminal::new(backend).expect("terminal");
+                    terminal
+                        .draw(|f| super::render_card(f, f.area(), &s, None, false, 1_000_000_000))
+                        .expect("render");
+                    let buf = terminal.backend().buffer();
+                    let gx = (0..buf.area().width)
+                        .find(|&x| buf[(x, 0)].symbol() == "󰂞")
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "icon missing (agent={agent}, w={w}):\n{}",
+                                buffer_to_string(buf)
+                            )
+                        });
+                    let right = buf[(gx + 1, 0)].symbol();
+                    assert_eq!(
+                        right, " ",
+                        "icon needs a reserved blank to its right \
+                         (agent={agent}, titling={titling}, title={title:?}, w={w}, got {right:?}):\n{}",
+                        buffer_to_string(buf)
+                    );
+                }
+            }
+        }
+    }
+
+    // The title drops the redundant "[Claude]" badge and the project name
+    // (the project is already the card group's header). Non-Claude agents
+    // still get a badge so mixed fleets stay legible.
+    #[test]
+    fn card_title_omits_claude_badge_and_project_name() {
+        let mut s = fake_session("wk-1", 0);
+        s.project_name = "cc-hub".into();
+        s.title = Some("Fix the parser".into());
+
+        let claude = title_row(&s, 60);
+        assert!(
+            !claude.contains("Claude") && !claude.contains("cc-hub"),
+            "Claude card title must not show the agent badge or project name:\n{claude}"
+        );
+        assert!(
+            claude.contains("Fix the parser"),
+            "Claude card title should still show the Haiku title:\n{claude}"
+        );
+
+        s.agent_id = "codex".into();
+        let codex = title_row(&s, 60);
+        assert!(
+            codex.contains("codex"),
+            "non-Claude agents should still show a badge:\n{codex}"
+        );
     }
 
     fn task_with_worker(status: TaskStatus, worker_tmux: &str) -> TaskState {

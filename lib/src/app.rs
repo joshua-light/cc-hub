@@ -207,6 +207,12 @@ pub struct App {
     pub metrics_scroll: u16,
     pub metrics_rows: Vec<SelectableSession>,
     pub metrics_selected: Option<usize>,
+    /// Logical-line offset of every selectable session row, and the body
+    /// height, both synced by the renderer each frame. The key handler reads
+    /// them to decide whether a downward press should engage the selection
+    /// cursor (a session row is already on screen) or keep free-scrolling.
+    pub metrics_row_lines: Vec<usize>,
+    pub metrics_view_height: u16,
     /// (scanned, total) for the in-flight metrics scan, shown while
     /// [`Self::metrics`] is `None`. Cleared once analysis completes.
     pub metrics_progress: Option<(usize, usize)>,
@@ -338,6 +344,8 @@ impl App {
             metrics_scroll: 0,
             metrics_rows: Vec::new(),
             metrics_selected: None,
+            metrics_row_lines: Vec::new(),
+            metrics_view_height: 0,
             metrics_progress: None,
             pending_dispatch: VecDeque::new(),
             last_dispatch_probe_at: None,
@@ -797,14 +805,11 @@ impl App {
         self.metrics_rows = m.selectable_sessions();
         self.metrics = Some(m);
         self.metrics_progress = None;
-        self.metrics_selected = match prev_sid {
-            Some(sid) => self
-                .metrics_rows
-                .iter()
-                .position(|r| r.session_id == sid)
-                .or_else(|| (!self.metrics_rows.is_empty()).then_some(0)),
-            None => (!self.metrics_rows.is_empty()).then_some(0),
-        };
+        // Keep an existing selection pinned to its session across refreshes, but
+        // never auto-select: the tab opens at the top (Overview) and stays
+        // freely scrollable until the user navigates into the session lists.
+        self.metrics_selected =
+            prev_sid.and_then(|sid| self.metrics_rows.iter().position(|r| r.session_id == sid));
     }
 
     pub fn update_metrics_progress(&mut self, scanned: usize, total: usize) {
@@ -822,28 +827,45 @@ impl App {
         self.metrics_scroll = self.metrics_scroll.saturating_sub(3);
     }
 
-    pub fn metrics_sel_next(&mut self) {
-        if self.metrics_rows.is_empty() {
-            self.metrics_selected = None;
-            return;
+    /// Down/`j` on the Metrics tab. With a row selected, advance the cursor
+    /// (the renderer keeps it on screen). With nothing selected, engage the
+    /// first session row already visible — so selection only kicks in once the
+    /// lists scroll into view — otherwise keep free-scrolling toward them.
+    pub fn metrics_nav_down(&mut self) {
+        match self.metrics_selected {
+            Some(i) if !self.metrics_rows.is_empty() => {
+                self.metrics_selected = Some((i + 1).min(self.metrics_rows.len() - 1));
+            }
+            _ => match self.first_visible_metrics_row() {
+                Some(idx) => self.metrics_selected = Some(idx),
+                None => self.metrics_scroll_down(),
+            },
         }
-        let next = match self.metrics_selected {
-            Some(i) => (i + 1).min(self.metrics_rows.len() - 1),
-            None => 0,
-        };
-        self.metrics_selected = Some(next);
     }
 
-    pub fn metrics_sel_prev(&mut self) {
-        if self.metrics_rows.is_empty() {
-            self.metrics_selected = None;
-            return;
+    /// Up/`k` on the Metrics tab. Walk the cursor back up; pressing up past the
+    /// first session row releases the selection so free-scrolling (and reaching
+    /// the Overview at the very top) resumes.
+    pub fn metrics_nav_up(&mut self) {
+        match self.metrics_selected {
+            Some(0) => self.metrics_selected = None,
+            Some(i) => self.metrics_selected = Some(i - 1),
+            None => self.metrics_scroll_up(),
         }
-        let prev = match self.metrics_selected {
-            Some(i) => i.saturating_sub(1),
-            None => 0,
-        };
-        self.metrics_selected = Some(prev);
+    }
+
+    /// Index (into [`Self::metrics_rows`]) of the first selectable session row
+    /// currently inside the viewport, using the offsets/height the renderer
+    /// last synced. `None` when no session row is on screen.
+    fn first_visible_metrics_row(&self) -> Option<usize> {
+        let h = self.metrics_view_height;
+        if h == 0 {
+            return None;
+        }
+        let top = self.metrics_scroll;
+        self.metrics_row_lines
+            .iter()
+            .position(|&l| (l as u16) >= top && (l as u16) < top.saturating_add(h))
     }
 
     pub fn selected_metrics_session(&self) -> Option<&SelectableSession> {

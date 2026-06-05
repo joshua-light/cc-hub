@@ -67,18 +67,10 @@ pub(crate) async fn handle_key(
         (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_sessions => app.move_down(),
         (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_sessions => app.move_up(),
         (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_metrics => {
-            if app.metrics_rows.is_empty() {
-                app.metrics_scroll_down();
-            } else {
-                app.metrics_sel_next();
-            }
+            app.metrics_nav_down();
         }
         (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_metrics => {
-            if app.metrics_rows.is_empty() {
-                app.metrics_scroll_up();
-            } else {
-                app.metrics_sel_prev();
-            }
+            app.metrics_nav_up();
         }
         // Kanban: j/k moves the row cursor within the focused
         // column; h/l switches column; H/L (or [/]) cycles project chips.

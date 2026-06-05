@@ -96,12 +96,15 @@ pub enum SessionState {
 }
 
 impl SessionState {
+    /// Default card ordering within a project group: live sessions first
+    /// (those needing attention, then actively working), with dormant ones
+    /// sunk to the end — sleeping (`Idle`) before fully `Inactive`.
     pub fn sort_key(&self) -> u8 {
         match self {
             SessionState::Question => 0,
             SessionState::WaitingForInput => 1,
-            SessionState::Idle => 2,
-            SessionState::Processing => 3,
+            SessionState::Processing => 2,
+            SessionState::Idle => 3,
             SessionState::Inactive => 4,
         }
     }
