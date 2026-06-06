@@ -110,10 +110,12 @@ fn state_cache() -> &'static Mutex<StateCache> {
 
 /// Immutable first-user-message summary cache. The first user message of a
 /// session never changes once written, so once derived for a path we never
-/// re-read the head. Stored as `Option<String>` so a session with no usable
-/// first message is also remembered (and not re-parsed every tick).
-fn summary_cache() -> &'static Mutex<HashMap<PathBuf, Option<String>>> {
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Option<String>>>> = OnceLock::new();
+/// re-read the head. Only successful extractions are stored: a fresh session's
+/// JSONL exists for a beat before the first prompt is flushed, so a `None`
+/// must stay uncached and be re-derived next tick (see
+/// [`first_user_message_cached`]).
+fn summary_cache() -> &'static Mutex<HashMap<PathBuf, String>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -162,24 +164,49 @@ pub fn derive_state_cached(path: &Path) -> Option<Arc<StateDerivation>> {
     Some(derived)
 }
 
-/// First-user-message summary for `path`, memoized permanently per path.
+/// Head window for summary extraction. Covers the meta entries (`mode`,
+/// `permission-mode`, `file-history-snapshot`) plus any typical first prompt.
+const SUMMARY_HEAD_BYTES: u64 = 4096;
+/// Fallback window when the first user line straddles the 4KB boundary —
+/// `read_jsonl_head` drops a partial last line, so a long pasted prompt
+/// needs a window that contains it whole.
+const SUMMARY_HEAD_RETRY_BYTES: u64 = 256 * 1024;
+
+/// First-user-message summary for `path`, memoized permanently per path once
+/// a message exists.
 ///
 /// Unlike [`derive_state_cached`] this is NOT keyed on mtime: the first user
 /// message is immutable for the life of a session, so once read we never touch
-/// the head of the file again. Stale entries are reclaimed by [`retain_cached`]
-/// when the path disappears.
+/// the head of the file again. A `None` extraction is NOT cached, though —
+/// Claude Code flushes the meta lines (`mode`, `permission-mode`,
+/// `file-history-snapshot`) a beat before the first `user` line, so a scan
+/// tick can observe the JSONL before the prompt lands. Caching that `None`
+/// would leave the session summary-less (and therefore Haiku-title-less) for
+/// the rest of the process; instead the head is re-read each tick until the
+/// message appears. Stale entries are reclaimed by [`retain_cached`] when the
+/// path disappears.
 pub fn first_user_message_cached(path: &Path) -> Option<String> {
     {
         let cache = summary_cache().lock().unwrap_or_else(|e| e.into_inner());
         if let Some(cached) = cache.get(path) {
-            return cached.clone();
+            return Some(cached.clone());
         }
     }
-    let head = read_jsonl_head(path, 4096);
-    let summary = extract_first_user_message(&head);
+    let head = read_jsonl_head(path, SUMMARY_HEAD_BYTES);
+    let summary = extract_first_user_message(&head).or_else(|| {
+        // A long first prompt can start inside the 4KB window but extend past
+        // it, in which case read_jsonl_head discards it as a partial line —
+        // retry once with a window big enough for any realistic prompt.
+        if std::fs::metadata(path).is_ok_and(|m| m.len() > SUMMARY_HEAD_BYTES) {
+            let head = read_jsonl_head(path, SUMMARY_HEAD_RETRY_BYTES);
+            extract_first_user_message(&head)
+        } else {
+            None
+        }
+    })?;
     let mut cache = summary_cache().lock().unwrap_or_else(|e| e.into_inner());
     cache.insert(path.to_path_buf(), summary.clone());
-    summary
+    Some(summary)
 }
 
 /// Evict cache entries for transcripts not present in `visited` this scan
@@ -1799,8 +1826,8 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    // The first user message is immutable, so the summary cache never re-reads
-    // the head — even after the file's content (and mtime) change.
+    // Once a first user message exists, the summary cache never re-reads the
+    // head — even after the file's content (and mtime) change.
     #[test]
     fn first_user_message_cached_is_immutable_per_path() {
         let p = fresh_jsonl("summary-immutable");
@@ -1826,6 +1853,65 @@ mod tests {
             Some("original first message"),
             "immutable summary must not be re-read"
         );
+
+        let _ = std::fs::remove_file(&p);
+    }
+
+    // A scan can observe a fresh session's JSONL after Claude Code flushes its
+    // meta lines but before the first user prompt lands. That None must not be
+    // cached, or the session stays summary-less (and Haiku-title-less) for the
+    // life of the process.
+    #[test]
+    fn first_user_message_cached_does_not_cache_none() {
+        let p = fresh_jsonl("summary-none-not-cached");
+        write_jsonl(
+            &p,
+            &[
+                r#"{"type":"mode","mode":"normal","sessionId":"s"}"#,
+                r#"{"type":"permission-mode","permissionMode":"default","sessionId":"s"}"#,
+            ],
+        );
+        assert_eq!(
+            first_user_message_cached(&p),
+            None,
+            "no user message yet → None"
+        );
+
+        // The first prompt arrives; the next scan tick must pick it up.
+        write_jsonl(
+            &p,
+            &[
+                r#"{"type":"mode","mode":"normal","sessionId":"s"}"#,
+                r#"{"type":"permission-mode","permissionMode":"default","sessionId":"s"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"first real prompt"}}"#,
+            ],
+        );
+        assert_eq!(
+            first_user_message_cached(&p).as_deref(),
+            Some("first real prompt"),
+            "None must not have been cached"
+        );
+
+        let _ = std::fs::remove_file(&p);
+    }
+
+    // A first prompt that starts inside the 4KB head window but extends past
+    // it is discarded as a partial line by read_jsonl_head — the larger retry
+    // window must recover it.
+    #[test]
+    fn first_user_message_cached_finds_message_straddling_head_window() {
+        let p = fresh_jsonl("summary-straddle");
+        let pad = "x".repeat(3500);
+        let long_msg = format!("start of a long pasted prompt {}", "y".repeat(2000));
+        write_jsonl(
+            &p,
+            &[
+                &format!(r#"{{"type":"file-history-snapshot","snapshot":{{"pad":"{pad}"}}}}"#),
+                &format!(r#"{{"type":"user","message":{{"role":"user","content":"{long_msg}"}}}}"#),
+            ],
+        );
+        let got = first_user_message_cached(&p).expect("retry window must find the message");
+        assert!(got.starts_with("start of a long pasted prompt"));
 
         let _ = std::fs::remove_file(&p);
     }
