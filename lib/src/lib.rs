@@ -14,6 +14,7 @@ pub mod merge_lock;
 pub mod metrics;
 pub mod models;
 pub mod orchestrator;
+pub mod persist;
 pub mod pi_bridge;
 pub mod pi_conversation;
 pub mod pi_scanner;
@@ -28,6 +29,31 @@ pub(crate) mod test_util {
     //! cross-module lock they race on the global env var.
     use std::sync::Mutex;
     pub static HOME_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Run `f` with `$HOME` pointing at a fresh tempdir, holding
+    /// [`HOME_TEST_LOCK`] for the duration. The previous `$HOME` is restored
+    /// even if `f` panics (drop guard), and a poisoned lock is recovered with
+    /// `into_inner` so one failing test doesn't cascade `PoisonError`s into
+    /// unrelated ones. Unix-only: on Windows `dirs::home_dir()` resolves via
+    /// the profile API and ignores `$HOME`, so this redirection can't isolate
+    /// anything there — gate callers behind `cfg(unix)`.
+    #[cfg(unix)]
+    pub fn with_temp_home<F: FnOnce()>(f: F) {
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _restore = RestoreHome(std::env::var_os("HOME"));
+        std::env::set_var("HOME", tmp.path());
+        f();
+    }
 }
 pub mod scanner;
 pub mod send;

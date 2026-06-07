@@ -303,8 +303,9 @@ pub struct App {
     /// can interleave, so allow a few attempts.
     pub pending_focus_budget: u8,
     /// Persistent scratch to-do list shown by the Sessions-tab side panel
-    /// ([`View::TodoPanel`], toggled with `t`). Loaded once on startup;
-    /// mutations persist immediately.
+    /// ([`View::TodoPanel`], toggled with `t`). Reloaded from disk each time
+    /// the panel opens (so external edits show up); mutations persist
+    /// immediately.
     pub todo: TodoList,
     /// Cursor into [`Self::todo`] while the panel is open. Clamped to the
     /// list length whenever the panel is entered or an item is removed.
@@ -386,18 +387,20 @@ impl App {
             artifact_image_failed: HashSet::new(),
             pending_focus_task_id: None,
             pending_focus_budget: 0,
-            todo: TodoList::load(),
+            todo: TodoList::default(),
             todo_selected: 0,
             todo_adding: false,
             todo_input: String::new(),
         }
     }
 
-    /// Open the Sessions-tab to-do side panel. Clamps the cursor in case the
-    /// list shrank (e.g. edited on disk) since it was last open, and starts
-    /// in navigation mode rather than add mode.
+    /// Open the Sessions-tab to-do side panel. Reloads the list from disk so
+    /// edits that landed since it was last open (another instance, the file
+    /// hand-edited) show up, clamps the cursor in case the list shrank, and
+    /// starts in navigation mode rather than add mode.
     pub fn enter_todo_panel(&mut self) {
         self.view = View::TodoPanel;
+        self.todo = TodoList::load();
         self.todo_adding = false;
         self.todo_input.clear();
         self.clamp_todo_selection();
@@ -434,7 +437,7 @@ impl App {
     /// Commit the in-progress task. Empty input just exits add mode. On
     /// success the cursor moves to the freshly-added item.
     pub fn todo_commit_add(&mut self) {
-        if let Some(idx) = self.todo.add(&self.todo_input.clone()) {
+        if let Some(idx) = self.todo.add(&self.todo_input) {
             self.todo_selected = idx;
         }
         self.todo_adding = false;
@@ -2442,5 +2445,23 @@ mod tests {
             app.pending_focus_task_id.is_none(),
             "cleared after budget=0"
         );
+    }
+
+    /// Opening the to-do panel must pick up edits that landed on disk while
+    /// it was closed (another instance, the file hand-edited) — App::new()
+    /// deliberately starts with an empty list and defers I/O to panel open.
+    #[test]
+    #[cfg(unix)]
+    fn enter_todo_panel_reloads_from_disk() {
+        crate::test_util::with_temp_home(|| {
+            let mut app = App::new();
+            assert!(app.todo.is_empty(), "no disk I/O in App::new()");
+            // Simulate an external writer landing while the panel is closed.
+            let mut external = crate::todo::TodoList::load();
+            external.add("written elsewhere");
+            app.enter_todo_panel();
+            assert_eq!(app.todo.len(), 1);
+            assert_eq!(app.todo.items()[0].text, "written elsewhere");
+        });
     }
 }

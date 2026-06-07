@@ -86,11 +86,7 @@ impl TodoList {
         let Some(path) = todo_path() else {
             return Ok(());
         };
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let raw = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        fs::write(&path, raw)
+        crate::persist::save_json(&path, self)
     }
 }
 
@@ -98,22 +94,13 @@ fn todo_path() -> Option<PathBuf> {
     cc_hub_home().map(|h| h.join("todo.json"))
 }
 
-#[cfg(test)]
+// Unix-only: these tests isolate by redirecting `$HOME`, which
+// `dirs::home_dir()` honours on unix but ignores on Windows (profile API) —
+// running them there would read and write the real `%USERPROFILE%\.cc-hub`.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::test_util::HOME_TEST_LOCK;
-
-    fn with_temp_home<F: FnOnce()>(f: F) {
-        let _guard = HOME_TEST_LOCK.lock().unwrap();
-        let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var_os("HOME");
-        std::env::set_var("HOME", tmp.path());
-        f();
-        match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
+    use crate::test_util::with_temp_home;
 
     #[test]
     fn add_persists_round_trip() {

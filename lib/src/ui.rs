@@ -34,10 +34,11 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn render(frame: &mut Frame, app: &mut App) {
-    app.update_grid_cols(frame.area().width);
-
-    let chunks = Layout::default()
+/// Top-level vertical split: title bar, tab strip, body, status bar. Shared
+/// between `render` and overlays that anchor to the body region (e.g. the
+/// to-do side panel) so the band heights are defined in exactly one place.
+fn main_layout(area: Rect) -> std::rc::Rc<[Rect]> {
+    Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
@@ -45,7 +46,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             Constraint::Min(0),
             Constraint::Length(1),
         ])
-        .split(frame.area());
+        .split(area)
+}
+
+pub fn render(frame: &mut Frame, app: &mut App) {
+    app.update_grid_cols(frame.area().width);
+
+    let chunks = main_layout(frame.area());
 
     render_title_bar(frame, chunks[0], app);
     render_tab_strip(frame, chunks[1], app);
@@ -418,18 +425,10 @@ fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
 /// region so the tab strip and status bar (which carries the panel's own key
 /// hints) stay visible behind it.
 fn render_todo_panel(frame: &mut Frame, area: Rect, app: &App) {
-    // Re-derive the body rect from the same vertical split `render` uses, so
-    // the panel sits under the header band and above the status row rather
-    // than covering the whole screen.
-    let body = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(3),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
-        .split(area)[2];
+    // Anchor to the body band of the same split `render` uses, so the panel
+    // sits under the header band and above the status row rather than
+    // covering the whole screen.
+    let body = main_layout(area)[2];
 
     let width = 46u16.min(body.width);
     if width == 0 || body.height == 0 {
@@ -461,6 +460,19 @@ fn render_todo_panel(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
+    // One row per item (long text is clipped, not wrapped) so the window
+    // arithmetic below stays exact: scroll the list to keep the selection
+    // visible, and in add mode reserve the bottom two rows (spacer + input)
+    // so the input line can never be pushed off-screen by a long list.
+    let input_rows = if app.todo_adding { 2usize } else { 0 };
+    let list_rows = (inner.height as usize).saturating_sub(input_rows);
+    let sel = app.todo_selected.min(total.saturating_sub(1));
+    let scroll_top = if total <= list_rows || sel < list_rows {
+        0
+    } else {
+        sel + 1 - list_rows
+    };
+
     let mut lines: Vec<Line> = Vec::new();
     if total == 0 && !app.todo_adding {
         lines.push(Line::raw(""));
@@ -471,8 +483,15 @@ fn render_todo_panel(frame: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::ITALIC),
         )));
     } else {
-        for (i, item) in app.todo.items().iter().enumerate() {
-            let selected = !app.todo_adding && i == app.todo_selected;
+        for (i, item) in app
+            .todo
+            .items()
+            .iter()
+            .enumerate()
+            .skip(scroll_top)
+            .take(list_rows)
+        {
+            let selected = !app.todo_adding && i == sel;
             let cursor = if selected { "› " } else { "  " };
             let checkbox = if item.done { "[x] " } else { "[ ] " };
             let text_style = if item.done {
@@ -506,6 +525,15 @@ fn render_todo_panel(frame: &mut Frame, area: Rect, app: &App) {
     if app.todo_adding {
         let mut input = app.todo_input.clone();
         input.push('▎');
+        // Without wrap the line clips on the right, which would hide the
+        // cursor on long input — show the tail instead, like an input field.
+        let avail = (inner.width as usize).saturating_sub(2); // "+ " prefix
+        let chars = input.chars().count();
+        if chars > avail && avail > 0 {
+            input = std::iter::once('…')
+                .chain(input.chars().skip(chars + 1 - avail))
+                .collect();
+        }
         lines.push(Line::raw(""));
         lines.push(Line::from(vec![
             Span::styled(
@@ -523,7 +551,7 @@ fn render_todo_panel(frame: &mut Frame, area: Rect, app: &App) {
         ]));
     }
 
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_rename_session(frame: &mut Frame, area: Rect, app: &App) {
