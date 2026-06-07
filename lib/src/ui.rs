@@ -34,10 +34,11 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn render(frame: &mut Frame, app: &mut App) {
-    app.update_grid_cols(frame.area().width);
-
-    let chunks = Layout::default()
+/// Top-level vertical split: title bar, tab strip, body, status bar. Shared
+/// between `render` and overlays that anchor to the body region (e.g. the
+/// to-do side panel) so the band heights are defined in exactly one place.
+fn main_layout(area: Rect) -> std::rc::Rc<[Rect]> {
+    Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
@@ -45,7 +46,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             Constraint::Min(0),
             Constraint::Length(1),
         ])
-        .split(frame.area());
+        .split(area)
+}
+
+pub fn render(frame: &mut Frame, app: &mut App) {
+    app.update_grid_cols(frame.area().width);
+
+    let chunks = main_layout(frame.area());
 
     render_title_bar(frame, chunks[0], app);
     render_tab_strip(frame, chunks[1], app);
@@ -71,6 +78,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         }
         View::ProjectsResult => render_projects_result(frame, frame.area(), app),
         View::Backlog => render_backlog(frame, frame.area(), app),
+        View::TodoPanel => render_todo_panel(frame, frame.area(), app),
         View::Grid => {}
     }
 }
@@ -411,6 +419,139 @@ fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
     ];
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// Scratch to-do list, drawn as a right-anchored side panel over the body
+/// region so the tab strip and status bar (which carries the panel's own key
+/// hints) stay visible behind it.
+fn render_todo_panel(frame: &mut Frame, area: Rect, app: &App) {
+    // Anchor to the body band of the same split `render` uses, so the panel
+    // sits under the header band and above the status row rather than
+    // covering the whole screen.
+    let body = main_layout(area)[2];
+
+    let width = 46u16.min(body.width);
+    if width == 0 || body.height == 0 {
+        return;
+    }
+    let panel = Rect::new(body.x + body.width - width, body.y, width, body.height);
+    frame.render_widget(Clear, panel);
+
+    let done = app.todo.items().iter().filter(|i| i.done).count();
+    let total = app.todo.len();
+    let block = popup_block(Span::styled(
+        format!(" To-Do · {}/{} done ", done, total),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .title_bottom(Span::styled(
+        if app.todo_adding {
+            " enter add · esc cancel "
+        } else {
+            " a add · space toggle · d delete · esc close "
+        },
+        Style::default().fg(Color::Rgb(110, 110, 130)),
+    ));
+
+    let inner = block.inner(panel);
+    frame.render_widget(block, panel);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    // One row per item (long text is clipped, not wrapped) so the window
+    // arithmetic below stays exact: scroll the list to keep the selection
+    // visible, and in add mode reserve the bottom two rows (spacer + input)
+    // so the input line can never be pushed off-screen by a long list.
+    let input_rows = if app.todo_adding { 2usize } else { 0 };
+    let list_rows = (inner.height as usize).saturating_sub(input_rows);
+    let sel = app.todo_selected.min(total.saturating_sub(1));
+    let scroll_top = if total <= list_rows || sel < list_rows {
+        0
+    } else {
+        sel + 1 - list_rows
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    if total == 0 && !app.todo_adding {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "  No tasks yet — press a to add one.",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )));
+    } else {
+        for (i, item) in app
+            .todo
+            .items()
+            .iter()
+            .enumerate()
+            .skip(scroll_top)
+            .take(list_rows)
+        {
+            let selected = !app.todo_adding && i == sel;
+            let cursor = if selected { "› " } else { "  " };
+            let checkbox = if item.done { "[x] " } else { "[ ] " };
+            let text_style = if item.done {
+                Style::default()
+                    .fg(Color::Rgb(110, 110, 130))
+                    .add_modifier(Modifier::ITALIC)
+            } else if selected {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Rgb(200, 200, 210))
+            };
+            let marker_style = if item.done {
+                Style::default().fg(Color::Green)
+            } else if selected {
+                Style::default()
+                    .fg(Color::Rgb(180, 200, 230))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(cursor, marker_style),
+                Span::styled(checkbox, marker_style),
+                Span::styled(item.text.clone(), text_style),
+            ]));
+        }
+    }
+
+    if app.todo_adding {
+        let mut input = app.todo_input.clone();
+        input.push('▎');
+        // Without wrap the line clips on the right, which would hide the
+        // cursor on long input — show the tail instead, like an input field.
+        let avail = (inner.width as usize).saturating_sub(2); // "+ " prefix
+        let chars = input.chars().count();
+        if chars > avail && avail > 0 {
+            input = std::iter::once('…')
+                .chain(input.chars().skip(chars + 1 - avail))
+                .collect();
+        }
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                "+ ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                input,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_rename_session(frame: &mut Frame, area: Rect, app: &App) {
@@ -2966,7 +3107,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 // chip is rendered separately *ahead* of this string below so
                 // it is never the first thing clipped.
                 Tab::Projects => "enter:focus orch  n:new task  r:result  f:agent terminal/resurrect  R:restart  b:backlog  h/l:col  j/k:task  H/L:project  N:register project  c:copy id  x:delete task  X:remove project  tab:next  q:quit",
-                Tab::Sessions => "enter/f:focus/resume  n:new  i:info  r:rename  o:shell  N:new in…  M:bookmarks  D:why?  h/j/k/l:nav  x:close  H:inactive  W:workers  tab:next  q:quit",
+                Tab::Sessions => "enter/f:focus/resume  n:new  i:info  r:rename  t:to-do  o:shell  N:new in…  M:bookmarks  D:why?  h/j/k/l:nav  x:close  H:inactive  W:workers  tab:next  q:quit",
                 Tab::Metrics => "enter:view transcript  j/k:select  r:refresh  tab:next  q:quit",
             },
             View::Popup => "j/k:scroll  esc:close  q:close",
@@ -2975,6 +3116,13 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             View::StateDebug => "j/k:scroll  esc:close  q:close",
             View::PromptInput => "type prompt  enter:dispatch  esc:cancel",
             View::RenameSession => "edit title  enter:rename  esc:cancel",
+            View::TodoPanel => {
+                if app.todo_adding {
+                    "type task  enter:add  esc:cancel"
+                } else {
+                    "j/k:move  space/enter:toggle  a:add  d:delete  t/esc:close"
+                }
+            }
             View::TmuxPane => "forwarding keys to tmux · F1: detach & close",
             View::FolderPicker => {
                 if app

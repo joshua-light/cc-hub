@@ -862,6 +862,9 @@ pub(crate) async fn handle_key(
         (View::Grid, KeyCode::Char('p')) if on_sessions => {
             app.enter_prompt_input();
         }
+        (View::Grid, KeyCode::Char('t')) if on_sessions => {
+            app.enter_todo_panel();
+        }
         (View::Grid, KeyCode::Char('r')) if on_sessions => {
             if !app.enter_rename_session() {
                 app.set_status("no session selected to rename".into());
@@ -1013,6 +1016,41 @@ pub(crate) async fn handle_key(
                     app.set_status(format!("auto-spawn failed: {}", e));
                 }
             }
+        }
+        // To-do side panel — add-task input mode (these guarded arms come
+        // first so typed characters edit the buffer instead of triggering
+        // the navigation commands below).
+        (View::TodoPanel, KeyCode::Esc) if app.todo_adding => {
+            app.todo_cancel_add();
+        }
+        (View::TodoPanel, KeyCode::Enter) if app.todo_adding => {
+            app.todo_commit_add();
+        }
+        (View::TodoPanel, KeyCode::Backspace) if app.todo_adding => {
+            app.todo_input.pop();
+        }
+        (View::TodoPanel, KeyCode::Char(c)) if app.todo_adding => {
+            app.todo_input.push(c);
+        }
+        // To-do side panel — navigation / commands (only reached when not
+        // in add mode).
+        (View::TodoPanel, KeyCode::Down | KeyCode::Char('j')) => {
+            app.todo_move_down();
+        }
+        (View::TodoPanel, KeyCode::Up | KeyCode::Char('k')) => {
+            app.todo_move_up();
+        }
+        (View::TodoPanel, KeyCode::Char(' ') | KeyCode::Enter) => {
+            app.todo_toggle_selected();
+        }
+        (View::TodoPanel, KeyCode::Char('a') | KeyCode::Char('i')) => {
+            app.todo_begin_add();
+        }
+        (View::TodoPanel, KeyCode::Char('d') | KeyCode::Char('x')) => {
+            app.todo_delete_selected();
+        }
+        (View::TodoPanel, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('t')) => {
+            app.close_todo_panel();
         }
         // Popup navigation
         (View::Popup, KeyCode::Esc | KeyCode::Char('q')) => app.close_popup(),
