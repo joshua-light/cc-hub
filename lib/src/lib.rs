@@ -35,6 +35,7 @@ pub mod session_count;
 pub mod spawn;
 pub mod title;
 pub mod tmux_pane;
+pub mod todo;
 pub mod tool_use_count;
 pub mod triage;
 pub mod ui;

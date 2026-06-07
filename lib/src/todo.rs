@@ -1,0 +1,177 @@
+//! Persistent scratch to-do list shown as a side panel on the Sessions tab
+//! (toggled with `t`). It's a lightweight place to jot things to do while
+//! driving agents — not tied to any session or project. Stored at
+//! `~/.cc-hub/todo.json` as an ordered array of `{ text, done }` items so the
+//! file is trivially editable by hand if needed.
+
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
+
+use crate::platform::paths::cc_hub_home;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoItem {
+    pub text: String,
+    #[serde(default)]
+    pub done: bool,
+}
+
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+pub struct TodoList {
+    #[serde(default)]
+    items: Vec<TodoItem>,
+}
+
+impl TodoList {
+    /// Load the list from disk. A missing or unparseable file yields an empty
+    /// list — the to-do list is a convenience, not a correctness guarantee, so
+    /// we'd rather start fresh than refuse to open.
+    pub fn load() -> Self {
+        let Some(path) = todo_path() else {
+            return Self::default();
+        };
+        let Ok(raw) = fs::read_to_string(&path) else {
+            return Self::default();
+        };
+        serde_json::from_str(&raw).unwrap_or_default()
+    }
+
+    pub fn items(&self) -> &[TodoItem] {
+        &self.items
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// Append a task (trimmed). Empty/whitespace-only input is ignored.
+    /// Returns the index of the new item, or `None` if nothing was added.
+    /// Persists immediately.
+    pub fn add(&mut self, text: &str) -> Option<usize> {
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        self.items.push(TodoItem {
+            text: text.to_string(),
+            done: false,
+        });
+        let _ = self.save();
+        Some(self.items.len() - 1)
+    }
+
+    /// Flip the done/undone flag of the item at `idx`. No-op if out of range.
+    /// Persists immediately.
+    pub fn toggle(&mut self, idx: usize) {
+        if let Some(item) = self.items.get_mut(idx) {
+            item.done = !item.done;
+            let _ = self.save();
+        }
+    }
+
+    /// Remove the item at `idx`. No-op if out of range. Persists immediately.
+    pub fn remove(&mut self, idx: usize) {
+        if idx < self.items.len() {
+            self.items.remove(idx);
+            let _ = self.save();
+        }
+    }
+
+    fn save(&self) -> std::io::Result<()> {
+        let Some(path) = todo_path() else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let raw = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
+        fs::write(&path, raw)
+    }
+}
+
+fn todo_path() -> Option<PathBuf> {
+    cc_hub_home().map(|h| h.join("todo.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::HOME_TEST_LOCK;
+
+    fn with_temp_home<F: FnOnce()>(f: F) {
+        let _guard = HOME_TEST_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", tmp.path());
+        f();
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn add_persists_round_trip() {
+        with_temp_home(|| {
+            let mut t = TodoList::load();
+            assert!(t.is_empty());
+            assert_eq!(t.add("buy milk"), Some(0));
+            assert_eq!(t.add("  ship PR  "), Some(1));
+            let reloaded = TodoList::load();
+            assert_eq!(reloaded.len(), 2);
+            assert_eq!(reloaded.items()[0].text, "buy milk");
+            // Whitespace is trimmed on the way in.
+            assert_eq!(reloaded.items()[1].text, "ship PR");
+            assert!(!reloaded.items()[1].done);
+        });
+    }
+
+    #[test]
+    fn empty_input_is_ignored() {
+        with_temp_home(|| {
+            let mut t = TodoList::load();
+            assert_eq!(t.add("   "), None);
+            assert!(t.is_empty());
+        });
+    }
+
+    #[test]
+    fn toggle_persists() {
+        with_temp_home(|| {
+            let mut t = TodoList::load();
+            t.add("task");
+            t.toggle(0);
+            assert!(TodoList::load().items()[0].done);
+            t.toggle(0);
+            assert!(!TodoList::load().items()[0].done);
+            // Out-of-range toggle is a no-op.
+            t.toggle(9);
+            assert_eq!(TodoList::load().len(), 1);
+        });
+    }
+
+    #[test]
+    fn remove_persists() {
+        with_temp_home(|| {
+            let mut t = TodoList::load();
+            t.add("a");
+            t.add("b");
+            t.remove(0);
+            let reloaded = TodoList::load();
+            assert_eq!(reloaded.len(), 1);
+            assert_eq!(reloaded.items()[0].text, "b");
+        });
+    }
+
+    #[test]
+    fn missing_file_yields_empty() {
+        with_temp_home(|| {
+            assert!(TodoList::load().is_empty());
+        });
+    }
+}
