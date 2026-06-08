@@ -2,11 +2,11 @@
 //!
 //! [`handle_key`] is the ~85-arm `(View, KeyCode)` match that used to live
 //! inline in `run()`. It is a mechanical move — every arm preserves its exact
-//! original behavior and ordering. The one structural change is control flow:
-//! arms that used to `continue` the outer loop (skipping the per-frame scan
-//! drain + pending-dispatch poll) now return [`KeyOutcome::Continue`]; arms
-//! that fell through return [`KeyOutcome::Proceed`]. `run()` translates a
-//! `Continue` back into a `continue` of its loop.
+//! original behavior and ordering. Arms that used to `continue` the outer
+//! loop return [`KeyOutcome::Continue`]; arms that fell through return
+//! [`KeyOutcome::Proceed`]. Since `run()` switched to draining whole input
+//! bursts before its per-pass scan drain, it treats both outcomes the same;
+//! the variants survive as documentation of each arm's original intent.
 
 use crate::ScanMsg;
 use cc_hub_lib::app::{App, Tab, View};
@@ -18,9 +18,11 @@ use ratatui::Terminal;
 use std::io;
 use tokio::sync::mpsc;
 
-/// Whether `run()` should skip the rest of this loop iteration (the scan
-/// drain + pending-dispatch poll) and start the next pass. `Continue` mirrors
-/// the `continue` statements that the match arms used inline.
+/// Historically: whether `run()` should skip the rest of its loop iteration
+/// (the scan drain + pending-dispatch poll). `Continue` mirrors the
+/// `continue` statements the match arms used when they lived inline. `run()`
+/// now handles both variants identically — kept because the distinction
+/// still documents which arms fully consumed their key.
 pub(crate) enum KeyOutcome {
     Continue,
     Proceed,

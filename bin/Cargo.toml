@@ -16,6 +16,9 @@ tokio.workspace = true
 chrono.workspace = true
 log.workspace = true
 simplelog.workspace = true
+# Same `time` simplelog uses — needed directly because simplelog's
+# re-exported `format_description!` macro expands to `time::` paths.
+time = { version = "0.3", features = ["macros"] }
 hot-lib-reloader = { version = "0.7", optional = true }
 
 [dev-dependencies]

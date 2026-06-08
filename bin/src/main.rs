@@ -24,14 +24,14 @@ mod hot {
 }
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use log::LevelFilter;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use simplelog::{Config as LogConfig, WriteLogger};
+use simplelog::WriteLogger;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io;
@@ -426,7 +426,16 @@ fn init_logging() -> PathBuf {
     ));
 
     if let Ok(file) = File::create(&log_path) {
-        WriteLogger::init(LevelFilter::Debug, LogConfig::default(), file).ok();
+        // Millisecond timestamps: input-latency forensics correlate a key's
+        // arrival with the frame that follows — second granularity can't
+        // show a 200ms stall. (Times are UTC; simplelog's local offset
+        // needs an extra feature + unsound-on-unix caveats.)
+        let config = simplelog::ConfigBuilder::new()
+            .set_time_format_custom(time::macros::format_description!(
+                "[hour]:[minute]:[second].[subsecond digits:3]"
+            ))
+            .build();
+        WriteLogger::init(LevelFilter::Debug, config, file).ok();
     }
 
     log_path
@@ -592,6 +601,11 @@ fn run_no_tui() -> io::Result<()> {
 /// `run()` channel-drain loop; the `title`-tracking maps/gate are threaded
 /// through so the `SessionList` / `Projects` arms can kick off missing-title
 /// subprocesses exactly as they did inline.
+///
+/// Returns true when the message changed anything the renderer shows. The
+/// periodic scan arms (`SessionList` / `Projects`) report no-change for the
+/// common all-idle tick so the caller can skip the repaint; every other
+/// message exists only to mutate visible state, so they always return true.
 fn apply_scan_msg(
     app: &mut App,
     msg: ScanMsg,
@@ -600,11 +614,11 @@ fn apply_scan_msg(
     inflight_task_titles: &Arc<Mutex<HashMap<String, Instant>>>,
     active_task_titles: &Arc<Mutex<HashSet<String>>>,
     title_gate: &Arc<tokio::sync::Semaphore>,
-) {
+) -> bool {
     match msg {
         ScanMsg::SessionList(mut sessions) => {
             queue_missing_titles(&mut sessions, inflight_titles, active_titles, title_gate);
-            app.update_sessions(sessions);
+            return app.update_sessions(sessions);
         }
         ScanMsg::Detail(detail) => app.update_detail(detail),
         ScanMsg::StateDebug(info, exp) => {
@@ -631,7 +645,7 @@ fn apply_scan_msg(
                 active_task_titles,
                 title_gate,
             );
-            app.update_projects(snap);
+            return app.update_projects(snap);
         }
         ScanMsg::GhCreateDone { name, result } => {
             if let Some(picker) = app.folder_picker.as_mut() {
@@ -681,6 +695,7 @@ fn apply_scan_msg(
             app.set_status(ok.unwrap_or_else(|e| e));
         }
     }
+    true
 }
 
 async fn run(
@@ -881,7 +896,7 @@ async fn run(
     // terminal's native wheel scroll keeps working elsewhere.
     let mut mouse_captured = false;
 
-    // Redraw gating (issue #18a). The loop wakes every ~50ms but the widget
+    // Redraw gating (issue #18a). The loop wakes every ~5ms but the widget
     // tree only changes on input, on a drained ScanMsg, on a LiveTail poll
     // that picked up new entries, or on the once-per-second elapsed clock.
     // We draw immediately on the first three (so input latency is unchanged)
@@ -891,6 +906,20 @@ async fn run(
     // background reader, so while it's open we redraw every loop tick.
     let mut dirty = true;
     let mut last_clock_redraw = Instant::now();
+    // Diff-based rendering silently breaks if the physical screen ever
+    // diverges from ratatui's back buffer (anything writing to the tty
+    // behind our back does it) — the symptom is a provably-correct state
+    // with a stale highlight that no input fixes. Self-heal: every 10s the
+    // draw goes through a full clear+repaint instead of a diff.
+    let mut last_full_redraw = Instant::now();
+    // Set when an input event is handled, consumed by the draw that follows:
+    // the resulting `latency=` in the draw trace is the app-side time from
+    // event read to frame flushed. If a user-felt lag isn't visible here,
+    // the time is being lost outside the process (terminal, compositor).
+    let mut last_input_at: Option<Instant> = None;
+    /// Any single loop phase taking this long is a responsiveness incident
+    /// worth a warn-level breakdown in the log.
+    const STALL: Duration = Duration::from_millis(30);
 
     loop {
         // Poll live view for new JSONL entries
@@ -928,71 +957,177 @@ async fn run(
         // changed, plus a ~1Hz tick so the elapsed clocks keep moving.
         let in_tmux = app.view == View::TmuxPane;
         let clock_tick = last_clock_redraw.elapsed() >= Duration::from_secs(1);
-        if dirty || in_tmux || clock_tick {
+        let full_redraw = last_full_redraw.elapsed() >= Duration::from_secs(10);
+        let t_draw = Instant::now();
+        let mut draw_dur = Duration::ZERO;
+        if dirty || in_tmux || clock_tick || full_redraw {
+            if full_redraw {
+                // Clear resets ratatui's back buffer, so the draw right after
+                // rewrites every cell — resyncing the physical screen. The
+                // blank window is one buffer swap, not a visible flash.
+                terminal.clear()?;
+                last_full_redraw = Instant::now();
+            }
             terminal.draw(|frame| hot::render(frame, &mut app))?;
+            draw_dur = t_draw.elapsed();
+            // Trace what each frame actually rendered (key/selection traces
+            // alone proved state correct while a user still saw a stale
+            // highlight — this line closes the state↔pixels gap). `latency`
+            // is read-to-frame for the most recent input event: app-side
+            // responsiveness, measured per keypress. Skip the pane's 60Hz
+            // stream to keep the log readable.
+            if !in_tmux {
+                log::debug!(
+                    "draw: sel=({}, {}) view={:?} trigger={} took={:?} latency={:?}",
+                    app.sel_group,
+                    app.sel_in_group,
+                    app.view,
+                    if full_redraw {
+                        "full"
+                    } else if dirty {
+                        "dirty"
+                    } else {
+                        "clock"
+                    },
+                    draw_dur,
+                    last_input_at.take().map(|t| t.elapsed()),
+                );
+            }
             dirty = false;
             last_clock_redraw = Instant::now();
         }
 
-        let poll_ms = if app.view == View::TmuxPane { 16 } else { 50 };
+        let poll_ms = if app.view == View::TmuxPane { 16 } else { 5 };
 
+        let mut input_dur = Duration::ZERO;
         if event::poll(Duration::from_millis(poll_ms))? {
-            let evt = event::read()?;
-            // Any input may mutate state (scroll, selection, view change,
-            // status line) — repaint on the next loop pass regardless of which
-            // arm handles it or whether it `continue`s out early.
-            dirty = true;
-            if let Event::Mouse(m) = evt {
-                if app.view == View::TmuxPane {
-                    if let Some(pane) = app.tmux_pane.as_mut() {
-                        pane.send_mouse(m);
-                    }
-                }
-                continue;
-            }
-            if let Event::Paste(text) = evt {
-                if app.view == View::TmuxPane {
-                    if let Some(pane) = app.tmux_pane.as_ref() {
-                        if let Err(e) = pane.paste_text(&text) {
-                            app.set_status(format!("paste failed: {}", e));
+            let t_input = Instant::now();
+            // Drain the whole input burst before the next draw. Reading one
+            // event per loop pass meant every queued keystroke paid a full
+            // render + scan drain before the next was even looked at — fast
+            // typing (or a mouse-move flood in the pane) backlogged and read
+            // as "my key was never processed". Bounded so a pathological
+            // event stream can't starve rendering entirely; leftovers are
+            // picked up by the next pass's poll() immediately.
+            for _ in 0..64 {
+                let evt = event::read()?;
+                // Any input may mutate state (scroll, selection, view change,
+                // status line) — repaint after the burst regardless of which
+                // arm handles it.
+                dirty = true;
+                last_input_at = Some(Instant::now());
+                match evt {
+                    Event::Mouse(m) => {
+                        if app.view == View::TmuxPane {
+                            if let Some(pane) = app.tmux_pane.as_mut() {
+                                pane.send_mouse(m);
+                            }
                         }
                     }
-                }
-                continue;
-            }
-            if let Event::Key(key) = evt {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                let on_sessions = app.view == View::Grid && app.current_tab == Tab::Sessions;
-                let on_metrics = app.view == View::Grid && app.current_tab == Tab::Metrics;
-                let on_projects = app.view == View::Grid && app.current_tab == Tab::Projects;
+                    Event::Paste(text) => {
+                        if app.view == View::TmuxPane {
+                            if let Some(pane) = app.tmux_pane.as_ref() {
+                                if let Err(e) = pane.paste_text(&text) {
+                                    app.set_status(format!("paste failed: {}", e));
+                                }
+                            }
+                        }
+                    }
+                    Event::Key(key) => {
+                        // Trace every key so a "my press did nothing" report
+                        // can be answered from the log: did it arrive, with
+                        // what kind, and which view received it.
+                        log::debug!(
+                            "key: {:?} kind={:?} mods={:?} view={:?} tab={:?}",
+                            key.code,
+                            key.kind,
+                            key.modifiers,
+                            app.view,
+                            app.current_tab
+                        );
+                        // Ctrl+L: classic manual full repaint, and a live
+                        // diagnostic — if a "stuck" highlight snaps right
+                        // after this, the physical screen had diverged from
+                        // ratatui's buffer. Intercepted here because keys.rs
+                        // reads a bare Char('l') as move-right; inside the
+                        // pane it falls through to the shell.
+                        //
+                        // Nothing in this arm uses an early `continue`: it
+                        // would skip the poll(0) burst check below and block
+                        // the next read() on an empty queue.
+                        let force_redraw = key.code == KeyCode::Char('l')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                            && app.view != View::TmuxPane;
+                        if force_redraw {
+                            log::debug!("key: ctrl+l — manual full redraw");
+                            terminal.clear()?;
+                            last_full_redraw = Instant::now();
+                        } else if key.kind != KeyEventKind::Release {
+                            // Repeat is routed like Press — kitty (we push
+                            // DISAMBIGUATE at startup) tags held-key repeats
+                            // as Repeat, and the old `!= Press` filter dropped
+                            // every one. Release alone stays ignored.
+                            //
+                            // The pane child can exit while we sit in poll();
+                            // the loop-top cleanup hasn't run yet, so without
+                            // this re-check the key would be written into a
+                            // dead pty and vanish. Close first, route normally.
+                            if app.view == View::TmuxPane
+                                && app.tmux_pane.as_ref().is_some_and(|p| p.is_exited())
+                            {
+                                app.close_tmux_pane();
+                            }
+                            let on_sessions =
+                                app.view == View::Grid && app.current_tab == Tab::Sessions;
+                            let on_metrics =
+                                app.view == View::Grid && app.current_tab == Tab::Metrics;
+                            let on_projects =
+                                app.view == View::Grid && app.current_tab == Tab::Projects;
 
-                let outcome = keys::handle_key(
-                    &mut app,
-                    key,
-                    terminal,
-                    &scan_tx_main,
-                    &detail_tx,
-                    &state_debug_tx,
-                    &spawn_metrics,
-                    on_sessions,
-                    on_metrics,
-                    on_projects,
-                )
-                .await;
-                if let keys::KeyOutcome::Continue = outcome {
-                    continue;
+                            let sel_before = (app.sel_group, app.sel_in_group);
+                            // KeyOutcome::Continue used to skip this pass's
+                            // scan drain; with the whole burst handled before
+                            // a single drain, both outcomes proceed
+                            // identically here.
+                            let _ = keys::handle_key(
+                                &mut app,
+                                key,
+                                terminal,
+                                &scan_tx_main,
+                                &detail_tx,
+                                &state_debug_tx,
+                                &spawn_metrics,
+                                on_sessions,
+                                on_metrics,
+                                on_projects,
+                            )
+                            .await;
+                            let sel_after = (app.sel_group, app.sel_in_group);
+                            if sel_before != sel_after {
+                                log::debug!("key: selection {:?} -> {:?}", sel_before, sel_after);
+                            }
+                        }
+                    }
+                    other => {
+                        // Resize / focus events: nothing to do beyond the
+                        // repaint, but keep them visible in the trace.
+                        log::debug!("event: {:?}", other);
+                    }
+                }
+                if app.should_quit || !event::poll(Duration::ZERO)? {
+                    break;
                 }
             }
+            input_dur = t_input.elapsed();
         }
 
-        // Drain channel messages
+        // Drain channel messages. Repaint only when a message actually
+        // changed visible state — the periodic scan ticks usually carry an
+        // identical snapshot, and skipping those keeps an unchanged grid
+        // (and its selection) untouched between real changes.
+        let t_drain = Instant::now();
         while let Ok(msg) = scan_rx.try_recv() {
-            // Every scan message updates app state (session list, projects,
-            // usage, status line, …), so a drained message means repaint.
-            dirty = true;
-            apply_scan_msg(
+            if apply_scan_msg(
                 &mut app,
                 msg,
                 &inflight_titles,
@@ -1000,11 +1135,15 @@ async fn run(
                 &inflight_task_titles,
                 &active_task_titles,
                 &title_gate,
-            );
+            ) {
+                dirty = true;
+            }
         }
+        let drain_dur = t_drain.elapsed();
 
         // If a prompt was queued for an auto-spawned session, send it once the
         // session reports Idle in the latest scan.
+        let t_dispatch = Instant::now();
         match app.poll_pending_dispatch() {
             app::DispatchAction::Send { tmux, prompt } => {
                 log::info!(
@@ -1030,6 +1169,20 @@ async fn run(
                 dirty = true;
             }
             app::DispatchAction::Wait => {}
+        }
+        let dispatch_dur = t_dispatch.elapsed();
+
+        // Self-profiling: any phase that held the loop past STALL is exactly
+        // the kind of incident users report as "input lag" — name it with
+        // numbers instead of leaving it to feel.
+        if draw_dur >= STALL || input_dur >= STALL || drain_dur >= STALL || dispatch_dur >= STALL {
+            log::warn!(
+                "loop stall: draw={:?} input={:?} drain={:?} dispatch={:?}",
+                draw_dur,
+                input_dur,
+                drain_dur,
+                dispatch_dur
+            );
         }
 
         if app.should_quit {

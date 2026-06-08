@@ -484,7 +484,17 @@ impl App {
         self.set_tab(self.current_tab.cycle());
     }
 
-    pub fn update_projects(&mut self, snap: ProjectsSnapshot) {
+    /// Apply a fresh projects snapshot. Returns true when the snapshot
+    /// differs from the current one — unchanged ticks skip the cursor
+    /// bookkeeping (and the caller skips the repaint), mirroring
+    /// [`Self::update_sessions`].
+    pub fn update_projects(&mut self, snap: ProjectsSnapshot) -> bool {
+        // A pending focus must keep polling even on identical snapshots: its
+        // budget counts scan ticks, and the task it waits for may only gain
+        // a tmux session (not a snapshot change) when the orchestrator boots.
+        if self.pending_focus_task_id.is_none() && snap == self.projects {
+            return false;
+        }
         // Preserve cursor when possible: keep the same project_id selected
         // across rescans even if the order shifted.
         let prev_pid = self
@@ -540,6 +550,7 @@ impl App {
         // from the Sessions view immediately; without this the hide flag
         // would only take effect on the next session scan.
         self.rebuild_groups();
+        true
     }
 
     /// Search the focused project's kanban columns for `task_id`. If found,
@@ -1729,7 +1740,18 @@ impl App {
             .and_then(|g| g.sessions.get(self.sel_in_group))
     }
 
-    pub fn update_sessions(&mut self, mut sessions: Vec<SessionInfo>) {
+    /// Apply a fresh scan snapshot. Returns true when anything the renderer
+    /// shows actually changed, so the caller can skip the repaint — and, more
+    /// importantly, so unchanged ticks never rewrite the selection.
+    ///
+    /// Three tiers, cheapest first:
+    /// - identical snapshot → no-op;
+    /// - same cards in the same slots → swap card contents in place, leaving
+    ///   the cursor alone (a state flip updates the badge, it does not
+    ///   reshuffle the grid);
+    /// - membership changed → full rebuild with restore-selection-by-id and
+    ///   the new-session focus jump.
+    pub fn update_sessions(&mut self, mut sessions: Vec<SessionInfo>) -> bool {
         let acks_active = !self.acks.is_empty();
         if acks_active {
             // Apply user acks: if a non-Idle session is still at its acked
@@ -1747,9 +1769,34 @@ impl App {
             self.acks.retain_existing(&live_ids);
         }
 
-        self.last_sessions = sessions;
-        self.rebuild_groups();
         self.last_refresh = Instant::now();
+
+        let new_groups = self.build_groups(&sessions);
+        let same_structure = new_groups.len() == self.groups.len()
+            && new_groups.iter().zip(&self.groups).all(|(n, o)| {
+                n.cwd == o.cwd
+                    && n.sessions.len() == o.sessions.len()
+                    && n.sessions
+                        .iter()
+                        .zip(&o.sessions)
+                        .all(|(a, b)| a.session_id == b.session_id)
+            });
+        if same_structure {
+            // Same cards in the same slots: refresh their contents and leave
+            // the cursor untouched. No restore, no focus jump — a scan tick
+            // that changes nothing the user can act on must not move the
+            // selection out from under an in-flight keypress.
+            let changed = new_groups != self.groups;
+            self.groups = new_groups;
+            self.last_sessions = sessions;
+            if changed && self.view == View::PromptInput {
+                self.dispatch_target = Self::compute_dispatch_target(&self.groups);
+            }
+            return changed;
+        }
+
+        self.last_sessions = sessions;
+        self.adopt_groups(new_groups);
 
         let current_ids: HashSet<String> = self
             .groups
@@ -1769,18 +1816,26 @@ impl App {
         });
         self.known_session_ids = Some(current_ids);
         if let Some((gi, si)) = new_selection {
+            log::debug!(
+                "scan: new session appeared, focus jump ({}, {}) -> ({}, {})",
+                self.sel_group,
+                self.sel_in_group,
+                gi,
+                si
+            );
             self.sel_group = gi;
             self.sel_in_group = si;
         }
+        true
     }
 
-    fn rebuild_groups(&mut self) {
-        let prev_id = self.selected_session_id();
-        let acks_active = !self.acks.is_empty();
+    /// Filter, group, and order `sessions` into the rendered group list.
+    /// Pure with respect to selection — callers decide whether the result
+    /// warrants a selection restore (see [`Self::adopt_groups`]).
+    fn build_groups(&self, sessions: &[SessionInfo]) -> Vec<ProjectGroup> {
         let roles = self.projects.roles_by_tmux();
 
-        let sessions: Vec<SessionInfo> = self
-            .last_sessions
+        let sessions: Vec<SessionInfo> = sessions
             .iter()
             .filter(|s| self.show_inactive || s.state != SessionState::Inactive)
             .filter(|s| {
@@ -1798,27 +1853,17 @@ impl App {
             .cloned()
             .collect();
 
-        // Group sessions by cwd
+        // Group sessions by cwd. The scanner pre-sorts by stable keys
+        // (started_at desc, session id), and HashMap::entry preserves
+        // bucket-relative order, so each group comes out sorted — and the
+        // order never depends on volatile session state, so an ack downgrade
+        // or a state flip can't reshuffle cards under the cursor.
         let mut group_map: HashMap<String, Vec<SessionInfo>> = HashMap::new();
         for s in sessions {
             group_map.entry(s.cwd.clone()).or_default().push(s);
         }
 
-        // Scanner pre-sorts by (state, -started_at), and HashMap::entry preserves
-        // bucket-relative order, so groups are already sorted unless an ack
-        // downgrade changed a state above.
-        if acks_active {
-            for bucket in group_map.values_mut() {
-                bucket.sort_by(|a, b| {
-                    a.state
-                        .sort_key()
-                        .cmp(&b.state.sort_key())
-                        .then_with(|| b.started_at.cmp(&a.started_at))
-                });
-            }
-        }
-
-        self.groups = group_map
+        let mut groups: Vec<ProjectGroup> = group_map
             .into_iter()
             .map(|(cwd, sessions)| {
                 let name = sessions
@@ -1834,32 +1879,68 @@ impl App {
             .collect();
 
         // Sort groups alphabetically by name for stable ordering.
-        self.groups.sort_by_key(|a| a.name.to_lowercase());
+        groups.sort_by_key(|a| a.name.to_lowercase());
+        groups
+    }
+
+    /// Install a freshly-built group list and re-anchor the selection on the
+    /// session id that was selected before, clamping when it's gone.
+    fn adopt_groups(&mut self, groups: Vec<ProjectGroup>) {
+        let prev_id = self.selected_session_id();
+        let sel_before = (self.sel_group, self.sel_in_group);
+        self.groups = groups;
 
         if self.view == View::PromptInput {
             self.dispatch_target = Self::compute_dispatch_target(&self.groups);
         }
 
-        // Restore selection by session id
-        if let Some(id) = prev_id {
-            for (gi, group) in self.groups.iter().enumerate() {
-                if let Some(si) = group.sessions.iter().position(|s| s.session_id == id) {
-                    self.sel_group = gi;
-                    self.sel_in_group = si;
-                    return;
-                }
+        // Re-anchor the selection on the previously-selected session id;
+        // clamp into range when it's gone.
+        let restored = prev_id.and_then(|id| {
+            self.groups.iter().enumerate().find_map(|(gi, group)| {
+                group
+                    .sessions
+                    .iter()
+                    .position(|s| s.session_id == id)
+                    .map(|si| (gi, si))
+            })
+        });
+        match restored {
+            Some((gi, si)) => {
+                self.sel_group = gi;
+                self.sel_in_group = si;
+            }
+            None if self.groups.is_empty() => {
+                self.sel_group = 0;
+                self.sel_in_group = 0;
+            }
+            None => {
+                self.sel_group = self.sel_group.min(self.groups.len() - 1);
+                let max_in = self.groups[self.sel_group].sessions.len().saturating_sub(1);
+                self.sel_in_group = self.sel_in_group.min(max_in);
             }
         }
 
-        // Clamp selection
-        if self.groups.is_empty() {
-            self.sel_group = 0;
-            self.sel_in_group = 0;
-        } else {
-            self.sel_group = self.sel_group.min(self.groups.len() - 1);
-            let max_in = self.groups[self.sel_group].sessions.len().saturating_sub(1);
-            self.sel_in_group = self.sel_in_group.min(max_in);
+        // Background selection rewrites are the prime suspect whenever "my
+        // keypress did nothing" gets reported — make every one traceable.
+        let sel_after = (self.sel_group, self.sel_in_group);
+        if sel_before != sel_after {
+            log::debug!(
+                "scan: rebuild moved selection {:?} -> {:?} ({})",
+                sel_before,
+                sel_after,
+                if restored.is_some() {
+                    "id follow"
+                } else {
+                    "clamp"
+                }
+            );
         }
+    }
+
+    fn rebuild_groups(&mut self) {
+        let groups = self.build_groups(&self.last_sessions);
+        self.adopt_groups(groups);
     }
 
     pub fn update_detail(&mut self, detail: SessionDetail) {
@@ -2463,5 +2544,93 @@ mod tests {
             assert_eq!(app.todo.len(), 1);
             assert_eq!(app.todo.items()[0].text, "written elsewhere");
         });
+    }
+
+    /// Three sessions in one group, in scanner order. `fake_session` keys
+    /// session_id off the tmux name, so ids are the given names.
+    fn seed_three(app: &mut App) {
+        let changed = app.update_sessions(vec![
+            fake_session("a", SessionState::Idle),
+            fake_session("b", SessionState::Idle),
+            fake_session("c", SessionState::Idle),
+        ]);
+        assert!(changed, "first snapshot is a structure change");
+    }
+
+    fn grid_ids(app: &App) -> Vec<String> {
+        app.groups[0]
+            .sessions
+            .iter()
+            .map(|s| s.session_id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn state_flip_updates_card_in_place_without_touching_selection() {
+        let mut app = App::new();
+        seed_three(&mut app);
+        app.move_right();
+        assert_eq!(app.selected_session_id().as_deref(), Some("b"));
+
+        // b flips state: same cards, same slots — content-only update.
+        let changed = app.update_sessions(vec![
+            fake_session("a", SessionState::Idle),
+            fake_session("b", SessionState::Processing),
+            fake_session("c", SessionState::Idle),
+        ]);
+        assert!(changed, "a state flip is a visible change");
+        assert_eq!(grid_ids(&app), ["a", "b", "c"], "order must not change");
+        assert_eq!(app.sel_in_group, 1, "cursor must not move");
+        assert_eq!(
+            app.groups[0].sessions[1].state,
+            SessionState::Processing,
+            "card content must refresh"
+        );
+    }
+
+    #[test]
+    fn identical_snapshot_reports_no_change_and_keeps_selection() {
+        let mut app = App::new();
+        seed_three(&mut app);
+        app.move_right();
+
+        let changed = app.update_sessions(vec![
+            fake_session("a", SessionState::Idle),
+            fake_session("b", SessionState::Idle),
+            fake_session("c", SessionState::Idle),
+        ]);
+        assert!(!changed, "identical snapshot must not request a repaint");
+        assert_eq!(app.sel_in_group, 1, "cursor must not move");
+    }
+
+    #[test]
+    fn membership_change_rebuilds_and_follows_selected_id() {
+        let mut app = App::new();
+        seed_three(&mut app);
+        app.move_right();
+        assert_eq!(app.selected_session_id().as_deref(), Some("b"));
+
+        // a disappears: structure change → rebuild, selection follows b's id
+        // to its new slot.
+        let changed = app.update_sessions(vec![
+            fake_session("b", SessionState::Idle),
+            fake_session("c", SessionState::Idle),
+        ]);
+        assert!(changed);
+        assert_eq!(grid_ids(&app), ["b", "c"]);
+        assert_eq!(app.selected_session_id().as_deref(), Some("b"));
+        assert_eq!(app.sel_in_group, 0);
+    }
+
+    #[test]
+    fn update_projects_identical_snapshot_reports_no_change() {
+        let mut app = App::new();
+        let p = project("p-1");
+        let t = task("p-1", "t-1", TaskStatus::Running, false);
+        assert!(app.update_projects(snapshot(p.clone(), vec![t.clone()])));
+        assert!(
+            !app.update_projects(snapshot(p, vec![t])),
+            "identical projects snapshot must not request a repaint"
+        );
     }
 }
