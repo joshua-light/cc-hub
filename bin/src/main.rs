@@ -906,12 +906,6 @@ async fn run(
     // background reader, so while it's open we redraw every loop tick.
     let mut dirty = true;
     let mut last_clock_redraw = Instant::now();
-    // Diff-based rendering silently breaks if the physical screen ever
-    // diverges from ratatui's back buffer (anything writing to the tty
-    // behind our back does it) — the symptom is a provably-correct state
-    // with a stale highlight that no input fixes. Self-heal: every 10s the
-    // draw goes through a full clear+repaint instead of a diff.
-    let mut last_full_redraw = Instant::now();
     // Set when an input event is handled, consumed by the draw that follows:
     // the resulting `latency=` in the draw trace is the app-side time from
     // event read to frame flushed. If a user-felt lag isn't visible here,
@@ -957,17 +951,9 @@ async fn run(
         // changed, plus a ~1Hz tick so the elapsed clocks keep moving.
         let in_tmux = app.view == View::TmuxPane;
         let clock_tick = last_clock_redraw.elapsed() >= Duration::from_secs(1);
-        let full_redraw = last_full_redraw.elapsed() >= Duration::from_secs(10);
         let t_draw = Instant::now();
         let mut draw_dur = Duration::ZERO;
-        if dirty || in_tmux || clock_tick || full_redraw {
-            if full_redraw {
-                // Clear resets ratatui's back buffer, so the draw right after
-                // rewrites every cell — resyncing the physical screen. The
-                // blank window is one buffer swap, not a visible flash.
-                terminal.clear()?;
-                last_full_redraw = Instant::now();
-            }
+        if dirty || in_tmux || clock_tick {
             terminal.draw(|frame| hot::render(frame, &mut app))?;
             draw_dur = t_draw.elapsed();
             // Trace what each frame actually rendered (key/selection traces
@@ -982,13 +968,7 @@ async fn run(
                     app.sel_group,
                     app.sel_in_group,
                     app.view,
-                    if full_redraw {
-                        "full"
-                    } else if dirty {
-                        "dirty"
-                    } else {
-                        "clock"
-                    },
+                    if dirty { "dirty" } else { "clock" },
                     draw_dur,
                     last_input_at.take().map(|t| t.elapsed()),
                 );
@@ -1061,7 +1041,6 @@ async fn run(
                         if force_redraw {
                             log::debug!("key: ctrl+l — manual full redraw");
                             terminal.clear()?;
-                            last_full_redraw = Instant::now();
                         } else if key.kind != KeyEventKind::Release {
                             // Repeat is routed like Press — kitty (we push
                             // DISAMBIGUATE at startup) tags held-key repeats
