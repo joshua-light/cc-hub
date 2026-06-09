@@ -18,20 +18,20 @@ pub(crate) const GROUP_HEADER_HEIGHT: u16 = 1;
 pub(crate) const GROUP_GAP: u16 = 1;
 
 pub(crate) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
-    if app.groups.is_empty() {
+    if app.sessions.groups.is_empty() {
         let empty = Paragraph::new("No sessions found. Start an agent session to see it here.")
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(empty, area);
         return;
     }
 
-    let cols = app.grid_cols as usize;
-    let cell_width = area.width / app.grid_cols;
+    let cols = app.sessions.grid_cols as usize;
+    let cell_width = area.width / app.sessions.grid_cols;
 
     // Compute content-space y offset for each group
     let mut group_offsets: Vec<u16> = Vec::new();
     let mut y_acc: u16 = 0;
-    for group in &app.groups {
+    for group in &app.sessions.groups {
         group_offsets.push(y_acc);
         let rows = group.sessions.len().div_ceil(cols) as u16;
         y_acc = y_acc.saturating_add(GROUP_HEADER_HEIGHT + rows * cell_height() + GROUP_GAP);
@@ -39,36 +39,36 @@ pub(crate) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
 
     // Auto-scroll to keep selected card visible (prefer showing group header too)
     {
-        let g_offset = group_offsets[app.sel_group];
-        let card_row = (app.sel_in_group / cols) as u16;
+        let g_offset = group_offsets[app.sessions.sel_group];
+        let card_row = (app.sessions.sel_in_group / cols) as u16;
         let card_y = g_offset + GROUP_HEADER_HEIGHT + card_row * cell_height();
         let card_bottom = card_y + cell_height();
 
         if card_bottom.saturating_sub(g_offset) <= area.height {
             // Both header and card fit — keep both visible
-            if g_offset < app.grid_scroll {
-                app.grid_scroll = g_offset;
-            } else if card_bottom > app.grid_scroll + area.height {
-                app.grid_scroll = card_bottom.saturating_sub(area.height);
+            if g_offset < app.sessions.grid_scroll {
+                app.sessions.grid_scroll = g_offset;
+            } else if card_bottom > app.sessions.grid_scroll + area.height {
+                app.sessions.grid_scroll = card_bottom.saturating_sub(area.height);
             }
         } else {
             // Just ensure the card itself is visible
-            if card_y < app.grid_scroll {
-                app.grid_scroll = card_y;
-            } else if card_bottom > app.grid_scroll + area.height {
-                app.grid_scroll = card_bottom.saturating_sub(area.height);
+            if card_y < app.sessions.grid_scroll {
+                app.sessions.grid_scroll = card_y;
+            } else if card_bottom > app.sessions.grid_scroll + area.height {
+                app.sessions.grid_scroll = card_bottom.saturating_sub(area.height);
             }
         }
     }
 
-    let scroll = app.grid_scroll;
+    let scroll = app.sessions.grid_scroll;
     let now = now_ms();
     // Build the tmux→role index once per frame; per-card lookup was
     // O(projects × tasks × workers) and dominated re-render cost on hosts
     // with many tasks.
-    let roles_by_tmux = app.projects.roles_by_tmux();
+    let roles_by_tmux = app.projects.snapshot.roles_by_tmux();
 
-    for (gi, group) in app.groups.iter().enumerate() {
+    for (gi, group) in app.sessions.groups.iter().enumerate() {
         let g_y = group_offsets[gi];
 
         // Render group header
@@ -125,13 +125,13 @@ pub(crate) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
 
             let x = area.x + col * cell_width;
             let cy = area.y + card_sy as u16;
-            let w = if col == app.grid_cols - 1 {
+            let w = if col == app.sessions.grid_cols - 1 {
                 area.x + area.width - x
             } else {
                 cell_width
             };
 
-            let is_selected = gi == app.sel_group && si == app.sel_in_group;
+            let is_selected = gi == app.sessions.sel_group && si == app.sessions.sel_in_group;
             let cell_area = Rect::new(x, cy, w, cell_height());
             let role = session
                 .tmux_session

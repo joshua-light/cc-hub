@@ -688,7 +688,7 @@ pub(crate) fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut Ap
     // When the user has hit `e`, the selected card swells to fill most of
     // the visible body area; non-selected cards keep their default heights so
     // the surrounding context stays in view.
-    let expanded_body_h: u16 = if app.result_artifact_expanded {
+    let expanded_body_h: u16 = if app.projects.result_artifact_expanded {
         body_h.saturating_sub(6).min(40)
     } else {
         0
@@ -701,7 +701,9 @@ pub(crate) fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut Ap
         } else {
             card_body_height(kind)
         };
-        let h = if app.result_artifact_expanded && art_idx == app.result_artifact_sel {
+        let h = if app.projects.result_artifact_expanded
+            && art_idx == app.projects.result_artifact_sel
+        {
             expanded_body_h.max(default_h)
         } else {
             default_h
@@ -747,10 +749,10 @@ pub(crate) fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut Ap
     next_y = next_y.saturating_add(summary_h);
     let total_canvas_h = next_y;
 
-    let expanded_scroll_budget = if app.result_artifact_expanded {
+    let expanded_scroll_budget = if app.projects.result_artifact_expanded {
         card_meta
             .iter()
-            .find(|(art_idx, _, _)| *art_idx == app.result_artifact_sel)
+            .find(|(art_idx, _, _)| *art_idx == app.projects.result_artifact_sel)
             .and_then(|(art_idx, kind, body)| {
                 let max_bytes = 64 * 1024;
                 artifact_preview_total_lines(&t.artifacts[*art_idx], *kind, max_bytes, inner.width)
@@ -763,7 +765,7 @@ pub(crate) fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut Ap
 
     // Auto-scroll so the selected card stays on-screen.
     if !t.artifacts.is_empty() && body_h > 0 {
-        let sel_art_idx = app.result_artifact_sel.min(t.artifacts.len() - 1);
+        let sel_art_idx = app.projects.result_artifact_sel.min(t.artifacts.len() - 1);
         let sel_render_pos = render_order
             .iter()
             .position(|&i| i == sel_art_idx)
@@ -771,18 +773,18 @@ pub(crate) fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut Ap
         let sel_top = canvas_card_tops[sel_render_pos];
         let (_, _, sel_body) = card_meta[sel_render_pos];
         let sel_h = 1 + sel_body + 1;
-        if sel_top < app.result_scroll {
-            app.result_scroll = sel_top;
-        } else if sel_top + sel_h > app.result_scroll + body_h {
-            app.result_scroll = sel_top + sel_h - body_h;
+        if sel_top < app.projects.result_scroll {
+            app.projects.result_scroll = sel_top;
+        } else if sel_top + sel_h > app.projects.result_scroll + body_h {
+            app.projects.result_scroll = sel_top + sel_h - body_h;
         }
     }
     let base_max_scroll = total_canvas_h.saturating_sub(body_h);
     let max_scroll = base_max_scroll.saturating_add(expanded_scroll_budget);
-    if app.result_scroll > max_scroll {
-        app.result_scroll = max_scroll;
+    if app.projects.result_scroll > max_scroll {
+        app.projects.result_scroll = max_scroll;
     }
-    let scroll = app.result_scroll;
+    let scroll = app.projects.result_scroll;
 
     // The placeholder blank rows below each card header keep y-offsets honest
     // for the Paragraph's vertical scroll; per-card widgets paint over them in
@@ -797,7 +799,7 @@ pub(crate) fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut Ap
     } else {
         for &(art_idx, _, body) in &card_meta {
             let a = &t.artifacts[art_idx];
-            let selected = art_idx == app.result_artifact_sel;
+            let selected = art_idx == app.projects.result_artifact_sel;
             let is_lead = lead_idx == Some(art_idx);
             canvas_lines.push(evidence_card_header(a, selected, is_lead));
             for _ in 0..body {
@@ -877,12 +879,14 @@ pub(crate) fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut Ap
                 }
             }
             CardKind::Text => {
-                let expanded = app.result_artifact_expanded && art_idx == app.result_artifact_sel;
+                let expanded = app.projects.result_artifact_expanded
+                    && art_idx == app.projects.result_artifact_sel;
                 let max_bytes = if expanded { 64 * 1024 } else { 8 * 1024 };
                 render_text_card_body(frame, body_rect, a, max_bytes, body_scroll_lines);
             }
             CardKind::Diff => {
-                let expanded = app.result_artifact_expanded && art_idx == app.result_artifact_sel;
+                let expanded = app.projects.result_artifact_expanded
+                    && art_idx == app.projects.result_artifact_sel;
                 let max_bytes = if expanded { 64 * 1024 } else { 8 * 1024 };
                 render_diff_card_body(frame, body_rect, a, max_bytes, body_scroll_lines);
             }
@@ -897,7 +901,7 @@ pub(crate) fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut Ap
     } else {
         format!(
             "artifact {}/{}",
-            app.result_artifact_sel.min(t.artifacts.len() - 1) + 1,
+            app.projects.result_artifact_sel.min(t.artifacts.len() - 1) + 1,
             t.artifacts.len()
         )
     };
@@ -929,7 +933,7 @@ pub(crate) fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         format!(
             " · {}/{} ",
-            app.backlog_sel.min(tasks.len() - 1) + 1,
+            app.projects.backlog_sel.min(tasks.len() - 1) + 1,
             tasks.len()
         )
     };
@@ -979,7 +983,7 @@ pub(crate) fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
     let max_w = list_area.width.saturating_sub(4) as usize;
     let rows_per_task = 3usize;
     let visible_tasks = ((list_area.height as usize) / rows_per_task).max(1);
-    let sel = app.backlog_sel.min(tasks.len() - 1);
+    let sel = app.projects.backlog_sel.min(tasks.len() - 1);
     let scroll_top = if tasks.len() <= visible_tasks || sel < visible_tasks {
         0
     } else {
@@ -1078,7 +1082,7 @@ pub(crate) fn render_backlog(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 pub(crate) fn render_projects_body(frame: &mut Frame, area: Rect, app: &App) {
-    let snap = &app.projects;
+    let snap = &app.projects.snapshot;
 
     if snap.projects.is_empty() {
         let empty = Paragraph::new(Line::from(vec![
@@ -1139,7 +1143,7 @@ pub(crate) fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App
         None
     };
 
-    let snap = &app.projects;
+    let snap = &app.projects.snapshot;
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(snap.projects.len() * 4 + 2);
     spans.push(Span::styled(
         "  󰉋 ",
@@ -1176,7 +1180,7 @@ pub(crate) fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App
                 }
             }
         }
-        let selected = idx == app.projects_sel;
+        let selected = idx == app.projects.sel;
         let label = format!(" {} ", p.name);
         // Compact P·R·Rv·M·D counts. Review/Merging squeezed to two-letter
         // labels in the column headers; here they're positional.
@@ -1293,7 +1297,7 @@ pub(crate) fn render_kanban_board(frame: &mut Frame, area: Rect, app: &App) {
 
     let sessions_by_tmux = app.sessions_by_tmux();
     let now_secs = now_ms() / 1000;
-    let pr_summaries = &app.projects.pr_summaries;
+    let pr_summaries = &app.projects.snapshot.pr_summaries;
 
     for col_idx in 0..5 {
         render_kanban_column(
@@ -1332,7 +1336,7 @@ pub(crate) fn render_kanban_column(
     let (label, icon, accent) = kanban_column_meta(col_idx);
     let tasks = app.kanban_column_tasks(col_idx);
     let count = tasks.len();
-    let col_focused = app.projects_col == col_idx;
+    let col_focused = app.projects.col == col_idx;
     // Planning + Running show tall rich cards (orchestrator is alive,
     // there's live state to display); Review/Merging/Done get compact
     // cards since they're terminal states from the UI's POV.
@@ -1344,7 +1348,7 @@ pub(crate) fn render_kanban_column(
     let sel = if count == 0 {
         0
     } else if col_focused {
-        app.projects_task_sel.min(count - 1)
+        app.projects.task_sel.min(count - 1)
     } else {
         0
     };
@@ -1360,17 +1364,20 @@ pub(crate) fn render_kanban_column(
         app.selected_project().and_then(|p| {
             let holder = app
                 .projects
+                .snapshot
                 .merge_lock_holders
                 .get(&p.id)
                 .and_then(|h| h.as_ref())?;
             let title = app
                 .projects
+                .snapshot
                 .tasks
                 .get(&p.id)
                 .and_then(|ts| ts.iter().find(|t| t.task_id == holder.task_id))
                 .and_then(|t| t.title.as_deref());
             let pr_id = app
                 .projects
+                .snapshot
                 .merge_lock_holder_pr_ids
                 .get(&p.id)
                 .and_then(|v| *v);
@@ -1452,7 +1459,7 @@ pub(crate) fn render_kanban_column(
             height: card_height,
         };
         let selected = col_focused && rel == sel;
-        let titling_in_flight = app.projects.is_titling(&t.task_id);
+        let titling_in_flight = app.projects.snapshot.is_titling(&t.task_id);
         let pr_summary = pr_summaries.get(&t.task_id);
         if col_idx <= 1 {
             render_task_card_active(
@@ -2335,7 +2342,7 @@ mod result_popup_tests {
         };
         app.update_projects(snap);
         assert!(app.enter_projects_result(), "popup should open");
-        app.result_artifact_expanded = true;
+        app.projects.result_artifact_expanded = true;
 
         let backend = TestBackend::new(100, 28);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -2349,7 +2356,7 @@ mod result_popup_tests {
             first
         );
 
-        app.result_scroll_by(30);
+        app.projects.result_scroll_by(30);
         terminal
             .draw(|f| super::render_projects_result(f, f.area(), &mut app))
             .expect("render");

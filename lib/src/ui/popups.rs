@@ -217,7 +217,8 @@ pub(crate) fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
     let project_mode = app.prompt_input_for_project();
     let (title, target_label, title_color) = if project_mode {
         let cwd = app
-            .projects_pending_cwd
+            .projects
+            .pending_cwd
             .clone()
             .unwrap_or_else(|| "?".into());
         let agent = app.pending_agent_label().unwrap_or_else(|| "?".into());
@@ -323,8 +324,8 @@ pub(crate) fn render_todo_panel(frame: &mut Frame, area: Rect, app: &App) {
     let panel = Rect::new(body.x + body.width - width, body.y, width, body.height);
     frame.render_widget(Clear, panel);
 
-    let done = app.todo.items().iter().filter(|i| i.done).count();
-    let total = app.todo.len();
+    let done = app.todo.list.items().iter().filter(|i| i.done).count();
+    let total = app.todo.list.len();
     let block = popup_block(Span::styled(
         format!(" To-Do · {}/{} done ", done, total),
         Style::default()
@@ -332,7 +333,7 @@ pub(crate) fn render_todo_panel(frame: &mut Frame, area: Rect, app: &App) {
             .add_modifier(Modifier::BOLD),
     ))
     .title_bottom(Span::styled(
-        if app.todo_adding {
+        if app.todo.adding {
             " enter add · esc cancel "
         } else {
             " a add · space toggle · d delete · esc close "
@@ -350,9 +351,9 @@ pub(crate) fn render_todo_panel(frame: &mut Frame, area: Rect, app: &App) {
     // arithmetic below stays exact: scroll the list to keep the selection
     // visible, and in add mode reserve the bottom two rows (spacer + input)
     // so the input line can never be pushed off-screen by a long list.
-    let input_rows = if app.todo_adding { 2usize } else { 0 };
+    let input_rows = if app.todo.adding { 2usize } else { 0 };
     let list_rows = (inner.height as usize).saturating_sub(input_rows);
-    let sel = app.todo_selected.min(total.saturating_sub(1));
+    let sel = app.todo.selected.min(total.saturating_sub(1));
     let scroll_top = if total <= list_rows || sel < list_rows {
         0
     } else {
@@ -360,7 +361,7 @@ pub(crate) fn render_todo_panel(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let mut lines: Vec<Line> = Vec::new();
-    if total == 0 && !app.todo_adding {
+    if total == 0 && !app.todo.adding {
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
             "  No tasks yet — press a to add one.",
@@ -371,13 +372,14 @@ pub(crate) fn render_todo_panel(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         for (i, item) in app
             .todo
+            .list
             .items()
             .iter()
             .enumerate()
             .skip(scroll_top)
             .take(list_rows)
         {
-            let selected = !app.todo_adding && i == sel;
+            let selected = !app.todo.adding && i == sel;
             let cursor = if selected { "› " } else { "  " };
             let checkbox = if item.done { "[x] " } else { "[ ] " };
             let text_style = if item.done {
@@ -406,8 +408,8 @@ pub(crate) fn render_todo_panel(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    if app.todo_adding {
-        let mut input = app.todo_input.clone();
+    if app.todo.adding {
+        let mut input = app.todo.input.clone();
         input.push('▎');
         // Without wrap the line clips on the right, which would hide the
         // cursor on long input — show the tail instead, like an input field.

@@ -163,20 +163,680 @@ pub enum DispatchAction {
     Wait,
 }
 
-pub struct App {
+/// Sessions-tab state: the grouped-session grid plus its cursor and
+/// view-filter toggles. Pulled out of [`App`] so the grid cursor can't be
+/// moved out of range without going through the clamping methods here.
+pub struct SessionsView {
     pub groups: Vec<ProjectGroup>,
     pub sel_group: usize,
     pub sel_in_group: usize,
+    pub grid_scroll: u16,
+    pub grid_cols: u16,
+    pub show_inactive: bool,
+    /// When false, the Sessions view hides any session whose tmux name is
+    /// claimed by an orchestrator or worker in the current projects
+    /// snapshot. Toggled with `W` so the user can drop into the raw view
+    /// when something looks off.
+    pub show_orch_workers: bool,
+    pub acks: Acks,
+    /// Latest scan snapshot; drives [`App::rebuild_groups`].
+    last_sessions: Vec<SessionInfo>,
+    /// Session ids seen on the previous scan tick. `None` means the first
+    /// scan hasn't happened yet — used to skip cursor-jump on initial load.
+    known_session_ids: Option<HashSet<String>>,
+}
+
+impl SessionsView {
+    fn new() -> Self {
+        Self {
+            groups: Vec::new(),
+            sel_group: 0,
+            sel_in_group: 0,
+            grid_scroll: 0,
+            grid_cols: 3,
+            show_inactive: false,
+            show_orch_workers: false,
+            acks: Acks::new(),
+            last_sessions: Vec::new(),
+            known_session_ids: None,
+        }
+    }
+
+    pub fn move_right(&mut self) {
+        if let Some(group) = self.groups.get(self.sel_group) {
+            if group.sessions.is_empty() {
+                return;
+            }
+            self.sel_in_group = (self.sel_in_group + 1) % group.sessions.len();
+        }
+    }
+
+    pub fn move_left(&mut self) {
+        if let Some(group) = self.groups.get(self.sel_group) {
+            if group.sessions.is_empty() {
+                return;
+            }
+            if self.sel_in_group == 0 {
+                self.sel_in_group = group.sessions.len() - 1;
+            } else {
+                self.sel_in_group -= 1;
+            }
+        }
+    }
+
+    pub fn move_down(&mut self) {
+        if self.groups.is_empty() {
+            return;
+        }
+        let cols = self.grid_cols as usize;
+        let group = &self.groups[self.sel_group];
+        let current_col = self.sel_in_group % cols;
+        let next = self.sel_in_group + cols;
+        if next < group.sessions.len() {
+            self.sel_in_group = next;
+        } else if self.sel_group + 1 < self.groups.len() {
+            self.sel_group += 1;
+            let new_group = &self.groups[self.sel_group];
+            self.sel_in_group = current_col.min(new_group.sessions.len().saturating_sub(1));
+        }
+    }
+
+    pub fn move_up(&mut self) {
+        if self.groups.is_empty() {
+            return;
+        }
+        let cols = self.grid_cols as usize;
+        let current_col = self.sel_in_group % cols;
+        if self.sel_in_group >= cols {
+            self.sel_in_group -= cols;
+        } else if self.sel_group > 0 {
+            self.sel_group -= 1;
+            let prev_group = &self.groups[self.sel_group];
+            let last_row_start = prev_group.sessions.len().saturating_sub(1) / cols * cols;
+            self.sel_in_group =
+                (last_row_start + current_col).min(prev_group.sessions.len().saturating_sub(1));
+        }
+    }
+
+    pub fn selected_session_info(&self) -> Option<&SessionInfo> {
+        self.groups
+            .get(self.sel_group)
+            .and_then(|g| g.sessions.get(self.sel_in_group))
+    }
+
+    pub fn selected_session_id(&self) -> Option<String> {
+        self.selected_session_info().map(|s| s.session_id.clone())
+    }
+
+    pub fn session_count(&self) -> usize {
+        self.groups.iter().map(|g| g.sessions.len()).sum()
+    }
+
+    pub fn attention_count(&self) -> usize {
+        self.groups
+            .iter()
+            .flat_map(|g| &g.sessions)
+            .filter(|s| s.needs_attention())
+            .count()
+    }
+}
+
+/// Projects-tab state: the scanned snapshot plus every cursor/flag the
+/// Projects tab and its overlays (kanban, Backlog popup, Result popup,
+/// project-creation flow) navigate with. Grouped onto its own struct so the
+/// kanban/backlog cursors can only be moved through the clamping methods.
+pub struct ProjectsView {
+    /// Latest scan snapshot; drives the kanban columns and chip strip.
+    pub snapshot: ProjectsSnapshot,
+    /// Cursor in the Projects tab. `0..snapshot.projects.len()` selects a
+    /// project; task selection within the project lives in [`Self::task_sel`].
+    pub sel: usize,
+    pub task_sel: usize,
+    /// Kanban column cursor: 0=Planning, 1=Running, 2=Review, 3=Merging,
+    /// 4=Done. Drives which column [`Self::task_sel`] indexes into.
+    pub col: usize,
+    /// Cursor inside the Backlog popup, indexing into the selected
+    /// project's backlog tasks. Reset on popup open. Backlog tasks live
+    /// off the kanban (which starts at Planning) so this popup is the
+    /// only way to see and start them.
+    pub backlog_sel: usize,
+    /// True while the folder picker / prompt input flow is creating a
+    /// new project task (vs. spawning a regular session). Used to route
+    /// the picker's space-pick and prompt-input's enter to the project
+    /// flow instead of [`spawn::spawn_claude_session`].
+    pub creating_task: bool,
+    /// True while the folder picker is in "register a project, no task"
+    /// mode (the `N` shortcut from the Projects view). Picking a folder
+    /// just runs [`crate::orchestrator::ensure_project_registered`] and
+    /// closes the picker — no orchestrator is spawned.
+    pub registering_only: bool,
+    /// cwd captured when the picker chose a folder in Projects mode. Held
+    /// until the user submits the task prompt; consumed in
+    /// [`App::submit_project_task`].
+    pub pending_cwd: Option<String>,
+    /// Agent override for the pending project task. `None` means "use the
+    /// project default at spawn time"; `Some(id)` is set by the user
+    /// cycling backends in the prompt-input view via Tab.
+    pub pending_agent_id: Option<String>,
+    /// Task id we want the kanban cursor to jump to once the next
+    /// ProjectsSnapshot includes it. Set when the user starts a Backlog
+    /// task; cleared in update_projects once focus has moved (or when
+    /// the budget below runs out).
+    pub pending_focus_task_id: Option<String>,
+    /// Snapshot ticks remaining to find pending_focus_task_id before we
+    /// give up with a soft toast. Started at 5 — the fs-watcher-driven
+    /// scan typically lands within one tick, but the periodic 2s ticker
+    /// can interleave, so allow a few attempts.
+    pub pending_focus_budget: u8,
+    /// Cursor inside the Projects "Result" popup, indexing into the
+    /// selected task's `artifacts` vec. Reset on popup open.
+    pub result_artifact_sel: usize,
+    /// Vertical scroll offset (in unwrapped lines) for the Projects "Result"
+    /// popup body. Adjusted by the renderer to keep the selected card
+    /// visible, and by `PgUp`/`PgDn` for free scrolling. Reset on open.
+    pub result_scroll: u16,
+    /// When true, the currently-selected evidence card renders with an
+    /// enlarged body so the user can see more of its content inline. The
+    /// flag follows the j/k cursor — it is not tied to a specific artifact.
+    pub result_artifact_expanded: bool,
+}
+
+impl ProjectsView {
+    fn new() -> Self {
+        Self {
+            snapshot: ProjectsSnapshot::empty(),
+            sel: 0,
+            task_sel: 0,
+            col: 0,
+            backlog_sel: 0,
+            creating_task: false,
+            registering_only: false,
+            pending_cwd: None,
+            pending_agent_id: None,
+            pending_focus_task_id: None,
+            pending_focus_budget: 0,
+            result_artifact_sel: 0,
+            result_scroll: 0,
+            result_artifact_expanded: false,
+        }
+    }
+
+    pub fn selected_project(&self) -> Option<&crate::orchestrator::Project> {
+        self.snapshot.projects.get(self.sel)
+    }
+
+    /// Tasks in the currently-selected project that match the given
+    /// kanban column. Columns are derived from `TaskStatus` + worker
+    /// presence: a Running task with no workers is in "Planning"
+    /// (orchestrator is still decomposing); Running + workers is true
+    /// Running; Review/Merging/Done map straight from status.
+    ///
+    /// Indices: 0=Planning, 1=Running, 2=Review, 3=Merging, 4=Done.
+    /// Order matches the underlying `tasks` Vec (already sorted
+    /// newest-first by the orchestrator).
+    pub fn kanban_column_tasks(&self, col: usize) -> Vec<&crate::orchestrator::TaskState> {
+        let Some(p) = self.selected_project() else {
+            return Vec::new();
+        };
+        let Some(tasks) = self.snapshot.tasks.get(&p.id) else {
+            return Vec::new();
+        };
+        use crate::orchestrator::TaskStatus;
+        tasks
+            .iter()
+            .filter(|t| match col {
+                0 => t.status == TaskStatus::Running && t.workers.is_empty(),
+                1 => t.status == TaskStatus::Running && !t.workers.is_empty(),
+                2 => t.status == TaskStatus::Review,
+                3 => t.status == TaskStatus::Merging,
+                _ => t.status == TaskStatus::Done,
+            })
+            .map(|t| t.as_ref())
+            .collect()
+    }
+
+    pub fn kanban_column_len(&self, col: usize) -> usize {
+        self.kanban_column_tasks(col).len()
+    }
+
+    /// Backlog tasks for the currently-selected project, in scan order
+    /// (newest first, same as the underlying `tasks` Vec). Backlog tasks
+    /// don't appear in the kanban; the Backlog popup (`View::Backlog`) is
+    /// where they're listed and started.
+    pub fn backlog_tasks(&self) -> Vec<&crate::orchestrator::TaskState> {
+        let Some(p) = self.selected_project() else {
+            return Vec::new();
+        };
+        let Some(tasks) = self.snapshot.tasks.get(&p.id) else {
+            return Vec::new();
+        };
+        use crate::orchestrator::TaskStatus;
+        tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Backlog)
+            .map(|t| t.as_ref())
+            .collect()
+    }
+
+    pub fn selected_backlog_task(&self) -> Option<&crate::orchestrator::TaskState> {
+        self.backlog_tasks().get(self.backlog_sel).copied()
+    }
+
+    pub fn selected_project_task(&self) -> Option<&crate::orchestrator::TaskState> {
+        let col = self.kanban_column_tasks(self.col);
+        col.get(self.task_sel).copied()
+    }
+
+    /// Search the focused project's kanban columns for `task_id`. If found,
+    /// move `col` / `task_sel` onto it and return the column index. Returns
+    /// None if not found in any column (or if no project is selected).
+    pub fn focus_task(&mut self, task_id: &str) -> Option<usize> {
+        for col in 0..5 {
+            let tasks = self.kanban_column_tasks(col);
+            if let Some(row) = tasks.iter().position(|t| t.task_id == task_id) {
+                self.col = col;
+                self.task_sel = row;
+                return Some(col);
+            }
+        }
+        None
+    }
+
+    fn clamp_cursor(&mut self) {
+        self.clamp_cursor_inner(false);
+    }
+
+    /// Like [`Self::clamp_cursor`] but, if the focused column ends up empty,
+    /// jumps to the first non-empty column. Use at user-driven entry points
+    /// (project switch, approve_review) — not on every rescan, since that
+    /// would override an explicit column selection on the next tick.
+    fn clamp_cursor_jump_if_empty(&mut self) {
+        self.clamp_cursor_inner(true);
+    }
+
+    fn clamp_cursor_inner(&mut self, jump_if_empty: bool) {
+        let n = self.snapshot.projects.len();
+        if n == 0 {
+            self.sel = 0;
+            self.task_sel = 0;
+            self.col = 0;
+            return;
+        }
+        if self.sel >= n {
+            self.sel = n - 1;
+        }
+        if self.col > 4 {
+            self.col = 4;
+        }
+        if jump_if_empty && self.kanban_column_len(self.col) == 0 {
+            for col in 0..5 {
+                if self.kanban_column_len(col) > 0 {
+                    self.col = col;
+                    break;
+                }
+            }
+        }
+        let col_count = self.kanban_column_len(self.col);
+        if col_count == 0 {
+            self.task_sel = 0;
+        } else if self.task_sel >= col_count {
+            self.task_sel = col_count - 1;
+        }
+    }
+
+    /// Cycle through projects (top chip strip), wrapping at the ends. Clamp
+    /// the task cursor against the newly-focused project immediately so the
+    /// kanban never lands on an out-of-range row or an empty column with a
+    /// non-empty neighbor.
+    pub fn move_down(&mut self) {
+        let n = self.snapshot.projects.len();
+        if n == 0 {
+            return;
+        }
+        self.sel = (self.sel + 1) % n;
+        self.clamp_cursor_jump_if_empty();
+    }
+
+    pub fn move_up(&mut self) {
+        let n = self.snapshot.projects.len();
+        if n == 0 {
+            return;
+        }
+        self.sel = if self.sel == 0 { n - 1 } else { self.sel - 1 };
+        self.clamp_cursor_jump_if_empty();
+    }
+
+    /// Move cursor down within the current kanban column.
+    pub fn task_next(&mut self) {
+        let col_count = self.kanban_column_len(self.col);
+        if col_count == 0 {
+            return;
+        }
+        self.task_sel = (self.task_sel + 1).min(col_count - 1);
+    }
+
+    pub fn task_prev(&mut self) {
+        self.task_sel = self.task_sel.saturating_sub(1);
+    }
+
+    /// Move kanban cursor one column right (Planning → Running → Review
+    /// → Merging → Done). Clamps the row cursor to the destination
+    /// column's length so the selection is preserved where possible
+    /// instead of snapping back to the top card.
+    pub fn col_right(&mut self) {
+        if self.col < 4 {
+            self.col += 1;
+            self.clamp_cursor();
+        }
+    }
+
+    /// Move kanban cursor one column left. Clamps the row cursor to the
+    /// destination column's length rather than resetting it to the top.
+    pub fn col_left(&mut self) {
+        if self.col > 0 {
+            self.col -= 1;
+            self.clamp_cursor();
+        }
+    }
+
+    /// Reset the chip-strip cursor to the first project. Used after a
+    /// project removal where the selection may dangle past the now-removed
+    /// project until the next scan tick lands.
+    pub fn reset_project_cursor(&mut self) {
+        self.sel = 0;
+    }
+
+    /// Request that the kanban cursor jump to `task_id` once the next
+    /// ProjectsSnapshot includes it. Started/restarted tasks call this so
+    /// focus follows the new card into whichever column it lands in; the
+    /// jump (and budget countdown) is driven by [`App::update_projects`].
+    pub fn request_focus(&mut self, task_id: String) {
+        self.pending_focus_task_id = Some(task_id);
+        self.pending_focus_budget = 5;
+    }
+
+    pub fn backlog_up(&mut self) {
+        if self.backlog_sel > 0 {
+            self.backlog_sel -= 1;
+        }
+    }
+
+    pub fn backlog_down(&mut self) {
+        let n = self.backlog_tasks().len();
+        if n > 0 && self.backlog_sel + 1 < n {
+            self.backlog_sel += 1;
+        }
+    }
+
+    /// Clamp the Backlog cursor to the current backlog length. Used after a
+    /// backlog-task delete where the model may still include the removed
+    /// task until the next scan tick.
+    pub fn clamp_backlog_cursor(&mut self) {
+        self.backlog_sel = self
+            .backlog_sel
+            .min(self.backlog_tasks().len().saturating_sub(1));
+    }
+
+    pub fn result_artifact_next(&mut self) {
+        let n = self
+            .selected_project_task()
+            .map(|t| t.artifacts.len())
+            .unwrap_or(0);
+        if n == 0 {
+            self.result_artifact_sel = 0;
+            return;
+        }
+        self.result_artifact_sel = (self.result_artifact_sel + 1).min(n - 1);
+    }
+
+    pub fn result_artifact_prev(&mut self) {
+        self.result_artifact_sel = self.result_artifact_sel.saturating_sub(1);
+    }
+
+    /// PgUp/PgDn handler. Negative steps scroll up; the renderer clamps the
+    /// offset against content length so we never scroll past the end.
+    pub fn result_scroll_by(&mut self, delta: i32) {
+        let cur = self.result_scroll as i32;
+        let next = (cur + delta).max(0);
+        self.result_scroll = next.min(u16::MAX as i32) as u16;
+    }
+
+    pub fn toggle_result_artifact_expanded(&mut self) {
+        if self.selected_result_artifact().is_none() {
+            return;
+        }
+        self.result_artifact_expanded = !self.result_artifact_expanded;
+    }
+
+    /// The artifact under the popup cursor, if any. Used by the `c` and `o`
+    /// keybinds to know what path to act on.
+    pub fn selected_result_artifact(&self) -> Option<&crate::orchestrator::Artifact> {
+        let t = self.selected_project_task()?;
+        t.artifacts.get(self.result_artifact_sel)
+    }
+}
+
+/// Metrics-tab state: the analysis result, the selectable session rows, and
+/// the scroll/selection cursors. The renderer-synced fields at the bottom are
+/// written by the renderer each frame and read by the key handler, so they
+/// live together to make that render→input coupling visible in one place.
+pub struct MetricsView {
+    /// Latest completed analysis. `None` while a scan is in flight.
+    pub analysis: Option<MetricsAnalysis>,
+    pub scroll: u16,
+    pub rows: Vec<SelectableSession>,
+    pub selected: Option<usize>,
+    /// (scanned, total) for the in-flight metrics scan, shown while
+    /// [`Self::analysis`] is `None`. Cleared once analysis completes.
+    pub progress: Option<(usize, usize)>,
+    // renderer-synced: the following are written by `ui::metrics` each frame
+    // and read by the key handler on the next tick. They are NOT set by the
+    // input path — `row_lines` is the logical-line offset of every selectable
+    // session row and `view_height` the body height, both used to decide
+    // whether a downward press should engage the selection cursor (a session
+    // row is already on screen) or keep free-scrolling.
+    pub row_lines: Vec<usize>,
+    pub view_height: u16,
+}
+
+impl MetricsView {
+    fn new() -> Self {
+        Self {
+            analysis: None,
+            scroll: 0,
+            rows: Vec::new(),
+            selected: None,
+            progress: None,
+            row_lines: Vec::new(),
+            view_height: 0,
+        }
+    }
+
+    pub fn update(&mut self, m: MetricsAnalysis) {
+        let prev_sid = self
+            .selected
+            .and_then(|i| self.rows.get(i))
+            .map(|r| r.session_id.clone());
+        self.rows = m.selectable_sessions();
+        self.analysis = Some(m);
+        self.progress = None;
+        // Keep an existing selection pinned to its session across refreshes, but
+        // never auto-select: the tab opens at the top (Overview) and stays
+        // freely scrollable until the user navigates into the session lists.
+        self.selected = prev_sid.and_then(|sid| self.rows.iter().position(|r| r.session_id == sid));
+    }
+
+    pub fn update_progress(&mut self, scanned: usize, total: usize) {
+        if self.analysis.is_some() {
+            return;
+        }
+        self.progress = Some((scanned, total));
+    }
+
+    pub fn scroll_down(&mut self) {
+        self.scroll = self.scroll.saturating_add(3);
+    }
+
+    pub fn scroll_up(&mut self) {
+        self.scroll = self.scroll.saturating_sub(3);
+    }
+
+    /// Down/`j` on the Metrics tab. With a row selected, advance the cursor
+    /// (the renderer keeps it on screen). With nothing selected, engage the
+    /// first session row already visible — so selection only kicks in once the
+    /// lists scroll into view — otherwise keep free-scrolling toward them.
+    pub fn nav_down(&mut self) {
+        match self.selected {
+            Some(i) if !self.rows.is_empty() => {
+                self.selected = Some((i + 1).min(self.rows.len() - 1));
+            }
+            _ => match self.first_visible_row() {
+                Some(idx) => self.selected = Some(idx),
+                None => self.scroll_down(),
+            },
+        }
+    }
+
+    /// Up/`k` on the Metrics tab. Walk the cursor back up; pressing up past the
+    /// first session row releases the selection so free-scrolling (and reaching
+    /// the Overview at the very top) resumes.
+    pub fn nav_up(&mut self) {
+        match self.selected {
+            Some(0) => self.selected = None,
+            Some(i) => self.selected = Some(i - 1),
+            None => self.scroll_up(),
+        }
+    }
+
+    /// Index (into [`Self::rows`]) of the first selectable session row
+    /// currently inside the viewport, using the offsets/height the renderer
+    /// last synced. `None` when no session row is on screen.
+    fn first_visible_row(&self) -> Option<usize> {
+        let h = self.view_height;
+        if h == 0 {
+            return None;
+        }
+        let top = self.scroll;
+        self.row_lines
+            .iter()
+            .position(|&l| (l as u16) >= top && (l as u16) < top.saturating_add(h))
+    }
+
+    pub fn selected_session(&self) -> Option<&SelectableSession> {
+        self.selected.and_then(|i| self.rows.get(i))
+    }
+}
+
+/// Sessions-tab scratch to-do side panel ([`View::TodoPanel`]). The cursor
+/// here can only be moved through the clamping methods so it never points
+/// past the end of the list after a remove or external reload.
+pub struct TodoPanelState {
+    /// Persistent scratch to-do list shown by the Sessions-tab side panel
+    /// (toggled with `t`). Reloaded from disk each time the panel opens (so
+    /// external edits show up); mutations persist immediately.
+    pub list: TodoList,
+    /// Cursor into [`Self::list`] while the panel is open. Clamped to the
+    /// list length whenever the panel is entered or an item is removed.
+    pub selected: usize,
+    /// True while the panel is in add-task input mode: char keys append to
+    /// [`Self::input`] instead of acting as navigation commands.
+    pub adding: bool,
+    /// In-progress text for the task being added. Committed on Enter,
+    /// discarded on Esc.
+    pub input: String,
+}
+
+impl TodoPanelState {
+    fn new() -> Self {
+        Self {
+            list: TodoList::default(),
+            selected: 0,
+            adding: false,
+            input: String::new(),
+        }
+    }
+
+    /// Reload the list from disk (picking up external edits) and clamp the
+    /// cursor in case the list shrank. Starts in navigation mode.
+    pub fn reload(&mut self) {
+        self.list = TodoList::load();
+        self.adding = false;
+        self.input.clear();
+        self.clamp_selection();
+    }
+
+    /// Discard any in-progress add and leave add mode.
+    pub fn reset_add(&mut self) {
+        self.adding = false;
+        self.input.clear();
+    }
+
+    pub fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub fn move_down(&mut self) {
+        let last = self.list.len().saturating_sub(1);
+        self.selected = (self.selected + 1).min(last);
+    }
+
+    /// Enter add-task input mode with an empty buffer.
+    pub fn begin_add(&mut self) {
+        self.adding = true;
+        self.input.clear();
+    }
+
+    /// Leave add-task input mode without committing.
+    pub fn cancel_add(&mut self) {
+        self.adding = false;
+        self.input.clear();
+    }
+
+    /// Commit the in-progress task. Empty input just exits add mode. On
+    /// success the cursor moves to the freshly-added item.
+    pub fn commit_add(&mut self) {
+        if let Some(idx) = self.list.add(&self.input) {
+            self.selected = idx;
+        }
+        self.adding = false;
+        self.input.clear();
+    }
+
+    /// Flip done/undone on the selected item.
+    pub fn toggle_selected(&mut self) {
+        if self.selected < self.list.len() {
+            self.list.toggle(self.selected);
+        }
+    }
+
+    /// Delete the selected item, keeping the cursor in range.
+    pub fn delete_selected(&mut self) {
+        if self.selected < self.list.len() {
+            self.list.remove(self.selected);
+            self.clamp_selection();
+        }
+    }
+
+    fn clamp_selection(&mut self) {
+        let last = self.list.len().saturating_sub(1);
+        if self.selected > last {
+            self.selected = last;
+        }
+    }
+}
+
+pub struct App {
+    pub sessions: SessionsView,
+    pub projects: ProjectsView,
+    pub metrics: MetricsView,
+    pub todo: TodoPanelState,
     pub view: View,
     pub detail: Option<SessionDetail>,
     pub detail_loading: bool,
     pub popup_scroll: u16,
-    pub grid_scroll: u16,
     pub should_quit: bool,
     pub last_refresh: Instant,
-    pub grid_cols: u16,
     pub live_view: Option<LiveView>,
-    pub acks: Acks,
     pub status_msg: Option<(String, Instant)>,
     /// The single staged destructive/interrupting action behind
     /// [`View::ConfirmClose`]. At most one can be pending at a time, which
@@ -206,19 +866,6 @@ pub struct App {
     pub bookmarks: Bookmarks,
     pub gh_create_input: Option<GhCreateInput>,
     pub current_tab: Tab,
-    pub metrics: Option<MetricsAnalysis>,
-    pub metrics_scroll: u16,
-    pub metrics_rows: Vec<SelectableSession>,
-    pub metrics_selected: Option<usize>,
-    /// Logical-line offset of every selectable session row, and the body
-    /// height, both synced by the renderer each frame. The key handler reads
-    /// them to decide whether a downward press should engage the selection
-    /// cursor (a session row is already on screen) or keep free-scrolling.
-    pub metrics_row_lines: Vec<usize>,
-    pub metrics_view_height: u16,
-    /// (scanned, total) for the in-flight metrics scan, shown while
-    /// [`Self::metrics`] is `None`. Cleared once analysis completes.
-    pub metrics_progress: Option<(usize, usize)>,
     pub pending_dispatch: VecDeque<PendingDispatch>,
     /// Last time [`Self::poll_pending_dispatch`] ran the `pane_ready_for_input`
     /// probe (a `tmux capture-pane` fork+exec). The poll is called every render
@@ -226,60 +873,6 @@ pub struct App {
     /// checking a couple of times a second — this throttles the fork+exec so
     /// the event loop isn't spending most frames waiting on tmux.
     last_dispatch_probe_at: Option<Instant>,
-    pub show_inactive: bool,
-    /// When false, the Sessions view hides any session whose tmux name is
-    /// claimed by an orchestrator or worker in the current projects
-    /// snapshot. Toggled with `W` so the user can drop into the raw view
-    /// when something looks off.
-    pub show_orch_workers: bool,
-    pub projects: ProjectsSnapshot,
-    /// Cursor in the Projects tab. `0..projects.len()` selects a project;
-    /// task selection within the project lives in [`Self::projects_task_sel`].
-    pub projects_sel: usize,
-    pub projects_task_sel: usize,
-    /// Kanban column cursor: 0=Planning, 1=Running, 2=Review, 3=Merging,
-    /// 4=Done. Drives which column [`Self::projects_task_sel`] indexes
-    /// into.
-    pub projects_col: usize,
-    /// True while the folder picker / prompt input flow is creating a
-    /// new project task (vs. spawning a regular session). Used to route
-    /// the picker's space-pick and prompt-input's enter to the project
-    /// flow instead of [`spawn::spawn_claude_session`].
-    pub creating_project_task: bool,
-    /// Cursor inside the Backlog popup, indexing into the selected
-    /// project's backlog tasks. Reset on popup open. Backlog tasks live
-    /// off the kanban (which starts at Planning) so this popup is the
-    /// only way to see and start them.
-    pub backlog_sel: usize,
-    /// True while the folder picker is in "register a project, no task"
-    /// mode (the `N` shortcut from the Projects view). Picking a folder
-    /// just runs [`crate::orchestrator::ensure_project_registered`] and
-    /// closes the picker — no orchestrator is spawned.
-    pub registering_project_only: bool,
-    /// cwd captured when the picker chose a folder in Projects mode. Held
-    /// until the user submits the task prompt; consumed in
-    /// [`Self::submit_project_task`].
-    pub projects_pending_cwd: Option<String>,
-    /// Agent override for the pending project task. `None` means "use the
-    /// project default at spawn time"; `Some(id)` is set by the user
-    /// cycling backends in the prompt-input view via Tab.
-    pub projects_pending_agent_id: Option<String>,
-    /// Latest scan snapshot; drives [`rebuild_groups`].
-    last_sessions: Vec<SessionInfo>,
-    /// Session ids seen on the previous scan tick. `None` means the first
-    /// scan hasn't happened yet — used to skip cursor-jump on initial load.
-    known_session_ids: Option<HashSet<String>>,
-    /// Cursor inside the Projects "Result" popup, indexing into the
-    /// selected task's `artifacts` vec. Reset on popup open.
-    pub result_artifact_sel: usize,
-    /// Vertical scroll offset (in unwrapped lines) for the Projects "Result"
-    /// popup body. Adjusted by the renderer to keep the selected card
-    /// visible, and by `PgUp`/`PgDn` for free scrolling. Reset on open.
-    pub result_scroll: u16,
-    /// When true, the currently-selected evidence card renders with an
-    /// enlarged body so the user can see more of its content inline. The
-    /// flag follows the j/k cursor — it is not tied to a specific artifact.
-    pub result_artifact_expanded: bool,
     /// Terminal-graphics picker, initialised once after entering the alt
     /// screen. `None` when running headless / `--no-tui` / inside tests so
     /// the renderer can fall back to a placeholder rather than crash.
@@ -292,30 +885,6 @@ pub struct App {
     /// Paths whose decode failed once — never retry, since decoding the same
     /// bytes will keep failing and we'd burn CPU on every redraw.
     pub artifact_image_failed: HashSet<String>,
-    /// Task id we want the kanban cursor to jump to once the next
-    /// ProjectsSnapshot includes it. Set when the user starts a Backlog
-    /// task; cleared in update_projects once focus has moved (or when
-    /// the budget below runs out).
-    pub pending_focus_task_id: Option<String>,
-    /// Snapshot ticks remaining to find pending_focus_task_id before we
-    /// give up with a soft toast. Started at 5 — the fs-watcher-driven
-    /// scan typically lands within one tick, but the periodic 2s ticker
-    /// can interleave, so allow a few attempts.
-    pub pending_focus_budget: u8,
-    /// Persistent scratch to-do list shown by the Sessions-tab side panel
-    /// ([`View::TodoPanel`], toggled with `t`). Reloaded from disk each time
-    /// the panel opens (so external edits show up); mutations persist
-    /// immediately.
-    pub todo: TodoList,
-    /// Cursor into [`Self::todo`] while the panel is open. Clamped to the
-    /// list length whenever the panel is entered or an item is removed.
-    pub todo_selected: usize,
-    /// True while the panel is in add-task input mode: char keys append to
-    /// [`Self::todo_input`] instead of acting as navigation commands.
-    pub todo_adding: bool,
-    /// In-progress text for the task being added. Committed on Enter,
-    /// discarded on Esc.
-    pub todo_input: String,
 }
 
 impl Default for App {
@@ -327,19 +896,17 @@ impl Default for App {
 impl App {
     pub fn new() -> Self {
         Self {
-            groups: Vec::new(),
-            sel_group: 0,
-            sel_in_group: 0,
+            sessions: SessionsView::new(),
+            projects: ProjectsView::new(),
+            metrics: MetricsView::new(),
+            todo: TodoPanelState::new(),
             view: View::Grid,
             detail: None,
             detail_loading: false,
             popup_scroll: 0,
-            grid_scroll: 0,
             should_quit: false,
             last_refresh: Instant::now(),
-            grid_cols: 3,
             live_view: None,
-            acks: Acks::new(),
             status_msg: None,
             pending_confirm: None,
             state_debug: None,
@@ -357,40 +924,11 @@ impl App {
             bookmarks: Bookmarks::load(),
             gh_create_input: None,
             current_tab: Tab::Sessions,
-            metrics: None,
-            metrics_scroll: 0,
-            metrics_rows: Vec::new(),
-            metrics_selected: None,
-            metrics_row_lines: Vec::new(),
-            metrics_view_height: 0,
-            metrics_progress: None,
             pending_dispatch: VecDeque::new(),
             last_dispatch_probe_at: None,
-            show_inactive: false,
-            show_orch_workers: false,
-            projects: ProjectsSnapshot::empty(),
-            projects_sel: 0,
-            projects_task_sel: 0,
-            projects_col: 0,
-            backlog_sel: 0,
-            creating_project_task: false,
-            registering_project_only: false,
-            projects_pending_cwd: None,
-            projects_pending_agent_id: None,
-            last_sessions: Vec::new(),
-            known_session_ids: None,
-            result_artifact_sel: 0,
-            result_scroll: 0,
-            result_artifact_expanded: false,
             image_picker: None,
             artifact_images: HashMap::new(),
             artifact_image_failed: HashSet::new(),
-            pending_focus_task_id: None,
-            pending_focus_budget: 0,
-            todo: TodoList::default(),
-            todo_selected: 0,
-            todo_adding: false,
-            todo_input: String::new(),
         }
     }
 
@@ -400,79 +938,22 @@ impl App {
     /// starts in navigation mode rather than add mode.
     pub fn enter_todo_panel(&mut self) {
         self.view = View::TodoPanel;
-        self.todo = TodoList::load();
-        self.todo_adding = false;
-        self.todo_input.clear();
-        self.clamp_todo_selection();
+        self.todo.reload();
     }
 
     /// Close the panel and return to the grid, discarding any in-progress add.
     pub fn close_todo_panel(&mut self) {
         self.view = View::Grid;
-        self.todo_adding = false;
-        self.todo_input.clear();
-    }
-
-    pub fn todo_move_up(&mut self) {
-        self.todo_selected = self.todo_selected.saturating_sub(1);
-    }
-
-    pub fn todo_move_down(&mut self) {
-        let last = self.todo.len().saturating_sub(1);
-        self.todo_selected = (self.todo_selected + 1).min(last);
-    }
-
-    /// Enter add-task input mode with an empty buffer.
-    pub fn todo_begin_add(&mut self) {
-        self.todo_adding = true;
-        self.todo_input.clear();
-    }
-
-    /// Leave add-task input mode without committing.
-    pub fn todo_cancel_add(&mut self) {
-        self.todo_adding = false;
-        self.todo_input.clear();
-    }
-
-    /// Commit the in-progress task. Empty input just exits add mode. On
-    /// success the cursor moves to the freshly-added item.
-    pub fn todo_commit_add(&mut self) {
-        if let Some(idx) = self.todo.add(&self.todo_input) {
-            self.todo_selected = idx;
-        }
-        self.todo_adding = false;
-        self.todo_input.clear();
-    }
-
-    /// Flip done/undone on the selected item.
-    pub fn todo_toggle_selected(&mut self) {
-        if self.todo_selected < self.todo.len() {
-            self.todo.toggle(self.todo_selected);
-        }
-    }
-
-    /// Delete the selected item, keeping the cursor in range.
-    pub fn todo_delete_selected(&mut self) {
-        if self.todo_selected < self.todo.len() {
-            self.todo.remove(self.todo_selected);
-            self.clamp_todo_selection();
-        }
-    }
-
-    fn clamp_todo_selection(&mut self) {
-        let last = self.todo.len().saturating_sub(1);
-        if self.todo_selected > last {
-            self.todo_selected = last;
-        }
+        self.todo.reset_add();
     }
 
     pub fn toggle_show_inactive(&mut self) {
-        self.show_inactive = !self.show_inactive;
+        self.sessions.show_inactive = !self.sessions.show_inactive;
         self.rebuild_groups();
     }
 
     pub fn toggle_show_orch_workers(&mut self) {
-        self.show_orch_workers = !self.show_orch_workers;
+        self.sessions.show_orch_workers = !self.sessions.show_orch_workers;
         self.rebuild_groups();
     }
 
@@ -485,54 +966,52 @@ impl App {
     }
 
     pub fn update_projects(&mut self, snap: ProjectsSnapshot) {
+        let pv = &mut self.projects;
         // Preserve cursor when possible: keep the same project_id selected
         // across rescans even if the order shifted.
-        let prev_pid = self
-            .projects
-            .projects
-            .get(self.projects_sel)
-            .map(|p| p.id.clone());
+        let prev_pid = pv.snapshot.projects.get(pv.sel).map(|p| p.id.clone());
         // Track the focused task by id so a status transition (Running →
         // Review etc.) carries the cursor across columns. Mirrors the
         // prev_sid trick in `update_metrics`.
-        let prev_task_id = self.selected_project_task().map(|t| t.task_id.clone());
-        let first_load = self.projects.projects.is_empty();
-        self.projects = snap;
+        let prev_task_id = pv.selected_project_task().map(|t| t.task_id.clone());
+        let first_load = pv.snapshot.projects.is_empty();
+        pv.snapshot = snap;
         if let Some(pid) = prev_pid {
-            if let Some(idx) = self.projects.projects.iter().position(|p| p.id == pid) {
-                self.projects_sel = idx;
+            if let Some(idx) = pv.snapshot.projects.iter().position(|p| p.id == pid) {
+                pv.sel = idx;
             }
         }
         // If the task is gone, fall through and let clamp handle the row.
         if let Some(task_id) = prev_task_id {
-            self.focus_task(&task_id);
+            pv.focus_task(&task_id);
         }
         // Jump-if-empty only on the very first load — once the user is in the
         // tab, an empty focused column means they explicitly navigated there
         // (or a task drained out of it), and silently overriding their
         // selection on every rescan is the bug we're avoiding.
         if first_load {
-            self.clamp_projects_cursor_jump_if_empty();
+            pv.clamp_cursor_jump_if_empty();
         } else {
-            self.clamp_projects_cursor();
+            pv.clamp_cursor();
         }
-        if let Some(task_id) = self.pending_focus_task_id.clone() {
-            if let Some(col) = self.focus_task(&task_id) {
+        if let Some(task_id) = self.projects.pending_focus_task_id.clone() {
+            if let Some(col) = self.projects.focus_task(&task_id) {
                 self.set_status(format!(
                     "started {} — focus moved to {}",
                     crate::orchestrator::short_task_id(&task_id),
                     kanban_col_name(col),
                 ));
-                self.pending_focus_task_id = None;
-                self.pending_focus_budget = 0;
+                self.projects.pending_focus_task_id = None;
+                self.projects.pending_focus_budget = 0;
             } else {
-                self.pending_focus_budget = self.pending_focus_budget.saturating_sub(1);
-                if self.pending_focus_budget == 0 {
+                self.projects.pending_focus_budget =
+                    self.projects.pending_focus_budget.saturating_sub(1);
+                if self.projects.pending_focus_budget == 0 {
                     self.set_status(format!(
                         "started {} — orchestrator booting; cursor unchanged",
                         crate::orchestrator::short_task_id(&task_id),
                     ));
-                    self.pending_focus_task_id = None;
+                    self.projects.pending_focus_task_id = None;
                 }
             }
         }
@@ -542,182 +1021,20 @@ impl App {
         self.rebuild_groups();
     }
 
-    /// Search the focused project's kanban columns for `task_id`. If found,
-    /// move `projects_col` / `projects_task_sel` onto it and return the
-    /// column index. Returns None if not found in any column (or if no
-    /// project is selected).
-    pub fn focus_task(&mut self, task_id: &str) -> Option<usize> {
-        for col in 0..5 {
-            let tasks = self.kanban_column_tasks(col);
-            if let Some(row) = tasks.iter().position(|t| t.task_id == task_id) {
-                self.projects_col = col;
-                self.projects_task_sel = row;
-                return Some(col);
-            }
-        }
-        None
-    }
-
-    fn clamp_projects_cursor(&mut self) {
-        self.clamp_projects_cursor_inner(false);
-    }
-
-    /// Like [`Self::clamp_projects_cursor`] but, if the focused column ends up
-    /// empty, jumps to the first non-empty column. Use at user-driven entry
-    /// points (project switch, approve_review) — not on every rescan, since
-    /// that would override an explicit column selection on the next tick.
-    fn clamp_projects_cursor_jump_if_empty(&mut self) {
-        self.clamp_projects_cursor_inner(true);
-    }
-
-    fn clamp_projects_cursor_inner(&mut self, jump_if_empty: bool) {
-        let n = self.projects.projects.len();
-        if n == 0 {
-            self.projects_sel = 0;
-            self.projects_task_sel = 0;
-            self.projects_col = 0;
-            return;
-        }
-        if self.projects_sel >= n {
-            self.projects_sel = n - 1;
-        }
-        if self.projects_col > 4 {
-            self.projects_col = 4;
-        }
-        if jump_if_empty && self.kanban_column_len(self.projects_col) == 0 {
-            for col in 0..5 {
-                if self.kanban_column_len(col) > 0 {
-                    self.projects_col = col;
-                    break;
-                }
-            }
-        }
-        let col_count = self.kanban_column_len(self.projects_col);
-        if col_count == 0 {
-            self.projects_task_sel = 0;
-        } else if self.projects_task_sel >= col_count {
-            self.projects_task_sel = col_count - 1;
-        }
-    }
-
-    /// Cycle through projects (top chip strip), wrapping at the ends. Clamp
-    /// the task cursor against the newly-focused project immediately so the
-    /// kanban never lands on an out-of-range row or an empty column with a
-    /// non-empty neighbor.
-    pub fn projects_move_down(&mut self) {
-        let n = self.projects.projects.len();
-        if n == 0 {
-            return;
-        }
-        self.projects_sel = (self.projects_sel + 1) % n;
-        self.clamp_projects_cursor_jump_if_empty();
-    }
-
-    pub fn projects_move_up(&mut self) {
-        let n = self.projects.projects.len();
-        if n == 0 {
-            return;
-        }
-        self.projects_sel = if self.projects_sel == 0 {
-            n - 1
-        } else {
-            self.projects_sel - 1
-        };
-        self.clamp_projects_cursor_jump_if_empty();
-    }
-
-    /// Move cursor down within the current kanban column.
-    pub fn projects_task_next(&mut self) {
-        let col_count = self.kanban_column_len(self.projects_col);
-        if col_count == 0 {
-            return;
-        }
-        self.projects_task_sel = (self.projects_task_sel + 1).min(col_count - 1);
-    }
-
-    pub fn projects_task_prev(&mut self) {
-        self.projects_task_sel = self.projects_task_sel.saturating_sub(1);
-    }
-
-    /// Move kanban cursor one column right (Planning → Running → Review
-    /// → Merging → Done). Clamps the row cursor to the destination
-    /// column's length so the selection is preserved where possible
-    /// instead of snapping back to the top card.
-    pub fn projects_col_right(&mut self) {
-        if self.projects_col < 4 {
-            self.projects_col += 1;
-            self.clamp_projects_cursor();
-        }
-    }
-
-    /// Move kanban cursor one column left. Clamps the row cursor to the
-    /// destination column's length rather than resetting it to the top.
-    pub fn projects_col_left(&mut self) {
-        if self.projects_col > 0 {
-            self.projects_col -= 1;
-            self.clamp_projects_cursor();
-        }
-    }
-
     pub fn selected_project(&self) -> Option<&crate::orchestrator::Project> {
-        self.projects.projects.get(self.projects_sel)
+        self.projects.selected_project()
     }
 
-    /// Tasks in the currently-selected project that match the given
-    /// kanban column. Columns are derived from `TaskStatus` + worker
-    /// presence: a Running task with no workers is in "Planning"
-    /// (orchestrator is still decomposing); Running + workers is true
-    /// Running; Review/Merging/Done map straight from status.
-    ///
-    /// Indices: 0=Planning, 1=Running, 2=Review, 3=Merging, 4=Done.
-    /// Order matches the underlying `tasks` Vec (already sorted
-    /// newest-first by the orchestrator).
     pub fn kanban_column_tasks(&self, col: usize) -> Vec<&crate::orchestrator::TaskState> {
-        let Some(p) = self.selected_project() else {
-            return Vec::new();
-        };
-        let Some(tasks) = self.projects.tasks.get(&p.id) else {
-            return Vec::new();
-        };
-        use crate::orchestrator::TaskStatus;
-        tasks
-            .iter()
-            .filter(|t| match col {
-                0 => t.status == TaskStatus::Running && t.workers.is_empty(),
-                1 => t.status == TaskStatus::Running && !t.workers.is_empty(),
-                2 => t.status == TaskStatus::Review,
-                3 => t.status == TaskStatus::Merging,
-                _ => t.status == TaskStatus::Done,
-            })
-            .map(|t| t.as_ref())
-            .collect()
+        self.projects.kanban_column_tasks(col)
     }
 
-    pub fn kanban_column_len(&self, col: usize) -> usize {
-        self.kanban_column_tasks(col).len()
-    }
-
-    /// Backlog tasks for the currently-selected project, in scan order
-    /// (newest first, same as the underlying `tasks` Vec). Backlog tasks
-    /// don't appear in the kanban; the Backlog popup (`View::Backlog`) is
-    /// where they're listed and started.
     pub fn backlog_tasks(&self) -> Vec<&crate::orchestrator::TaskState> {
-        let Some(p) = self.selected_project() else {
-            return Vec::new();
-        };
-        let Some(tasks) = self.projects.tasks.get(&p.id) else {
-            return Vec::new();
-        };
-        use crate::orchestrator::TaskStatus;
-        tasks
-            .iter()
-            .filter(|t| t.status == TaskStatus::Backlog)
-            .map(|t| t.as_ref())
-            .collect()
+        self.projects.backlog_tasks()
     }
 
     pub fn open_backlog(&mut self) {
-        self.backlog_sel = 0;
+        self.projects.backlog_sel = 0;
         self.view = View::Backlog;
     }
 
@@ -725,26 +1042,12 @@ impl App {
         self.view = View::Grid;
     }
 
-    pub fn backlog_up(&mut self) {
-        if self.backlog_sel > 0 {
-            self.backlog_sel -= 1;
-        }
-    }
-
-    pub fn backlog_down(&mut self) {
-        let n = self.backlog_tasks().len();
-        if n > 0 && self.backlog_sel + 1 < n {
-            self.backlog_sel += 1;
-        }
-    }
-
     pub fn selected_backlog_task(&self) -> Option<&crate::orchestrator::TaskState> {
-        self.backlog_tasks().get(self.backlog_sel).copied()
+        self.projects.selected_backlog_task()
     }
 
     pub fn selected_project_task(&self) -> Option<&crate::orchestrator::TaskState> {
-        let col = self.kanban_column_tasks(self.projects_col);
-        col.get(self.projects_task_sel).copied()
+        self.projects.selected_project_task()
     }
 
     /// Approve the focused Review task. If the task has a PR, flip
@@ -882,7 +1185,7 @@ impl App {
     /// tokens, current tool, idle/processing/waiting).
     pub fn sessions_by_tmux(&self) -> HashMap<&str, &SessionInfo> {
         let mut out = HashMap::new();
-        for s in &self.last_sessions {
+        for s in &self.sessions.last_sessions {
             if let Some(name) = s.tmux_session.as_deref() {
                 out.insert(name, s);
             }
@@ -891,78 +1194,15 @@ impl App {
     }
 
     pub fn update_metrics(&mut self, m: MetricsAnalysis) {
-        let prev_sid = self
-            .metrics_selected
-            .and_then(|i| self.metrics_rows.get(i))
-            .map(|r| r.session_id.clone());
-        self.metrics_rows = m.selectable_sessions();
-        self.metrics = Some(m);
-        self.metrics_progress = None;
-        // Keep an existing selection pinned to its session across refreshes, but
-        // never auto-select: the tab opens at the top (Overview) and stays
-        // freely scrollable until the user navigates into the session lists.
-        self.metrics_selected =
-            prev_sid.and_then(|sid| self.metrics_rows.iter().position(|r| r.session_id == sid));
+        self.metrics.update(m);
     }
 
     pub fn update_metrics_progress(&mut self, scanned: usize, total: usize) {
-        if self.metrics.is_some() {
-            return;
-        }
-        self.metrics_progress = Some((scanned, total));
-    }
-
-    pub fn metrics_scroll_down(&mut self) {
-        self.metrics_scroll = self.metrics_scroll.saturating_add(3);
-    }
-
-    pub fn metrics_scroll_up(&mut self) {
-        self.metrics_scroll = self.metrics_scroll.saturating_sub(3);
-    }
-
-    /// Down/`j` on the Metrics tab. With a row selected, advance the cursor
-    /// (the renderer keeps it on screen). With nothing selected, engage the
-    /// first session row already visible — so selection only kicks in once the
-    /// lists scroll into view — otherwise keep free-scrolling toward them.
-    pub fn metrics_nav_down(&mut self) {
-        match self.metrics_selected {
-            Some(i) if !self.metrics_rows.is_empty() => {
-                self.metrics_selected = Some((i + 1).min(self.metrics_rows.len() - 1));
-            }
-            _ => match self.first_visible_metrics_row() {
-                Some(idx) => self.metrics_selected = Some(idx),
-                None => self.metrics_scroll_down(),
-            },
-        }
-    }
-
-    /// Up/`k` on the Metrics tab. Walk the cursor back up; pressing up past the
-    /// first session row releases the selection so free-scrolling (and reaching
-    /// the Overview at the very top) resumes.
-    pub fn metrics_nav_up(&mut self) {
-        match self.metrics_selected {
-            Some(0) => self.metrics_selected = None,
-            Some(i) => self.metrics_selected = Some(i - 1),
-            None => self.metrics_scroll_up(),
-        }
-    }
-
-    /// Index (into [`Self::metrics_rows`]) of the first selectable session row
-    /// currently inside the viewport, using the offsets/height the renderer
-    /// last synced. `None` when no session row is on screen.
-    fn first_visible_metrics_row(&self) -> Option<usize> {
-        let h = self.metrics_view_height;
-        if h == 0 {
-            return None;
-        }
-        let top = self.metrics_scroll;
-        self.metrics_row_lines
-            .iter()
-            .position(|&l| (l as u16) >= top && (l as u16) < top.saturating_add(h))
+        self.metrics.update_progress(scanned, total);
     }
 
     pub fn selected_metrics_session(&self) -> Option<&SelectableSession> {
-        self.metrics_selected.and_then(|i| self.metrics_rows.get(i))
+        self.metrics.selected_session()
     }
 
     pub fn enter_folder_picker(&mut self) {
@@ -1015,7 +1255,7 @@ impl App {
             .or_else(dirs::home_dir)
             .unwrap_or_else(|| PathBuf::from("/"));
         self.folder_picker = Some(FolderPicker::new(start));
-        self.creating_project_task = true;
+        self.projects.creating_task = true;
         self.view = View::FolderPicker;
     }
 
@@ -1030,7 +1270,7 @@ impl App {
             .or_else(dirs::home_dir)
             .unwrap_or_else(|| PathBuf::from("/"));
         self.folder_picker = Some(FolderPicker::new(start));
-        self.registering_project_only = true;
+        self.projects.registering_only = true;
         self.view = View::FolderPicker;
     }
 
@@ -1055,8 +1295,8 @@ impl App {
     /// spawn happens in [`Self::submit_project_task`].
     pub fn enter_project_task_prompt(&mut self, cwd: String) {
         self.folder_picker = None;
-        self.projects_pending_cwd = Some(cwd);
-        self.projects_pending_agent_id = None;
+        self.projects.pending_cwd = Some(cwd);
+        self.projects.pending_agent_id = None;
         self.prompt_buffer.clear();
         self.dispatch_target = None;
         self.view = View::PromptInput;
@@ -1066,7 +1306,7 @@ impl App {
     /// next entry in the resolved-agents map. No-op when fewer than two
     /// agents are configured. Called from the prompt-input Tab handler.
     pub fn cycle_pending_agent_id(&mut self) {
-        if self.projects_pending_cwd.is_none() {
+        if self.projects.pending_cwd.is_none() {
             return;
         }
         let agents = config::get().resolved_agents();
@@ -1075,21 +1315,23 @@ impl App {
             return;
         }
         let current = self
-            .projects_pending_agent_id
+            .projects
+            .pending_agent_id
             .clone()
             .unwrap_or_else(|| config::get().default_orchestrator_agent_id());
         let idx = ids.iter().position(|id| id == &current).unwrap_or(0);
         let next = ids[(idx + 1) % ids.len()].clone();
-        self.projects_pending_agent_id = Some(next);
+        self.projects.pending_agent_id = Some(next);
     }
 
     /// Display label for the agent that will run the pending project task,
     /// resolving `None` to the configured default. Returns `None` outside
     /// the project-creation flow.
     pub fn pending_agent_label(&self) -> Option<String> {
-        self.projects_pending_cwd.as_ref()?;
+        self.projects.pending_cwd.as_ref()?;
         Some(
-            self.projects_pending_agent_id
+            self.projects
+                .pending_agent_id
                 .clone()
                 .unwrap_or_else(|| config::get().default_orchestrator_agent_id()),
         )
@@ -1119,8 +1361,8 @@ impl App {
     pub fn close_folder_picker(&mut self) {
         self.folder_picker = None;
         self.gh_create_input = None;
-        self.creating_project_task = false;
-        self.registering_project_only = false;
+        self.projects.creating_task = false;
+        self.projects.registering_only = false;
         self.view = View::Grid;
     }
 
@@ -1171,23 +1413,23 @@ impl App {
 
     pub fn enter_prompt_input(&mut self) {
         self.prompt_buffer.clear();
-        self.dispatch_target = Self::compute_dispatch_target(&self.groups);
+        self.dispatch_target = Self::compute_dispatch_target(&self.sessions.groups);
         self.view = View::PromptInput;
     }
 
     pub fn close_prompt_input(&mut self) {
         self.prompt_buffer.clear();
         self.dispatch_target = None;
-        self.projects_pending_cwd = None;
-        self.projects_pending_agent_id = None;
-        self.creating_project_task = false;
+        self.projects.pending_cwd = None;
+        self.projects.pending_agent_id = None;
+        self.projects.creating_task = false;
         self.view = View::Grid;
     }
 
     /// True when the prompt input should be routed through the orchestrator
     /// project-task flow instead of the regular session-dispatch flow.
     pub fn prompt_input_for_project(&self) -> bool {
-        self.projects_pending_cwd.is_some()
+        self.projects.pending_cwd.is_some()
     }
 
     /// Consumes the pending cwd, prompt, and agent override, clears
@@ -1195,9 +1437,9 @@ impl App {
     /// Returns `None` if no project task is pending. The override is
     /// `None` when the user didn't cycle off the configured default.
     pub fn submit_project_task(&mut self) -> Option<(String, String, Option<String>)> {
-        let cwd = self.projects_pending_cwd.take()?;
-        let agent_id = self.projects_pending_agent_id.take();
-        self.creating_project_task = false;
+        let cwd = self.projects.pending_cwd.take()?;
+        let agent_id = self.projects.pending_agent_id.take();
+        self.projects.creating_task = false;
         self.view = View::Grid;
         let prompt = std::mem::take(&mut self.prompt_buffer);
         Some((cwd, prompt, agent_id))
@@ -1232,7 +1474,8 @@ impl App {
     /// Title currently being edited, for the modal's "renaming X" header.
     pub fn rename_original_title(&self) -> Option<&str> {
         let sid = self.rename_target.as_deref()?;
-        self.groups
+        self.sessions
+            .groups
             .iter()
             .flat_map(|g| g.sessions.iter())
             .find(|s| s.session_id == sid)
@@ -1251,7 +1494,7 @@ impl App {
         if title.is_empty() {
             return None;
         }
-        for group in &mut self.groups {
+        for group in &mut self.sessions.groups {
             for session in &mut group.sessions {
                 if session.session_id == sid {
                     session.title = Some(title.clone());
@@ -1303,11 +1546,11 @@ impl App {
         //      to the timeout and the user sees a "session that just
         //      sits there empty" — the real-world failure mode that
         //      motivated this comment.
-        // Walk the unfiltered scan set, not `self.groups`: orchestrator
-        // and worker tmux names are hidden from `groups` by the Sessions
-        // view filter, so checking `groups` here would block dispatch
+        // Walk the unfiltered scan set, not `self.sessions.groups`:
+        // orchestrator and worker tmux names are hidden from `groups` by the
+        // Sessions view filter, so checking `groups` here would block dispatch
         // forever for the very sessions we need to dispatch into.
-        let scanner_idle = self.last_sessions.iter().any(|s| {
+        let scanner_idle = self.sessions.last_sessions.iter().any(|s| {
             s.tmux_session.as_deref() == Some(pd.tmux.as_str()) && s.state == SessionState::Idle
         });
         if scanner_idle {
@@ -1515,7 +1758,13 @@ impl App {
             self.set_status("no project selected".into());
             return;
         };
-        let n = self.projects.tasks.get(&p.id).map(|v| v.len()).unwrap_or(0);
+        let n = self
+            .projects
+            .snapshot
+            .tasks
+            .get(&p.id)
+            .map(|v| v.len())
+            .unwrap_or(0);
         let display = format!("{} ({} task{})", p.name, n, if n == 1 { "" } else { "s" });
         self.pending_confirm = Some(PendingConfirm::ProjectDelete(PendingProjectDelete {
             project_id: p.id.clone(),
@@ -1580,7 +1829,7 @@ impl App {
     /// non-Idle state (WaitingForInput or Processing).
     /// Returns true if an ack was recorded.
     pub fn ack_selected(&mut self) -> bool {
-        let Some(session) = self.selected_session_info() else {
+        let Some(session) = self.sessions.selected_session_info() else {
             return false;
         };
         if session.state == SessionState::Idle {
@@ -1588,72 +1837,18 @@ impl App {
         }
         let id = session.session_id.clone();
         let watermark = session.last_activity;
-        self.acks.ack(&id, watermark);
+        self.sessions.acks.ack(&id, watermark);
         // Apply immediately so the UI reflects the ack before the next scan tick.
+        let (sel_group, sel_in_group) = (self.sessions.sel_group, self.sessions.sel_in_group);
         if let Some(s) = self
+            .sessions
             .groups
-            .get_mut(self.sel_group)
-            .and_then(|g| g.sessions.get_mut(self.sel_in_group))
+            .get_mut(sel_group)
+            .and_then(|g| g.sessions.get_mut(sel_in_group))
         {
             s.state = SessionState::Idle;
         }
         true
-    }
-
-    pub fn move_right(&mut self) {
-        if let Some(group) = self.groups.get(self.sel_group) {
-            if group.sessions.is_empty() {
-                return;
-            }
-            self.sel_in_group = (self.sel_in_group + 1) % group.sessions.len();
-        }
-    }
-
-    pub fn move_left(&mut self) {
-        if let Some(group) = self.groups.get(self.sel_group) {
-            if group.sessions.is_empty() {
-                return;
-            }
-            if self.sel_in_group == 0 {
-                self.sel_in_group = group.sessions.len() - 1;
-            } else {
-                self.sel_in_group -= 1;
-            }
-        }
-    }
-
-    pub fn move_down(&mut self) {
-        if self.groups.is_empty() {
-            return;
-        }
-        let cols = self.grid_cols as usize;
-        let group = &self.groups[self.sel_group];
-        let current_col = self.sel_in_group % cols;
-        let next = self.sel_in_group + cols;
-        if next < group.sessions.len() {
-            self.sel_in_group = next;
-        } else if self.sel_group + 1 < self.groups.len() {
-            self.sel_group += 1;
-            let new_group = &self.groups[self.sel_group];
-            self.sel_in_group = current_col.min(new_group.sessions.len().saturating_sub(1));
-        }
-    }
-
-    pub fn move_up(&mut self) {
-        if self.groups.is_empty() {
-            return;
-        }
-        let cols = self.grid_cols as usize;
-        let current_col = self.sel_in_group % cols;
-        if self.sel_in_group >= cols {
-            self.sel_in_group -= cols;
-        } else if self.sel_group > 0 {
-            self.sel_group -= 1;
-            let prev_group = &self.groups[self.sel_group];
-            let last_row_start = prev_group.sessions.len().saturating_sub(1) / cols * cols;
-            self.sel_in_group =
-                (last_row_start + current_col).min(prev_group.sessions.len().saturating_sub(1));
-        }
     }
 
     pub fn scroll_down(&mut self) {
@@ -1720,17 +1915,15 @@ impl App {
     }
 
     pub fn selected_session_id(&self) -> Option<String> {
-        self.selected_session_info().map(|s| s.session_id.clone())
+        self.sessions.selected_session_id()
     }
 
     pub fn selected_session_info(&self) -> Option<&SessionInfo> {
-        self.groups
-            .get(self.sel_group)
-            .and_then(|g| g.sessions.get(self.sel_in_group))
+        self.sessions.selected_session_info()
     }
 
     pub fn update_sessions(&mut self, mut sessions: Vec<SessionInfo>) {
-        let acks_active = !self.acks.is_empty();
+        let acks_active = !self.sessions.acks.is_empty();
         if acks_active {
             // Apply user acks: if a non-Idle session is still at its acked
             // watermark, downgrade it to Idle. Any advance in last_activity clears
@@ -1738,56 +1931,62 @@ impl App {
             for s in &mut sessions {
                 if s.state != SessionState::Idle
                     && s.state != SessionState::Inactive
-                    && self.acks.is_acked(&s.session_id, s.last_activity)
+                    && self.sessions.acks.is_acked(&s.session_id, s.last_activity)
                 {
                     s.state = SessionState::Idle;
                 }
             }
             let live_ids: HashSet<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
-            self.acks.retain_existing(&live_ids);
+            self.sessions.acks.retain_existing(&live_ids);
         }
 
-        self.last_sessions = sessions;
+        self.sessions.last_sessions = sessions;
         self.rebuild_groups();
         self.last_refresh = Instant::now();
 
         let current_ids: HashSet<String> = self
+            .sessions
             .groups
             .iter()
             .flat_map(|g| g.sessions.iter().map(|s| s.session_id.clone()))
             .collect();
         // First tick seeds known ids without hijacking the cursor; later ticks
         // jump selection to a freshly-appeared session so it gets focus.
-        let new_selection = self.known_session_ids.as_ref().and_then(|known| {
-            self.groups.iter().enumerate().find_map(|(gi, group)| {
-                group
-                    .sessions
-                    .iter()
-                    .position(|s| !known.contains(&s.session_id))
-                    .map(|si| (gi, si))
-            })
+        let new_selection = self.sessions.known_session_ids.as_ref().and_then(|known| {
+            self.sessions
+                .groups
+                .iter()
+                .enumerate()
+                .find_map(|(gi, group)| {
+                    group
+                        .sessions
+                        .iter()
+                        .position(|s| !known.contains(&s.session_id))
+                        .map(|si| (gi, si))
+                })
         });
-        self.known_session_ids = Some(current_ids);
+        self.sessions.known_session_ids = Some(current_ids);
         if let Some((gi, si)) = new_selection {
-            self.sel_group = gi;
-            self.sel_in_group = si;
+            self.sessions.sel_group = gi;
+            self.sessions.sel_in_group = si;
         }
     }
 
     fn rebuild_groups(&mut self) {
         let prev_id = self.selected_session_id();
-        let acks_active = !self.acks.is_empty();
-        let roles = self.projects.roles_by_tmux();
+        let acks_active = !self.sessions.acks.is_empty();
+        let roles = self.projects.snapshot.roles_by_tmux();
 
         let sessions: Vec<SessionInfo> = self
+            .sessions
             .last_sessions
             .iter()
-            .filter(|s| self.show_inactive || s.state != SessionState::Inactive)
+            .filter(|s| self.sessions.show_inactive || s.state != SessionState::Inactive)
             .filter(|s| {
                 // Hide tmux sessions claimed by an orchestrator or worker
                 // unless the user has asked to see them. Sessions without a
                 // tmux name (legacy/manual launches) always show.
-                if self.show_orch_workers {
+                if self.sessions.show_orch_workers {
                     return true;
                 }
                 match s.tmux_session.as_deref() {
@@ -1818,7 +2017,7 @@ impl App {
             }
         }
 
-        self.groups = group_map
+        self.sessions.groups = group_map
             .into_iter()
             .map(|(cwd, sessions)| {
                 let name = sessions
@@ -1834,31 +2033,34 @@ impl App {
             .collect();
 
         // Sort groups alphabetically by name for stable ordering.
-        self.groups.sort_by_key(|a| a.name.to_lowercase());
+        self.sessions.groups.sort_by_key(|a| a.name.to_lowercase());
 
         if self.view == View::PromptInput {
-            self.dispatch_target = Self::compute_dispatch_target(&self.groups);
+            self.dispatch_target = Self::compute_dispatch_target(&self.sessions.groups);
         }
 
         // Restore selection by session id
         if let Some(id) = prev_id {
-            for (gi, group) in self.groups.iter().enumerate() {
+            for (gi, group) in self.sessions.groups.iter().enumerate() {
                 if let Some(si) = group.sessions.iter().position(|s| s.session_id == id) {
-                    self.sel_group = gi;
-                    self.sel_in_group = si;
+                    self.sessions.sel_group = gi;
+                    self.sessions.sel_in_group = si;
                     return;
                 }
             }
         }
 
         // Clamp selection
-        if self.groups.is_empty() {
-            self.sel_group = 0;
-            self.sel_in_group = 0;
+        if self.sessions.groups.is_empty() {
+            self.sessions.sel_group = 0;
+            self.sessions.sel_in_group = 0;
         } else {
-            self.sel_group = self.sel_group.min(self.groups.len() - 1);
-            let max_in = self.groups[self.sel_group].sessions.len().saturating_sub(1);
-            self.sel_in_group = self.sel_in_group.min(max_in);
+            self.sessions.sel_group = self.sessions.sel_group.min(self.sessions.groups.len() - 1);
+            let max_in = self.sessions.groups[self.sessions.sel_group]
+                .sessions
+                .len()
+                .saturating_sub(1);
+            self.sessions.sel_in_group = self.sessions.sel_in_group.min(max_in);
         }
     }
 
@@ -1869,19 +2071,15 @@ impl App {
 
     pub fn update_grid_cols(&mut self, width: u16) {
         let cell_width = config::get().ui.cell_width.max(1);
-        self.grid_cols = (width / cell_width).max(1);
+        self.sessions.grid_cols = (width / cell_width).max(1);
     }
 
     pub fn session_count(&self) -> usize {
-        self.groups.iter().map(|g| g.sessions.len()).sum()
+        self.sessions.session_count()
     }
 
     pub fn attention_count(&self) -> usize {
-        self.groups
-            .iter()
-            .flat_map(|g| &g.sessions)
-            .filter(|s| s.needs_attention())
-            .count()
+        self.sessions.attention_count()
     }
 
     pub fn log_state_dump(&self) {
@@ -1889,10 +2087,10 @@ impl App {
         log::info!(
             "view={:?} sel_group={} sel_in_group={} grid_cols={} groups={} sessions={} attention={}",
             self.view,
-            self.sel_group,
-            self.sel_in_group,
-            self.grid_cols,
-            self.groups.len(),
+            self.sessions.sel_group,
+            self.sessions.sel_in_group,
+            self.sessions.grid_cols,
+            self.sessions.groups.len(),
             self.session_count(),
             self.attention_count()
         );
@@ -1922,10 +2120,10 @@ impl App {
                 tmux
             );
         }
-        if !self.acks.is_empty() {
+        if !self.sessions.acks.is_empty() {
             log::info!("acks: active");
         }
-        for (gi, group) in self.groups.iter().enumerate() {
+        for (gi, group) in self.sessions.groups.iter().enumerate() {
             log::info!(
                 "group[{}]: name={} cwd={} sessions={}",
                 gi,
@@ -1963,56 +2161,24 @@ impl App {
         if self.selected_project_task().is_none() {
             return false;
         }
-        self.result_artifact_sel = 0;
-        self.result_scroll = 0;
-        self.result_artifact_expanded = false;
+        self.projects.result_artifact_sel = 0;
+        self.projects.result_scroll = 0;
+        self.projects.result_artifact_expanded = false;
         self.view = View::ProjectsResult;
         true
     }
 
     pub fn close_projects_result(&mut self) {
         self.view = View::Grid;
-        self.result_artifact_sel = 0;
-        self.result_scroll = 0;
-        self.result_artifact_expanded = false;
-    }
-
-    pub fn toggle_result_artifact_expanded(&mut self) {
-        if self.selected_result_artifact().is_none() {
-            return;
-        }
-        self.result_artifact_expanded = !self.result_artifact_expanded;
-    }
-
-    pub fn result_artifact_next(&mut self) {
-        let n = self
-            .selected_project_task()
-            .map(|t| t.artifacts.len())
-            .unwrap_or(0);
-        if n == 0 {
-            self.result_artifact_sel = 0;
-            return;
-        }
-        self.result_artifact_sel = (self.result_artifact_sel + 1).min(n - 1);
-    }
-
-    pub fn result_artifact_prev(&mut self) {
-        self.result_artifact_sel = self.result_artifact_sel.saturating_sub(1);
-    }
-
-    /// PgUp/PgDn handler. Negative steps scroll up; the renderer clamps the
-    /// offset against content length so we never scroll past the end.
-    pub fn result_scroll_by(&mut self, delta: i32) {
-        let cur = self.result_scroll as i32;
-        let next = (cur + delta).max(0);
-        self.result_scroll = next.min(u16::MAX as i32) as u16;
+        self.projects.result_artifact_sel = 0;
+        self.projects.result_scroll = 0;
+        self.projects.result_artifact_expanded = false;
     }
 
     /// The artifact under the popup cursor, if any. Used by the `c` and `o`
     /// keybinds to know what path to act on.
     pub fn selected_result_artifact(&self) -> Option<&crate::orchestrator::Artifact> {
-        let t = self.selected_project_task()?;
-        t.artifacts.get(self.result_artifact_sel)
+        self.projects.selected_result_artifact()
     }
 }
 
@@ -2123,7 +2289,7 @@ mod tests {
         for pd in &mut app.pending_dispatch {
             pd.queued_at = Instant::now() - Duration::from_secs(6);
         }
-        app.last_sessions = vec![
+        app.sessions.last_sessions = vec![
             fake_session("tmux-a", SessionState::Idle),
             fake_session("tmux-b", SessionState::Idle),
         ];
@@ -2157,7 +2323,7 @@ mod tests {
         );
         app.update_projects(snap1);
 
-        assert_eq!(app.projects_col, 1, "Running+workers should land in col 1");
+        assert_eq!(app.projects.col, 1, "Running+workers should land in col 1");
         assert_eq!(
             app.selected_project_task().map(|t| t.task_id.clone()),
             Some("t-1".to_string()),
@@ -2168,7 +2334,7 @@ mod tests {
         app.update_projects(snap2);
 
         assert_eq!(
-            app.projects_col, 2,
+            app.projects.col, 2,
             "cursor should follow t-1 into the Review column"
         );
         assert_eq!(
@@ -2214,7 +2380,7 @@ mod tests {
         app.current_tab = Tab::Projects;
         app.update_projects(snapshot(p, vec![t]));
         // Cursor lands on the Review task (col 2, row 0).
-        assert_eq!(app.projects_col, 2);
+        assert_eq!(app.projects.col, 2);
 
         assert_eq!(app.approve_review_task(), ApproveOutcome::PrApproved);
 
@@ -2250,7 +2416,7 @@ mod tests {
         let mut app = App::new();
         app.current_tab = Tab::Projects;
         app.update_projects(snapshot(p, vec![t]));
-        assert_eq!(app.projects_col, 2);
+        assert_eq!(app.projects.col, 2);
 
         assert_eq!(app.approve_review_task(), ApproveOutcome::DoneNoPr);
 
@@ -2353,7 +2519,7 @@ mod tests {
             vec![task("p-1", "t-1", TaskStatus::Running, true)],
         );
         app.update_projects(snap1);
-        assert_eq!(app.projects_col, 1);
+        assert_eq!(app.projects.col, 1);
 
         // Task vanishes from the snapshot entirely.
         let snap2 = snapshot(p, Vec::new());
@@ -2361,10 +2527,10 @@ mod tests {
 
         assert!(app.selected_project_task().is_none());
         assert_eq!(
-            app.projects_col, 1,
+            app.projects.col, 1,
             "column should stay where it was when task disappears",
         );
-        assert_eq!(app.projects_task_sel, 0, "row should clamp to 0");
+        assert_eq!(app.projects.task_sel, 0, "row should clamp to 0");
     }
 
     #[test]
@@ -2379,17 +2545,17 @@ mod tests {
             (p2, vec![task("p-2", "t-plan", TaskStatus::Running, false)]),
         ]));
 
-        assert_eq!(app.projects_sel, 0);
-        assert_eq!(app.projects_col, 2, "first project starts in Review");
+        assert_eq!(app.projects.sel, 0);
+        assert_eq!(app.projects.col, 2, "first project starts in Review");
         assert_eq!(
             app.selected_project_task().map(|t| t.task_id.as_str()),
             Some("t-review")
         );
 
-        app.projects_move_down();
-        assert_eq!(app.projects_sel, 1);
+        app.projects.move_down();
+        assert_eq!(app.projects.sel, 1);
         assert_eq!(
-            app.projects_col, 0,
+            app.projects.col, 0,
             "switching projects should jump from empty Review to Planning"
         );
         assert_eq!(
@@ -2397,13 +2563,13 @@ mod tests {
             Some("t-plan")
         );
 
-        app.projects_move_down();
-        assert_eq!(app.projects_sel, 0, "L/]/down wraps to first project");
-        assert_eq!(app.projects_col, 2);
+        app.projects.move_down();
+        assert_eq!(app.projects.sel, 0, "L/]/down wraps to first project");
+        assert_eq!(app.projects.col, 2);
 
-        app.projects_move_up();
-        assert_eq!(app.projects_sel, 1, "H/[/up wraps to last project");
-        assert_eq!(app.projects_col, 0);
+        app.projects.move_up();
+        assert_eq!(app.projects.sel, 1, "H/[/up wraps to last project");
+        assert_eq!(app.projects.col, 0);
     }
 
     #[test]
@@ -2414,17 +2580,17 @@ mod tests {
         // Initial snapshot: empty (the task hasn't been written yet from
         // the orchestrator's POV, or is still in Backlog).
         app.update_projects(snapshot(p.clone(), Vec::new()));
-        app.pending_focus_task_id = Some("t-new".to_string());
-        app.pending_focus_budget = 5;
+        app.projects.pending_focus_task_id = Some("t-new".to_string());
+        app.projects.pending_focus_budget = 5;
         // New snapshot: task appears as Running with no workers → Planning column.
         app.update_projects(snapshot(
             p,
             vec![task("p-1", "t-new", TaskStatus::Running, false)],
         ));
-        assert_eq!(app.projects_col, 0, "cursor should land on Planning");
-        assert_eq!(app.projects_task_sel, 0);
+        assert_eq!(app.projects.col, 0, "cursor should land on Planning");
+        assert_eq!(app.projects.task_sel, 0);
         assert!(
-            app.pending_focus_task_id.is_none(),
+            app.projects.pending_focus_task_id.is_none(),
             "pending should clear after success"
         );
     }
@@ -2435,14 +2601,17 @@ mod tests {
         app.current_tab = Tab::Projects;
         let p = project("p-1");
         app.update_projects(snapshot(p.clone(), Vec::new()));
-        app.pending_focus_task_id = Some("t-ghost".to_string());
-        app.pending_focus_budget = 2;
+        app.projects.pending_focus_task_id = Some("t-ghost".to_string());
+        app.projects.pending_focus_budget = 2;
         // Two empty snapshots → budget exhausted, pending cleared.
         app.update_projects(snapshot(p.clone(), Vec::new()));
-        assert!(app.pending_focus_task_id.is_some(), "still pending after 1");
+        assert!(
+            app.projects.pending_focus_task_id.is_some(),
+            "still pending after 1"
+        );
         app.update_projects(snapshot(p, Vec::new()));
         assert!(
-            app.pending_focus_task_id.is_none(),
+            app.projects.pending_focus_task_id.is_none(),
             "cleared after budget=0"
         );
     }
@@ -2455,13 +2624,13 @@ mod tests {
     fn enter_todo_panel_reloads_from_disk() {
         crate::test_util::with_temp_home(|| {
             let mut app = App::new();
-            assert!(app.todo.is_empty(), "no disk I/O in App::new()");
+            assert!(app.todo.list.is_empty(), "no disk I/O in App::new()");
             // Simulate an external writer landing while the panel is closed.
             let mut external = crate::todo::TodoList::load();
             external.add("written elsewhere");
             app.enter_todo_panel();
-            assert_eq!(app.todo.len(), 1);
-            assert_eq!(app.todo.items()[0].text, "written elsewhere");
+            assert_eq!(app.todo.list.len(), 1);
+            assert_eq!(app.todo.list.items()[0].text, "written elsewhere");
         });
     }
 }

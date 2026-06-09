@@ -51,46 +51,48 @@ pub(crate) async fn handle_key(
         (View::Grid, KeyCode::Tab | KeyCode::BackTab) => {
             let was_metrics = app.current_tab == Tab::Metrics;
             app.cycle_tab();
-            if !was_metrics && app.current_tab == Tab::Metrics && app.metrics.is_none() {
+            if !was_metrics && app.current_tab == Tab::Metrics && app.metrics.analysis.is_none() {
                 spawn_metrics();
             }
         }
         (View::Grid, KeyCode::Char('m')) if on_sessions => {
-            let needs_compute = app.metrics.is_none();
+            let needs_compute = app.metrics.analysis.is_none();
             app.set_tab(Tab::Metrics);
             if needs_compute {
                 spawn_metrics();
             }
         }
-        (View::Grid, KeyCode::Right | KeyCode::Char('l')) if on_sessions => app.move_right(),
-        (View::Grid, KeyCode::Left | KeyCode::Char('h')) if on_sessions => app.move_left(),
-        (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_sessions => app.move_down(),
-        (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_sessions => app.move_up(),
+        (View::Grid, KeyCode::Right | KeyCode::Char('l')) if on_sessions => {
+            app.sessions.move_right()
+        }
+        (View::Grid, KeyCode::Left | KeyCode::Char('h')) if on_sessions => app.sessions.move_left(),
+        (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_sessions => app.sessions.move_down(),
+        (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_sessions => app.sessions.move_up(),
         (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_metrics => {
-            app.metrics_nav_down();
+            app.metrics.nav_down();
         }
         (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_metrics => {
-            app.metrics_nav_up();
+            app.metrics.nav_up();
         }
         // Kanban: j/k moves the row cursor within the focused
         // column; h/l switches column; H/L (or [/]) cycles project chips.
         (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_projects => {
-            app.projects_task_next();
+            app.projects.task_next();
         }
         (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_projects => {
-            app.projects_task_prev();
+            app.projects.task_prev();
         }
         (View::Grid, KeyCode::Right | KeyCode::Char('l')) if on_projects => {
-            app.projects_col_right();
+            app.projects.col_right();
         }
         (View::Grid, KeyCode::Left | KeyCode::Char('h')) if on_projects => {
-            app.projects_col_left();
+            app.projects.col_left();
         }
         (View::Grid, KeyCode::Char(']') | KeyCode::Char('L')) if on_projects => {
-            app.projects_move_down();
+            app.projects.move_down();
         }
         (View::Grid, KeyCode::Char('[') | KeyCode::Char('H')) if on_projects => {
-            app.projects_move_up();
+            app.projects.move_up();
         }
         (View::Grid, KeyCode::Char(' ')) if on_projects => {
             use cc_hub_lib::app::ApproveOutcome;
@@ -158,16 +160,16 @@ pub(crate) async fn handle_key(
             app.close_projects_result();
         }
         (View::ProjectsResult, KeyCode::Down | KeyCode::Char('j')) => {
-            app.result_artifact_next();
+            app.projects.result_artifact_next();
         }
         (View::ProjectsResult, KeyCode::Up | KeyCode::Char('k')) => {
-            app.result_artifact_prev();
+            app.projects.result_artifact_prev();
         }
         (View::ProjectsResult, KeyCode::PageDown) => {
-            app.result_scroll_by(10);
+            app.projects.result_scroll_by(10);
         }
         (View::ProjectsResult, KeyCode::PageUp) => {
-            app.result_scroll_by(-10);
+            app.projects.result_scroll_by(-10);
         }
         (View::ProjectsResult, KeyCode::Char('c')) => {
             match app.selected_result_artifact().map(|a| a.path.clone()) {
@@ -179,7 +181,7 @@ pub(crate) async fn handle_key(
             }
         }
         (View::ProjectsResult, KeyCode::Char('e')) => {
-            app.toggle_result_artifact_expanded();
+            app.projects.toggle_result_artifact_expanded();
         }
         (View::ProjectsResult, KeyCode::Char('o')) => {
             match app.selected_result_artifact().map(|a| a.path.clone()) {
@@ -380,10 +382,10 @@ pub(crate) async fn handle_key(
             app.close_backlog();
         }
         (View::Backlog, KeyCode::Down | KeyCode::Char('j')) => {
-            app.backlog_down();
+            app.projects.backlog_down();
         }
         (View::Backlog, KeyCode::Up | KeyCode::Char('k')) => {
-            app.backlog_up();
+            app.projects.backlog_up();
         }
         (View::Backlog, KeyCode::Char('x')) => {
             app.enter_confirm_backlog_task_delete();
@@ -425,8 +427,7 @@ pub(crate) async fn handle_key(
                         state.task_id, tmux_name
                     ));
                     app.close_backlog();
-                    app.pending_focus_task_id = Some(state.task_id.clone());
-                    app.pending_focus_budget = 5;
+                    app.projects.request_focus(state.task_id.clone());
                 }
                 Err(e) => {
                     log::warn!("project task: start backlog failed: {}", e);
@@ -461,7 +462,7 @@ pub(crate) async fn handle_key(
             }
         }
         (View::Grid, KeyCode::Char('r')) if on_metrics => {
-            app.metrics = None;
+            app.metrics.analysis = None;
             spawn_metrics();
         }
         // 'i' for info popup (old Enter behavior)
@@ -488,12 +489,16 @@ pub(crate) async fn handle_key(
         }
         (View::Grid, KeyCode::Char('H')) if on_sessions => {
             app.toggle_show_inactive();
-            let state = if app.show_inactive { "shown" } else { "hidden" };
+            let state = if app.sessions.show_inactive {
+                "shown"
+            } else {
+                "hidden"
+            };
             app.set_status(format!("inactive sessions {}", state));
         }
         (View::Grid, KeyCode::Char('W')) if on_sessions => {
             app.toggle_show_orch_workers();
-            let state = if app.show_orch_workers {
+            let state = if app.sessions.show_orch_workers {
                 "shown"
             } else {
                 "hidden"
@@ -613,7 +618,7 @@ pub(crate) async fn handle_key(
                 // Selection may dangle past the now-removed project
                 // until the next scan tick lands; reset to 0 so
                 // we don't render one bad frame.
-                app.projects_sel = 0;
+                app.projects.reset_project_cursor();
                 app.set_status(msg);
             } else if let Some(pending) = app.take_pending_task_delete() {
                 let msg = match cc_hub_lib::orchestrator::delete_task(
@@ -656,9 +661,7 @@ pub(crate) async fn handle_key(
                     // Model may still include the just-removed task
                     // until the next scan tick; clamp so we don't
                     // render a stale out-of-range selection.
-                    app.backlog_sel = app
-                        .backlog_sel
-                        .min(app.backlog_tasks().len().saturating_sub(1));
+                    app.projects.clamp_backlog_cursor();
                 }
             } else if let Some(pending) = app.take_pending_task_restart() {
                 match cc_hub_lib::orchestrator::restart_task(
@@ -679,8 +682,7 @@ pub(crate) async fn handle_key(
                             "restarted [{}], orchestrator [{}] starting…",
                             state.task_id, tmux_name
                         ));
-                        app.pending_focus_task_id = Some(state.task_id.clone());
-                        app.pending_focus_budget = 5;
+                        app.projects.request_focus(state.task_id.clone());
                     }
                     Err(e) => {
                         log::warn!("project task: restart failed: {}", e);
@@ -1020,34 +1022,34 @@ pub(crate) async fn handle_key(
         // To-do side panel — add-task input mode (these guarded arms come
         // first so typed characters edit the buffer instead of triggering
         // the navigation commands below).
-        (View::TodoPanel, KeyCode::Esc) if app.todo_adding => {
-            app.todo_cancel_add();
+        (View::TodoPanel, KeyCode::Esc) if app.todo.adding => {
+            app.todo.cancel_add();
         }
-        (View::TodoPanel, KeyCode::Enter) if app.todo_adding => {
-            app.todo_commit_add();
+        (View::TodoPanel, KeyCode::Enter) if app.todo.adding => {
+            app.todo.commit_add();
         }
-        (View::TodoPanel, KeyCode::Backspace) if app.todo_adding => {
-            app.todo_input.pop();
+        (View::TodoPanel, KeyCode::Backspace) if app.todo.adding => {
+            app.todo.input.pop();
         }
-        (View::TodoPanel, KeyCode::Char(c)) if app.todo_adding => {
-            app.todo_input.push(c);
+        (View::TodoPanel, KeyCode::Char(c)) if app.todo.adding => {
+            app.todo.input.push(c);
         }
         // To-do side panel — navigation / commands (only reached when not
         // in add mode).
         (View::TodoPanel, KeyCode::Down | KeyCode::Char('j')) => {
-            app.todo_move_down();
+            app.todo.move_down();
         }
         (View::TodoPanel, KeyCode::Up | KeyCode::Char('k')) => {
-            app.todo_move_up();
+            app.todo.move_up();
         }
         (View::TodoPanel, KeyCode::Char(' ') | KeyCode::Enter) => {
-            app.todo_toggle_selected();
+            app.todo.toggle_selected();
         }
         (View::TodoPanel, KeyCode::Char('a') | KeyCode::Char('i')) => {
-            app.todo_begin_add();
+            app.todo.begin_add();
         }
         (View::TodoPanel, KeyCode::Char('d') | KeyCode::Char('x')) => {
-            app.todo_delete_selected();
+            app.todo.delete_selected();
         }
         (View::TodoPanel, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('t')) => {
             app.close_todo_panel();

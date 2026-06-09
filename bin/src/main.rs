@@ -340,13 +340,13 @@ pub(crate) fn open_path_detached(path: &str) -> io::Result<()> {
 /// Closes the picker on completion (the App helpers handle that for the
 /// register/projects branches).
 pub(crate) fn dispatch_picked_cwd(app: &mut App, cwd: &str) {
-    if app.registering_project_only {
+    if app.projects.registering_only {
         let status = match app.register_picked_project(cwd) {
             Ok(name) => format!("registered project: {}", name),
             Err(e) => format!("register failed: {}", e),
         };
         app.set_status(status);
-    } else if app.creating_project_task {
+    } else if app.projects.creating_task {
         app.enter_project_task_prompt(cwd.to_string());
     } else {
         app.close_folder_picker();

@@ -18,10 +18,10 @@ pub(crate) fn render_metrics_body(frame: &mut Frame, area: Rect, app: &mut App) 
         return;
     }
 
-    let m = match &app.metrics {
+    let m = match &app.metrics.analysis {
         Some(m) => m,
         None => {
-            let text = match app.metrics_progress {
+            let text = match app.metrics.progress {
                 Some((scanned, total)) if total > 0 => {
                     let pct = (scanned as f64 / total as f64 * 100.0).round() as u64;
                     format!(
@@ -42,7 +42,7 @@ pub(crate) fn render_metrics_body(frame: &mut Frame, area: Rect, app: &mut App) 
         }
     };
 
-    let (lines, row_lines) = build_metrics_content(m, app.metrics_selected);
+    let (lines, row_lines) = build_metrics_content(m, app.metrics.selected);
     let total_lines = lines.len() as u16;
     let body_height = area.height.saturating_sub(1);
     let max_scroll = total_lines.saturating_sub(body_height);
@@ -51,10 +51,10 @@ pub(crate) fn render_metrics_body(frame: &mut Frame, area: Rect, app: &mut App) 
     // user's free scroll. Either way clamp to the content height and write the
     // result back, so selection and scroll stay in sync — releasing the
     // selection (up past the first row) then resumes scrolling from here.
-    let scroll = match app.metrics_selected.and_then(|i| row_lines.get(i).copied()) {
+    let scroll = match app.metrics.selected.and_then(|i| row_lines.get(i).copied()) {
         Some(line_idx) => {
             let line = line_idx as u16;
-            let current = app.metrics_scroll;
+            let current = app.metrics.scroll;
             if line < current {
                 line
             } else if body_height > 0 && line >= current + body_height {
@@ -63,16 +63,16 @@ pub(crate) fn render_metrics_body(frame: &mut Frame, area: Rect, app: &mut App) 
                 current
             }
         }
-        None => app.metrics_scroll,
+        None => app.metrics.scroll,
     }
     .min(max_scroll);
 
     // Hand the row offsets and viewport height to the key handler so a downward
     // press can tell "engage the first on-screen session" from "scroll toward
     // the lists". Done after reading `row_lines` above (this moves it).
-    app.metrics_view_height = body_height;
-    app.metrics_row_lines = row_lines;
-    app.metrics_scroll = scroll;
+    app.metrics.view_height = body_height;
+    app.metrics.row_lines = row_lines;
+    app.metrics.scroll = scroll;
 
     let scroll_info = format!(
         " {}/{} ",

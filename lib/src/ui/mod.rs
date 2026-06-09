@@ -253,7 +253,7 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             View::PromptInput => "type prompt  enter:dispatch  esc:cancel",
             View::RenameSession => "edit title  enter:rename  esc:cancel",
             View::TodoPanel => {
-                if app.todo_adding {
+                if app.todo.adding {
                     "type task  enter:add  esc:cancel"
                 } else {
                     "j/k:move  space/enter:toggle  a:add  d:delete  t/esc:close"
