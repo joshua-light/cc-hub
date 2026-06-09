@@ -510,3 +510,601 @@ fn tool_brief_arg(name: &str, args: &Value) -> Option<String> {
 fn truncate_str(s: &str, max: usize) -> String {
     crate::models::first_line_truncated(s.trim(), max)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::io::Write as _;
+
+    // --- helper constructors (mirror conversation.rs json! fixture idioms) ---
+
+    /// Pi user entry: `type=message`, `message.role=user`, string or array content.
+    fn user(content: Value) -> Value {
+        json!({"type": "message", "message": {"role": "user", "content": content}})
+    }
+
+    /// Pi assistant entry with the given stopReason and content blocks.
+    fn assistant(stop_reason: &str, content: Value) -> Value {
+        json!({"type": "message", "message": {
+            "role": "assistant", "stopReason": stop_reason, "content": content
+        }})
+    }
+
+    /// Pi `toolCall` content block.
+    fn tool_call(id: &str, name: &str, arguments: Value) -> Value {
+        json!({"type": "toolCall", "id": id, "name": name, "arguments": arguments})
+    }
+
+    /// Pi `toolResult` entry resolving the given toolCallId.
+    fn tool_result(id: &str) -> Value {
+        json!({"type": "message", "message": {"role": "toolResult", "toolCallId": id}})
+    }
+
+    /// Write JSONL lines to a fresh tempfile and return the handle (keep it
+    /// alive for the test so the file isn't unlinked).
+    fn write_jsonl(lines: &[&str]) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().expect("create tempfile");
+        for line in lines {
+            writeln!(f, "{}", line).expect("write line");
+        }
+        f.flush().expect("flush");
+        f
+    }
+
+    // --- extract_state ---
+
+    #[test]
+    fn extract_state_empty_is_idle() {
+        assert_eq!(extract_state(&[]), SessionState::Idle);
+    }
+
+    #[test]
+    fn extract_state_only_non_message_entries_is_idle() {
+        // model_change / toolResult entries are not user|assistant roles.
+        let entries = vec![
+            json!({"type": "model_change", "provider": "anthropic", "modelId": "x"}),
+            tool_result("t1"),
+        ];
+        assert_eq!(extract_state(&entries), SessionState::Idle);
+    }
+
+    #[test]
+    fn extract_state_last_user_is_processing() {
+        let entries = vec![
+            assistant("stop", json!([{"type": "text", "text": "done"}])),
+            user(json!("another prompt")),
+        ];
+        assert_eq!(extract_state(&entries), SessionState::Processing);
+    }
+
+    #[test]
+    fn extract_state_assistant_tool_use_is_processing() {
+        let entries = vec![assistant(
+            "toolUse",
+            json!([tool_call("t1", "bash", json!({"command": "ls"}))]),
+        )];
+        assert_eq!(extract_state(&entries), SessionState::Processing);
+    }
+
+    #[test]
+    fn extract_state_assistant_stop_is_waiting() {
+        let entries = vec![assistant("stop", json!([{"type": "text", "text": "hi"}]))];
+        assert_eq!(extract_state(&entries), SessionState::WaitingForInput);
+    }
+
+    #[test]
+    fn extract_state_assistant_error_aborted_length_are_waiting() {
+        for reason in ["error", "aborted", "length"] {
+            let entries = vec![assistant(reason, json!([]))];
+            assert_eq!(
+                extract_state(&entries),
+                SessionState::WaitingForInput,
+                "stopReason={reason} should be WaitingForInput"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_state_assistant_unknown_stop_reason_is_processing() {
+        // Missing/unrecognised stopReason falls through to Processing.
+        let entries = vec![assistant("", json!([]))];
+        assert_eq!(extract_state(&entries), SessionState::Processing);
+        let entries = vec![json!({"type": "message", "message": {"role": "assistant"}})];
+        assert_eq!(extract_state(&entries), SessionState::Processing);
+    }
+
+    #[test]
+    fn extract_state_skips_trailing_tool_result_to_find_assistant() {
+        // toolResult is not a user|assistant role, so state is judged by the
+        // preceding assistant entry.
+        let entries = vec![
+            assistant("stop", json!([{"type": "text", "text": "answer"}])),
+            tool_result("t1"),
+        ];
+        assert_eq!(extract_state(&entries), SessionState::WaitingForInput);
+    }
+
+    #[test]
+    fn extract_state_ignores_type_assistant_without_message_wrapper() {
+        // Claude-shaped entry (type=assistant directly) is NOT a Pi message —
+        // message_role returns None, so it's invisible to the Pi parser.
+        let entries = vec![json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "stopReason": "stop", "content": []}
+        })];
+        assert_eq!(extract_state(&entries), SessionState::Idle);
+    }
+
+    // --- extract_current_tool ---
+
+    #[test]
+    fn extract_current_tool_none_when_empty() {
+        assert_eq!(extract_current_tool(&[]), None);
+    }
+
+    #[test]
+    fn extract_current_tool_returns_unresolved_among_parallel_calls() {
+        let entries = vec![
+            assistant(
+                "toolUse",
+                json!([
+                    tool_call("t1", "bash", json!({"command": "ls"})),
+                    tool_call("t2", "edit", json!({"path": "a.rs"})),
+                ]),
+            ),
+            tool_result("t1"),
+        ];
+        let got = extract_current_tool(&entries).unwrap();
+        assert_eq!(got.name, "edit");
+    }
+
+    #[test]
+    fn extract_current_tool_none_when_all_resolved() {
+        let entries = vec![
+            assistant(
+                "toolUse",
+                json!([tool_call("t1", "read", json!({"path": "x"}))]),
+            ),
+            tool_result("t1"),
+        ];
+        assert_eq!(extract_current_tool(&entries), None);
+    }
+
+    #[test]
+    fn extract_current_tool_prefers_most_recent_unresolved() {
+        let entries = vec![
+            assistant(
+                "toolUse",
+                json!([tool_call("old", "bash", json!({"command": "a"}))]),
+            ),
+            assistant(
+                "toolUse",
+                json!([tool_call("new", "grep", json!({"pattern": "foo"}))]),
+            ),
+        ];
+        assert_eq!(extract_current_tool(&entries).unwrap().name, "grep");
+    }
+
+    #[test]
+    fn extract_current_tool_bash_command_hint() {
+        let entries = vec![assistant(
+            "toolUse",
+            json!([tool_call(
+                "t1",
+                "bash",
+                json!({"command": "cargo  build   --release"})
+            )]),
+        )];
+        let got = extract_current_tool(&entries).unwrap();
+        assert_eq!(got.name, "bash");
+        // Whitespace is collapsed to single spaces.
+        assert_eq!(got.hint.as_deref(), Some("cargo build --release"));
+    }
+
+    #[test]
+    fn extract_current_tool_path_hint_for_file_tools() {
+        let entries = vec![assistant(
+            "toolUse",
+            json!([tool_call(
+                "t1",
+                "read",
+                json!({"path": "/home/u/proj/main.rs"})
+            )]),
+        )];
+        // Pi's format_tool_hint does NOT take the basename (unlike Claude) —
+        // it returns the whole path with whitespace collapsed.
+        assert_eq!(
+            extract_current_tool(&entries).unwrap().hint.as_deref(),
+            Some("/home/u/proj/main.rs")
+        );
+    }
+
+    #[test]
+    fn extract_current_tool_grep_pattern_hint() {
+        let entries = vec![assistant(
+            "toolUse",
+            json!([tool_call("t1", "grep", json!({"pattern": "TODO"}))]),
+        )];
+        assert_eq!(
+            extract_current_tool(&entries).unwrap().hint.as_deref(),
+            Some("TODO")
+        );
+    }
+
+    #[test]
+    fn extract_current_tool_unknown_tool_uses_first_string_arg() {
+        // The `_` arm falls back to the first string-valued argument.
+        let entries = vec![assistant(
+            "toolUse",
+            json!([tool_call(
+                "t1",
+                "mystery",
+                json!({"n": 1, "label": "hello"})
+            )]),
+        )];
+        assert_eq!(
+            extract_current_tool(&entries).unwrap().hint.as_deref(),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn extract_current_tool_skips_block_missing_id_or_name() {
+        // A toolCall with empty id/name is ignored (can't be resolved).
+        let entries = vec![assistant(
+            "toolUse",
+            json!([json!({"type": "toolCall", "arguments": {"command": "x"}})]),
+        )];
+        assert_eq!(extract_current_tool(&entries), None);
+    }
+
+    // --- extract_context_tokens ---
+
+    #[test]
+    fn extract_context_tokens_sums_input_and_cache() {
+        let entries = vec![json!({
+            "type": "message",
+            "message": {"role": "assistant", "usage": {
+                "input": 1000, "cacheRead": 50000, "cacheWrite": 4000, "output": 200
+            }}
+        })];
+        assert_eq!(extract_context_tokens(&entries), Some(55000));
+    }
+
+    #[test]
+    fn extract_context_tokens_none_without_assistant() {
+        let entries = vec![user(json!("hi"))];
+        assert_eq!(extract_context_tokens(&entries), None);
+    }
+
+    #[test]
+    fn extract_context_tokens_none_when_total_zero() {
+        let entries = vec![json!({
+            "type": "message",
+            "message": {"role": "assistant", "usage": {"output": 200}}
+        })];
+        assert_eq!(extract_context_tokens(&entries), None);
+    }
+
+    #[test]
+    fn extract_context_tokens_uses_most_recent_assistant() {
+        let entries = vec![
+            json!({"type": "message", "message": {"role": "assistant",
+                "usage": {"input": 5}}}),
+            json!({"type": "message", "message": {"role": "assistant",
+                "usage": {"input": 7, "cacheRead": 3}}}),
+        ];
+        assert_eq!(extract_context_tokens(&entries), Some(10));
+    }
+
+    // --- extract_last_user_message / extract_first_user_message ---
+
+    #[test]
+    fn extract_last_user_message_string_content() {
+        let entries = vec![
+            user(json!("first")),
+            assistant("stop", json!([{"type": "text", "text": "reply"}])),
+            user(json!("second")),
+        ];
+        assert_eq!(extract_last_user_message(&entries).as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn extract_first_user_message_string_content() {
+        let entries = vec![user(json!("first")), user(json!("second"))];
+        assert_eq!(extract_first_user_message(&entries).as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn extract_user_message_array_text_block() {
+        let entries = vec![user(json!([
+            {"type": "text", "text": "hello from array"}
+        ]))];
+        assert_eq!(
+            extract_last_user_message(&entries).as_deref(),
+            Some("hello from array")
+        );
+    }
+
+    #[test]
+    fn extract_user_message_none_when_no_user_entries() {
+        let entries = vec![assistant("stop", json!([{"type": "text", "text": "x"}]))];
+        assert_eq!(extract_last_user_message(&entries), None);
+        assert_eq!(extract_first_user_message(&entries), None);
+    }
+
+    // --- extract_metadata ---
+
+    #[test]
+    fn extract_metadata_model_change_provider_and_id() {
+        let entries = vec![json!({
+            "type": "model_change", "provider": "anthropic", "modelId": "claude-opus-4"
+        })];
+        let (git, model, version) = extract_metadata(&entries);
+        assert_eq!(git, None);
+        assert_eq!(model.as_deref(), Some("anthropic/claude-opus-4"));
+        assert_eq!(version, None);
+    }
+
+    #[test]
+    fn extract_metadata_model_change_id_only() {
+        let entries = vec![json!({"type": "model_change", "modelId": "gpt-5"})];
+        assert_eq!(extract_metadata(&entries).1.as_deref(), Some("gpt-5"));
+    }
+
+    #[test]
+    fn extract_metadata_falls_back_to_assistant_message() {
+        // No model_change → use the most recent assistant message provider/model.
+        let entries = vec![json!({
+            "type": "message",
+            "message": {"role": "assistant", "provider": "openai", "model": "o3"}
+        })];
+        assert_eq!(extract_metadata(&entries).1.as_deref(), Some("openai/o3"));
+    }
+
+    #[test]
+    fn extract_metadata_model_change_takes_precedence_over_assistant() {
+        let entries = vec![
+            json!({"type": "message", "message": {"role": "assistant",
+                "provider": "openai", "model": "o3"}}),
+            json!({"type": "model_change", "provider": "anthropic",
+                "modelId": "claude-opus-4"}),
+        ];
+        assert_eq!(
+            extract_metadata(&entries).1.as_deref(),
+            Some("anthropic/claude-opus-4")
+        );
+    }
+
+    #[test]
+    fn extract_metadata_none_when_no_model_info() {
+        let entries = vec![user(json!("hi"))];
+        assert_eq!(extract_metadata(&entries), (None, None, None));
+    }
+
+    // --- extract_last_activity ---
+
+    #[test]
+    fn extract_last_activity_top_level_timestamp() {
+        let entries = vec![
+            json!({"type": "message", "timestamp": "2026-04-15T18:14:00.000Z",
+                "message": {"role": "user", "content": "a"}}),
+            json!({"type": "message", "timestamp": "2026-04-15T18:14:30.201Z",
+                "message": {"role": "assistant", "stopReason": "stop", "content": []}}),
+        ];
+        let ms = extract_last_activity(&entries).unwrap();
+        assert_eq!(ms % 1000, 201);
+    }
+
+    #[test]
+    fn extract_last_activity_nested_message_timestamp() {
+        // Timestamp lives under message, not top-level.
+        let entries = vec![json!({
+            "type": "message",
+            "message": {"role": "user", "content": "a",
+                "timestamp": "2026-04-15T18:14:30.201Z"}
+        })];
+        let ms = extract_last_activity(&entries).unwrap();
+        assert_eq!(ms % 1000, 201);
+    }
+
+    #[test]
+    fn extract_last_activity_returns_max_not_last() {
+        // Out-of-order timestamps: extract_last_activity uses .max().
+        let entries = vec![
+            json!({"type": "message", "timestamp": 5000u64,
+                "message": {"role": "user"}}),
+            json!({"type": "message", "timestamp": 1000u64,
+                "message": {"role": "assistant", "content": []}}),
+        ];
+        assert_eq!(extract_last_activity(&entries), Some(5000));
+    }
+
+    #[test]
+    fn extract_last_activity_none_without_timestamps() {
+        let entries = vec![user(json!("hi"))];
+        assert_eq!(extract_last_activity(&entries), None);
+    }
+
+    // --- extract_messages ---
+
+    #[test]
+    fn extract_messages_maps_roles_and_usage() {
+        let entries = vec![
+            json!({"type": "message", "timestamp": 1000u64,
+                "message": {"role": "user", "content": "hello"}}),
+            json!({"type": "message", "timestamp": 2000u64,
+                "message": {"role": "assistant", "stopReason": "stop",
+                    "model": "claude-opus-4",
+                    "content": [{"type": "text", "text": "hi there"}],
+                    "usage": {"input": 10, "output": 5, "cacheRead": 2, "cacheWrite": 1}}}),
+        ];
+        let msgs = extract_messages(&entries, 10);
+        assert_eq!(msgs.len(), 2);
+
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].content_preview, "hello");
+        assert_eq!(msgs[0].timestamp, 1000);
+        assert_eq!(msgs[0].model, None);
+        assert_eq!(msgs[0].input_tokens, None);
+
+        assert_eq!(msgs[1].role, "assistant");
+        assert_eq!(msgs[1].content_preview, "hi there");
+        assert_eq!(msgs[1].timestamp, 2000);
+        assert_eq!(msgs[1].model.as_deref(), Some("claude-opus-4"));
+        assert_eq!(msgs[1].stop_reason.as_deref(), Some("stop"));
+        assert_eq!(msgs[1].input_tokens, Some(10));
+        assert_eq!(msgs[1].output_tokens, Some(5));
+        assert_eq!(msgs[1].cache_read_input_tokens, Some(2));
+        assert_eq!(msgs[1].cache_creation_input_tokens, Some(1));
+    }
+
+    #[test]
+    fn extract_messages_keeps_last_n() {
+        let entries = vec![
+            user(json!("one")),
+            user(json!("two")),
+            user(json!("three")),
+        ];
+        let msgs = extract_messages(&entries, 2);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].content_preview, "two");
+        assert_eq!(msgs[1].content_preview, "three");
+    }
+
+    #[test]
+    fn extract_messages_skips_non_message_entries() {
+        let entries = vec![
+            json!({"type": "model_change", "modelId": "x"}),
+            user(json!("real")),
+        ];
+        let msgs = extract_messages(&entries, 10);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content_preview, "real");
+    }
+
+    #[test]
+    fn extract_messages_assistant_tool_call_preview() {
+        let entries = vec![assistant(
+            "toolUse",
+            json!([tool_call("t1", "bash", json!({"command": "ls -la"}))]),
+        )];
+        let msgs = extract_messages(&entries, 10);
+        assert_eq!(msgs.len(), 1);
+        assert!(
+            msgs[0].content_preview.contains("bash"),
+            "tool preview should name the tool, got {:?}",
+            msgs[0].content_preview
+        );
+    }
+
+    // --- extract_token_totals ---
+
+    #[test]
+    fn extract_token_totals_sums_only_assistant_usage() {
+        let entries = vec![
+            json!({"type": "message", "message": {"role": "assistant",
+                "usage": {"input": 100, "cacheRead": 10, "cacheWrite": 5, "output": 20}}}),
+            // A user entry carrying a usage block must NOT be counted: the Pi
+            // tally is gated on message.role == assistant.
+            json!({"type": "message", "message": {"role": "user",
+                "usage": {"input": 999, "output": 999}}}),
+            json!({"type": "message", "message": {"role": "assistant",
+                "usage": {"input": 200, "output": 30}}}),
+        ];
+        let (input, output) = extract_token_totals(&entries);
+        assert_eq!(input, 100 + 10 + 5 + 200);
+        assert_eq!(output, 20 + 30);
+    }
+
+    #[test]
+    fn extract_token_totals_zero_when_no_usage() {
+        let entries = vec![user(json!("hi"))];
+        assert_eq!(extract_token_totals(&entries), (0, 0));
+    }
+
+    // --- read_jsonl_tail_for_state ---
+
+    #[test]
+    fn read_jsonl_tail_for_state_missing_file_is_empty() {
+        let path = Path::new("/nonexistent/cc_hub_pi_does_not_exist.jsonl");
+        assert!(read_jsonl_tail_for_state(path).is_empty());
+    }
+
+    #[test]
+    fn read_jsonl_tail_for_state_reads_pi_entries() {
+        let f = write_jsonl(&[
+            r#"{"type":"message","message":{"role":"user","content":"hello"}}"#,
+            r#"{"type":"message","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"hi"}]}}"#,
+        ]);
+        let entries = read_jsonl_tail_for_state(f.path());
+        assert_eq!(entries.len(), 2);
+        assert_eq!(extract_state(&entries), SessionState::WaitingForInput);
+    }
+
+    #[test]
+    fn read_jsonl_tail_for_state_skips_garbage_trailing_line() {
+        // The last line is truncated/garbage JSON; parse_jsonl_values drops it
+        // while keeping the well-formed entries before it.
+        let f = write_jsonl(&[
+            r#"{"type":"message","message":{"role":"user","content":"hello"}}"#,
+            r#"{"type":"message","message":{"role":"assistant","stopReason":"stop","content":[]}}"#,
+            r#"{"type":"message","message":{"role":"assist"#, // truncated, invalid JSON
+        ]);
+        let entries = read_jsonl_tail_for_state(f.path());
+        assert_eq!(entries.len(), 2, "garbage trailing line must be discarded");
+        assert_eq!(
+            message_role(&entries[1]),
+            Some("assistant"),
+            "the two valid Pi entries survive"
+        );
+    }
+
+    // --- is_currently_thinking ---
+
+    #[test]
+    fn is_currently_thinking_true_when_last_block_thinking() {
+        let entries = vec![assistant("toolUse", json!([{"type": "thinking"}]))];
+        assert!(is_currently_thinking(&entries));
+    }
+
+    #[test]
+    fn is_currently_thinking_false_when_tool_call_follows() {
+        let entries = vec![
+            assistant("toolUse", json!([{"type": "thinking"}])),
+            assistant(
+                "toolUse",
+                json!([tool_call("t1", "bash", json!({"command": "ls"}))]),
+            ),
+        ];
+        assert!(!is_currently_thinking(&entries));
+    }
+
+    // --- count_tool_uses_in_reader ---
+
+    #[test]
+    fn count_tool_uses_counts_pi_tool_call_blocks() {
+        let data = concat!(
+            r#"{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"a","name":"bash"},{"type":"toolCall","id":"b","name":"read"}]}}"#,
+            "\n",
+            r#"{"type":"message","message":{"role":"user","content":"hi"}}"#,
+            "\n",
+            r#"{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"c","name":"grep"}]}}"#,
+            "\n",
+        );
+        assert_eq!(count_tool_uses_in_reader(data.as_bytes()), 3);
+    }
+
+    #[test]
+    fn count_tool_uses_ignores_non_assistant_tool_calls() {
+        // toolCall blocks only count under an assistant message.
+        let data = concat!(
+            r#"{"type":"message","message":{"role":"user","content":[{"type":"toolCall","id":"a","name":"bash"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"toolCall","id":"b","name":"read"}]}}"#,
+            "\n",
+        );
+        assert_eq!(count_tool_uses_in_reader(data.as_bytes()), 0);
+    }
+}
