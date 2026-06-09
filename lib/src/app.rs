@@ -1075,12 +1075,19 @@ impl App {
         }
         let project_id = t.project_id.clone();
         let task_id = t.task_id.clone();
-        let project_root = t.project_root.clone();
 
-        // Resolve the SHAs the user is approving — captured here rather
-        // than in `pr approve` so we don't need a subprocess.
+        // The read distinguishes the PR-less Done path from a real PR;
+        // for the latter, the approval itself (SHA snapshot + review_state
+        // flip) is delegated to the shared `ops::pr` implementation so the
+        // TUI and CLI record identical state.
         let pr = match crate::pr::read_pr(&project_id, &task_id) {
-            Ok(Some(p)) => p,
+            Ok(Some(_)) => match crate::ops::pr::pr_approve(&project_id, &task_id) {
+                Ok(pr) => pr,
+                Err(e) => {
+                    self.set_status(format!("approve failed: {}", e));
+                    return ApproveOutcome::Failed;
+                }
+            },
             Ok(None) => {
                 match crate::orchestrator::update_task_state(&project_id, &task_id, |s| {
                     s.status = TaskStatus::Done;
@@ -1104,19 +1111,6 @@ impl App {
                 return ApproveOutcome::Failed;
             }
         };
-        let branch_sha = git_rev_parse_short(&project_root, &pr.branch);
-        let base = crate::orchestrator::detect_main_branch(&project_root);
-        let base_sha = git_rev_parse_short(&project_root, &base);
-
-        if let Err(e) = crate::pr::update_pr(&project_id, &task_id, |p| {
-            p.review_state = crate::pr::ReviewState::Approved;
-            p.approved_at_branch_sha = branch_sha;
-            p.approved_at_base_sha = base_sha;
-        }) {
-            self.set_status(format!("approve failed: {}", e));
-            return ApproveOutcome::Failed;
-        }
-
         let pr_id = pr.id;
         let lock_holder = crate::merge_lock::current_holder(&project_id)
             .ok()
@@ -2190,14 +2184,6 @@ pub fn kanban_col_name(col: usize) -> &'static str {
         3 => "Merging",
         _ => "Done",
     }
-}
-
-fn git_rev_parse_short(root: &std::path::Path, rev: &str) -> Option<String> {
-    let out = crate::orchestrator::run_git(root, &["rev-parse", rev]).ok()?;
-    if !out.status_ok {
-        return None;
-    }
-    Some(out.stdout.trim().to_string())
 }
 
 #[cfg(test)]

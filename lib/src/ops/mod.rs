@@ -59,3 +59,16 @@ impl OpError {
         }
     }
 }
+
+/// Human-readable message — the TUI surfaces this in its status bar. The
+/// CLI does not use it (it maps variants onto `CliError` instead).
+impl std::fmt::Display for OpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OpError::Usage(m) | OpError::NotFound(m) | OpError::Other(m) | OpError::Reported(m) => {
+                f.write_str(m)
+            }
+            OpError::Conflict { msg, .. } => f.write_str(msg),
+        }
+    }
+}
