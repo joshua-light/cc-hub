@@ -459,6 +459,23 @@ impl App {
         }
     }
 
+    /// Delete every completed item in one stroke, keeping the cursor in range.
+    /// Surfaces a status line so the bulk removal is visible — unlike the
+    /// single-item delete, the user can't see at a glance what just vanished.
+    pub fn todo_clear_completed(&mut self) {
+        let removed = self.todo.clear_completed();
+        if removed > 0 {
+            self.clamp_todo_selection();
+            self.set_status(format!(
+                "cleared {} completed task{}",
+                removed,
+                if removed == 1 { "" } else { "s" }
+            ));
+        } else {
+            self.set_status("no completed tasks to clear".to_string());
+        }
+    }
+
     fn clamp_todo_selection(&mut self) {
         let last = self.todo.len().saturating_sub(1);
         if self.todo_selected > last {

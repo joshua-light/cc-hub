@@ -1051,6 +1051,9 @@ pub(crate) async fn handle_key(
         (View::TodoPanel, KeyCode::Char('d') | KeyCode::Char('x')) => {
             app.todo_delete_selected();
         }
+        (View::TodoPanel, KeyCode::Char('c')) => {
+            app.todo_clear_completed();
+        }
         (View::TodoPanel, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('t')) => {
             app.close_todo_panel();
         }
