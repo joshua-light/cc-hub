@@ -18,19 +18,12 @@
 //! <path> main`. cc-hub does **only** the mechanical git ops; deciding when
 //! to spawn one and when to merge is the orchestrator's job.
 
-use cc_hub_lib::orchestrator::{
-    self, Artifact, MergeOutcome, MergeRecord, TaskState, TaskStatus, TodoItem, Worker,
-};
-use cc_hub_lib::scanner;
-use cc_hub_lib::{config, models, send, spawn};
+use cc_hub_lib::models;
+use cc_hub_lib::ops::{self, OpError};
+use cc_hub_lib::orchestrator::{self, MergeOutcome, TaskState, TaskStatus, TodoItem};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-/// Cold claude sessions in fresh cwds (no JSONL history, no trust-store
-/// entry) take longer to reach Idle than warm dev directories. 120s leaves
-/// margin even for the slowest path; the timeout exists to surface
-/// genuinely broken spawns, not to bound happy-path latency.
-const DEFAULT_PROMPT_WAIT_SECS: u64 = 120;
 const TASK_VERBS_HELP: &str =
     "`report`, `create`, `start`, `list`, `show`, `delete`, `gc`, `auto-review`, `artifact`, or `todos`";
 
@@ -289,19 +282,25 @@ impl CliError {
             CliError::Conflict { msg, recipe } => (msg, recipe),
         }
     }
-
-    /// A `conflict` error carrying a remediation recipe for the orchestrator.
-    fn conflict_with_recipe(msg: impl Into<String>, recipe: impl Into<String>) -> Self {
-        CliError::Conflict {
-            msg: msg.into(),
-            recipe: Some(recipe.into()),
-        }
-    }
 }
 
 impl From<String> for CliError {
     fn from(s: String) -> Self {
         CliError::Other(s)
+    }
+}
+
+impl From<OpError> for CliError {
+    /// Lossless 1:1 mapping from the domain-layer error to the CLI error so
+    /// the JSON error contract (kind / recipe / exit code) is unchanged.
+    fn from(e: OpError) -> Self {
+        match e {
+            OpError::Usage(msg) => CliError::Usage(msg),
+            OpError::NotFound(msg) => CliError::NotFound(msg),
+            OpError::Conflict { msg, recipe } => CliError::Conflict { msg, recipe },
+            OpError::Other(msg) => CliError::Other(msg),
+            OpError::Reported(msg) => CliError::Reported(msg),
+        }
     }
 }
 
@@ -578,15 +577,6 @@ fn require_task(f: &Flags) -> Result<String, CliError> {
         .ok_or_else(|| CliError::Usage("--task is required".into()))
 }
 
-fn find_by_tmux<'a>(
-    sessions: &'a [models::SessionInfo],
-    tmux: &str,
-) -> Option<&'a models::SessionInfo> {
-    sessions
-        .iter()
-        .find(|s| s.tmux_session.as_deref() == Some(tmux))
-}
-
 fn resolve_project_id(f: &Flags) -> Result<String, CliError> {
     if let Some(id) = f.project_id.clone() {
         return Ok(id);
@@ -660,12 +650,6 @@ fn scan_projects_for_task(task_id: &str) -> Vec<String> {
     out
 }
 
-fn resolve_orchestrator_agent_id(f: &Flags) -> String {
-    f.agent
-        .clone()
-        .unwrap_or_else(|| config::get().default_orchestrator_agent_id())
-}
-
 fn print_json(value: &serde_json::Value) {
     // One line per call so orchestrators can split on \n. Pretty-print would
     // make Bash piping awkward.
@@ -682,87 +666,28 @@ fn spawn_worker(args: &[String]) -> Result<(), CliError> {
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
 
-    if f.worktree.is_some() && f.readonly {
-        return Err(CliError::Usage(
-            "--worktree and --readonly are mutually exclusive".into(),
-        ));
-    }
+    let outcome = ops::worker::spawn_worker(
+        &project_id,
+        &task_id,
+        ops::worker::SpawnWorkerOpts {
+            worktree: f.worktree.clone(),
+            readonly: f.readonly,
+            prompt: f.prompt.clone(),
+            agent: f.agent.clone(),
+            wait_secs: f.wait_secs,
+        },
+    )?;
 
-    let state = orchestrator::read_task_state(&project_id, &task_id).map_err(|e| {
-        CliError::Other(format!(
-            "load state for {}/{}: {} (was the task created?)",
-            project_id, task_id, e
-        ))
-    })?;
-    let project_root = state.project_root.clone();
-
-    let (cwd, worktree_name) = if let Some(name) = f.worktree.clone() {
-        let main = orchestrator::detect_main_branch(&project_root);
-        let path = orchestrator::create_worktree(&project_root, &task_id, &name, &main)
-            .map_err(|e| CliError::Other(format!("create worktree: {}", e)))?;
-        (path.to_string_lossy().into_owned(), Some(name))
-    } else if f.readonly {
-        (project_root.to_string_lossy().into_owned(), None)
-    } else {
-        return Err(CliError::Usage(
-            "must pass either --worktree NAME or --readonly".into(),
-        ));
-    };
-
-    let agent_id = f
-        .agent
-        .clone()
-        .unwrap_or_else(|| state.orchestrator_agent_id.clone());
-    let agent = config::get()
-        .agent(&agent_id)
-        .ok_or_else(|| CliError::Other(format!("unknown worker agent: {}", agent_id)))?;
-    let initial_prompt = if agent.supports_initial_prompt() {
-        f.prompt.as_deref()
-    } else {
-        None
-    };
-    let tmux_name = spawn::spawn_agent_session(&agent_id, &cwd, None, initial_prompt, f.readonly)
-        .map_err(|e| CliError::Other(format!("spawn session: {}", e)))?;
-
-    let worker = Worker {
-        agent_id: agent_id.clone(),
-        agent_kind: agent.kind,
-        tmux_name: tmux_name.clone(),
-        cwd: PathBuf::from(&cwd),
-        worktree: worktree_name.clone(),
-        readonly: f.readonly,
-        spawned_at: orchestrator::now_unix_secs(),
-    };
-    orchestrator::update_task_state(&project_id, &task_id, move |s| {
-        s.workers.push(worker);
-    })
-    .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
-
-    let mut prompt_status = "skipped";
-    if agent.supports_initial_prompt() {
-        if f.prompt.is_some() {
-            prompt_status = "sent";
-        }
-    } else if let Some(prompt) = f.prompt.as_ref() {
-        let wait = f.wait_secs.unwrap_or(DEFAULT_PROMPT_WAIT_SECS);
-        match wait_until_idle_and_send(&tmux_name, prompt, Duration::from_secs(wait)) {
-            Ok(()) => prompt_status = "sent",
-            Err(e) => {
-                log::warn!("spawn-worker: prompt dispatch failed: {}", e);
-                prompt_status = "deferred";
-                eprintln!("warning: prompt dispatch failed ({}), session is up", e);
-            }
-        }
-    }
+    let prompt_status = report_prompt_status(&outcome.prompt_status);
 
     print_json(&serde_json::json!({
         "ok": true,
-        "agent_id": agent_id,
-        "agent_kind": agent.kind,
-        "tmux": tmux_name,
-        "cwd": cwd,
-        "worktree": worktree_name,
-        "readonly": f.readonly,
+        "agent_id": outcome.agent_id,
+        "agent_kind": outcome.agent_kind,
+        "tmux": outcome.tmux,
+        "cwd": outcome.cwd,
+        "worktree": outcome.worktree,
+        "readonly": outcome.readonly,
         "prompt_status": prompt_status,
         "task_id": task_id,
         "project_id": project_id,
@@ -770,48 +695,13 @@ fn spawn_worker(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-fn wait_until_idle_and_send(
-    tmux_name: &str,
-    prompt: &str,
-    timeout: Duration,
-) -> Result<(), String> {
-    let started = Instant::now();
-    let deadline = started + timeout;
-    loop {
-        // Layered readiness, same shape as App::poll_pending_dispatch:
-        //   1. scanner Idle + pane shows claude's empty `❯` input row.
-        //      Tightest, preferred.
-        //   2. scanner Idle + >=5s elapsed. Fallback for the case where
-        //      claude renders something we don't recognise; without it,
-        //      any cosmetic mismatch silently drops the prompt at the
-        //      timeout boundary.
-        let sessions = scanner::scan_sessions();
-        let scanner_idle = find_by_tmux(&sessions, tmux_name)
-            .is_some_and(|s| s.state == models::SessionState::Idle);
-        if scanner_idle {
-            let pane_ready = send::pane_ready_for_input(tmux_name);
-            let aged_in = started.elapsed() >= Duration::from_secs(5);
-            if pane_ready || aged_in {
-                if !pane_ready {
-                    log::info!(
-                        "dispatch: pane_ready=false but {}s elapsed — sending anyway (target=[{}])",
-                        started.elapsed().as_secs(),
-                        tmux_name
-                    );
-                }
-                return send::send_prompt(tmux_name, prompt)
-                    .map_err(|e| format!("send_prompt: {}", e));
-            }
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "{} did not become ready within {}s",
-                tmux_name,
-                timeout.as_secs()
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(500));
+/// Map a [`PromptStatus`] to its JSON string, emitting the human warning line
+/// to stderr for the `Deferred` case (presentation stays in cli.rs).
+fn report_prompt_status(status: &ops::worker::PromptStatus) -> &'static str {
+    if let ops::worker::PromptStatus::Deferred(warning) = status {
+        eprintln!("warning: {}", warning);
     }
+    status.as_str()
 }
 
 // ─── merge-worktree ───────────────────────────────────────────────────────
@@ -825,33 +715,19 @@ fn merge_worktree(args: &[String]) -> Result<(), CliError> {
         .clone()
         .ok_or_else(|| CliError::Usage("--worktree NAME is required".into()))?;
 
-    let state = orchestrator::read_task_state(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
-    let project_root = state.project_root.clone();
-    let branch = orchestrator::worktree_branch(&task_id, &worktree_name);
-    let main = orchestrator::detect_main_branch(&project_root);
-
-    let (outcome, stdout, stderr) = orchestrator::merge_branch(&project_root, &main, &branch)
-        .map_err(|e| CliError::Other(format!("merge: {}", e)))?;
-
-    // Don't persist a MergeRecord for the dirty-tree pre-flight refusal —
-    // the merge never started, so recording it as "attempted" would
-    // mislead the Projects view. Conflict/Ok still get recorded.
-    let is_preflight_block = matches!(outcome, MergeOutcome::BlockedByDirtyTree { .. });
-    if !is_preflight_block {
-        let record = MergeRecord {
-            worktree: worktree_name.clone(),
-            at: orchestrator::now_unix_secs(),
-            outcome: outcome.clone(),
-        };
-        let _ = orchestrator::update_task_state(&project_id, &task_id, |s| {
-            s.merges.push(record);
-        });
-    }
+    let result = ops::worker::merge_worktree(&project_id, &task_id, &worktree_name)?;
+    let ops::worker::MergeWorktreeOutcome {
+        outcome,
+        worktree,
+        branch,
+        main,
+        stdout,
+        stderr,
+    } = result;
 
     let mut payload = serde_json::json!({
         "ok": matches!(outcome, MergeOutcome::Ok),
-        "worktree": worktree_name,
+        "worktree": worktree,
         "branch": branch,
         "main": main,
         "stdout": stdout,
@@ -909,62 +785,31 @@ fn orchestrate_start(args: &[String]) -> Result<(), CliError> {
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
 
-    let state = orchestrator::read_task_state(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
+    let outcome = ops::task::orchestrate_start(
+        &project_id,
+        &task_id,
+        f.agent.clone(),
+        f.wait_secs,
+        f.dry_run,
+    )?;
 
-    let cc_hub_bin = orchestrator::resolve_cc_hub_bin();
-
-    if f.dry_run {
-        // Useful for verifying prompt content without paying for a session.
-        let prompt = orchestrator::build_orchestrator_prompt(&state, &cc_hub_bin);
-        println!("{}", prompt);
-        return Ok(());
-    }
-
-    let agent_id = resolve_orchestrator_agent_id(&f);
-    let agent = config::get()
-        .agent(&agent_id)
-        .ok_or_else(|| CliError::Other(format!("unknown orchestrator agent: {}", agent_id)))?;
-
-    let cwd = state.project_root.to_string_lossy().into_owned();
-    let prompt = orchestrator::build_orchestrator_prompt(&state, &cc_hub_bin);
-    let initial_prompt = if agent.supports_initial_prompt() {
-        Some(prompt.as_str())
-    } else {
-        None
-    };
-    let tmux_name = spawn::spawn_agent_session(&agent_id, &cwd, None, initial_prompt, false)
-        .map_err(|e| CliError::Other(format!("spawn orchestrator: {}", e)))?;
-
-    // Locked re-read + merge: the spawn takes long enough that writing the
-    // pre-spawn snapshot back wholesale could clobber a concurrent update.
-    orchestrator::update_task_state(&project_id, &task_id, |s| {
-        s.orchestrator_tmux = Some(tmux_name.clone());
-        s.orchestrator_agent_id = agent_id.clone();
-        s.orchestrator_agent_kind = agent.kind;
-    })
-    .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
-
-    let wait = f.wait_secs.unwrap_or(DEFAULT_PROMPT_WAIT_SECS);
-    let prompt_status = if agent.supports_initial_prompt() {
-        "sent"
-    } else {
-        match wait_until_idle_and_send(&tmux_name, &prompt, Duration::from_secs(wait)) {
-            Ok(()) => "sent",
-            Err(e) => {
-                log::warn!("orchestrate start: dispatch failed: {}", e);
-                eprintln!("warning: prompt dispatch failed ({}), session is up", e);
-                "deferred"
-            }
+    let spawn = match outcome {
+        ops::task::OrchestrateStart::DryRun(prompt) => {
+            // Useful for verifying prompt content without paying for a session.
+            println!("{}", prompt);
+            return Ok(());
         }
+        ops::task::OrchestrateStart::Spawned(spawn) => spawn,
     };
+
+    let prompt_status = report_prompt_status(&spawn.prompt_status);
 
     print_json(&serde_json::json!({
         "ok": true,
-        "agent_id": agent_id,
-        "agent_kind": agent.kind,
-        "tmux": tmux_name,
-        "cwd": cwd,
+        "agent_id": spawn.state.orchestrator_agent_id,
+        "agent_kind": spawn.state.orchestrator_agent_kind,
+        "tmux": spawn.tmux,
+        "cwd": spawn.state.project_root.to_string_lossy(),
         "prompt_status": prompt_status,
         "task_id": task_id,
         "project_id": project_id,
@@ -1013,40 +858,7 @@ fn task_delete(args: &[String]) -> Result<(), CliError> {
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
 
-    let state = match orchestrator::read_task_state(&project_id, &task_id) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(CliError::Other(format!(
-                "no such task: {}/{}",
-                project_id, task_id
-            )));
-        }
-        Err(e) => return Err(CliError::Other(format!("load state: {}", e))),
-    };
-
-    // Active states require --force. Merging is included so the user has to
-    // acknowledge they're tearing down an in-flight merge — but it CAN be
-    // deleted (delete_task releases the merge lock below), which is the only
-    // recovery path when the merging orchestrator has died.
-    if matches!(
-        state.status,
-        TaskStatus::Running | TaskStatus::Review | TaskStatus::Merging
-    ) && !f.force
-    {
-        return Err(CliError::Other(format!(
-            "task {} is {}; pass --force to delete an active task (orchestrator tmux will be killed{})",
-            task_id,
-            state.status.as_str(),
-            if state.status == TaskStatus::Merging {
-                ", merge lock released"
-            } else {
-                ""
-            }
-        )));
-    }
-
-    let deleted = orchestrator::delete_task(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("delete task: {}", e)))?;
+    let deleted = ops::task::task_delete(&project_id, &task_id, f.force)?;
 
     let worktree_errors: Vec<serde_json::Value> = deleted
         .worktree_errors
@@ -1086,8 +898,7 @@ fn task_gc(args: &[String]) -> Result<(), CliError> {
     let project_id = resolve_project_id(&f)?;
     let project_root = resolve_project_root(&project_id)?;
 
-    let outcome = orchestrator::gc_worktrees(&project_id, &project_root, f.dry_run)
-        .map_err(|e| CliError::Other(format!("gc worktrees: {}", e)))?;
+    let outcome = ops::task::task_gc(&project_id, &project_root, f.dry_run)?;
 
     let orphans: Vec<serde_json::Value> = outcome
         .orphans
@@ -1162,34 +973,19 @@ fn task_start(args: &[String]) -> Result<(), CliError> {
     let f = parse_flags(args)?;
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
-    let agent_id = f.agent.clone();
 
-    let (state, tmux_name, prompt) =
-        orchestrator::start_backlog_task(&project_id, &task_id, agent_id.as_deref())
-            .map_err(|e| CliError::Other(format!("start backlog task: {}", e)))?;
+    let spawn = ops::task::task_start(&project_id, &task_id, f.agent.clone(), f.wait_secs)?;
 
-    let wait = f.wait_secs.unwrap_or(DEFAULT_PROMPT_WAIT_SECS);
-    let prompt_status = if let Some(prompt) = prompt {
-        match wait_until_idle_and_send(&tmux_name, &prompt, Duration::from_secs(wait)) {
-            Ok(()) => "sent",
-            Err(e) => {
-                log::warn!("task start: dispatch failed: {}", e);
-                eprintln!("warning: prompt dispatch failed ({}), session is up", e);
-                "deferred"
-            }
-        }
-    } else {
-        "sent"
-    };
+    let prompt_status = report_prompt_status(&spawn.prompt_status);
 
     // Echo agent_id/agent_kind/cwd alongside the tmux name to match
     // `spawn-worker`'s output shape so orchestrators get a uniform envelope.
     print_json(&serde_json::json!({
         "ok": true,
-        "agent_id": state.orchestrator_agent_id,
-        "agent_kind": state.orchestrator_agent_kind,
-        "cwd": state.project_root.to_string_lossy(),
-        "tmux": tmux_name,
+        "agent_id": spawn.state.orchestrator_agent_id,
+        "agent_kind": spawn.state.orchestrator_agent_kind,
+        "cwd": spawn.state.project_root.to_string_lossy(),
+        "tmux": spawn.tmux,
         "prompt_status": prompt_status,
         "task_id": task_id,
         "project_id": project_id,
@@ -1319,119 +1115,23 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
 
     let raw_status = parse_status_flag(f.status.as_deref())?;
 
-    let prev_status = orchestrator::read_task_state(&project_id, &task_id)
-        .ok()
-        .map(|s| s.status);
-
-    // Backlog is only a valid target from a Backlog state. Flipping a
-    // running task to Backlog would hide it from the kanban while leaving
-    // the orchestrator/tmux session alive — a zombie.
-    if raw_status.as_ref() == Some(&TaskStatus::Backlog)
-        && prev_status.as_ref() != Some(&TaskStatus::Backlog)
-    {
-        return Err(CliError::Usage(
-            "--status backlog is only valid from a Backlog state".into(),
-        ));
-    }
-
-    // Symmetric guard: leaving Backlog requires an orchestrator spawn,
-    // which only `task start` provides. A bare status flip would mutate
-    // the on-disk state to e.g. Running without any tmux/session, leaving
-    // a zombie that the `s` keybind can't recover (it requires Backlog).
-    if raw_status.is_some()
-        && prev_status.as_ref() == Some(&TaskStatus::Backlog)
-        && raw_status.as_ref() != Some(&TaskStatus::Backlog)
-    {
-        return Err(CliError::Usage(
-            "use cc-hub task start --task ID to launch a Backlog task; \
-             task report --status cannot spawn an orchestrator"
-                .into(),
-        ));
-    }
-
-    // `--status running` on a Review task with a live PR would silently
-    // clobber the Review state the PR flow just established — a recurring
-    // orchestrator mistake right after `pr create`. The sanctioned path
-    // back to Running is `pr request-changes`. PR-less Review tasks keep
-    // the direct path: they have no PR verb to do it for them.
-    if raw_status.as_ref() == Some(&TaskStatus::Running)
-        && prev_status.as_ref() == Some(&TaskStatus::Review)
-    {
-        let live_pr = matches!(
-            cc_hub_lib::pr::read_pr(&project_id, &task_id),
-            Ok(Some(p)) if !matches!(
-                p.review_state,
-                cc_hub_lib::pr::ReviewState::Merged | cc_hub_lib::pr::ReviewState::Closed
-            )
-        );
-        if live_pr {
-            return Err(CliError::Usage(
-                "task is in Review with a live PR — use `cc-hub pr request-changes` \
-                 to send it back to Running (or `--status review` / no --status to \
-                 report progress)"
-                    .into(),
-            ));
-        }
-    }
-
-    // An orchestrator's `--status done` means "I'm finished" — it does NOT
-    // mean the work is approved. Route that into Review so a human (or
-    // future agentic reviewer) signs off via the TUI's `Space` keybind.
-    // The exception: if the task is already in Review, an explicit `done`
-    // is the approval path (used by `approve_review_task`'s subprocess
-    // fallback, if any) — let it through.
-    let effective_status = match (raw_status.clone(), prev_status.as_ref()) {
-        (Some(TaskStatus::Done), prev) if prev != Some(&TaskStatus::Review) => {
-            Some(TaskStatus::Review)
-        }
-        (other, _) => other,
-    };
-
-    let was_running = prev_status.as_ref() == Some(&TaskStatus::Running);
-    let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
-        let prev = s.status.clone();
-        if let Some(st) = effective_status {
-            s.status = st;
-        }
-        if let Some(note) = f.note.clone() {
-            s.note = Some(note);
-        }
-        if let Some(summary) = f.summary.clone() {
-            s.summary = Some(summary);
-        }
-        // Capture the project's shipped version on the *first* transition
-        // out of Running. By this point the orchestrator's post-merge /bump
-        // has already landed on the project's main branch, so the manifest
-        // at `project_root` reflects the version that was just shipped.
-        let leaving_running =
-            was_running && matches!(s.status, TaskStatus::Review | TaskStatus::Done);
-        if leaving_running && s.shipped_version.is_none() {
-            s.shipped_version = cc_hub_lib::version::detect(&s.project_root);
-        }
-        // Each transition *into* Review starts a fresh review round, so
-        // the auto-reviewer gets one pass per round.
-        if s.status == TaskStatus::Review && prev != TaskStatus::Review {
-            s.last_auto_reviewed_at = None;
-        }
-    })
-    .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
-
-    // Cleanup runs only when the task actually leaves the active flow:
-    // Done is the only terminal state, and it's only reached via Review → Done
-    // (fresh `done` reports go to Review and keep the orchestrator alive in
-    // case the human wants follow-up).
-    let became_terminal =
-        state.status == TaskStatus::Done && prev_status.as_ref() != Some(&state.status);
-    if became_terminal {
-        orchestrator::cleanup_task_sessions(&state);
-    }
+    let outcome = ops::task::task_report(
+        &project_id,
+        &task_id,
+        ops::task::ReportOpts {
+            status: raw_status,
+            note: f.note.clone(),
+            summary: f.summary.clone(),
+        },
+    )?;
+    let state = outcome.state;
 
     print_json(&serde_json::json!({
         "ok": true,
         "task_id": state.task_id,
         "project_id": state.project_id,
         "status": state.status,
-        "requested_status": raw_status,
+        "requested_status": outcome.requested_status,
         "note": state.note,
         "summary": state.summary,
         "shipped_version": state.shipped_version,
@@ -1525,37 +1225,7 @@ fn task_auto_review(args: &[String]) -> Result<(), CliError> {
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
 
-    let state = orchestrator::read_task_state(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
-    if state.status != TaskStatus::Review {
-        return Err(CliError::Usage(format!(
-            "auto-review is only meaningful in the Review state (task is currently {})",
-            state.status.as_str()
-        )));
-    }
-
-    let pr = cc_hub_lib::pr::read_pr(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
-        .ok_or_else(|| {
-            CliError::Usage(
-                "no PR exists for this task; auto-review only applies to a task with an open PR"
-                    .into(),
-            )
-        })?;
-    if !matches!(
-        pr.review_state,
-        cc_hub_lib::pr::ReviewState::Open | cc_hub_lib::pr::ReviewState::ChangesRequested
-    ) {
-        return Err(CliError::Usage(format!(
-            "auto-review only applies to PRs in Open or ChangesRequested state (PR is currently {})",
-            pr.review_state.as_str()
-        )));
-    }
-
-    orchestrator::update_task_state(&project_id, &task_id, |s| {
-        s.last_auto_reviewed_at = None;
-    })
-    .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
+    ops::task::task_auto_review(&project_id, &task_id)?;
 
     print_json(&serde_json::json!({
         "ok": true,
@@ -1582,10 +1252,6 @@ fn task_artifact_subcommand(args: &[String]) -> Result<(), CliError> {
     }
 }
 
-fn looks_like_url(s: &str) -> bool {
-    s.starts_with("http://") || s.starts_with("https://")
-}
-
 fn task_artifact_add(args: &[String]) -> Result<(), CliError> {
     let f = parse_flags(args)?;
     let task_id = require_task(&f)?;
@@ -1595,69 +1261,14 @@ fn task_artifact_add(args: &[String]) -> Result<(), CliError> {
         .clone()
         .ok_or_else(|| CliError::Usage("--path is required".into()))?;
 
-    // Confirm the task exists before doing any filesystem work, so we don't
-    // copy files into a directory that points at a nonexistent task.
-    let _ = orchestrator::read_task_state(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
-
-    let (kind, stored_path) = if looks_like_url(&raw_path) {
-        let kind = f.kind.clone().unwrap_or_else(|| "url".into());
-        (kind, raw_path.clone())
-    } else {
-        let kind = f.kind.clone().unwrap_or_else(|| "file".into());
-        let src = std::fs::canonicalize(&raw_path).map_err(|e| {
-            CliError::Other(format!(
-                "resolve source path {:?}: {} (does the file exist?)",
-                raw_path, e
-            ))
-        })?;
-        let meta = std::fs::metadata(&src)
-            .map_err(|e| CliError::Other(format!("stat {}: {}", src.display(), e)))?;
-        if meta.is_dir() {
-            return Err(CliError::Other(format!(
-                "{} is a directory; only single files are supported",
-                src.display()
-            )));
-        }
-        let basename = src
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .ok_or_else(|| CliError::Other(format!("{} has no file name", src.display())))?;
-
-        let dest_dir = orchestrator::task_state_dir(&project_id, &task_id)
-            .ok_or_else(|| CliError::Other("no home dir".into()))?
-            .join("artifacts");
-        std::fs::create_dir_all(&dest_dir)
-            .map_err(|e| CliError::Other(format!("create {}: {}", dest_dir.display(), e)))?;
-
-        let ts = orchestrator::now_unix_secs();
-        let dest = dest_dir.join(format!("{}-{}", ts, basename));
-        std::fs::copy(&src, &dest).map_err(|e| {
-            CliError::Other(format!(
-                "copy {} -> {}: {}",
-                src.display(),
-                dest.display(),
-                e
-            ))
-        })?;
-        (kind, dest.to_string_lossy().into_owned())
-    };
-
-    let artifact = Artifact {
-        kind: kind.clone(),
-        path: stored_path.clone(),
-        original: raw_path.clone(),
-        caption: f.caption.clone(),
-        added_at: orchestrator::now_unix_secs(),
-    };
-    let mark_lead = f.lead;
-    let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
-        s.artifacts.push(artifact.clone());
-        if mark_lead {
-            s.lead_artifact = Some(s.artifacts.len() - 1);
-        }
-    })
-    .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
+    let state = ops::task::task_artifact_add(
+        &project_id,
+        &task_id,
+        &raw_path,
+        f.kind.clone(),
+        f.caption.clone(),
+        f.lead,
+    )?;
 
     let added_idx = state.artifacts.len() - 1;
     let added = state.artifacts.last().expect("just pushed");
@@ -1685,8 +1296,7 @@ fn task_artifact_list(args: &[String]) -> Result<(), CliError> {
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
 
-    let state = orchestrator::read_task_state(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
+    let state = ops::task::task_artifact_list(&project_id, &task_id)?;
 
     let lead_idx = state.lead_artifact;
     let arr: Vec<serde_json::Value> = state
@@ -1752,20 +1362,7 @@ fn task_todos_set(args: &[String]) -> Result<(), CliError> {
         CliError::Usage("--items is required (newline-separated todo texts)".into())
     })?;
 
-    let new_todos: Vec<TodoItem> = raw
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .map(|l| TodoItem {
-            text: l.to_string(),
-            done: false,
-        })
-        .collect();
-
-    let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
-        s.todos = new_todos;
-    })
-    .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
+    let state = ops::task::task_todos_set(&project_id, &task_id, &raw)?;
 
     print_todos_result(&state);
     Ok(())
@@ -1779,23 +1376,7 @@ fn task_todos_mark(args: &[String], done: bool) -> Result<(), CliError> {
         .index
         .ok_or_else(|| CliError::Usage("--index is required (0-based)".into()))?;
 
-    let pre = orchestrator::read_task_state(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
-    if idx >= pre.todos.len() {
-        return Err(CliError::Usage(format!(
-            "--index {} out of range (have {} todo{})",
-            idx,
-            pre.todos.len(),
-            if pre.todos.len() == 1 { "" } else { "s" }
-        )));
-    }
-
-    let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
-        if let Some(t) = s.todos.get_mut(idx) {
-            t.done = done;
-        }
-    })
-    .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
+    let state = ops::task::task_todos_mark(&project_id, &task_id, idx, done)?;
 
     print_todos_result(&state);
     Ok(())
@@ -1806,10 +1387,7 @@ fn task_todos_clear(args: &[String]) -> Result<(), CliError> {
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
 
-    let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
-        s.todos.clear();
-    })
-    .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
+    let state = ops::task::task_todos_clear(&project_id, &task_id)?;
 
     print_todos_result(&state);
     Ok(())
@@ -1826,45 +1404,13 @@ fn task_create(args: &[String]) -> Result<(), CliError> {
         .prompt
         .clone()
         .ok_or_else(|| CliError::Usage("--prompt is required".into()))?;
-    let (project_id, project_root) = if let Some(id) = f.project_id.clone() {
-        let projects = orchestrator::load_projects();
-        let root = projects
-            .projects
-            .into_iter()
-            .find(|p| p.id == id)
-            .map(|p| p.root)
-            .ok_or_else(|| {
-                CliError::Usage(format!(
-                    "--project-id {}: not registered in ~/.cc-hub/projects.toml",
-                    id
-                ))
-            })?;
-        (id, root)
-    } else {
-        let cwd = std::env::current_dir().map_err(|e| CliError::Other(format!("cwd: {}", e)))?;
-        let project_id = orchestrator::project_id_for_path(&cwd);
-        let project_name = name.unwrap_or_else(|| {
-            cwd.file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| project_id.clone())
-        });
-        orchestrator::ensure_project_registered(&cwd, &project_name)
-            .map_err(|e| CliError::Other(format!("register project: {}", e)))?;
-        (project_id, cwd)
-    };
 
-    let state = if f.backlog {
-        TaskState::new_backlog(project_id.clone(), project_root, prompt)
-    } else {
-        TaskState::new(project_id.clone(), project_root, prompt)
-    };
-    orchestrator::write_task_state(&state)
-        .map_err(|e| CliError::Other(format!("write state: {}", e)))?;
+    let state = ops::task::task_create(f.project_id.as_deref(), name, prompt, f.backlog)?;
 
     print_json(&serde_json::json!({
         "ok": true,
         "task_id": state.task_id,
-        "project_id": project_id,
+        "project_id": state.project_id,
         "status": state.status,
     }));
     Ok(())
@@ -1962,32 +1508,7 @@ fn pr_create(args: &[String]) -> Result<(), CliError> {
         .ok_or_else(|| CliError::Usage("--title is required".into()))?;
     let description = f.description.clone().unwrap_or_default();
 
-    let state = orchestrator::read_task_state(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
-
-    if cc_hub_lib::pr::read_pr(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
-        .is_some()
-    {
-        return Err(CliError::Other(
-            "a PR already exists for this task; use `pr show` to inspect".into(),
-        ));
-    }
-
-    let branch = orchestrator::worktree_branch(&task_id, &worktree_name);
-    let base = orchestrator::detect_main_branch(&state.project_root);
-
-    let pr = cc_hub_lib::pr::create_pr(&state, branch, base, title, description)
-        .map_err(|e| CliError::Other(format!("create pr: {}", e)))?;
-
-    // PR open → task transitions Running → Review. The orchestrator's
-    // tmux stays alive so it can iterate when the user requests changes.
-    orchestrator::update_task_state(&project_id, &task_id, |s| {
-        s.status = TaskStatus::Review;
-        s.note = Some(format!("PR #{}: {}", pr.id, pr.title));
-        s.last_auto_reviewed_at = None;
-    })
-    .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
+    let pr = ops::pr::pr_create(&project_id, &task_id, &worktree_name, title, description)?;
 
     print_json(&serde_json::json!({
         "ok": true,
@@ -2010,51 +1531,12 @@ fn pr_show(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Guard a review-state mutation against terminal PRs. `pr approve` and
-/// `pr request-changes` must refuse a Merged/Closed PR — like their siblings
-/// `pr reopen`/`pr merge`/`pr close` — instead of silently resurrecting a
-/// finished task (forcing Done → Running and re-opening the merged PR).
-fn guard_pr_mutable(verb: &str, state: cc_hub_lib::pr::ReviewState) -> Result<(), CliError> {
-    match state {
-        cc_hub_lib::pr::ReviewState::Merged => Err(CliError::conflict_with_recipe(
-            format!("cannot {} a merged PR", verb),
-            "The PR is already merged; open a follow-up task instead of reopening finished work.",
-        )),
-        cc_hub_lib::pr::ReviewState::Closed => Err(CliError::conflict_with_recipe(
-            format!("cannot {} a closed PR", verb),
-            "The PR is closed; reopen it via the TUI before changing its review state.",
-        )),
-        _ => Ok(()),
-    }
-}
-
 fn pr_approve(args: &[String]) -> Result<(), CliError> {
     let f = parse_flags(args)?;
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
 
-    let state = orchestrator::read_task_state(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
-    let project_root = state.project_root.clone();
-
-    let pr = cc_hub_lib::pr::read_pr(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
-        .ok_or_else(|| CliError::NotFound("no PR for this task".into()))?;
-    guard_pr_mutable("approve", pr.review_state)?;
-    let pr_branch = pr.branch.clone();
-    let base_branch = orchestrator::detect_main_branch(&project_root);
-
-    // Snapshot SHAs at approval — used by `pr merge` to detect whether
-    // main moved before the merge fired (auto-approve heuristic).
-    let branch_sha = git_rev_parse(&project_root, &pr_branch).ok();
-    let base_sha = git_rev_parse(&project_root, &base_branch).ok();
-
-    let pr = cc_hub_lib::pr::update_pr(&project_id, &task_id, |p| {
-        p.review_state = cc_hub_lib::pr::ReviewState::Approved;
-        p.approved_at_branch_sha = branch_sha;
-        p.approved_at_base_sha = base_sha;
-    })
-    .map_err(|e| CliError::Other(format!("update pr: {}", e)))?;
+    let pr = ops::pr::pr_approve(&project_id, &task_id)?;
 
     print_json(&serde_json::json!({
         "ok": true,
@@ -2073,29 +1555,7 @@ fn pr_request_changes(args: &[String]) -> Result<(), CliError> {
         .ok_or_else(|| CliError::Usage("--comment is required".into()))?;
     let author = f.author.clone().unwrap_or_else(|| "user".into());
 
-    let existing = cc_hub_lib::pr::read_pr(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
-        .ok_or_else(|| CliError::NotFound("no PR for this task".into()))?;
-    guard_pr_mutable("request changes on", existing.review_state)?;
-
-    let now = orchestrator::now_unix_secs();
-    let pr = cc_hub_lib::pr::update_pr(&project_id, &task_id, |p| {
-        p.review_state = cc_hub_lib::pr::ReviewState::ChangesRequested;
-        p.comments.push(cc_hub_lib::pr::Comment {
-            author: author.clone(),
-            at: now,
-            body: comment.clone(),
-        });
-    })
-    .map_err(|e| CliError::Other(format!("update pr: {}", e)))?;
-
-    // Changes requested → task goes back to Running so the orchestrator
-    // can iterate. Its tmux is still alive (Review keeps it alive).
-    orchestrator::update_task_state(&project_id, &task_id, |s| {
-        s.status = TaskStatus::Running;
-        s.note = Some(format!("PR #{}: changes requested", pr.id));
-    })
-    .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
+    let pr = ops::pr::pr_request_changes(&project_id, &task_id, comment, author)?;
 
     print_json(&serde_json::json!({
         "ok": true,
@@ -2111,38 +1571,7 @@ fn pr_reopen(args: &[String]) -> Result<(), CliError> {
     let comment = f.comment.clone();
     let author = f.author.clone().unwrap_or_else(|| "orchestrator".into());
 
-    let pr = cc_hub_lib::pr::read_pr(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
-        .ok_or_else(|| CliError::NotFound("no PR for this task".into()))?;
-
-    if pr.review_state != cc_hub_lib::pr::ReviewState::ChangesRequested {
-        return Err(CliError::Other(format!(
-            "PR is not in changes_requested (state: {}); reopen only applies after request-changes",
-            pr.review_state.as_str()
-        )));
-    }
-
-    let now = orchestrator::now_unix_secs();
-    let pr = cc_hub_lib::pr::update_pr(&project_id, &task_id, |p| {
-        p.review_state = cc_hub_lib::pr::ReviewState::Open;
-        if let Some(body) = comment.clone() {
-            p.comments.push(cc_hub_lib::pr::Comment {
-                author: author.clone(),
-                at: now,
-                body,
-            });
-        }
-    })
-    .map_err(|e| CliError::Other(format!("update pr: {}", e)))?;
-
-    // Re-opened PR → task transitions Running → Review and auto-review
-    // should re-fire on the new commits (mirror pr_create precedent).
-    orchestrator::update_task_state(&project_id, &task_id, |s| {
-        s.status = TaskStatus::Review;
-        s.note = Some(format!("PR #{}: reopened for re-review", pr.id));
-        s.last_auto_reviewed_at = None;
-    })
-    .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
+    let pr = ops::pr::pr_reopen(&project_id, &task_id, comment, author)?;
 
     print_json(&serde_json::json!({
         "ok": true,
@@ -2161,15 +1590,7 @@ fn pr_comment(args: &[String]) -> Result<(), CliError> {
         .ok_or_else(|| CliError::Usage("--comment is required".into()))?;
     let author = f.author.clone().unwrap_or_else(|| "orchestrator".into());
 
-    let now = orchestrator::now_unix_secs();
-    let pr = cc_hub_lib::pr::update_pr(&project_id, &task_id, |p| {
-        p.comments.push(cc_hub_lib::pr::Comment {
-            author: author.clone(),
-            at: now,
-            body: body.clone(),
-        });
-    })
-    .map_err(|e| CliError::Other(format!("update pr: {}", e)))?;
+    let pr = ops::pr::pr_comment(&project_id, &task_id, body, author)?;
 
     print_json(&serde_json::json!({
         "ok": true,
@@ -2188,47 +1609,7 @@ fn pr_close(args: &[String]) -> Result<(), CliError> {
     let comment = f.comment.clone();
     let author = f.author.clone().unwrap_or_else(|| "user".into());
 
-    let pr = cc_hub_lib::pr::read_pr(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
-        .ok_or_else(|| CliError::NotFound("no PR for this task".into()))?;
-
-    match pr.review_state {
-        cc_hub_lib::pr::ReviewState::Merged => {
-            return Err(CliError::Usage(
-                "PR is already merged; closing a merged PR is not meaningful — consider opening a follow-up task instead".into(),
-            ));
-        }
-        cc_hub_lib::pr::ReviewState::Closed => {
-            return Err(CliError::Usage(
-                "PR is already closed; reopen it via the TUI before closing again".into(),
-            ));
-        }
-        _ => {}
-    }
-
-    let now = orchestrator::now_unix_secs();
-    let pr = cc_hub_lib::pr::update_pr(&project_id, &task_id, |p| {
-        p.review_state = cc_hub_lib::pr::ReviewState::Closed;
-        if let Some(body) = comment.clone() {
-            p.comments.push(cc_hub_lib::pr::Comment {
-                author: author.clone(),
-                at: now,
-                body,
-            });
-        }
-    })
-    .map_err(|e| CliError::Other(format!("update pr: {}", e)))?;
-
-    let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
-        s.status = TaskStatus::Done;
-        s.note = Some(format!("PR #{}: closed", pr.id));
-    })
-    .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
-
-    // No-op if this task isn't the holder.
-    let _ = cc_hub_lib::merge_lock::release(&project_id, &task_id);
-
-    orchestrator::cleanup_task_sessions(&state);
+    let pr = ops::pr::pr_close(&project_id, &task_id, comment, author)?;
 
     print_json(&serde_json::json!({
         "ok": true,
@@ -2239,349 +1620,128 @@ fn pr_close(args: &[String]) -> Result<(), CliError> {
 }
 
 fn pr_merge(args: &[String]) -> Result<(), CliError> {
+    use ops::pr::MergeOutcomeOp;
+
     let f = parse_flags(args)?;
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
 
-    let state = orchestrator::read_task_state(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
-    let project_root = state.project_root.clone();
-    let pr = cc_hub_lib::pr::read_pr(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
-        .ok_or_else(|| CliError::NotFound("no PR for this task".into()))?;
+    let outcome = ops::pr::pr_merge(&project_id, &task_id, f.wait, f.timeout_secs)?;
 
-    if pr.review_state != cc_hub_lib::pr::ReviewState::Approved {
-        return Err(CliError::Other(format!(
-            "PR is not approved (state: {}); approve it first via the TUI or `cc-hub pr approve`",
-            pr.review_state.as_str()
-        )));
-    }
-
-    // Acquire the project-wide merge lock. Held across the entire merging
-    // phase — released by `pr finalize` after /simplify and /bump.
-    let acquire = if f.wait {
-        let timeout = std::time::Duration::from_secs(f.timeout_secs.unwrap_or(1800));
-        cc_hub_lib::merge_lock::acquire_blocking(
-            &project_id,
-            &task_id,
-            state.orchestrator_tmux.as_deref(),
-            timeout,
-            std::time::Duration::from_millis(500),
-        )
-        .map_err(|e| CliError::Other(format!("acquire merge lock: {}", e)))?
-    } else {
-        cc_hub_lib::merge_lock::acquire(&project_id, &task_id, state.orchestrator_tmux.as_deref())
-            .map_err(|e| CliError::Other(format!("acquire merge lock: {}", e)))?
-    };
-    if let cc_hub_lib::merge_lock::AcquireOutcome::Held(holder) = acquire {
-        let holder_task = holder.task_id.clone();
-        let age_seconds = orchestrator::now_unix_secs().saturating_sub(holder.acquired_at);
-        let mut payload = serde_json::json!({
-            "ok": false,
-            "locked": true,
-            "holder_task": holder.task_id,
-            "since": holder.acquired_at,
-            "phase": holder.phase.as_str(),
-            "age_seconds": age_seconds,
-            "recipe": "Another task currently holds the merge lock. Re-run with `--wait` to block until it releases, or poll `cc-hub pr merge` manually.",
-        });
-        if f.wait {
-            payload["timed_out"] = serde_json::Value::Bool(true);
-            payload["recipe"] = serde_json::Value::String(
-                "Merge lock still held after the wait timeout. Re-run `cc-hub pr merge --wait` (optionally with `--timeout-secs N`) or investigate why the holder is stuck.".into(),
-            );
-        }
-        print_json(&payload);
-        return Err(CliError::Reported(format!(
-            "merge lock held by task {}",
-            holder_task
-        )));
-    }
-
-    // From here on the merge lock is HELD (released by `pr finalize`, or by the
-    // explicit demote/preflight paths below). Any fallible step that bubbles its
-    // error up via `?` must release the lock first — otherwise a mid-merge
-    // failure (corrupt index, permission error, git exec failure) strands the
-    // lock on an exited process and wedges every subsequent `pr merge` for the
-    // project. Funnel those errors through `unlock`. (Release is idempotent, so
-    // paths that already released explicitly are unaffected.)
-    let unlock = |msg: String| -> CliError {
-        let _ = cc_hub_lib::merge_lock::release(&project_id, &task_id);
-        CliError::Other(msg)
-    };
-
-    // Step 1: bring main into the feature branch so the conflict
-    // resolution happens on the feature branch (where the worker can
-    // re-resolve cleanly), not on main itself.
-    let worktree_path = match resolve_worktree_path(&state, &pr.branch) {
-        Some(p) => p,
-        None => {
-            let _ = cc_hub_lib::merge_lock::release(&project_id, &task_id);
-            return Err(CliError::Other(format!(
-                "could not resolve worktree path for branch {} \
-                 (no Worker record matches; was the worktree removed?)",
-                pr.branch
-            )));
-        }
-    };
-
-    // The worktree dir must still exist before we operate on it: a gc / manual
-    // cleanup may have removed it while the task sat in Review. Treat a missing
-    // worktree as a distinct outcome rather than letting `git -C <gone>` fail
-    // with an opaque error.
-    if !worktree_path.exists() {
-        let _ = cc_hub_lib::merge_lock::release(&project_id, &task_id);
-        print_json(&serde_json::json!({
-            "ok": false,
-            "phase": "preflight",
-            "kind": "missing_worktree",
-            "worktree": worktree_path.to_string_lossy(),
-            "recipe": "The feature branch worktree no longer exists (removed by gc or manual cleanup). Recreate it (`cc-hub spawn-worker`) on the same branch before re-running `cc-hub pr merge`, or close the PR. The merge lock has been released.",
-        }));
-        return Err(CliError::Reported(format!(
-            "worktree for branch {} no longer exists",
-            pr.branch
-        )));
-    }
-
-    // Clean-tree preflight on the worktree itself. Step 1 merges base INTO the
-    // feature branch inside this worktree; if it's dirty, git either aborts
-    // ("would be overwritten") or auto-stashes and produces conflict markers on
-    // pop — which downstream misclassifies as a content conflict and wrongly
-    // demotes the approved PR with a misleading "0 files" message. Refuse up
-    // front with a distinct outcome so the orchestrator gets an actionable
-    // recipe instead of a phantom conflict.
-    let worktree_dirty = orchestrator::dirty_paths(&worktree_path)
-        .map_err(|e| unlock(format!("git status (worktree): {}", e)))?;
-    if !worktree_dirty.is_empty() {
-        let _ = cc_hub_lib::merge_lock::release(&project_id, &task_id);
-        print_json(&serde_json::json!({
-            "ok": false,
-            "phase": "preflight",
-            "kind": "dirty_worktree",
-            "worktree": worktree_path.to_string_lossy(),
-            "dirty": worktree_dirty,
-            "recipe": "The feature-branch worktree has uncommitted changes; cc-hub won't merge base into a dirty tree. Commit or stash the listed paths in the worktree, then re-run `cc-hub pr merge`. The merge lock has been released.",
-        }));
-        return Err(CliError::Reported(format!(
-            "merge blocked: feature-branch worktree has {} uncommitted path(s)",
-            worktree_dirty.len()
-        )));
-    }
-
-    let merge_into_feature = orchestrator::run_git(
-        &worktree_path,
-        &[
-            "merge",
-            "--no-ff",
-            "-m",
-            &format!("cc-hub: merge {} into {}", pr.base, pr.branch),
-            &pr.base,
-        ],
-    )
-    .map_err(|e| unlock(format!("git merge {} into branch: {}", pr.base, e)))?;
-
-    if !merge_into_feature.status_ok {
-        // Conflicts merging main into the feature branch. By the
-        // PR-flow design's auto-approve rule (only *clean* resolutions
-        // skip re-review), conflicts demote the PR back to Open: the
-        // user must re-approve once the orchestrator commits the
-        // resolution, since the diff they previously approved no
-        // longer matches what would land. The merge lock is released
-        // so other tasks can proceed in the meantime.
-        let conflicting = git_conflicting_paths(&worktree_path).unwrap_or_default();
-
-        // Abort the in-progress merge so the worktree returns to a
-        // clean state — the orchestrator will re-merge main once the
-        // user re-approves. We don't surface abort failures: if abort
-        // itself fails, the orchestrator can recover manually.
-        let _ = orchestrator::run_git(&worktree_path, &["merge", "--abort"]);
-
-        let comment_body = format!(
-            "Auto-demoted to Open: merging `{}` into the feature branch produced conflicts in {} \
-             file(s) ({}). cc-hub's auto-approve rule only accepts clean resolutions; resolve in \
-             the worktree, push the resolution commit, then ask the reviewer to re-approve.",
-            pr.base,
-            conflicting.len(),
-            conflicting.join(", "),
-        );
-        let now = orchestrator::now_unix_secs();
-        let _ = cc_hub_lib::pr::update_pr(&project_id, &task_id, |p| {
-            p.review_state = cc_hub_lib::pr::ReviewState::Open;
-            p.approved_at_branch_sha = None;
-            p.approved_at_base_sha = None;
-            p.comments.push(cc_hub_lib::pr::Comment {
-                author: "cc-hub".into(),
-                at: now,
-                body: comment_body.clone(),
+    match outcome {
+        MergeOutcomeOp::Locked(holder) => {
+            let mut payload = serde_json::json!({
+                "ok": false,
+                "locked": true,
+                "holder_task": holder.holder_task,
+                "since": holder.since,
+                "phase": holder.phase,
+                "age_seconds": holder.age_seconds,
+                "recipe": "Another task currently holds the merge lock. Re-run with `--wait` to block until it releases, or poll `cc-hub pr merge` manually.",
             });
-        });
-        let _ = orchestrator::update_task_state(&project_id, &task_id, |s| {
-            s.status = TaskStatus::Review;
-            s.note = Some(format!(
-                "PR #{}: conflicts during merge — re-review required",
-                pr.id
-            ));
-            s.last_auto_reviewed_at = None;
-        });
-        let _ = cc_hub_lib::merge_lock::release(&project_id, &task_id);
-
-        print_json(&serde_json::json!({
-            "ok": false,
-            "phase": "merge_main_into_branch",
-            "demoted_to": "open",
-            "conflicting_paths": conflicting,
-            "stdout": merge_into_feature.stdout,
-            "stderr": merge_into_feature.stderr,
-            "recipe": "Resolve conflicts in the worktree, commit the resolution, then ask the reviewer to re-approve before re-running `cc-hub pr merge`. The merge lock has been released.",
-        }));
-        return Err(CliError::Reported(
-            "conflict merging main into the feature branch — PR demoted to Open".into(),
-        ));
-    }
-
-    // Step 2: dirty-tree preflight on main. Distinct from cross-task
-    // conflicts (which the merge lock already handles) — this catches
-    // the user's local uncommitted edits.
-    let changed = orchestrator::branch_changed_paths(&project_root, &pr.base, &pr.branch)
-        .map_err(|e| unlock(format!("diff branch: {}", e)))?;
-    let dirty: std::collections::BTreeSet<String> = orchestrator::dirty_paths(&project_root)
-        .map_err(|e| unlock(format!("git status: {}", e)))?
-        .into_iter()
-        .collect();
-    let branch_files: std::collections::BTreeSet<String> = changed.iter().cloned().collect();
-    let overlap: Vec<String> = dirty.intersection(&branch_files).cloned().collect();
-    if !overlap.is_empty() {
-        // Release the lock so other tasks can merge while the user
-        // cleans up their working tree. The PR remains Approved; the
-        // orchestrator simply re-runs `pr merge` once the user has
-        // committed/stashed/reverted.
-        let _ = cc_hub_lib::merge_lock::release(&project_id, &task_id);
-        print_json(&serde_json::json!({
-            "ok": false,
-            "phase": "preflight",
-            "blocked_by_dirty_tree": true,
-            "overlap": overlap,
-            "recipe": "Commit, stash, or revert the listed paths on the target branch, then re-run `cc-hub pr merge`. The merge lock has been released.",
-        }));
-        return Err(CliError::Reported(
-            "merge blocked: working tree on target branch has overlapping uncommitted edits".into(),
-        ));
-    }
-
-    // Capture which ref the project root was on before we check out `base` to
-    // run the merge, so we can put the user's branch back afterward instead of
-    // silently leaving them on main. `None` means we couldn't determine it
-    // (detached / git error) — we then skip the restore rather than guess.
-    let prior_ref = capture_head_ref(&project_root);
-
-    // Step 3: merge feature branch into main. Should be conflict-free
-    // since we already merged main into the branch in step 1.
-    let checkout = orchestrator::run_git(&project_root, &["checkout", &pr.base])
-        .map_err(|e| unlock(format!("git checkout: {}", e)))?;
-    if !checkout.status_ok {
-        return Err(unlock(format!(
-            "git checkout {} failed: {}",
-            pr.base,
-            checkout.stderr.trim()
-        )));
-    }
-    let msg = format!(
-        "cc-hub: merge {} into {} (PR #{})",
-        pr.branch, pr.base, pr.id
-    );
-    let merge_into_main =
-        orchestrator::run_git(&project_root, &["merge", "--no-ff", "-m", &msg, &pr.branch])
-            .map_err(|e| unlock(format!("git merge: {}", e)))?;
-
-    if !merge_into_main.status_ok {
-        // Should be rare given step 1, but possible if main moved
-        // concurrently inside the lock window (it shouldn't, since
-        // the lock serialises merges). Abort to leave main clean,
-        // release the lock, and surface to the orchestrator.
-        let conflicting = git_conflicting_paths(&project_root).unwrap_or_default();
-        let _ = orchestrator::run_git(&project_root, &["merge", "--abort"]);
-        let _ = cc_hub_lib::merge_lock::release(&project_id, &task_id);
-        print_json(&serde_json::json!({
-            "ok": false,
-            "phase": "merge_branch_into_main",
-            "conflicting_paths": conflicting,
-            "stdout": merge_into_main.stdout,
-            "stderr": merge_into_main.stderr,
-            "recipe": "Unexpected conflict merging into main (the merge lock should have prevented this — investigate before retrying).",
-        }));
-        return Err(CliError::Reported("conflict merging into main".into()));
-    }
-
-    // Restore the project root to whatever ref it was on before step 3's
-    // checkout, so the user isn't silently left on `base`. Skip when we were
-    // already on `base` (the merge advanced it; nothing to do) or couldn't
-    // determine the prior ref. Best-effort: a failure is reported, not fatal —
-    // the merge already landed.
-    let restored_ref = match &prior_ref {
-        Some(r) if r != &pr.base => {
-            let out = orchestrator::run_git(&project_root, &["checkout", r]);
-            match out {
-                Ok(o) if o.status_ok => Some(r.clone()),
-                Ok(o) => {
-                    log::warn!(
-                        "pr merge: restore HEAD to {} failed: {}",
-                        r,
-                        o.stderr.trim()
-                    );
-                    None
-                }
-                Err(e) => {
-                    log::warn!("pr merge: restore HEAD to {} errored: {}", r, e);
-                    None
-                }
+            if holder.timed_out {
+                payload["timed_out"] = serde_json::Value::Bool(true);
+                payload["recipe"] = serde_json::Value::String(
+                    "Merge lock still held after the wait timeout. Re-run `cc-hub pr merge --wait` (optionally with `--timeout-secs N`) or investigate why the holder is stuck.".into(),
+                );
             }
+            print_json(&payload);
+            Err(CliError::Reported(format!(
+                "merge lock held by task {}",
+                holder.holder_task
+            )))
         }
-        _ => None,
-    };
-
-    // Transition task to Merging. /simplify and /bump still need to run;
-    // `pr finalize` flips to Done afterwards.
-    orchestrator::update_task_state(&project_id, &task_id, |s| {
-        s.status = TaskStatus::Merging;
-        s.note = Some(format!("PR #{}: merged; running /simplify + /bump", pr.id));
-        s.merges.push(MergeRecord {
-            worktree: pr
-                .branch
-                .strip_prefix(&format!("cc-hub/{}-", task_id))
-                .unwrap_or(&pr.branch)
-                .to_string(),
-            at: orchestrator::now_unix_secs(),
-            outcome: MergeOutcome::Ok,
-        });
-    })
-    .map_err(|e| unlock(format!("update state: {}", e)))?;
-
-    print_json(&serde_json::json!({
-        "ok": true,
-        "phase": "merged",
-        "branch": pr.branch,
-        "base": pr.base,
-        "stdout": merge_into_main.stdout,
-        "restored_ref": restored_ref,
-        "next": "Run /simplify, then /bump, then `cc-hub pr finalize --task <id>` to release the merge lock and mark the task done.",
-    }));
-    Ok(())
-}
-
-/// The branch HEAD points to in `root`, or `None` when detached or git fails.
-/// Used by `pr merge` to remember the user's branch before checking out `base`
-/// so it can restore it afterward.
-fn capture_head_ref(root: &std::path::Path) -> Option<String> {
-    let out = orchestrator::run_git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()?;
-    if !out.status_ok {
-        return None;
-    }
-    let name = out.stdout.trim();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name.to_string())
+        MergeOutcomeOp::MissingWorktree { worktree, branch } => {
+            print_json(&serde_json::json!({
+                "ok": false,
+                "phase": "preflight",
+                "kind": "missing_worktree",
+                "worktree": worktree,
+                "recipe": "The feature branch worktree no longer exists (removed by gc or manual cleanup). Recreate it (`cc-hub spawn-worker`) on the same branch before re-running `cc-hub pr merge`, or close the PR. The merge lock has been released.",
+            }));
+            Err(CliError::Reported(format!(
+                "worktree for branch {} no longer exists",
+                branch
+            )))
+        }
+        MergeOutcomeOp::DirtyWorktree { worktree, dirty } => {
+            let dirty_len = dirty.len();
+            print_json(&serde_json::json!({
+                "ok": false,
+                "phase": "preflight",
+                "kind": "dirty_worktree",
+                "worktree": worktree,
+                "dirty": dirty,
+                "recipe": "The feature-branch worktree has uncommitted changes; cc-hub won't merge base into a dirty tree. Commit or stash the listed paths in the worktree, then re-run `cc-hub pr merge`. The merge lock has been released.",
+            }));
+            Err(CliError::Reported(format!(
+                "merge blocked: feature-branch worktree has {} uncommitted path(s)",
+                dirty_len
+            )))
+        }
+        MergeOutcomeOp::DemotedConflict {
+            conflicting_paths,
+            stdout,
+            stderr,
+        } => {
+            print_json(&serde_json::json!({
+                "ok": false,
+                "phase": "merge_main_into_branch",
+                "demoted_to": "open",
+                "conflicting_paths": conflicting_paths,
+                "stdout": stdout,
+                "stderr": stderr,
+                "recipe": "Resolve conflicts in the worktree, commit the resolution, then ask the reviewer to re-approve before re-running `cc-hub pr merge`. The merge lock has been released.",
+            }));
+            Err(CliError::Reported(
+                "conflict merging main into the feature branch — PR demoted to Open".into(),
+            ))
+        }
+        MergeOutcomeOp::BlockedByDirtyTree { overlap } => {
+            print_json(&serde_json::json!({
+                "ok": false,
+                "phase": "preflight",
+                "blocked_by_dirty_tree": true,
+                "overlap": overlap,
+                "recipe": "Commit, stash, or revert the listed paths on the target branch, then re-run `cc-hub pr merge`. The merge lock has been released.",
+            }));
+            Err(CliError::Reported(
+                "merge blocked: working tree on target branch has overlapping uncommitted edits"
+                    .into(),
+            ))
+        }
+        MergeOutcomeOp::ConflictIntoMain {
+            conflicting_paths,
+            stdout,
+            stderr,
+        } => {
+            print_json(&serde_json::json!({
+                "ok": false,
+                "phase": "merge_branch_into_main",
+                "conflicting_paths": conflicting_paths,
+                "stdout": stdout,
+                "stderr": stderr,
+                "recipe": "Unexpected conflict merging into main (the merge lock should have prevented this — investigate before retrying).",
+            }));
+            Err(CliError::Reported("conflict merging into main".into()))
+        }
+        MergeOutcomeOp::Merged {
+            branch,
+            base,
+            stdout,
+            restored_ref,
+        } => {
+            print_json(&serde_json::json!({
+                "ok": true,
+                "phase": "merged",
+                "branch": branch,
+                "base": base,
+                "stdout": stdout,
+                "restored_ref": restored_ref,
+                "next": "Run /simplify, then /bump, then `cc-hub pr finalize --task <id>` to release the merge lock and mark the task done.",
+            }));
+            Ok(())
+        }
     }
 }
 
@@ -2600,73 +1760,62 @@ fn capture_head_ref(root: &std::path::Path) -> Option<String> {
 /// the pane is busy the prompt cannot be injected; the verb reports that
 /// (`sent:false, pane_busy:true`) so the caller knows to retry once idle.
 fn pr_continue(args: &[String]) -> Result<(), CliError> {
+    use ops::pr::ContinueOutcome;
+
     let f = parse_flags(args)?;
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
 
-    let state = orchestrator::read_task_state(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
-
-    let Some(tmux_name) = state.orchestrator_tmux.clone() else {
-        print_json(&serde_json::json!({
-            "ok": false,
-            "task_id": task_id,
-            "orchestrator_alive": false,
-            "reason": "no_orchestrator_tmux",
-            "recipe": "This task has no orchestrator tmux recorded — it was never started or its session name was cleared. Resurrect the orchestrator (`cc-hub orchestrate start --task <id>`), or if the merge is wedged, `cc-hub task delete --force --task <id>` to recover.",
-        }));
-        return Err(CliError::Reported(format!(
-            "task {} has no orchestrator tmux to continue",
-            task_id
-        )));
-    };
-
-    if !send::tmux_session_exists(&tmux_name) {
-        print_json(&serde_json::json!({
-            "ok": false,
-            "task_id": task_id,
-            "orchestrator_tmux": tmux_name,
-            "orchestrator_alive": false,
-            "reason": "orchestrator_dead",
-            "recipe": "The orchestrator session is dead. Resurrect it (`cc-hub orchestrate start --task <id>`) then re-run `cc-hub pr continue`, or `cc-hub task delete --force --task <id>` to tear down a wedged merge (releases the merge lock).",
-        }));
-        return Err(CliError::Reported(format!(
-            "orchestrator [{}] is not live",
-            tmux_name
-        )));
-    }
-
-    let prompt =
-        orchestrator::build_review_approval_prompt(&task_id, &orchestrator::resolve_cc_hub_bin());
-
-    if !send::pane_ready_for_input(&tmux_name) {
-        print_json(&serde_json::json!({
-            "ok": true,
-            "task_id": task_id,
-            "orchestrator_tmux": tmux_name,
-            "orchestrator_alive": true,
-            "sent": false,
-            "pane_busy": true,
-            "recipe": "The orchestrator is alive but its pane is busy (mid-turn). Re-run `cc-hub pr continue` once it's idle.",
-        }));
-        return Ok(());
-    }
-
-    match send::send_prompt(&tmux_name, &prompt) {
-        Ok(()) => {
+    match ops::pr::pr_continue(&project_id, &task_id)? {
+        ContinueOutcome::NoOrchestratorTmux => {
+            print_json(&serde_json::json!({
+                "ok": false,
+                "task_id": task_id,
+                "orchestrator_alive": false,
+                "reason": "no_orchestrator_tmux",
+                "recipe": "This task has no orchestrator tmux recorded — it was never started or its session name was cleared. Resurrect the orchestrator (`cc-hub orchestrate start --task <id>`), or if the merge is wedged, `cc-hub task delete --force --task <id>` to recover.",
+            }));
+            Err(CliError::Reported(format!(
+                "task {} has no orchestrator tmux to continue",
+                task_id
+            )))
+        }
+        ContinueOutcome::OrchestratorDead { tmux } => {
+            print_json(&serde_json::json!({
+                "ok": false,
+                "task_id": task_id,
+                "orchestrator_tmux": tmux,
+                "orchestrator_alive": false,
+                "reason": "orchestrator_dead",
+                "recipe": "The orchestrator session is dead. Resurrect it (`cc-hub orchestrate start --task <id>`) then re-run `cc-hub pr continue`, or `cc-hub task delete --force --task <id>` to tear down a wedged merge (releases the merge lock).",
+            }));
+            Err(CliError::Reported(format!(
+                "orchestrator [{}] is not live",
+                tmux
+            )))
+        }
+        ContinueOutcome::PaneBusy { tmux } => {
             print_json(&serde_json::json!({
                 "ok": true,
                 "task_id": task_id,
-                "orchestrator_tmux": tmux_name,
+                "orchestrator_tmux": tmux,
+                "orchestrator_alive": true,
+                "sent": false,
+                "pane_busy": true,
+                "recipe": "The orchestrator is alive but its pane is busy (mid-turn). Re-run `cc-hub pr continue` once it's idle.",
+            }));
+            Ok(())
+        }
+        ContinueOutcome::Sent { tmux } => {
+            print_json(&serde_json::json!({
+                "ok": true,
+                "task_id": task_id,
+                "orchestrator_tmux": tmux,
                 "orchestrator_alive": true,
                 "sent": true,
             }));
             Ok(())
         }
-        Err(e) => Err(CliError::Other(format!(
-            "send merge-flow prompt to [{}]: {}",
-            tmux_name, e
-        ))),
     }
 }
 
@@ -2683,45 +1832,14 @@ fn pr_lock_phase(args: &[String]) -> Result<(), CliError> {
             phase_raw
         ))
     })?;
-    let updated = cc_hub_lib::merge_lock::set_phase(&project_id, &task_id, phase)
-        .map_err(|e| CliError::Other(format!("set merge phase: {}", e)))?;
-    if !updated {
-        return Err(CliError::Other(format!(
-            "task {} does not hold the merge lock for project {} (or no lock exists)",
-            task_id, project_id
-        )));
-    }
+    let phase_str = ops::pr::pr_lock_phase(&project_id, &task_id, phase)?;
     print_json(&serde_json::json!({
         "ok": true,
         "task_id": task_id,
         "project_id": project_id,
-        "phase": phase.as_str(),
+        "phase": phase_str,
     }));
     Ok(())
-}
-
-/// Run a build command inside `project_root` and capture stdout+stderr.
-/// `cmd` runs via `sh -c "<cmd>"` so users can pass pipelines / `&&` chains.
-/// Returns (status_ok, stdout, stderr).
-fn run_build_command(
-    project_root: &std::path::Path,
-    cmd: &str,
-) -> Result<(bool, String, String), CliError> {
-    let out = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .current_dir(project_root)
-        .output()
-        .map_err(|e| CliError::Other(format!("run build: {}", e)))?;
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    Ok((out.status.success(), stdout, stderr))
-}
-
-fn tail_lines(s: &str, n: usize) -> String {
-    let lines: Vec<&str> = s.lines().collect();
-    let take = lines.len().saturating_sub(n);
-    lines[take..].join("\n")
 }
 
 /// After the build gate passes, release the merge lock BEFORE flipping the PR
@@ -2730,159 +1848,62 @@ fn tail_lines(s: &str, n: usize) -> String {
 /// FS error would strand a `Done` task as the lock holder and block the
 /// project's merge queue until `STALE_TTL_SECS`.
 fn pr_finalize(args: &[String]) -> Result<(), CliError> {
+    use ops::pr::FinalizeOutcome;
+
     let f = parse_flags(args)?;
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
 
-    // Resolve build command: CLI flag > project config > default.
-    let build_cmd = f
-        .build_cmd
-        .clone()
-        .or_else(|| orchestrator::project_build_cmd(&project_id))
-        .unwrap_or_else(|| "cargo build --release".to_string());
+    let outcome = ops::pr::pr_finalize(
+        &project_id,
+        &task_id,
+        ops::pr::FinalizeOpts {
+            build_cmd: f.build_cmd.clone(),
+            skip_build: f.skip_build,
+            keep_tmux: f.keep_tmux,
+        },
+    )?;
 
-    // Build gate runs on main after /simplify and /bump. If the tree is
-    // broken, refuse to release the lock so a follow-up task can't
-    // inherit a red main.
-    let state = orchestrator::read_task_state(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
-
-    // State guards — check PR + status BEFORE any mutation. The Merged check
-    // must come before the status check: after a successful finalize, the
-    // task is Done (not Merging), so an idempotent retry would otherwise be
-    // refused by the Merging guard.
-    let existing_pr = cc_hub_lib::pr::read_pr(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("read pr: {}", e)))?
-        .ok_or_else(|| {
-            CliError::Usage(format!(
-                "no PR exists for task {} — finalize is only meaningful after `cc-hub pr merge`",
-                task_id
-            ))
-        })?;
-    if existing_pr.review_state == cc_hub_lib::pr::ReviewState::Merged {
-        print_json(&serde_json::json!({
-            "ok": true,
-            "noop": true,
-            "task_id": task_id,
-            "status": "done",
-            "reason": "pr already merged",
-        }));
-        return Ok(());
-    }
-    if state.status != TaskStatus::Merging {
-        return Err(CliError::Usage(format!(
-            "task {} must be in Merging to finalize (currently {}) — run `cc-hub pr merge --task {} --wait` first",
-            task_id, state.status.as_str(), task_id
-        )));
-    }
-
-    if !f.skip_build {
-        let project_root = state.project_root.clone();
-        let (ok, _stdout, stderr) = run_build_command(&project_root, &build_cmd)?;
-        if !ok {
-            let tail = tail_lines(&stderr, 80);
-            let comment_body = format!(
-                "`cc-hub pr finalize` build gate failed.\n\nCommand: `{}`\n\nstderr tail:\n```\n{}\n```",
-                build_cmd, tail
-            );
-            let now = orchestrator::now_unix_secs();
-            let _ = cc_hub_lib::pr::update_pr(&project_id, &task_id, |p| {
-                p.comments.push(cc_hub_lib::pr::Comment {
-                    author: "cc-hub".into(),
-                    at: now,
-                    body: comment_body,
-                });
-            });
+    match outcome {
+        FinalizeOutcome::AlreadyMerged => {
+            print_json(&serde_json::json!({
+                "ok": true,
+                "noop": true,
+                "task_id": task_id,
+                "status": "done",
+                "reason": "pr already merged",
+            }));
+            Ok(())
+        }
+        FinalizeOutcome::BuildFailed {
+            command,
+            stderr_tail,
+        } => {
             print_json(&serde_json::json!({
                 "ok": false,
                 "phase": "build",
-                "command": build_cmd,
-                "stderr": tail,
+                "command": command,
+                "stderr": stderr_tail,
                 "recipe": "Build failed on main after /simplify or /bump; fix in the working tree, commit, then re-run cc-hub pr finalize.",
             }));
-            return Err(CliError::Reported("build gate failed".into()));
+            Err(CliError::Reported("build gate failed".into()))
+        }
+        FinalizeOutcome::Finalized {
+            released,
+            build_skipped,
+            tmux_kept,
+        } => {
+            print_json(&serde_json::json!({
+                "ok": true,
+                "released": released,
+                "task_id": task_id,
+                "status": "done",
+                "build_skipped": build_skipped,
+                "tmux_kept": tmux_kept,
+            }));
+            Ok(())
         }
     }
-
-    // Release the merge lock BEFORE flipping PR and task to terminal states.
-    let released = cc_hub_lib::merge_lock::release(&project_id, &task_id)
-        .map_err(|e| CliError::Other(format!("release merge lock: {}", e)))?;
-
-    cc_hub_lib::pr::update_pr(&project_id, &task_id, |p| {
-        p.review_state = cc_hub_lib::pr::ReviewState::Merged;
-    })
-    .map_err(|e| CliError::Other(format!("update pr: {}", e)))?;
-
-    let state = orchestrator::update_task_state(&project_id, &task_id, |s| {
-        s.status = TaskStatus::Done;
-    })
-    .map_err(|e| CliError::Other(format!("update state: {}", e)))?;
-
-    if !f.keep_tmux {
-        orchestrator::cleanup_task_sessions(&state);
-    }
-
-    print_json(&serde_json::json!({
-        "ok": true,
-        "released": released,
-        "task_id": task_id,
-        "status": "done",
-        "build_skipped": f.skip_build,
-        "tmux_kept": f.keep_tmux,
-    }));
-    Ok(())
-}
-
-fn git_rev_parse(root: &std::path::Path, rev: &str) -> Result<String, String> {
-    let out = orchestrator::run_git(root, &["rev-parse", rev])
-        .map_err(|e| format!("git rev-parse: {}", e))?;
-    if !out.status_ok {
-        return Err(format!(
-            "git rev-parse {} failed: {}",
-            rev,
-            out.stderr.trim()
-        ));
-    }
-    Ok(out.stdout.trim().to_string())
-}
-
-/// `git diff --name-only --diff-filter=U` lists files with unresolved
-/// conflicts. Repo-relative paths.
-fn git_conflicting_paths(root: &std::path::Path) -> Result<Vec<String>, String> {
-    let out = orchestrator::run_git(root, &["diff", "--name-only", "--diff-filter=U", "-z"])
-        .map_err(|e| format!("git diff (conflicts): {}", e))?;
-    if !out.status_ok {
-        return Err(format!("git diff failed: {}", out.stderr.trim()));
-    }
-    Ok(out
-        .stdout
-        .split('\0')
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect())
-}
-
-/// Locate the worktree directory for `branch` by checking the task's
-/// recorded workers. Falls back to the conventional `<root>/.cc-hub-wt/`
-/// path layout if no Worker record matches.
-fn resolve_worktree_path(state: &TaskState, branch: &str) -> Option<PathBuf> {
-    for w in &state.workers {
-        if let Some(name) = &w.worktree {
-            let expected_branch = orchestrator::worktree_branch(&state.task_id, name);
-            if expected_branch == branch {
-                return Some(w.cwd.clone());
-            }
-        }
-    }
-    // Fallback: parse the branch name (cc-hub/<task>-<name>) and rebuild.
-    let stripped = branch.strip_prefix("cc-hub/")?;
-    let prefix = format!("{}-", state.task_id);
-    let name = stripped.strip_prefix(&prefix)?;
-    Some(orchestrator::worktree_path(
-        &state.project_root,
-        &state.task_id,
-        name,
-    ))
 }
 
 // ─── worker ──────────────────────────────────────────────────────────────
@@ -2926,65 +1947,12 @@ fn resolve_wait_targets(
     worktree_targets: &[String],
     all: bool,
 ) -> Result<Vec<String>, CliError> {
-    if tmux_targets.is_empty() && worktree_targets.is_empty() && !all {
-        return Err(CliError::Usage(
-            "must pass --tmux NAME ..., --worktree NAME ..., or --all".into(),
-        ));
-    }
-
-    let known_tmux: std::collections::HashSet<&str> =
-        state.workers.iter().map(|w| w.tmux_name.as_str()).collect();
-    for t in tmux_targets {
-        if !known_tmux.contains(t.as_str()) {
-            return Err(CliError::Usage(format!(
-                "--tmux {}: not a worker of task {} (known: [{}])",
-                t,
-                state.task_id,
-                state
-                    .workers
-                    .iter()
-                    .map(|w| w.tmux_name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )));
-        }
-    }
-
-    let mut targets: Vec<String> = Vec::new();
-    for t in tmux_targets {
-        targets.push(t.clone());
-    }
-    for wt in worktree_targets {
-        match state
-            .workers
-            .iter()
-            .find(|w| w.worktree.as_deref() == Some(wt.as_str()))
-        {
-            Some(w) => targets.push(w.tmux_name.clone()),
-            None => {
-                let known_wt: Vec<&str> = state
-                    .workers
-                    .iter()
-                    .filter_map(|w| w.worktree.as_deref())
-                    .collect();
-                return Err(CliError::Usage(format!(
-                    "--worktree {}: not a worker of task {} (known worktrees: [{}])",
-                    wt,
-                    state.task_id,
-                    known_wt.join(", ")
-                )));
-            }
-        }
-    }
-    if all {
-        for w in &state.workers {
-            targets.push(w.tmux_name.clone());
-        }
-    }
-
-    let mut seen = std::collections::HashSet::new();
-    targets.retain(|t| seen.insert(t.clone()));
-    Ok(targets)
+    Ok(ops::worker::resolve_wait_targets(
+        state,
+        tmux_targets,
+        worktree_targets,
+        all,
+    )?)
 }
 
 fn worker_wait(args: &[String]) -> Result<(), CliError> {
@@ -3009,8 +1977,6 @@ fn worker_wait(args: &[String]) -> Result<(), CliError> {
     }
 
     let timeout = Duration::from_secs(f.timeout_secs.unwrap_or(1800));
-    let started = Instant::now();
-    let deadline = started + timeout;
 
     let progress_interval = if f.progress {
         Some(Duration::from_secs(
@@ -3019,105 +1985,22 @@ fn worker_wait(args: &[String]) -> Result<(), CliError> {
     } else {
         None
     };
-    let mut last_emit: Option<Instant> = None;
 
-    let mut done: std::collections::HashMap<String, serde_json::Value> =
-        std::collections::HashMap::new();
-    // A target that disappears from the scanner *after* having been seen
-    // is treated as Inactive (worker tmux torn down). One that never
-    // appears stays pending — fresh sessions sometimes lag the scanner.
-    let mut ever_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    let timed_out = loop {
-        let sessions = scanner::scan_sessions();
-        for name in &targets {
-            if done.contains_key(name) {
-                continue;
-            }
-            if let Some(s) = find_by_tmux(&sessions, name) {
-                ever_seen.insert(name.clone());
-                if matches!(
-                    s.state,
-                    models::SessionState::WaitingForInput
-                        | models::SessionState::Question
-                        | models::SessionState::Inactive
-                ) {
-                    done.insert(
-                        name.clone(),
-                        serde_json::json!({
-                            "tmux": name,
-                            "state": s.state.to_string(),
-                            "done": true,
-                            "last_user_message": s.last_user_message,
-                        }),
-                    );
-                }
-            } else if ever_seen.contains(name) {
-                done.insert(
-                    name.clone(),
-                    serde_json::json!({
-                        "tmux": name,
-                        "state": models::SessionState::Inactive.to_string(),
-                        "done": true,
-                        "last_user_message": serde_json::Value::Null,
-                    }),
-                );
-            }
-        }
-        if done.len() == targets.len() {
-            break false;
-        }
-        if Instant::now() >= deadline {
-            break true;
-        }
-        if let Some(interval) = progress_interval {
-            let should_emit = match last_emit {
-                None => true,
-                Some(t) => t.elapsed() >= interval,
-            };
-            if should_emit {
-                let mut done_names: Vec<String> = done.keys().cloned().collect();
-                done_names.sort();
-                let mut pending_names: Vec<String> = targets
-                    .iter()
-                    .filter(|n| !done.contains_key(n.as_str()))
-                    .cloned()
-                    .collect();
-                pending_names.sort();
-                print_json(&serde_json::json!({
-                    "event": "progress",
-                    "elapsed_secs": started.elapsed().as_secs(),
-                    "pending": pending_names,
-                    "done": done_names,
-                }));
-                last_emit = Some(Instant::now());
-            }
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    };
-
-    let elapsed_secs = started.elapsed().as_secs();
-    let workers: Vec<serde_json::Value> = targets
-        .iter()
-        .map(|name| {
-            done.get(name).cloned().unwrap_or_else(|| {
-                serde_json::json!({
-                    "tmux": name,
-                    "state": "unknown",
-                    "done": false,
-                    "last_user_message": serde_json::Value::Null,
-                })
-            })
-        })
-        .collect();
-    let all_done = done.len() == targets.len();
+    let outcome = ops::worker::worker_wait(&targets, timeout, progress_interval, |p| {
+        print_json(&serde_json::json!({
+            "event": "progress",
+            "elapsed_secs": p.elapsed_secs,
+            "pending": p.pending,
+            "done": p.done,
+        }));
+    });
 
     print_json(&serde_json::json!({
         "ok": true,
-        "all_done": all_done,
-        "timed_out": timed_out,
-        "elapsed_secs": elapsed_secs,
-        "workers": workers,
+        "all_done": outcome.all_done,
+        "timed_out": outcome.timed_out,
+        "elapsed_secs": outcome.elapsed_secs,
+        "workers": outcome.workers,
     }));
     Ok(())
 }
@@ -4125,7 +3008,7 @@ mod tests {
         );
         state.task_id = task_id.clone();
         state.status = status;
-        state.workers.push(Worker {
+        state.workers.push(orchestrator::Worker {
             agent_id: "claude".into(),
             agent_kind: cc_hub_lib::agent::AgentKind::Claude,
             tmux_name: "cc-hub-test-wkr".into(),

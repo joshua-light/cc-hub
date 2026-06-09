@@ -13,6 +13,7 @@ pub mod live_view;
 pub mod merge_lock;
 pub mod metrics;
 pub mod models;
+pub mod ops;
 pub mod orchestrator;
 pub mod persist;
 pub mod pi_bridge;
