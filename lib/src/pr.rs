@@ -164,6 +164,7 @@ pub fn allocate_pr_id(project_id: &str) -> io::Result<u32> {
     use fs2::FileExt;
     let counter_lock = fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(path.with_extension("lock"))?;
     counter_lock.lock_exclusive()?;

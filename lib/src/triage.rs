@@ -9,9 +9,7 @@
 //! started orchestrator has had time to declare reservations.
 
 use crate::config;
-use crate::orchestrator::{
-    self, now_unix_secs, update_task_state_no_touch, TaskState, TaskStatus,
-};
+use crate::orchestrator::{self, now_unix_secs, update_task_state_no_touch, TaskState, TaskStatus};
 use crate::projects_scan;
 use crate::title;
 use log::{debug, info, warn};

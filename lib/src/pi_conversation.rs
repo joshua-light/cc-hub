@@ -807,13 +807,19 @@ mod tests {
             assistant("stop", json!([{"type": "text", "text": "reply"}])),
             user(json!("second")),
         ];
-        assert_eq!(extract_last_user_message(&entries).as_deref(), Some("second"));
+        assert_eq!(
+            extract_last_user_message(&entries).as_deref(),
+            Some("second")
+        );
     }
 
     #[test]
     fn extract_first_user_message_string_content() {
         let entries = vec![user(json!("first")), user(json!("second"))];
-        assert_eq!(extract_first_user_message(&entries).as_deref(), Some("first"));
+        assert_eq!(
+            extract_first_user_message(&entries).as_deref(),
+            Some("first")
+        );
     }
 
     #[test]
@@ -962,11 +968,7 @@ mod tests {
 
     #[test]
     fn extract_messages_keeps_last_n() {
-        let entries = vec![
-            user(json!("one")),
-            user(json!("two")),
-            user(json!("three")),
-        ];
+        let entries = vec![user(json!("one")), user(json!("two")), user(json!("three"))];
         let msgs = extract_messages(&entries, 2);
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].content_preview, "two");

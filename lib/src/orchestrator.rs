@@ -434,6 +434,7 @@ pub(crate) fn lock_task_state(project_id: &str, task_id: &str) -> io::Result<Opt
     }
     let f = fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(dir.join("state.lock"))?;
     f.lock_exclusive()?;
@@ -611,11 +612,7 @@ where
 /// [`update_task_state`] without the trailing `touch()`. For background
 /// daemons (triage, auto-review) that stamp bookkeeping timestamps and must
 /// not reshuffle the kanban's `updated_at` ordering on every tick.
-pub fn update_task_state_no_touch<F>(
-    project_id: &str,
-    task_id: &str,
-    f: F,
-) -> io::Result<TaskState>
+pub fn update_task_state_no_touch<F>(project_id: &str, task_id: &str, f: F) -> io::Result<TaskState>
 where
     F: FnOnce(&mut TaskState),
 {

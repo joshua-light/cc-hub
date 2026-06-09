@@ -16,9 +16,7 @@
 //! bounded under busy review queues.
 
 use crate::config;
-use crate::orchestrator::{
-    self, now_unix_secs, update_task_state_no_touch, TaskState, TaskStatus,
-};
+use crate::orchestrator::{self, now_unix_secs, update_task_state_no_touch, TaskState, TaskStatus};
 use crate::pr;
 use crate::projects_scan;
 use log::{debug, info, warn};
