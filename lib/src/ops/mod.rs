@@ -1,8 +1,8 @@
 //! Shared domain logic for the orchestrator layer's compound operations.
 //!
 //! These functions are the single implementation of the task/PR/worker state
-//! transitions that both the CLI (`bin/src/cli.rs`) and the TUI
-//! (`lib/src/app.rs`) drive. The CLI keeps argument parsing, JSON rendering,
+//! transitions that both the CLI (`bin/src/cli/`) and the TUI
+//! (`lib/src/app/`) drive. The CLI keeps argument parsing, JSON rendering,
 //! and exit-code mapping; everything that mutates on-disk state lives here.
 //!
 //! Conventions:
@@ -22,7 +22,7 @@ pub mod pr;
 pub mod task;
 pub mod worker;
 
-/// Error type for domain ops. Mirrors the variants of `bin/src/cli.rs`'s
+/// Error type for domain ops. Mirrors the variants of the CLI's
 /// `CliError` that domain code needs, so the CLI can convert losslessly via a
 /// `From<OpError>` impl on its side (and tests asserting `kind()` /
 /// `CliError::Usage(..)` keep passing).

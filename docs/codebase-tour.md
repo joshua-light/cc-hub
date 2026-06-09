@@ -12,7 +12,7 @@ cc-hub is a single Cargo workspace with two crates:
 Cargo.toml          # workspace root; pins ratatui/crossterm/tokio/chrono
 bin/                # cc-hub binary — TUI driver + CLI subcommands
   src/main.rs       # tokio runtime, terminal setup, scan/event loop
-  src/cli.rs        # `cc-hub spawn-worker | merge-worktree | task | orchestrate | pr`
+  src/cli/          # `cc-hub spawn-worker | merge-worktree | task | orchestrate | pr`
 lib/                # cc-hub-lib — everything else, behind a stable API
   src/lib.rs        # module wiring + #[no_mangle] render() for hot-reload
   src/*.rs          # state, scanners, UI, platform, agents, orchestrator…
@@ -69,7 +69,7 @@ cc-hub has two coexisting layers, each with its own scanner and snapshot:
 | **Sessions** (one agent process at a time) | `~/.claude/sessions`, `~/.pi/agent/sessions`, JSONL transcripts | `lib/src/scanner.rs`, `lib/src/pi_scanner.rs` | `Vec<SessionInfo>` (`lib/src/models.rs`) |
 | **Projects/Tasks** (orchestrator + workers) | `~/.cc-hub/projects.toml`, `~/.cc-hub/projects/<pid>/tasks/<tid>/state.json` | `lib/src/projects_scan.rs` | `ProjectsSnapshot` |
 
-Both feed into `App` (`lib/src/app.rs`), which groups per-tab state into
+Both feed into `App` (`lib/src/app/`), which groups per-tab state into
 `SessionsView` / `ProjectsView` / `MetricsView` / `TodoPanelState`
 sub-structs — cursor mutations go through their clamping methods. The
 Sessions tab shows raw agent processes; the Projects tab is the
@@ -88,9 +88,9 @@ matching its tmux name against `ProjectsSnapshot::roles_by_tmux`.
 - **`pi_scanner.rs`** — the equivalent for Pi sessions in
   `~/.pi/agent/sessions`. `pi_bridge.rs` writes/reads heartbeats so cc-hub
   can detect a live Pi session whose PID it doesn't own.
-- **`conversation.rs`** — JSONL parsing + state classification. Reads a
+- **`conversation/`** — JSONL parsing + state classification. Reads a
   growing tail until at least one assistant entry is in window
-  (`read_jsonl_tail_for_state` at `lib/src/conversation.rs:17`), then
+  (`read_jsonl_tail_for_state` at `lib/src/conversation/io.rs:27`), then
   extracts the current state (`Processing | WaitingForInput | Question |
   Idle | Inactive`) and
   decorates `SessionInfo` with last user message, current tool, model,
@@ -103,8 +103,8 @@ matching its tmux name against `ProjectsSnapshot::roles_by_tmux`.
 
 ### Projects/Tasks layer
 
-- **`orchestrator.rs`** — schema + on-disk helpers for the Projects layer.
-  See the module docstring at `lib/src/orchestrator.rs:1`. Owns:
+- **`orchestrator/`** — schema + on-disk helpers for the Projects layer.
+  See the module docstring at `lib/src/orchestrator/mod.rs:1`. Owns:
   - `Project` (registered directory) + `TaskState` (one task)
   - `TaskStatus`: `Backlog → Running → Review → Merging → Done`
   - `Worker`, `Artifact`, `TodoItem`, `MergeRecord`
@@ -129,7 +129,7 @@ matching its tmux name against `ProjectsSnapshot::roles_by_tmux`.
   operations (`task report/delete/gc`, `pr create/approve/request-changes/
   merge/finalize`, `spawn-worker`, `merge-worktree`, `worker wait`). Typed
   parameters in, typed outcome enums/structs out; `OpError` maps 1:1 onto
-  the CLI's `CliError`. Both `bin/src/cli.rs` and the TUI (`app.rs`) call
+  the CLI's `CliError`. Both `bin/src/cli/` and the TUI (`app/`) call
   these, so the two front-ends cannot drift.
 - **`pr.rs`** — PR schema (`pr.json` next to `state.json`). Sequential
   per-project counter at `~/.cc-hub/projects/<pid>/pr-counter`. Review
@@ -162,11 +162,13 @@ matching its tmux name against `ProjectsSnapshot::roles_by_tmux`.
 
 ### CLI subcommands (orchestrator-facing)
 
-`bin/src/cli.rs` implements verbs the orchestrator session calls from a
-shell to mutate task state. Argument parsing is hand-rolled; the verb
-*bodies* live in `lib/src/ops/` — cli.rs only parses flags, calls the op,
-and renders one JSON line so the orchestrator can parse the outcome
-programmatically.
+`bin/src/cli/` implements verbs the orchestrator session calls from a
+shell to mutate task state — one module per top-level verb (`task.rs`,
+`pr.rs`, `worker.rs`, …) with dispatch, `Flags` parsing, and the
+`CliError` JSON contract in `mod.rs`. Argument parsing is hand-rolled;
+the verb *bodies* live in `lib/src/ops/` — the CLI modules only parse
+flags, call the op, and render one JSON line so the orchestrator can
+parse the outcome programmatically.
 
 | Verb | Purpose |
 |---|---|
@@ -223,7 +225,7 @@ session running under bash) can drive the same state from its tools.
 | Claude sessions | `~/.claude/sessions/*.json` | (Claude Code, read-only) |
 | Claude transcripts | `~/.claude/projects/<encoded-cwd>/<sid>.jsonl` | (Claude Code, read-only) |
 | Pi sessions | `~/.pi/agent/sessions/*` | (Pi, read-only) |
-| Worktrees | `<project-root>/.cc-hub-wt/<task-id>-<name>` | git via `bin/src/cli.rs` |
+| Worktrees | `<project-root>/.cc-hub-wt/<task-id>-<name>` | git via `bin/src/cli/` |
 | Logs | `$XDG_CACHE_HOME/cc-hub/cc-hub_*.log` (Linux) | `bin/src/main.rs:init_logging` |
 
 `.cc-hub-wt/` is in the project's `.gitignore` so worktrees never get
@@ -239,14 +241,14 @@ committed to feature branches.
 - **Adding a new CLI verb.** Put the body in `lib/src/ops/` (typed
   parameters in, typed outcome out, mutate state via
   `orchestrator::update_task_state`), then add a branch to
-  `cli::dispatch` (`bin/src/cli.rs:37`) with a thin parse → call →
-  print-JSON wrapper.
+  `cli::dispatch` (`bin/src/cli/mod.rs:35`) with a thin parse → call →
+  print-JSON wrapper in the matching `bin/src/cli/<verb>.rs` module.
 - **Adding a new task field.** Extend `TaskState` in
-  `lib/src/orchestrator.rs:209` with `#[serde(default)]` for back-compat
+  `lib/src/orchestrator/mod.rs:252` with `#[serde(default)]` for back-compat
   with older `state.json` files; `read_task_state` returns `InvalidData`
   on parse errors so schema drift is loud.
 - **Adding a new view / popup.** Add a `View` variant in
-  `lib/src/app.rs`, render it in the matching `lib/src/ui/` module, and
+  `lib/src/app/`, render it in the matching `lib/src/ui/` module, and
   add the keybind branches in the `(View, KeyCode)` match in
   `bin/src/keys.rs`.
 - **Adding a new background tick.** Spawn a tokio task in

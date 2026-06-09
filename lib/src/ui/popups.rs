@@ -1092,7 +1092,7 @@ pub(crate) enum PreviewPart {
 }
 
 /// Tokenize a preview back into the parts that produced it. The marker
-/// format is defined by `extract_text_content` in conversation.rs — keep
+/// format is defined by `extract_text_content` in `conversation/render.rs` — keep
 /// the two in sync via the shared marker constants.
 pub(crate) fn parse_preview(preview: &str) -> Vec<PreviewPart> {
     use crate::conversation::{THINKING_MARKER, TOOL_MARKER_PREFIX};

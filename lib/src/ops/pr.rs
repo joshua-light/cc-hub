@@ -4,7 +4,7 @@
 //! `pr comment`, `pr close`, `pr merge`, `pr continue`, `pr lock-phase`, and
 //! `pr finalize`. The CLI keeps flag parsing and JSON rendering; the
 //! side-effect ORDER (update_pr / update_task_state / merge-lock release
-//! points) is preserved exactly as it was in cli.rs.
+//! points) is preserved exactly as it was in the CLI layer.
 //!
 //! The two big verbs — `pr_merge` (merge-lock acquire/wait, merge, conflict
 //! demotion, HEAD restore) and `pr_finalize` (build gate, lock release,

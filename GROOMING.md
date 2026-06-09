@@ -49,12 +49,12 @@ anything that mutates state outside `cc-hub task create --backlog` and
 
 2. **Survey the Projects layer (5–8 min).** Pick two or three of these
    threads per run; rotate across runs so coverage broadens over time:
-   - Skim `lib/src/ui.rs` Projects-tab rendering. Look for visual rough
+   - Skim `lib/src/ui/projects/` (Projects-tab rendering). Look for visual rough
      edges, inconsistent spacing, missing affordances, awkward popups.
-   - Skim `lib/src/orchestrator.rs` (schema + helpers). Look for `TaskState`
+   - Skim `lib/src/orchestrator/` (schema + helpers). Look for `TaskState`
      fields that are written but never rendered, or rendered but never
      refreshed.
-   - Skim `bin/src/cli.rs` verbs. Look for verbs that are awkward to call
+   - Skim the `bin/src/cli/` verbs. Look for verbs that are awkward to call
      from a worker (missing flags, surprising defaults, output that's hard
      to parse).
    - Read 2–3 recent task `state.json` files and their `orchestrator.log` at
@@ -69,7 +69,7 @@ anything that mutates state outside `cc-hub task create --backlog` and
    - **Atomic**: one PR-sized change. If it fans out into 3+ workers, it's a
      planning task, file it as "investigate X and decompose" instead.
    - **Scoped**: names specific files, behaviours, or modules. "Improve
-     UX" is not actionable; "In `lib/src/ui.rs`, the Backlog popup row
+     UX" is not actionable; "In `lib/src/ui/projects/backlog.rs`, the Backlog popup row
      wraps awkwardly when the prompt exceeds 80 chars — truncate with an
      ellipsis instead" is.
    - **Self-contained**: the future orchestrator won't have your context.
@@ -111,7 +111,7 @@ anything that mutates state outside `cc-hub task create --backlog` and
 Pick the closest template; keep prompts under ~6 lines.
 
 **UI tweak**
-> In `lib/src/ui.rs`, `<function or popup>` currently renders
+> In `lib/src/ui/<module>.rs`, `<function or popup>` currently renders
 > `<observed behaviour>`. Change it to `<desired behaviour>` because
 > `<reason>`. Acceptance: `<concrete check>`.
 
@@ -123,7 +123,7 @@ Pick the closest template; keep prompts under ~6 lines.
 **Schema / CLI verb**
 > Add `<verb or field>` so workers can `<concrete capability they currently
 > lack>`. Sketch: extend `TaskState` with `<field>`, mutate via
-> `cc-hub task <verb> --<flag>`, render in `ui.rs::<function>`. Out of
+> `cc-hub task <verb> --<flag>`, render in `ui::<module>::<function>`. Out of
 > scope: `<explicit bound>`.
 
 **Investigate (when too big to action directly)**
