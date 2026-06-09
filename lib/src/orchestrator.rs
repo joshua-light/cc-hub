@@ -416,19 +416,73 @@ pub fn write_task_state(state: &TaskState) -> io::Result<()> {
     Ok(())
 }
 
-/// In-place update under `read → mutate → write`. The closure receives a
-/// mutable state and is responsible for any field-level changes; `touch()`
-/// is called automatically after the closure so callers don't have to
-/// remember.
+/// Take the per-task exclusive advisory lock that serializes every
+/// read-mutate-write over this task's `state.json` / `pr.json` across
+/// processes (TUI, CLI verbs run from agent sessions, triage, auto-review).
+/// The lock lives in a dedicated `state.lock` file next to `state.json`
+/// because flock follows the inode — a tempfile+rename store can't be
+/// locked directly. Returns `None` when the task directory doesn't exist
+/// yet: there's nothing to protect, and the caller's read will surface
+/// `NotFound` with its usual error.
+pub(crate) fn lock_task_state(project_id: &str, task_id: &str) -> io::Result<Option<fs::File>> {
+    use fs2::FileExt;
+    let Some(dir) = task_state_dir(project_id, task_id) else {
+        return Ok(None);
+    };
+    if !dir.exists() {
+        return Ok(None);
+    }
+    let f = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(dir.join("state.lock"))?;
+    f.lock_exclusive()?;
+    Ok(Some(f))
+}
+
+fn update_task_state_inner<F>(
+    project_id: &str,
+    task_id: &str,
+    touch: bool,
+    f: F,
+) -> io::Result<TaskState>
+where
+    F: FnOnce(&mut TaskState),
+{
+    let _lock = lock_task_state(project_id, task_id)?;
+    let mut state = read_task_state(project_id, task_id)?;
+    f(&mut state);
+    if touch {
+        state.touch();
+    }
+    write_task_state(&state)?;
+    Ok(state)
+}
+
+/// In-place update under `read → mutate → write`, serialized by the
+/// per-task advisory lock so concurrent writers (TUI, CLI, daemons) can't
+/// lose each other's updates. The closure receives a mutable state and is
+/// responsible for any field-level changes; `touch()` is called
+/// automatically after the closure so callers don't have to remember.
 pub fn update_task_state<F>(project_id: &str, task_id: &str, f: F) -> io::Result<TaskState>
 where
     F: FnOnce(&mut TaskState),
 {
-    let mut state = read_task_state(project_id, task_id)?;
-    f(&mut state);
-    state.touch();
-    write_task_state(&state)?;
-    Ok(state)
+    update_task_state_inner(project_id, task_id, true, f)
+}
+
+/// [`update_task_state`] without the trailing `touch()`. For background
+/// daemons (triage, auto-review) that stamp bookkeeping timestamps and must
+/// not reshuffle the kanban's `updated_at` ordering on every tick.
+pub fn update_task_state_no_touch<F>(
+    project_id: &str,
+    task_id: &str,
+    f: F,
+) -> io::Result<TaskState>
+where
+    F: FnOnce(&mut TaskState),
+{
+    update_task_state_inner(project_id, task_id, false, f)
 }
 
 /// Persist a Haiku-generated short title onto a task's state file. Reuses
@@ -1418,9 +1472,17 @@ pub fn start_backlog_task(
     let (tmux_name, prompt_to_dispatch) =
         launch_orchestrator_session(&mut state, agent_id_override)?;
 
-    state.orchestrator_tmux = Some(tmux_name.clone());
-    state.touch();
-    write_task_state(&state)?;
+    // Persist via a locked re-read + merge rather than writing the stale
+    // pre-spawn snapshot back wholesale: the spawn takes long enough that a
+    // concurrent `task report`/artifact write would otherwise be clobbered.
+    let agent_id = state.orchestrator_agent_id.clone();
+    let agent_kind = state.orchestrator_agent_kind;
+    let state = update_task_state(project_id, task_id, |s| {
+        s.status = TaskStatus::Running;
+        s.orchestrator_agent_id = agent_id;
+        s.orchestrator_agent_kind = agent_kind;
+        s.orchestrator_tmux = Some(tmux_name.clone());
+    })?;
 
     Ok((state, tmux_name, prompt_to_dispatch))
 }
@@ -1471,9 +1533,17 @@ pub fn restart_task(
         }
     }
 
-    state.orchestrator_tmux = Some(tmux_name.clone());
-    state.touch();
-    write_task_state(&state)?;
+    // Same merge-don't-clobber persist as `start_backlog_task`: the old
+    // orchestrator may have written state between our read and the spawn.
+    let agent_id = state.orchestrator_agent_id.clone();
+    let agent_kind = state.orchestrator_agent_kind;
+    let state = update_task_state(project_id, task_id, |s| {
+        s.status = TaskStatus::Running;
+        s.orchestrator_session_id = None;
+        s.orchestrator_agent_id = agent_id;
+        s.orchestrator_agent_kind = agent_kind;
+        s.orchestrator_tmux = Some(tmux_name.clone());
+    })?;
 
     Ok((state, tmux_name, prompt_to_dispatch))
 }

@@ -135,10 +135,13 @@ pub fn write_pr(pr: &PullRequest) -> io::Result<()> {
 
 /// In-place read → mutate → write helper, mirroring
 /// [`orchestrator::update_task_state`]. Returns the post-mutation record.
+/// Serialized under the same per-task advisory lock as `state.json`, so a
+/// concurrent comment/approve/close can't lose each other's edits.
 pub fn update_pr<F>(project_id: &str, task_id: &str, f: F) -> io::Result<PullRequest>
 where
     F: FnOnce(&mut PullRequest),
 {
+    let _lock = orchestrator::lock_task_state(project_id, task_id)?;
     let mut pr = read_pr(project_id, task_id)?
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no PR for this task"))?;
     f(&mut pr);
@@ -155,6 +158,15 @@ pub fn allocate_pr_id(project_id: &str) -> io::Result<u32> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    // Exclusive advisory lock on a sibling lock file: two concurrent
+    // `pr create` calls must not both read the same counter value. The
+    // counter file itself is rename-replaced, so it can't host the flock.
+    use fs2::FileExt;
+    let counter_lock = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(path.with_extension("lock"))?;
+    counter_lock.lock_exclusive()?;
     let current: u32 = match fs::read_to_string(&path) {
         Ok(raw) => raw.trim().parse().map_err(|e| {
             io::Error::new(

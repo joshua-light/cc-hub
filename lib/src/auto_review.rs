@@ -17,7 +17,7 @@
 
 use crate::config;
 use crate::orchestrator::{
-    self, now_unix_secs, read_task_state, write_task_state, TaskState, TaskStatus,
+    self, now_unix_secs, update_task_state_no_touch, TaskState, TaskStatus,
 };
 use crate::pr;
 use crate::projects_scan;
@@ -101,22 +101,17 @@ pub fn tick() -> TickOutcome {
     );
 
     // Stamp before spawn so a slow spawn doesn't expose us to a second
-    // tick re-picking the same task. Direct read/write avoids `touch()`,
+    // tick re-picking the same task. The no-touch variant avoids `touch()`,
     // which would shuffle the kanban ordering on every tick.
-    let stamped = match read_task_state(&project.id, &task_id) {
-        Ok(mut s) => {
-            s.last_auto_reviewed_at = Some(now);
-            if let Err(e) = write_task_state(&s) {
-                warn!(
-                    "auto_review: stamp last_auto_reviewed_at failed for {}: {}",
-                    task_id, e
-                );
-                return TickOutcome::default();
-            }
-            s
-        }
+    let stamped = match update_task_state_no_touch(&project.id, &task_id, |s| {
+        s.last_auto_reviewed_at = Some(now);
+    }) {
+        Ok(s) => s,
         Err(e) => {
-            warn!("auto_review: read state failed for {}: {}", task_id, e);
+            warn!(
+                "auto_review: stamp last_auto_reviewed_at failed for {}: {}",
+                task_id, e
+            );
             return TickOutcome::default();
         }
     };

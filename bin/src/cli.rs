@@ -909,7 +909,7 @@ fn orchestrate_start(args: &[String]) -> Result<(), CliError> {
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
 
-    let mut state = orchestrator::read_task_state(&project_id, &task_id)
+    let state = orchestrator::read_task_state(&project_id, &task_id)
         .map_err(|e| CliError::Other(format!("load state: {}", e)))?;
 
     let cc_hub_bin = orchestrator::resolve_cc_hub_bin();
@@ -936,12 +936,14 @@ fn orchestrate_start(args: &[String]) -> Result<(), CliError> {
     let tmux_name = spawn::spawn_agent_session(&agent_id, &cwd, None, initial_prompt, false)
         .map_err(|e| CliError::Other(format!("spawn orchestrator: {}", e)))?;
 
-    state.orchestrator_tmux = Some(tmux_name.clone());
-    state.orchestrator_agent_id = agent_id.clone();
-    state.orchestrator_agent_kind = agent.kind;
-    state.touch();
-    orchestrator::write_task_state(&state)
-        .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
+    // Locked re-read + merge: the spawn takes long enough that writing the
+    // pre-spawn snapshot back wholesale could clobber a concurrent update.
+    orchestrator::update_task_state(&project_id, &task_id, |s| {
+        s.orchestrator_tmux = Some(tmux_name.clone());
+        s.orchestrator_agent_id = agent_id.clone();
+        s.orchestrator_agent_kind = agent.kind;
+    })
+    .map_err(|e| CliError::Other(format!("persist state: {}", e)))?;
 
     let wait = f.wait_secs.unwrap_or(DEFAULT_PROMPT_WAIT_SECS);
     let prompt_status = if agent.supports_initial_prompt() {

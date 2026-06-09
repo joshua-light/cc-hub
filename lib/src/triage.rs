@@ -10,7 +10,7 @@
 
 use crate::config;
 use crate::orchestrator::{
-    self, now_unix_secs, read_task_state, write_task_state, TaskState, TaskStatus,
+    self, now_unix_secs, update_task_state_no_touch, TaskState, TaskStatus,
 };
 use crate::projects_scan;
 use crate::title;
@@ -89,17 +89,16 @@ pub fn tick() -> TickOutcome {
     // (or a hold) doesn't put us in a tight retry loop. The picked task is
     // skipped — start_backlog_task rewrites its state with status=Planning,
     // and stamping an already-promoted task is just a wasted disk write.
-    // Direct read/write skips the `touch()` in `update_task_state` so the
-    // kanban doesn't reshuffle every TTL purely from triage stamping.
+    // The no-touch variant skips `touch()` so the kanban doesn't reshuffle
+    // every TTL purely from triage stamping.
     for t in &tasks {
         if Some(&t.task_id) == chosen_id.as_ref() {
             continue;
         }
-        if let Ok(mut s) = read_task_state(&project.id, &t.task_id) {
+        if let Err(e) = update_task_state_no_touch(&project.id, &t.task_id, |s| {
             s.triaged_at = Some(now);
-            if let Err(e) = write_task_state(&s) {
-                warn!("triage: failed to stamp triaged_at on {}: {}", t.task_id, e);
-            }
+        }) {
+            warn!("triage: failed to stamp triaged_at on {}: {}", t.task_id, e);
         }
     }
 
