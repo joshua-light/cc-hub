@@ -1349,6 +1349,31 @@ fn task_report(args: &[String]) -> Result<(), CliError> {
         ));
     }
 
+    // `--status running` on a Review task with a live PR would silently
+    // clobber the Review state the PR flow just established — a recurring
+    // orchestrator mistake right after `pr create`. The sanctioned path
+    // back to Running is `pr request-changes`. PR-less Review tasks keep
+    // the direct path: they have no PR verb to do it for them.
+    if raw_status.as_ref() == Some(&TaskStatus::Running)
+        && prev_status.as_ref() == Some(&TaskStatus::Review)
+    {
+        let live_pr = matches!(
+            cc_hub_lib::pr::read_pr(&project_id, &task_id),
+            Ok(Some(p)) if !matches!(
+                p.review_state,
+                cc_hub_lib::pr::ReviewState::Merged | cc_hub_lib::pr::ReviewState::Closed
+            )
+        );
+        if live_pr {
+            return Err(CliError::Usage(
+                "task is in Review with a live PR — use `cc-hub pr request-changes` \
+                 to send it back to Running (or `--status review` / no --status to \
+                 report progress)"
+                    .into(),
+            ));
+        }
+    }
+
     // An orchestrator's `--status done` means "I'm finished" — it does NOT
     // mean the work is approved. Route that into Review so a human (or
     // future agentic reviewer) signs off via the TUI's `Space` keybind.

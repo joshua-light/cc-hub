@@ -440,6 +440,53 @@ pub(crate) fn lock_task_state(project_id: &str, task_id: &str) -> io::Result<Opt
     Ok(Some(f))
 }
 
+/// Single source of truth for legal task-status transitions. Enforced
+/// centrally by [`update_task_state`] / [`update_task_state_no_touch`], so
+/// no CLI verb, TUI keybind, or daemon can invent an edge the kanban flow
+/// doesn't have. Per-verb guards (e.g. "leaving Backlog requires an
+/// orchestrator spawn") add context-specific rules on top.
+///
+/// Legal edges and the flows that produce them:
+///
+/// | from → to          | produced by                                          |
+/// |--------------------|------------------------------------------------------|
+/// | Backlog → Running  | `task start`, triage promotion                       |
+/// | Running → Review   | `pr create`, `pr reopen`, `task report`              |
+/// | Running → Done     | `pr close` while iterating                           |
+/// | Review  → Running  | `pr request-changes`                                 |
+/// | Review  → Merging  | approve (TUI `Space`, `pr merge`)                    |
+/// | Review  → Done     | PR-less approve, `pr close`, explicit done           |
+/// | Merging → Review   | merge-conflict demotion, dead-orchestrator rollback  |
+/// | Merging → Done     | `pr finalize`, `pr close`                            |
+///
+/// Self-transitions are always allowed (idempotent re-reports). Done is
+/// terminal; Backlog is only ever left via an orchestrator spawn.
+pub fn validate_status_transition(from: &TaskStatus, to: &TaskStatus) -> Result<(), String> {
+    use TaskStatus::*;
+    let legal = from == to
+        || matches!(
+            (from, to),
+            (Backlog, Running)
+                | (Running, Review)
+                | (Running, Done)
+                | (Review, Running)
+                | (Review, Merging)
+                | (Review, Done)
+                | (Merging, Review)
+                | (Merging, Done)
+        );
+    if legal {
+        Ok(())
+    } else {
+        Err(format!(
+            "illegal task status transition {:?} → {:?} (flow is Backlog → Running → Review \
+             → Merging → Done; Review can bounce to Running/Merging, Merging back to Review; \
+             Done is terminal)",
+            from, to
+        ))
+    }
+}
+
 fn update_task_state_inner<F>(
     project_id: &str,
     task_id: &str,
@@ -451,12 +498,102 @@ where
 {
     let _lock = lock_task_state(project_id, task_id)?;
     let mut state = read_task_state(project_id, task_id)?;
+    let prev_status = state.status.clone();
     f(&mut state);
+    if state.status != prev_status {
+        validate_status_transition(&prev_status, &state.status)
+            .map_err(|msg| io::Error::new(io::ErrorKind::InvalidInput, msg))?;
+    }
     if touch {
         state.touch();
     }
     write_task_state(&state)?;
     Ok(state)
+}
+
+#[cfg(test)]
+mod status_transition_tests {
+    use super::*;
+
+    #[test]
+    fn legal_edges_pass() {
+        use TaskStatus::*;
+        for (from, to) in [
+            (Backlog, Running),
+            (Running, Review),
+            (Running, Done),
+            (Review, Running),
+            (Review, Merging),
+            (Review, Done),
+            (Merging, Review),
+            (Merging, Done),
+            // Idempotent self-transitions.
+            (Backlog, Backlog),
+            (Done, Done),
+        ] {
+            assert!(
+                validate_status_transition(&from, &to).is_ok(),
+                "{:?} → {:?} should be legal",
+                from,
+                to
+            );
+        }
+    }
+
+    #[test]
+    fn illegal_edges_fail() {
+        use TaskStatus::*;
+        for (from, to) in [
+            (Backlog, Review),
+            (Backlog, Merging),
+            (Backlog, Done),
+            (Running, Backlog),
+            (Running, Merging),
+            (Review, Backlog),
+            (Merging, Running),
+            (Merging, Backlog),
+            (Done, Running),
+            (Done, Review),
+            (Done, Merging),
+            (Done, Backlog),
+        ] {
+            assert!(
+                validate_status_transition(&from, &to).is_err(),
+                "{:?} → {:?} should be illegal",
+                from,
+                to
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn update_task_state_enforces_transitions() {
+        crate::test_util::with_temp_home(|| {
+            let state = TaskState::new(
+                "p-transitions".into(),
+                PathBuf::from("/tmp/p-transitions"),
+                "do the thing".into(),
+            );
+            write_task_state(&state).unwrap();
+
+            // Running → Backlog is illegal and must not be persisted.
+            let err = update_task_state(&state.project_id, &state.task_id, |s| {
+                s.status = TaskStatus::Backlog;
+            })
+            .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            let on_disk = read_task_state(&state.project_id, &state.task_id).unwrap();
+            assert_eq!(on_disk.status, TaskStatus::Running);
+
+            // Running → Review is legal.
+            let updated = update_task_state(&state.project_id, &state.task_id, |s| {
+                s.status = TaskStatus::Review;
+            })
+            .unwrap();
+            assert_eq!(updated.status, TaskStatus::Review);
+        });
+    }
 }
 
 /// In-place update under `read → mutate → write`, serialized by the
