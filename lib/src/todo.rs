@@ -82,6 +82,19 @@ impl TodoList {
         }
     }
 
+    /// Drop every completed item, preserving the order of the rest. Returns the
+    /// number removed. Only persists when something actually changed, so a
+    /// no-op stroke doesn't rewrite the file.
+    pub fn clear_completed(&mut self) -> usize {
+        let before = self.items.len();
+        self.items.retain(|item| !item.done);
+        let removed = before - self.items.len();
+        if removed > 0 {
+            let _ = self.save();
+        }
+        removed
+    }
+
     fn save(&self) -> std::io::Result<()> {
         let Some(path) = todo_path() else {
             return Ok(());
@@ -152,6 +165,24 @@ mod tests {
             let reloaded = TodoList::load();
             assert_eq!(reloaded.len(), 1);
             assert_eq!(reloaded.items()[0].text, "b");
+        });
+    }
+
+    #[test]
+    fn clear_completed_drops_done_items() {
+        with_temp_home(|| {
+            let mut t = TodoList::load();
+            t.add("a");
+            t.add("b");
+            t.add("c");
+            t.toggle(0); // a done
+            t.toggle(2); // c done
+            assert_eq!(t.clear_completed(), 2);
+            let reloaded = TodoList::load();
+            assert_eq!(reloaded.len(), 1);
+            assert_eq!(reloaded.items()[0].text, "b");
+            // Nothing left to clear → no-op.
+            assert_eq!(TodoList::load().clear_completed(), 0);
         });
     }
 

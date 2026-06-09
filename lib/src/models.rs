@@ -95,21 +95,6 @@ pub enum SessionState {
     Inactive,
 }
 
-impl SessionState {
-    /// Default card ordering within a project group: live sessions first
-    /// (those needing attention, then actively working), with dormant ones
-    /// sunk to the end — sleeping (`Idle`) before fully `Inactive`.
-    pub fn sort_key(&self) -> u8 {
-        match self {
-            SessionState::Question => 0,
-            SessionState::WaitingForInput => 1,
-            SessionState::Processing => 2,
-            SessionState::Idle => 3,
-            SessionState::Inactive => 4,
-        }
-    }
-}
-
 impl fmt::Display for SessionState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -122,7 +107,7 @@ impl fmt::Display for SessionState {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SessionInfo {
     pub agent_id: String,
     pub agent_kind: AgentKind,
@@ -192,7 +177,7 @@ pub struct SessionDetail {
     pub total_output_tokens: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ProjectGroup {
     pub name: String,
     pub cwd: String,

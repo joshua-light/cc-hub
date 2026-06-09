@@ -256,7 +256,7 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 if app.todo.adding {
                     "type task  enter:add  esc:cancel"
                 } else {
-                    "j/k:move  space/enter:toggle  a:add  d:delete  t/esc:close"
+                    "j/k:move  space/enter:toggle  a:add  d:delete  c:clear done  t/esc:close"
                 }
             }
             View::TmuxPane => "forwarding keys to tmux · F1: detach & close",

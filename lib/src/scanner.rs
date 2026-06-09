@@ -943,14 +943,23 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
         .collect();
     conversation::retain_cached(&visited);
 
-    sessions.sort_by(|a, b| {
-        a.state
-            .sort_key()
-            .cmp(&b.state.sort_key())
-            .then_with(|| b.started_at.cmp(&a.started_at))
-    });
+    sort_stable(&mut sessions);
 
     sessions
+}
+
+/// Order sessions by stable keys only — newest first, session id as the
+/// deterministic tiebreak. Deliberately excludes `state`: it flips every few
+/// seconds while agents work, and sorting by it made cards swap positions
+/// under the cursor on every scan tick (the selection followed the session id
+/// to its new slot, so a keypress could advance the selection logically while
+/// the highlight visibly stayed put). State is a card *badge*, not an order.
+fn sort_stable(sessions: &mut [SessionInfo]) {
+    sessions.sort_by(|a, b| {
+        b.started_at
+            .cmp(&a.started_at)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
 }
 
 #[derive(Clone, Debug)]
@@ -999,12 +1008,7 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
             .collect();
         sessions.extend(pi_scanner::scan(&pi_agents, &titles));
     }
-    sessions.sort_by(|a, b| {
-        a.state
-            .sort_key()
-            .cmp(&b.state.sort_key())
-            .then_with(|| b.started_at.cmp(&a.started_at))
-    });
+    sort_stable(&mut sessions);
     sessions
 }
 
@@ -1062,11 +1066,21 @@ mod tests {
         let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().expect("tempdir");
         let prev = std::env::var_os("HOME");
+        // CLAUDE_CONFIG_DIR overrides the HOME-derived layout in
+        // platform::paths — leaving it set (e.g. when the test runner itself
+        // was launched with --claude-config-dir) would point the scanner at
+        // the real config dir instead of the temp home.
+        let prev_cfg = std::env::var_os("CLAUDE_CONFIG_DIR");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
         std::env::set_var("HOME", home.path());
         let out = f(home.path());
         match prev {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
+        }
+        match prev_cfg {
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
         }
         out
     }

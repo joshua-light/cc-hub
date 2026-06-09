@@ -29,7 +29,7 @@ type TaskStateCache = HashMap<PathBuf, (SystemTime, Arc<TaskState>)>;
 /// snapshot can carry one per task without inflating clone cost: the
 /// renderer only needs id + review state + comment count to draw the
 /// badge.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrCardSummary {
     pub id: u32,
     pub review_state: ReviewState,
@@ -80,7 +80,7 @@ pub enum SessionRole {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProjectsSnapshot {
     pub projects: Vec<Project>,
     /// Tasks for each project_id, sorted newest-first by `updated_at` so
