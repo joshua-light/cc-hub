@@ -69,8 +69,11 @@ cc-hub has two coexisting layers, each with its own scanner and snapshot:
 | **Sessions** (one agent process at a time) | `~/.claude/sessions`, `~/.pi/agent/sessions`, JSONL transcripts | `lib/src/scanner.rs`, `lib/src/pi_scanner.rs` | `Vec<SessionInfo>` (`lib/src/models.rs`) |
 | **Projects/Tasks** (orchestrator + workers) | `~/.cc-hub/projects.toml`, `~/.cc-hub/projects/<pid>/tasks/<tid>/state.json` | `lib/src/projects_scan.rs` | `ProjectsSnapshot` |
 
-Both feed into `App` (`lib/src/app.rs:117`). The Sessions tab shows raw
-agent processes; the Projects tab is the higher-level kanban over tasks.
+Both feed into `App` (`lib/src/app.rs`), which groups per-tab state into
+`SessionsView` / `ProjectsView` / `MetricsView` / `TodoPanelState`
+sub-structs — cursor mutations go through their clamping methods. The
+Sessions tab shows raw agent processes; the Projects tab is the
+higher-level kanban over tasks.
 A session can be cross-referenced as an "orchestrator" or "worker" by
 matching its tmux name against `ProjectsSnapshot::roles_by_tmux`.
 
@@ -108,7 +111,12 @@ matching its tmux name against `ProjectsSnapshot::roles_by_tmux`.
   - File layout: `~/.cc-hub/projects.toml` (registry) and
     `~/.cc-hub/projects/<pid>/tasks/<tid>/state.json` (per-task)
   - Atomic IO: `read_task_state` / `write_task_state` (tempfile + rename)
-    and `update_task_state(pid, tid, |s| ...)` for read-mutate-write
+    and `update_task_state(pid, tid, |s| ...)` for read-mutate-write.
+    Updates are serialized by a per-task `state.lock` (fs2 advisory lock —
+    TUI, CLI verbs, and daemons can't lose each other's writes; daemons
+    stamp via `update_task_state_no_touch` to avoid kanban reshuffles)
+    and status changes are gated by `validate_status_transition`, the
+    single legal-edge table for the kanban state machine
   - Project id derivation: canonical-path, non-alphanumeric → dashes
   - Task id format: `t-<unix-nanos>`
   - Worktree convention: `<project-root>/.cc-hub-wt/<task-id>-<name>`
@@ -117,6 +125,12 @@ matching its tmux name against `ProjectsSnapshot::roles_by_tmux`.
   mtime change, and evicts entries no longer on disk. Builds
   `ProjectsSnapshot::roles_by_tmux` so Sessions can look up "is this
   tmux session an orchestrator/worker?" in O(1).
+- **`ops/`** — the single implementation of the compound task/PR/worker
+  operations (`task report/delete/gc`, `pr create/approve/request-changes/
+  merge/finalize`, `spawn-worker`, `merge-worktree`, `worker wait`). Typed
+  parameters in, typed outcome enums/structs out; `OpError` maps 1:1 onto
+  the CLI's `CliError`. Both `bin/src/cli.rs` and the TUI (`app.rs`) call
+  these, so the two front-ends cannot drift.
 - **`pr.rs`** — PR schema (`pr.json` next to `state.json`). Sequential
   per-project counter at `~/.cc-hub/projects/<pid>/pr-counter`. Review
   states: `Open → ChangesRequested → Approved → Merged | Closed`.
@@ -149,8 +163,9 @@ matching its tmux name against `ProjectsSnapshot::roles_by_tmux`.
 ### CLI subcommands (orchestrator-facing)
 
 `bin/src/cli.rs` implements verbs the orchestrator session calls from a
-shell to mutate task state. Argument parsing is hand-rolled. Each verb
-emits one JSON line so the orchestrator can parse the outcome
+shell to mutate task state. Argument parsing is hand-rolled; the verb
+*bodies* live in `lib/src/ops/` — cli.rs only parses flags, calls the op,
+and renders one JSON line so the orchestrator can parse the outcome
 programmatically.
 
 | Verb | Purpose |
@@ -163,18 +178,21 @@ programmatically.
 | `cc-hub task artifact add ...` / `cc-hub task todos ...` | Append evidence / mutate the task checklist |
 | `cc-hub pr {create,show,approve,merge,...}` | PR-flow CLI; pairs with `lib/src/pr.rs` schema |
 
-The TUI never invokes these directly — it calls the same `orchestrator::*`
-helpers in-process. The CLI exists so the orchestrator (a Claude or Pi
+The TUI never shells out to these — it calls the same `lib/src/ops/`
+functions in-process. The CLI exists so the orchestrator (a Claude or Pi
 session running under bash) can drive the same state from its tools.
 
 ### TUI rendering
 
-- **`ui.rs`** — single big `render(frame, app)` (≈4.7k LoC) dispatched on
-  `app.view` and `app.current_tab`. Renders the three tabs (Projects,
-  Sessions, Metrics), all popups (Detail, LiveTail, FolderPicker,
-  PromptInput, ProjectsResult, Backlog, ConfirmClose, StateDebug,
-  GhCreateInput), and the embedded tmux pane. Reads only from `App` and
-  is the function `bin/main.rs` resolves through hot-reload.
+- **`ui/`** — `render(frame, app)` entry in `ui/mod.rs` (the function
+  `bin/main.rs` resolves through hot-reload), dispatched on `app.view`
+  and `app.current_tab` into `sessions.rs` (grid + cards + detail popup),
+  `projects.rs` (chips, kanban, task/artifact cards, result + backlog
+  popups), `metrics.rs`, and `popups.rs` (pickers, inputs, live tail,
+  state debug, embedded tmux pane). Shared helpers live in `common.rs`,
+  named colors in `palette.rs`. Reads from `App`; the only render-time
+  writes are scroll clamping and the documented renderer-synced metrics
+  fields.
 - **`tmux_pane.rs`** — embeds a tmux session as an interactive pane via
   portable-pty + vt100 + tui-term. Auto-replies to psmux's DSR query so
   Windows attach doesn't deadlock (`lib/src/tmux_pane.rs:11`).
@@ -218,16 +236,19 @@ committed to feature branches.
   its command, and (if it has its own JSONL layout) add a scanner like
   `pi_scanner.rs` and wire it into `scanner::scan_sessions`. The TUI
   renders backends generically via `agent_badge()`.
-- **Adding a new CLI verb.** Add a branch to `cli::dispatch`
-  (`bin/src/cli.rs:37`) and a sibling helper. Verbs should mutate state
-  via `orchestrator::update_task_state` and emit one JSON line on stdout.
+- **Adding a new CLI verb.** Put the body in `lib/src/ops/` (typed
+  parameters in, typed outcome out, mutate state via
+  `orchestrator::update_task_state`), then add a branch to
+  `cli::dispatch` (`bin/src/cli.rs:37`) with a thin parse → call →
+  print-JSON wrapper.
 - **Adding a new task field.** Extend `TaskState` in
   `lib/src/orchestrator.rs:209` with `#[serde(default)]` for back-compat
   with older `state.json` files; `read_task_state` returns `InvalidData`
   on parse errors so schema drift is loud.
 - **Adding a new view / popup.** Add a `View` variant in
-  `lib/src/app.rs:21`, render it in `lib/src/ui.rs`, and add the keybind
-  branches in the `(View, KeyCode)` match in `bin/src/main.rs`.
+  `lib/src/app.rs`, render it in the matching `lib/src/ui/` module, and
+  add the keybind branches in the `(View, KeyCode)` match in
+  `bin/src/keys.rs`.
 - **Adding a new background tick.** Spawn a tokio task in
   `bin/src/main.rs:run`; emit a `ScanMsg` variant for results; drain it in
   the same big `select!`. The fs-watcher fallback timer is the reference
