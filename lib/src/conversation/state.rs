@@ -352,6 +352,16 @@ fn format_tool_hint(name: &str, input: Option<&Value>) -> Option<String> {
             .get("todos")
             .and_then(|v| v.as_array())
             .map(|a| format!("{} todos", a.len())),
+        // The question text itself — the Sessions card shows it on Question
+        // cards so the user sees what is being asked without focusing the
+        // session. Multi-question calls surface the first.
+        "AskUserQuestion" => input
+            .get("questions")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|q| q.get("question"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         _ => None,
     }?;
     let cleaned = raw.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -449,6 +459,20 @@ mod tests {
         })];
         let got = extract_current_tool(&entries).unwrap();
         assert_eq!(got.hint.as_deref(), Some("main.rs"));
+    }
+
+    #[test]
+    fn extract_current_tool_ask_user_question_hint_is_first_question() {
+        let entries = vec![serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "stop_reason": "tool_use",
+                "content": [{"type": "tool_use", "id": "t1", "name": "AskUserQuestion",
+                    "input": {"questions": [
+                        {"question": "Keep the old endpoint?", "header": "Endpoint"},
+                        {"question": "Second question?", "header": "Other"}]}}]}
+        })];
+        let got = extract_current_tool(&entries).unwrap();
+        assert_eq!(got.hint.as_deref(), Some("Keep the old endpoint?"));
     }
 
     #[test]

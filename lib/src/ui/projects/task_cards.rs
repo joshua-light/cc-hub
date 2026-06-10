@@ -140,7 +140,7 @@ pub(crate) fn render_task_card_active(
     }
     if sum.tool_uses > 0 {
         row3.push(Span::styled(
-            format!("   󰠰 {}", sum.tool_uses),
+            format!("   󰖷 {}", sum.tool_uses),
             Style::default().fg(Color::Rgb(180, 200, 160)),
         ));
     }
@@ -412,7 +412,7 @@ pub(crate) fn render_task_card_collapsed(
     if tool_uses > 0 {
         footer.push(Span::raw("   "));
         footer.push(Span::styled(
-            format!("󰠰 {}", tool_uses),
+            format!("󰖷 {}", tool_uses),
             Style::default().fg(Color::Rgb(180, 200, 160)),
         ));
     }
@@ -695,12 +695,12 @@ mod kanban_card_tests {
             .expect("render");
         let plain = buffer_to_string(terminal.backend().buffer());
         assert!(
-            plain.contains("󰠰 7") || plain.contains(" 7"),
+            plain.contains("󰖷 7") || plain.contains(" 7"),
             "active card should show tool-uses badge with 7:\n{}",
             plain
         );
         assert!(
-            plain.contains("󰠰"),
+            plain.contains("󰖷"),
             "active card should show tool glyph:\n{}",
             plain
         );
@@ -728,7 +728,7 @@ mod kanban_card_tests {
             })
             .expect("render");
         let plain = buffer_to_string(terminal.backend().buffer());
-        assert!(!plain.contains("󰠰"), "no tool uses => no badge:\n{}", plain);
+        assert!(!plain.contains("󰖷"), "no tool uses => no badge:\n{}", plain);
     }
 
     #[test]
@@ -757,7 +757,7 @@ mod kanban_card_tests {
             .expect("render");
         let plain = buffer_to_string(terminal.backend().buffer());
         assert!(
-            plain.contains("󰠰") && plain.contains("5"),
+            plain.contains("󰖷") && plain.contains("5"),
             "collapsed card should show tool-uses badge with 5:\n{}",
             plain
         );

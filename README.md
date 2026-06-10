@@ -3,8 +3,9 @@
 A TUI-based coding-agent hub. cc-hub can manage multiple backends: Claude
 Code sessions from `~/.claude/...` and Pi sessions from `~/.pi/agent/sessions`.
 It gives you a grid of every discovered session on the box: what state it's in
-(processing / waiting / idle), the last user prompt, token usage, and a live
- tail of the JSONL transcript. From the grid you can:
+(processing / waiting / idle), the running tool or pending approval/question,
+a live tool-call counter, context-window usage, and a live tail of the JSONL
+transcript. From the grid you can:
 
 - spawn new configured agent sessions in any folder,
 - dispatch a prompt to the first idle agent (or auto-spawn one if none
@@ -195,8 +196,10 @@ status_msg_ttl_secs = 5
 # How long an auto-spawned session has to become Idle before the queued
 # prompt is abandoned.
 pending_dispatch_timeout_secs = 60
-# Grid cell dimensions (rows, columns of terminal cells per card).
-cell_height = 7
+# Grid cell dimensions (rows, columns of terminal cells per card). At 6 the
+# card body is payload + branch + model + footer; 5 and below merge the
+# identity rows into one compact line.
+cell_height = 6
 cell_width = 42
 
 [metrics]

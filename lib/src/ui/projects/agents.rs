@@ -215,59 +215,9 @@ pub(crate) fn merge_progress_spans(t: &crate::orchestrator::TaskState) -> Vec<Sp
     spans
 }
 
-/// Color ramp for context utilization: green → yellow → orange → red.
-pub(crate) fn ctx_color(pct: u8) -> Color {
-    if pct >= 90 {
-        Color::Rgb(220, 120, 120)
-    } else if pct >= 70 {
-        Color::Rgb(220, 200, 120)
-    } else if pct >= 40 {
-        Color::Rgb(180, 200, 140)
-    } else {
-        Color::Rgb(120, 180, 200)
-    }
-}
-
-/// Build a unicode bar of `width` columns filled to `pct` (0..=100). Uses
-/// 1/8-block glyphs so even a short width has visual gradation.
-pub(crate) fn ctx_bar(pct: u8, width: usize) -> Vec<Span<'static>> {
-    if width == 0 {
-        return Vec::new();
-    }
-    let pct = pct.min(100) as usize;
-    let total_eighths = (pct * width * 8 + 50) / 100; // round to nearest eighth
-    let full = total_eighths / 8;
-    let rem = total_eighths % 8;
-    let partial_glyph = match rem {
-        1 => Some("▏"),
-        2 => Some("▎"),
-        3 => Some("▍"),
-        4 => Some("▌"),
-        5 => Some("▋"),
-        6 => Some("▊"),
-        7 => Some("▉"),
-        _ => None,
-    };
-    let color = ctx_color(pct as u8);
-    let mut s = String::new();
-    for _ in 0..full {
-        s.push('█');
-    }
-    if let Some(g) = partial_glyph {
-        s.push_str(g);
-    }
-    let drawn = full + if partial_glyph.is_some() { 1 } else { 0 };
-    let mut out = Vec::with_capacity(2);
-    out.push(Span::styled(s, Style::default().fg(color)));
-    if drawn < width {
-        let pad = "░".repeat(width - drawn);
-        out.push(Span::styled(
-            pad,
-            Style::default().fg(Color::Rgb(50, 50, 65)),
-        ));
-    }
-    out
-}
+// Moved to ui::common (the sessions grid renders ctx bars too); re-exported
+// here so the `ui::projects::ctx_bar` paths keep resolving.
+pub(crate) use crate::ui::common::{ctx_bar, ctx_color};
 
 /// Compact PR status badge for kanban cards. Surfaces the bits a reviewer
 /// needs to triage at-a-glance — PR id, review state, comment count — so

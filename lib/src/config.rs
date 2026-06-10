@@ -232,7 +232,11 @@ impl Default for UiConfig {
         Self {
             status_msg_ttl_secs: 5,
             pending_dispatch_timeout_secs: 60,
-            cell_height: 7,
+            // 6 = borders + payload row + branch row + model row + footer
+            // row: every body row carries content, so taller cells would
+            // just render blank rows. At 5 and below the renderer merges
+            // branch/model/id into one compact row.
+            cell_height: 6,
             cell_width: 42,
         }
     }
