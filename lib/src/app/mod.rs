@@ -1,7 +1,7 @@
 use crate::bookmarks::Bookmarks;
 use crate::config;
 use crate::conversation::StateExplanation;
-use crate::folder_picker::{FolderPicker, PickerMode};
+use crate::folder_picker::{FolderPicker, PickerMode, Place};
 use crate::live_view::LiveView;
 use crate::metrics::{MetricsAnalysis, SelectableSession};
 use crate::models::{ProjectGroup, SessionDetail, SessionInfo, SessionState};
@@ -366,9 +366,63 @@ impl App {
         })
     }
 
-    /// `s` on a focused task: open the folder picker to choose the cwd the
-    /// agent will run in. Returns false when no task is focused or the task
-    /// is already Done.
+    /// Candidates for the task-assign places picker: registered projects
+    /// first, then bookmarks, then recently-used directories (other board
+    /// tasks, scanned sessions) newest-first — deduped by path with the
+    /// labelled project entry winning. This order is what an empty filter
+    /// shows.
+    pub fn known_places(&self) -> Vec<Place> {
+        use crate::folder_picker::PlaceSource;
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        let mut out: Vec<Place> = Vec::new();
+        for p in &self.projects.snapshot.projects {
+            if seen.insert(p.root.clone()) {
+                out.push(Place::new(
+                    Some(p.name.clone()),
+                    p.root.clone(),
+                    PlaceSource::Project,
+                ));
+            }
+        }
+        for path in self.bookmarks.list() {
+            if seen.insert(path.clone()) {
+                out.push(Place::new(None, path, PlaceSource::Bookmark));
+            }
+        }
+        // Recents carry a coarse timestamp purely for ordering: a task's
+        // creation (or completion) time, a session's last activity.
+        let mut recents: Vec<(u64, PathBuf)> = Vec::new();
+        for t in self.tasks.board.tasks() {
+            if let Some(cwd) = t.cwd.as_deref() {
+                recents.push((t.created_at.max(t.done_at.unwrap_or(0)), PathBuf::from(cwd)));
+            }
+        }
+        for s in &self.sessions.last_sessions {
+            recents.push((
+                s.last_activity.unwrap_or(s.started_at),
+                PathBuf::from(&s.cwd),
+            ));
+        }
+        recents.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts));
+        const MAX_RECENTS: usize = 15;
+        let mut added = 0usize;
+        for (_, path) in recents {
+            if added >= MAX_RECENTS {
+                break;
+            }
+            if seen.insert(path.clone()) {
+                out.push(Place::new(None, path, PlaceSource::Recent));
+                added += 1;
+            }
+        }
+        out
+    }
+
+    /// `s` on a focused task: open the places picker (registered projects,
+    /// bookmarks, recent dirs — fuzzy-filterable) to choose the cwd the
+    /// agent will run in, falling back to the filesystem browser when
+    /// nothing is known yet. Returns false when no task is focused or the
+    /// task is already Done.
     pub fn enter_task_assign_picker(&mut self) -> bool {
         use crate::tasks::TaskItemStatus;
         let Some(t) = self.tasks.selected_task() else {
@@ -377,16 +431,59 @@ impl App {
         if t.status == TaskItemStatus::Done {
             return false;
         }
-        let start = t
-            .cwd
-            .as_ref()
-            .map(PathBuf::from)
-            .or_else(dirs::home_dir)
-            .unwrap_or_else(|| PathBuf::from("/"));
-        self.tasks.pending_assign = Some(t.id.clone());
-        self.folder_picker = Some(FolderPicker::new(start));
+        let id = t.id.clone();
+        let prev_cwd = t.cwd.clone();
+        let places = self.known_places();
+        self.tasks.pending_assign = Some(id);
+        if places.is_empty() {
+            self.folder_picker = Some(FolderPicker::new(Self::assign_browse_start(
+                prev_cwd.as_deref(),
+            )));
+        } else {
+            let mut picker = FolderPicker::new_places(places);
+            if let Some(cwd) = prev_cwd.as_deref() {
+                picker.select_path(std::path::Path::new(cwd));
+            }
+            self.folder_picker = Some(picker);
+        }
         self.view = View::FolderPicker;
         true
+    }
+
+    /// Tab in the assign picker: flip between the known-places list and
+    /// the filesystem browser. No-op outside the task-assign flow (places
+    /// are only built there), or when there is nothing to flip to.
+    pub fn toggle_assign_picker_mode(&mut self) {
+        let Some(id) = self.tasks.pending_assign.clone() else {
+            return;
+        };
+        let Some(picker) = self.folder_picker.as_ref() else {
+            return;
+        };
+        match picker.mode {
+            PickerMode::Places => {
+                let prev_cwd = self.tasks.board.get(&id).and_then(|t| t.cwd.clone());
+                self.folder_picker = Some(FolderPicker::new(Self::assign_browse_start(
+                    prev_cwd.as_deref(),
+                )));
+            }
+            PickerMode::Browse => {
+                let places = self.known_places();
+                if !places.is_empty() {
+                    self.folder_picker = Some(FolderPicker::new_places(places));
+                }
+            }
+            PickerMode::Bookmarks => {}
+        }
+    }
+
+    /// Browse-mode starting point for an assignment: the task's previous
+    /// cwd, else `$HOME`, else `/`.
+    fn assign_browse_start(prev_cwd: Option<&str>) -> PathBuf {
+        prev_cwd
+            .map(PathBuf::from)
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("/"))
     }
 
     /// Picker chose `cwd` for the pending assignment: spawn the default
@@ -2326,5 +2423,96 @@ mod tests {
             !app.update_projects(snapshot(p, vec![t])),
             "identical projects snapshot must not request a repaint"
         );
+    }
+
+    // `$HOME`-redirected (TaskBoard/Bookmarks persist on mutation), so
+    // unix-only like the other with_temp_home suites.
+    #[cfg(unix)]
+    mod assign_picker {
+        use super::*;
+        use crate::folder_picker::PlaceSource;
+        use crate::test_util::with_temp_home;
+
+        #[test]
+        fn known_places_orders_projects_bookmarks_recents_and_dedups() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                app.projects.snapshot = snapshot(project("cc-hub"), vec![]);
+                app.bookmarks.toggle(PathBuf::from("/tmp/bm"));
+                // Bookmark duplicating the project root must be swallowed.
+                app.bookmarks.toggle(PathBuf::from("/tmp/cc-hub"));
+                let id = app.tasks.board.add("t").unwrap();
+                app.tasks
+                    .board
+                    .assign(&id, "/tmp/recent", "claude", "mux-1");
+
+                let places = app.known_places();
+                let got: Vec<(&str, PlaceSource)> =
+                    places.iter().map(|p| (p.name.as_str(), p.source)).collect();
+                assert_eq!(
+                    got,
+                    vec![
+                        ("cc-hub", PlaceSource::Project),
+                        ("bm", PlaceSource::Bookmark),
+                        ("recent", PlaceSource::Recent),
+                    ]
+                );
+            });
+        }
+
+        #[test]
+        fn assign_picker_opens_places_and_preselects_previous_cwd() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                app.projects.snapshot =
+                    snapshot_many(vec![(project("p-a"), vec![]), (project("p-b"), vec![])]);
+                let id = app.tasks.board.add("do the thing").unwrap();
+                // A previous assignment on p-b: reopening the picker must
+                // land the cursor there, not on the first candidate.
+                app.tasks.board.assign(&id, "/tmp/p-b", "claude", "mux-1");
+                app.tasks.focus(&id);
+
+                assert!(app.enter_task_assign_picker());
+                let picker = app.folder_picker.as_ref().unwrap();
+                assert_eq!(picker.mode, PickerMode::Places);
+                assert_eq!(picker.selected_place().unwrap().name, "p-b");
+                assert_eq!(app.tasks.pending_assign.as_deref(), Some(id.as_str()));
+            });
+        }
+
+        #[test]
+        fn assign_picker_falls_back_to_browse_when_nothing_known() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                let id = app.tasks.board.add("t").unwrap();
+                app.tasks.focus(&id);
+                assert!(app.enter_task_assign_picker());
+                assert_eq!(app.folder_picker.as_ref().unwrap().mode, PickerMode::Browse);
+            });
+        }
+
+        #[test]
+        fn tab_toggles_between_places_and_browse_only_while_assigning() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                app.projects.snapshot = snapshot(project("p-a"), vec![]);
+                let id = app.tasks.board.add("t").unwrap();
+                app.tasks.focus(&id);
+                assert!(app.enter_task_assign_picker());
+                let mode = |app: &App| app.folder_picker.as_ref().unwrap().mode;
+                assert_eq!(mode(&app), PickerMode::Places);
+                app.toggle_assign_picker_mode();
+                assert_eq!(mode(&app), PickerMode::Browse);
+                app.toggle_assign_picker_mode();
+                assert_eq!(mode(&app), PickerMode::Places);
+
+                // Outside the assign flow (sessions-tab browse) the toggle
+                // must not fire — places are an assign-only concept.
+                app.close_folder_picker();
+                app.enter_folder_picker();
+                app.toggle_assign_picker_mode();
+                assert_eq!(mode(&app), PickerMode::Browse);
+            });
+        }
     }
 }

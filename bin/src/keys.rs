@@ -846,8 +846,67 @@ pub(crate) async fn handle_key(
                 app.set_status("no bookmarks — press N then m on a folder to add one".into());
             }
         }
+        // Places mode (task assign): printable keys type into the fuzzy
+        // filter, so the generic picker bindings below (j/k/q/m/. etc.)
+        // must not fire. Navigation is arrows plus ctrl-j/k and ctrl-n/p.
+        (View::FolderPicker, code)
+            if app
+                .folder_picker
+                .as_ref()
+                .is_some_and(|p| p.mode == PickerMode::Places) =>
+        {
+            match code {
+                KeyCode::Esc => app.close_folder_picker(),
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    // Don't let an empty match list cancel the picker —
+                    // pick_from_folder_picker closes on no selection.
+                    if app
+                        .folder_picker
+                        .as_ref()
+                        .is_some_and(|p| p.selected_path().is_some())
+                    {
+                        crate::pick_from_folder_picker(app);
+                    }
+                }
+                KeyCode::Tab => app.toggle_assign_picker_mode(),
+                KeyCode::Down => {
+                    if let Some(p) = app.folder_picker.as_mut() {
+                        p.move_down();
+                    }
+                }
+                KeyCode::Up => {
+                    if let Some(p) = app.folder_picker.as_mut() {
+                        p.move_up();
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(p) = app.folder_picker.as_mut() {
+                        p.pop_filter();
+                    }
+                }
+                KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(p) = app.folder_picker.as_mut() {
+                        match c {
+                            'j' | 'n' => p.move_down(),
+                            'k' | 'p' => p.move_up(),
+                            _ => {}
+                        }
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Some(p) = app.folder_picker.as_mut() {
+                        p.push_filter(c);
+                    }
+                }
+                _ => {}
+            }
+        }
         (View::FolderPicker, KeyCode::Esc | KeyCode::Char('q')) => {
             app.close_folder_picker();
+        }
+        // Browse → back to the places list (no-op outside task assign).
+        (View::FolderPicker, KeyCode::Tab) => {
+            app.toggle_assign_picker_mode();
         }
         (View::FolderPicker, KeyCode::Down | KeyCode::Char('j')) => {
             if let Some(p) = app.folder_picker.as_mut() {

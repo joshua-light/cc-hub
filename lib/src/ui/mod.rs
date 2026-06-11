@@ -265,17 +265,20 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 }
             }
             View::TmuxPane => "forwarding keys to tmux · F1: detach & close",
-            View::FolderPicker => {
-                if app
-                    .folder_picker
-                    .as_ref()
-                    .is_some_and(|p| p.mode == PickerMode::Bookmarks)
-                {
+            View::FolderPicker => match app.folder_picker.as_ref().map(|p| p.mode) {
+                Some(PickerMode::Bookmarks) => {
                     "j/k:move  enter/space:pick  m:unbookmark  esc:cancel"
-                } else {
+                }
+                Some(PickerMode::Places) => {
+                    "type:filter  ↑/↓:move  enter/space:pick  tab:browse folders  esc:cancel"
+                }
+                _ if app.tasks.pending_assign.is_some() => {
+                    "j/k:move  enter:descend  bksp:parent  space:pick  .:pick cwd  tab:projects  esc:cancel"
+                }
+                _ => {
                     "j/k:move  enter:descend  bksp:parent  space:pick  .:pick cwd  m:bookmark  c/C:gh new (pub/priv)  esc:cancel"
                 }
-            }
+            },
             View::GhCreateInput => "type name  tab:toggle public/private  enter:create  esc:cancel",
             View::TaskInput => "type task  enter:add  esc:cancel",
             View::ProjectsResult => "j/k:artifact  e:expand  PgUp/PgDn:scroll  c:copy path  o:xdg-open  esc/r:close",

@@ -5,7 +5,7 @@
 use crate::app::{App, PendingConfirm};
 use crate::config;
 use crate::conversation::{StateExplanation, Verdict};
-use crate::folder_picker::PickerMode;
+use crate::folder_picker::{FolderPicker, PickerMode, PlaceSource};
 use crate::models::SessionInfo;
 use crate::ui::common::{centered_fixed, centered_rect, format_tokens, popup_block, state_color};
 use crate::ui::main_layout;
@@ -20,7 +20,12 @@ pub(crate) fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
     let Some(picker) = app.folder_picker.as_ref() else {
         return;
     };
+    if picker.mode == PickerMode::Places {
+        render_places_picker(frame, area, picker);
+        return;
+    }
     let bookmarks_mode = picker.mode == PickerMode::Bookmarks;
+    let assigning = app.tasks.pending_assign.is_some();
 
     let popup = centered_fixed(area, 80, 24);
     frame.render_widget(Clear, popup);
@@ -30,6 +35,12 @@ pub(crate) fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
             " New session · bookmarks ",
             " j/k:move · enter/space:pick · m:unbookmark · esc:cancel ",
             "  (no bookmarks — press N to browse, then m on a folder)",
+        )
+    } else if assigning {
+        (
+            " Assign task · pick folder ",
+            " enter:descend · bksp:parent · space/.:pick · tab:projects · esc:cancel ",
+            "  (no subdirectories)",
         )
     } else {
         (
@@ -129,6 +140,155 @@ pub(crate) fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     frame.render_widget(Paragraph::new(lines), list_area);
+}
+
+/// Places mode of the assign picker: a flat, fuzzy-filterable list of known
+/// directories (registered projects, bookmarks, recent cwds). The top row
+/// is the live filter; matched chars are highlighted in each row.
+fn render_places_picker(frame: &mut Frame, area: Rect, picker: &FolderPicker) {
+    let popup = centered_fixed(area, 80, 24);
+    frame.render_widget(Clear, popup);
+
+    let block = popup_block(Span::styled(
+        " Assign task · pick project ",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .title_bottom(Span::styled(
+        " type:filter · ↑/↓:move · enter/space:pick · tab:browse · esc:cancel ",
+        Style::default().fg(DIM_TEXT),
+    ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if inner.height < 3 {
+        return;
+    }
+
+    let filter_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    let mut filter_line = picker.filter.clone();
+    filter_line.push('▎');
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                " ❯ ",
+                Style::default()
+                    .fg(ACCENT_BLUE)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                filter_line,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        filter_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("{}/{} ", picker.rows.len(), picker.places.len()),
+            Style::default().fg(DIM_TEXT),
+        )))
+        .alignment(Alignment::Right),
+        filter_area,
+    );
+
+    let list_h = inner.height - 2;
+    let list_area = Rect::new(inner.x, inner.y + 2, inner.width, list_h);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if picker.rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (no matches — backspace to widen, tab to browse)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        let visible = list_h as usize;
+        let start = picker.selection.saturating_sub(visible.saturating_sub(1));
+        for (i, row) in picker.rows.iter().enumerate().skip(start).take(visible) {
+            let Some(place) = picker.places.get(row.place) else {
+                continue;
+            };
+            let selected = i == picker.selection;
+            // Selected rows render as a solid white bar, so every span
+            // needs the bg set or the bar shows gaps.
+            let bar = if selected {
+                Style::default().bg(Color::White)
+            } else {
+                Style::default()
+            };
+            let (name_base, name_hl, path_base, path_hl) = if selected {
+                (
+                    bar.fg(Color::Black).add_modifier(Modifier::BOLD),
+                    bar.fg(Color::Blue).add_modifier(Modifier::BOLD),
+                    bar.fg(Color::Rgb(90, 90, 100)),
+                    bar.fg(Color::Blue),
+                )
+            } else {
+                (
+                    Style::default().fg(Color::Rgb(200, 200, 210)),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Color::Cyan),
+                )
+            };
+            let cursor = Span::styled(
+                if selected { "▶ " } else { "  " },
+                bar.fg(Color::Black).add_modifier(Modifier::BOLD),
+            );
+            let badge = match place.source {
+                PlaceSource::Project => Span::styled("◆ ", bar.fg(Color::Cyan)),
+                PlaceSource::Bookmark => Span::styled("★ ", bar.fg(Color::Yellow)),
+                PlaceSource::Recent => Span::styled("· ", bar.fg(Color::DarkGray)),
+            };
+            let mut spans = vec![cursor, badge];
+            spans.extend(highlight_spans(
+                &place.name,
+                &row.name_indices,
+                name_base,
+                name_hl,
+            ));
+            spans.push(Span::styled("  ", bar));
+            spans.extend(highlight_spans(
+                &place.display_path,
+                &row.path_indices,
+                path_base,
+                path_hl,
+            ));
+            lines.push(Line::from(spans));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), list_area);
+}
+
+/// Split `text` into spans alternating `base`/`hl` style, with `hl` on the
+/// chars at `indices` (sorted, as produced by the fuzzy matcher).
+fn highlight_spans(text: &str, indices: &[usize], base: Style, hl: Style) -> Vec<Span<'static>> {
+    if indices.is_empty() {
+        return vec![Span::styled(text.to_string(), base)];
+    }
+    let mut spans = Vec::new();
+    let mut cur = String::new();
+    let mut cur_hl = false;
+    for (i, ch) in text.chars().enumerate() {
+        let is_hl = indices.binary_search(&i).is_ok();
+        if is_hl != cur_hl && !cur.is_empty() {
+            spans.push(Span::styled(
+                std::mem::take(&mut cur),
+                if cur_hl { hl } else { base },
+            ));
+        }
+        cur_hl = is_hl;
+        cur.push(ch);
+    }
+    if !cur.is_empty() {
+        spans.push(Span::styled(cur, if cur_hl { hl } else { base }));
+    }
+    spans
 }
 
 pub(crate) fn render_gh_create_input(frame: &mut Frame, area: Rect, app: &App) {
@@ -1328,6 +1488,56 @@ mod wrap_text_tests {
     #[test]
     fn zero_width_is_clamped_to_one_column() {
         assert_eq!(wrap_text("ab", 0), vec!["a", "b"]);
+    }
+}
+
+// Unix-only: `with_temp_home` isolates `$HOME` for `App::new()`'s loads,
+// same as the todo-panel suite below.
+#[cfg(all(test, unix))]
+mod places_picker_tests {
+    use crate::app::{App, View};
+    use crate::folder_picker::{FolderPicker, Place, PlaceSource};
+    use crate::test_util::with_temp_home;
+    use crate::ui::common::buffer_to_string;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::path::PathBuf;
+
+    #[test]
+    fn renders_filter_match_count_and_surviving_rows() {
+        with_temp_home(|| {
+            let mut app = App::new();
+            let mut picker = FolderPicker::new_places(vec![
+                Place::new(
+                    Some("cc-hub".into()),
+                    PathBuf::from("/g/self/cc-hub"),
+                    PlaceSource::Project,
+                ),
+                Place::new(None, PathBuf::from("/g/self/reddit"), PlaceSource::Recent),
+            ]);
+            for c in "hub".chars() {
+                picker.push_filter(c);
+            }
+            app.folder_picker = Some(picker);
+            app.view = View::FolderPicker;
+
+            let backend = TestBackend::new(90, 26);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|f| super::render_folder_picker(f, f.area(), &app))
+                .expect("render");
+            let rendered = buffer_to_string(terminal.backend().buffer());
+
+            assert!(rendered.contains("cc-hub"), "name row:\n{}", rendered);
+            assert!(rendered.contains("/g/self/cc-hub"), "path:\n{}", rendered);
+            assert!(rendered.contains("hub▎"), "filter line:\n{}", rendered);
+            assert!(rendered.contains("1/2"), "match count:\n{}", rendered);
+            assert!(
+                !rendered.contains("reddit"),
+                "filtered-out row must not render:\n{}",
+                rendered
+            );
+        });
     }
 }
 

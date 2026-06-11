@@ -8,6 +8,7 @@ pub mod config;
 pub mod conversation;
 pub mod focus;
 pub mod folder_picker;
+pub mod fuzzy;
 pub mod gh;
 pub mod live_view;
 pub mod merge_lock;

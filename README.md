@@ -314,7 +314,7 @@ reopens its transcript.
 | `h` / `l` (or arrows) | Switch column |
 | `j` / `k` (or arrows) | Move within the column |
 | `a` / `n` | Add a task (lands in To-Do) |
-| `s` | Assign an agent: folder picker → spawn session there with the task text as prompt → card moves to In Progress |
+| `s` | Assign an agent: project picker (registered projects · bookmarks · recent dirs, fuzzy-filtered by typing — `Tab` flips to a plain folder browser) → spawn session there with the task text as prompt → card moves to In Progress |
 | `Enter` / `f` | Attach the bound agent's pane (embedded); resumes the session if its tmux died; hints `s` when unassigned |
 | `Space` | Toggle Done / reopen |
 | `x` | Delete the task (a bound agent session is left running — close it from Sessions) |
