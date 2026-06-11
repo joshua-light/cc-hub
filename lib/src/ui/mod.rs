@@ -10,12 +10,13 @@ pub mod palette;
 pub mod popups;
 pub mod projects;
 pub mod sessions;
+pub mod tasks;
 
 // Items consumed by bin/src/main.rs keep their `cc_hub_lib::ui::X` paths.
 pub use common::build_usage_line;
 pub use popups::build_state_debug_content;
 
-use crate::app::{status_msg_ttl, App, Tab, View, TABS};
+use crate::app::{status_msg_ttl, visible_tabs, App, Tab, View};
 use crate::config;
 use crate::folder_picker::PickerMode;
 use crate::models;
@@ -65,6 +66,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     render_title_bar(frame, chunks[0], app);
     render_tab_strip(frame, chunks[1], app);
     match app.current_tab {
+        Tab::Tasks => tasks::render_tasks_body(frame, chunks[2], app),
         Tab::Projects => projects::render_projects_body(frame, chunks[2], app),
         Tab::Sessions => sessions::render_grid(frame, chunks[2], app),
         Tab::Metrics => metrics::render_metrics_body(frame, chunks[2], app),
@@ -87,6 +89,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         View::ProjectsResult => projects::render_projects_result(frame, frame.area(), app),
         View::Backlog => projects::render_backlog(frame, frame.area(), app),
         View::TodoPanel => popups::render_todo_panel(frame, frame.area(), app),
+        View::TaskInput => popups::render_task_input(frame, frame.area(), app),
         View::Grid => {}
     }
 }
@@ -101,8 +104,9 @@ pub(crate) fn render_tab_strip(frame: &mut Frame, area: Rect, app: &App) {
     // background colour reads as a continuous header strip.
     frame.render_widget(Paragraph::new("").style(bg), area);
 
+    let tabs = visible_tabs();
     let mut spans: Vec<Span<'static>> = vec![Span::styled("  ", bg)];
-    for (i, tab) in TABS.iter().enumerate() {
+    for (i, tab) in tabs.iter().enumerate() {
         let is_active = *tab == app.current_tab;
         let (fg, bgc, modi) = if is_active {
             (Color::Black, ACCENT_BLUE, Modifier::BOLD)
@@ -117,7 +121,7 @@ pub(crate) fn render_tab_strip(frame: &mut Frame, area: Rect, app: &App) {
             format!(" {} ", tab.label()),
             Style::default().fg(fg).bg(bgc).add_modifier(modi),
         ));
-        if i + 1 < TABS.len() {
+        if i + 1 < tabs.len() {
             spans.push(Span::styled(" ", bg));
         }
     }
@@ -242,6 +246,7 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 // wrap); rare project-management verbs trail. The Space:approve
                 // chip is rendered separately *ahead* of this string below so
                 // it is never the first thing clipped.
+                Tab::Tasks => "a/n:add  enter/f:focus agent  s:assign agent  h/l:col  j/k:task  x:delete  c:clear done  tab:next  q:quit",
                 Tab::Projects => "enter:focus orch  n:new task  r:result  f:agent terminal/resurrect  R:restart  b:backlog  h/l:col  j/k:task  H/L:project  N:register project  c:copy id  x:delete task  X:remove project  tab:next  q:quit",
                 Tab::Sessions => "enter/f:focus/resume  n:new  i:info  r:rename  t:to-do  o:shell  N:new in…  M:bookmarks  D:why?  h/j/k/l:nav  x:close  H:inactive  W:workers  tab:next  q:quit",
                 Tab::Metrics => "enter:view transcript  j/k:select  r:refresh  tab:next  q:quit",
@@ -272,6 +277,7 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 }
             }
             View::GhCreateInput => "type name  tab:toggle public/private  enter:create  esc:cancel",
+            View::TaskInput => "type task  enter:add  esc:cancel",
             View::ProjectsResult => "j/k:artifact  e:expand  PgUp/PgDn:scroll  c:copy path  o:xdg-open  esc/r:close",
             View::Backlog => "j/k:select  s/enter:start  x:delete  esc/q:close",
         };
@@ -279,6 +285,7 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         // (approve on Projects, ack on Sessions) is never the first thing
         // clipped off the right edge of this one-row, no-wrap status bar.
         let space_verb = match (&app.view, app.current_tab) {
+            (View::Grid, Tab::Tasks) => Some("done "),
             (View::Grid, Tab::Projects) => Some("approve "),
             (View::Grid, Tab::Sessions) => Some("ack "),
             _ => None,

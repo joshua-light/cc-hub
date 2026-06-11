@@ -340,7 +340,10 @@ pub(crate) fn open_path_detached(path: &str) -> io::Result<()> {
 /// Closes the picker on completion (the App helpers handle that for the
 /// register/projects branches).
 pub(crate) fn dispatch_picked_cwd(app: &mut App, cwd: &str) {
-    if app.projects.registering_only {
+    if app.tasks.pending_assign.is_some() {
+        let status = app.assign_task_agent(cwd);
+        app.set_status(status);
+    } else if app.projects.registering_only {
         let status = match app.register_picked_project(cwd) {
             Ok(name) => format!("registered project: {}", name),
             Err(e) => format!("register failed: {}", e),
@@ -1062,6 +1065,8 @@ async fn run(
                                 app.view == View::Grid && app.current_tab == Tab::Metrics;
                             let on_projects =
                                 app.view == View::Grid && app.current_tab == Tab::Projects;
+                            let on_tasks =
+                                app.view == View::Grid && app.current_tab == Tab::Tasks;
 
                             let sel_before = (app.sessions.sel_group, app.sessions.sel_in_group);
                             // KeyOutcome::Continue used to skip this pass's
@@ -1079,6 +1084,7 @@ async fn run(
                                 on_sessions,
                                 on_metrics,
                                 on_projects,
+                                on_tasks,
                             )
                             .await;
                             let sel_after = (app.sessions.sel_group, app.sessions.sel_in_group);

@@ -216,6 +216,9 @@ pub struct UiConfig {
     pub pending_dispatch_timeout_secs: u64,
     pub cell_height: u16,
     pub cell_width: u16,
+    /// The Projects tab (orchestrator kanban) is WIP and hidden from the
+    /// tab strip + ⇥ cycle by default. Set true to bring it back.
+    pub show_projects_tab: bool,
 }
 
 impl UiConfig {
@@ -238,6 +241,7 @@ impl Default for UiConfig {
             // branch/model/id into one compact row.
             cell_height: 6,
             cell_width: 42,
+            show_projects_tab: false,
         }
     }
 }

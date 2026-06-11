@@ -17,11 +17,13 @@ use std::time::{Duration, Instant};
 mod metrics_view;
 mod projects_view;
 mod sessions_view;
+mod tasks_view;
 mod todo_panel;
 
 pub use metrics_view::MetricsView;
 pub use projects_view::ProjectsView;
 pub use sessions_view::SessionsView;
+pub use tasks_view::{TasksView, TASK_COLUMNS};
 pub use todo_panel::TodoPanelState;
 
 pub fn status_msg_ttl() -> Duration {
@@ -44,6 +46,8 @@ pub enum View {
     Backlog,
     /// Scratch to-do side panel on the Sessions tab (toggled with `t`).
     TodoPanel,
+    /// Centered single-line input for adding a task on the Tasks tab.
+    TaskInput,
 }
 
 /// Outcome of pressing Space on a focused Projects-tab task. The caller
@@ -76,6 +80,7 @@ pub struct GhCreateInput {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Tab {
+    Tasks,
     Projects,
     Sessions,
     Metrics,
@@ -84,22 +89,26 @@ pub enum Tab {
 impl Tab {
     pub fn label(&self) -> &'static str {
         match self {
+            Tab::Tasks => "Tasks",
             Tab::Projects => "Projects",
             Tab::Sessions => "Sessions",
             Tab::Metrics => "Metrics",
         }
     }
 
-    pub fn cycle(&self) -> Self {
-        match self {
-            Tab::Projects => Tab::Sessions,
-            Tab::Sessions => Tab::Metrics,
-            Tab::Metrics => Tab::Projects,
-        }
-    }
 }
 
-pub const TABS: &[Tab] = &[Tab::Projects, Tab::Sessions, Tab::Metrics];
+pub const TABS: &[Tab] = &[Tab::Tasks, Tab::Projects, Tab::Sessions, Tab::Metrics];
+
+/// Tabs shown in the strip and reachable via ⇥, in [`TABS`] order. The
+/// Projects tab is WIP-gated behind `[ui] show_projects_tab` (its scan and
+/// data stay live either way — only the tab is hidden).
+pub fn visible_tabs() -> Vec<Tab> {
+    TABS.iter()
+        .copied()
+        .filter(|t| *t != Tab::Projects || config::get().ui.show_projects_tab)
+        .collect()
+}
 
 #[derive(Clone, Debug)]
 pub struct PendingClose {
@@ -175,6 +184,7 @@ pub struct App {
     pub sessions: SessionsView,
     pub projects: ProjectsView,
     pub metrics: MetricsView,
+    pub tasks: TasksView,
     pub todo: TodoPanelState,
     pub view: View,
     pub detail: Option<SessionDetail>,
@@ -245,6 +255,7 @@ impl App {
             sessions: SessionsView::new(),
             projects: ProjectsView::new(),
             metrics: MetricsView::new(),
+            tasks: TasksView::new(),
             todo: TodoPanelState::new(),
             view: View::Grid,
             detail: None,
@@ -309,6 +320,148 @@ impl App {
         }
     }
 
+    /// Open the add-task popup on the Tasks tab.
+    pub fn enter_task_input(&mut self) {
+        self.tasks.input.clear();
+        self.view = View::TaskInput;
+    }
+
+    pub fn close_task_input(&mut self) {
+        self.tasks.input.clear();
+        self.view = View::Grid;
+    }
+
+    /// Commit the add-task popup: append to To-Do and move the cursor to the
+    /// new card. Returns false when the input was empty (nothing added).
+    pub fn submit_task_input(&mut self) -> bool {
+        let text = std::mem::take(&mut self.tasks.input);
+        self.view = View::Grid;
+        match self.tasks.board.add(&text) {
+            Some(id) => {
+                self.tasks.focus(&id);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Flip the focused task between Done and To-Do (an In Progress task
+    /// goes to Done — finishing an agent task by hand is always allowed).
+    /// Returns a status line describing the move, or `None` when no task
+    /// is focused.
+    pub fn toggle_task_done(&mut self) -> Option<String> {
+        use crate::tasks::TaskItemStatus;
+        let t = self.tasks.selected_task()?;
+        let id = t.id.clone();
+        let preview = crate::models::first_line_truncated(&t.text, 32);
+        let to = match t.status {
+            TaskItemStatus::Done => TaskItemStatus::Todo,
+            _ => TaskItemStatus::Done,
+        };
+        self.tasks.board.set_status(&id, to);
+        self.tasks.clamp_row();
+        Some(match to {
+            TaskItemStatus::Done => format!("done: {}", preview),
+            _ => format!("reopened: {}", preview),
+        })
+    }
+
+    /// `s` on a focused task: open the folder picker to choose the cwd the
+    /// agent will run in. Returns false when no task is focused or the task
+    /// is already Done.
+    pub fn enter_task_assign_picker(&mut self) -> bool {
+        use crate::tasks::TaskItemStatus;
+        let Some(t) = self.tasks.selected_task() else {
+            return false;
+        };
+        if t.status == TaskItemStatus::Done {
+            return false;
+        }
+        let start = t
+            .cwd
+            .as_ref()
+            .map(PathBuf::from)
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        self.tasks.pending_assign = Some(t.id.clone());
+        self.folder_picker = Some(FolderPicker::new(start));
+        self.view = View::FolderPicker;
+        true
+    }
+
+    /// Picker chose `cwd` for the pending assignment: spawn the default
+    /// agent there, hand it the task text (inline when the agent supports a
+    /// spawn-time prompt, otherwise queued for dispatch once the session
+    /// reports Idle — Claude ignores spawn-time prompts), record the
+    /// binding, and move the card to In Progress. Returns the status line.
+    pub fn assign_task_agent(&mut self, cwd: &str) -> String {
+        let pending = self.tasks.pending_assign.take();
+        self.close_folder_picker();
+        let Some(id) = pending else {
+            return "no task pending assignment".into();
+        };
+        let Some(task) = self.tasks.board.get(&id) else {
+            return "task vanished before assignment".into();
+        };
+        let prompt = task.text.clone();
+        let agent_id = config::get().default_session_agent_id();
+        let supports_initial_prompt = config::get()
+            .agent(&agent_id)
+            .is_some_and(|a| a.supports_initial_prompt());
+        match crate::spawn::spawn_agent_session(
+            &agent_id,
+            cwd,
+            None,
+            supports_initial_prompt.then_some(prompt.as_str()),
+            false,
+        ) {
+            Ok(tmux) => {
+                if !supports_initial_prompt {
+                    self.queue_pending_dispatch(tmux.clone(), prompt);
+                }
+                self.tasks.board.assign(&id, cwd, &agent_id, &tmux);
+                self.tasks.focus(&id);
+                format!("assigned {} [{}] — task in progress", agent_id, tmux)
+            }
+            Err(e) => format!("assign failed: {}", e),
+        }
+    }
+
+    /// Point a task's binding at a freshly-spawned mux session (resume path).
+    pub fn rebind_task_tmux(&mut self, id: &str, tmux: &str) {
+        self.tasks.board.rebind_tmux(id, tmux);
+    }
+
+    /// Delete the focused task. The bound agent session (if any) is left
+    /// running — it still shows on the Sessions tab. Returns the status line.
+    pub fn delete_selected_task(&mut self) -> Option<String> {
+        let id = self.tasks.selected_task()?.id.clone();
+        let removed = self.tasks.board.remove(&id)?;
+        self.tasks.clamp_row();
+        let preview = crate::models::first_line_truncated(&removed.text, 32);
+        Some(match removed.tmux {
+            Some(tmux) => format!(
+                "deleted: {} — agent session [{}] left running (close it from Sessions)",
+                preview, tmux
+            ),
+            None => format!("deleted: {}", preview),
+        })
+    }
+
+    pub fn clear_done_tasks(&mut self) {
+        let removed = self.tasks.board.clear_done();
+        self.tasks.clamp_row();
+        if removed > 0 {
+            self.set_status(format!(
+                "cleared {} done task{}",
+                removed,
+                if removed == 1 { "" } else { "s" }
+            ));
+        } else {
+            self.set_status("no done tasks to clear".to_string());
+        }
+    }
+
     pub fn toggle_show_inactive(&mut self) {
         self.sessions.show_inactive = !self.sessions.show_inactive;
         self.rebuild_groups();
@@ -320,11 +473,25 @@ impl App {
     }
 
     pub fn set_tab(&mut self, tab: Tab) {
+        // Entering the Tasks tab re-reads the board so edits from another
+        // instance (or a hand-edited tasks.json) show up, mirroring the
+        // to-do panel's reload-on-open.
+        if tab == Tab::Tasks && self.current_tab != Tab::Tasks {
+            self.tasks.reload();
+        }
         self.current_tab = tab;
     }
 
     pub fn cycle_tab(&mut self) {
-        self.set_tab(self.current_tab.cycle());
+        let tabs = visible_tabs();
+        let next = match tabs.iter().position(|t| *t == self.current_tab) {
+            Some(i) => tabs[(i + 1) % tabs.len()],
+            // Current tab got hidden out from under us (config reload via
+            // restart can't do this mid-run, but stay defensive): land on
+            // the first visible tab rather than panicking.
+            None => tabs.first().copied().unwrap_or(Tab::Sessions),
+        };
+        self.set_tab(next);
     }
 
     /// Apply a fresh projects snapshot. Returns true when the snapshot
@@ -730,6 +897,7 @@ impl App {
         self.gh_create_input = None;
         self.projects.creating_task = false;
         self.projects.registering_only = false;
+        self.tasks.pending_assign = None;
         self.view = View::Grid;
     }
 
@@ -1320,6 +1488,11 @@ impl App {
 
         self.last_refresh = Instant::now();
 
+        // Resolve task-board agent bindings: a freshly-assigned task knows
+        // only its tmux name until the scanner sees the session; learning the
+        // session id here is what lets `f` resume after the tmux dies.
+        let task_bindings_changed = self.tasks.board.bind_sessions(&sessions);
+
         let new_groups = self.build_groups(&sessions);
         let same_structure = new_groups.len() == self.sessions.groups.len()
             && new_groups.iter().zip(&self.sessions.groups).all(|(n, o)| {
@@ -1341,7 +1514,7 @@ impl App {
             if changed && self.view == View::PromptInput {
                 self.dispatch_target = Self::compute_dispatch_target(&self.sessions.groups);
             }
-            return changed;
+            return changed || task_bindings_changed;
         }
 
         self.sessions.last_sessions = sessions;

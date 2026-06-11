@@ -14,11 +14,20 @@ transcript. From the grid you can:
 - focus the real terminal window of a detached session (Unix only), and
 - browse per-session metrics and Anthropic API usage.
 
-A separate **Projects** tab adds a higher-level layer: register a directory
-as a project, file a free-form *task* against it, and cc-hub spawns an
-*orchestrator* session that decomposes the task and dispatches *worker*
-sessions (read-only research workers, or worktree-isolated edit workers) via
-scriptable CLI primitives:
+A **Tasks** tab is the personal layer: a flat three-column board (**To-Do ·
+In Progress · Done**, stored at `~/.cc-hub/tasks.json`) where you jot tasks
+and either check them off by hand or hand one to an agent — `s` picks a
+folder, spawns a detached agent session there with the task text as its
+prompt, and binds it to the card. `f`/`Enter` on a bound card attaches the
+agent's pane exactly like the Sessions tab, including resume after the tmux
+session dies.
+
+A separate **Projects** tab (WIP — hidden by default, enable with
+`[ui] show_projects_tab = true`) adds a higher-level layer: register a
+directory as a project, file a free-form *task* against it, and cc-hub
+spawns an *orchestrator* session that decomposes the task and dispatches
+*worker* sessions (read-only research workers, or worktree-isolated edit
+workers) via scriptable CLI primitives:
 
 - `cc-hub task create --prompt "…" [--backlog]` / `cc-hub task start --task ID [--agent AGENT]`
 - `cc-hub orchestrate start --task ID [--agent AGENT] [--dry-run]`
@@ -201,6 +210,9 @@ pending_dispatch_timeout_secs = 60
 # identity rows into one compact line.
 cell_height = 6
 cell_width = 42
+# The Projects tab (orchestrator kanban) is WIP and hidden from the tab
+# strip + Tab cycle by default. Set true to bring it back.
+show_projects_tab = false
 
 [metrics]
 # Minimum assistant turns before a session is eligible for context-growth
@@ -284,8 +296,29 @@ differ:
 
 ## Keybindings
 
-`Tab` / `BackTab` cycles the three top-level tabs: **Projects → Sessions →
-Metrics**.
+`Tab` / `BackTab` cycles the top-level tabs: **Tasks → Sessions → Metrics**
+(plus **Projects**, after Tasks, when `[ui] show_projects_tab = true`).
+
+### Tasks tab
+
+A personal task board: **To-Do · In Progress · Done**. Cards live at
+`~/.cc-hub/tasks.json` (hand-editable). Assigning a task to an agent spawns
+a detached session and delivers the task text once the agent is idle; the
+card then shows the live session state (`⟳ working`, `󰂞 needs input`,
+`● idle`), the agent's folder, and age. Done cards keep their agent
+binding — `󰚩 claude · <dir>` marks a task an agent ran, and `f` still
+reopens its transcript.
+
+| Key | Action |
+|---|---|
+| `h` / `l` (or arrows) | Switch column |
+| `j` / `k` (or arrows) | Move within the column |
+| `a` / `n` | Add a task (lands in To-Do) |
+| `s` | Assign an agent: folder picker → spawn session there with the task text as prompt → card moves to In Progress |
+| `Enter` / `f` | Attach the bound agent's pane (embedded); resumes the session if its tmux died; hints `s` when unassigned |
+| `Space` | Toggle Done / reopen |
+| `x` | Delete the task (a bound agent session is left running — close it from Sessions) |
+| `c` | Clear all Done tasks |
 
 ### Sessions tab (grid view)
 
@@ -309,6 +342,8 @@ Metrics**.
 | `F1` (in embedded pane) | Close the pane, return to grid |
 
 ### Projects tab
+
+> WIP — hidden by default; enable with `[ui] show_projects_tab = true`.
 
 The Projects tab is laid out as a horizontal strip of project chips above a
 five-column kanban: **Planning · Running · Review · Merging · Done**. Backlog

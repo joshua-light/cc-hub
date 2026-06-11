@@ -60,6 +60,7 @@ pub mod scanner;
 pub mod send;
 pub mod session_count;
 pub mod spawn;
+pub mod tasks;
 pub mod title;
 pub mod tmux_pane;
 pub mod todo;

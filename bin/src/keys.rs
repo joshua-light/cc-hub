@@ -44,6 +44,7 @@ pub(crate) async fn handle_key(
     on_sessions: bool,
     on_metrics: bool,
     on_projects: bool,
+    on_tasks: bool,
 ) -> KeyOutcome {
     match (&app.view, key.code) {
         // Quit
@@ -75,6 +76,116 @@ pub(crate) async fn handle_key(
         }
         (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_metrics => {
             app.metrics.nav_up();
+        }
+        // Tasks board: j/k moves within the focused column; h/l switches
+        // column. Same muscle memory as the Projects kanban.
+        (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_tasks => {
+            app.tasks.row_down();
+        }
+        (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_tasks => {
+            app.tasks.row_up();
+        }
+        (View::Grid, KeyCode::Right | KeyCode::Char('l')) if on_tasks => {
+            app.tasks.col_right();
+        }
+        (View::Grid, KeyCode::Left | KeyCode::Char('h')) if on_tasks => {
+            app.tasks.col_left();
+        }
+        (View::Grid, KeyCode::Char('a') | KeyCode::Char('n')) if on_tasks => {
+            app.enter_task_input();
+        }
+        (View::Grid, KeyCode::Char(' ')) if on_tasks => {
+            match app.toggle_task_done() {
+                Some(msg) => app.set_status(msg),
+                None => app.set_status("no task focused".into()),
+            }
+        }
+        (View::Grid, KeyCode::Char('s')) if on_tasks => {
+            if !app.enter_task_assign_picker() {
+                app.set_status("focus a To-Do/In Progress task to assign an agent".into());
+            }
+        }
+        (View::Grid, KeyCode::Char('x')) if on_tasks => {
+            match app.delete_selected_task() {
+                Some(msg) => app.set_status(msg),
+                None => app.set_status("no task focused".into()),
+            }
+        }
+        (View::Grid, KeyCode::Char('c')) if on_tasks => {
+            app.clear_done_tasks();
+        }
+        // `f`/Enter on a task mirrors the Sessions tab: attach the bound
+        // agent's live tmux in the embedded pane; if the tmux died but the
+        // session id is known, respawn with resume and rebind; otherwise
+        // hint at `s`.
+        (View::Grid, KeyCode::Char('f') | KeyCode::Enter) if on_tasks => {
+            let Some(task) = app.tasks.selected_task().cloned() else {
+                app.set_status("no task focused".into());
+                return KeyOutcome::Continue;
+            };
+            let live_tmux = task
+                .tmux
+                .as_deref()
+                .filter(|n| send::tmux_session_exists(n));
+            if let Some(tmux_name) = live_tmux {
+                let (cols, rows) = crate::popup_pane_size(terminal);
+                match tmux_pane::TmuxPaneView::spawn(tmux_name, rows, cols) {
+                    Ok(pane) => app.enter_tmux_pane(pane),
+                    Err(e) => app.set_status(format!("tmux attach failed: {}", e)),
+                }
+            } else if let (Some(sid), Some(cwd)) =
+                (task.session_id.clone(), task.cwd.clone())
+            {
+                let agent_id = task.agent_id.clone().unwrap_or_else(|| "claude".into());
+                match spawn::spawn_agent_session(
+                    &agent_id,
+                    &cwd,
+                    Some(spawn::ResumeTarget::SessionId(sid.clone())),
+                    None,
+                    false,
+                ) {
+                    Ok(new_tmux) => {
+                        app.rebind_task_tmux(&task.id, &new_tmux);
+                        let (cols, rows) = crate::popup_pane_size(terminal);
+                        match tmux_pane::TmuxPaneView::spawn(&new_tmux, rows, cols) {
+                            Ok(pane) => {
+                                app.set_status(format!(
+                                    "resumed {} [{}]",
+                                    models::short_sid(&sid),
+                                    new_tmux
+                                ));
+                                app.enter_tmux_pane(pane);
+                            }
+                            Err(e) => app.set_status(format!(
+                                "resumed [{}] but attach failed: {}",
+                                new_tmux, e
+                            )),
+                        }
+                    }
+                    Err(e) => app.set_status(format!("resume failed: {}", e)),
+                }
+            } else if task.tmux.is_some() {
+                app.set_status(
+                    "agent session is gone and its session id was never seen — press s to re-assign"
+                        .into(),
+                );
+            } else {
+                app.set_status("no agent assigned — press s to assign one".into());
+            }
+        }
+        (View::TaskInput, KeyCode::Esc) => {
+            app.close_task_input();
+        }
+        (View::TaskInput, KeyCode::Backspace) => {
+            app.tasks.input.pop();
+        }
+        (View::TaskInput, KeyCode::Enter) => {
+            if !app.submit_task_input() {
+                app.set_status("empty task — nothing added".into());
+            }
+        }
+        (View::TaskInput, KeyCode::Char(c)) => {
+            app.tasks.input.push(c);
         }
         // Kanban: j/k moves the row cursor within the focused
         // column; h/l switches column; H/L (or [/]) cycles project chips.

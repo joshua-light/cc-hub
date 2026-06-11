@@ -511,6 +511,72 @@ pub(crate) fn render_todo_panel(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Centered single-line input for a new Tasks-tab task. Same shape as the
+/// rename popup: type, enter commits, esc cancels.
+pub(crate) fn render_task_input(frame: &mut Frame, area: Rect, app: &App) {
+    let mut input_line = app.tasks.input.clone();
+    input_line.push('▎');
+
+    let desired_w = 70u16.min(area.width);
+    let desired_h = 9u16.min(area.height);
+    let popup = centered_fixed(area, desired_w, desired_h);
+    frame.render_widget(Clear, popup);
+
+    let block = popup_block(Span::styled(
+        " New task ",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .title_bottom(Span::styled(
+        " lands in To-Do ",
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    ));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let footer_spans = vec![
+        Span::raw("  "),
+        Span::styled(
+            "[enter]",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" add   ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "[esc]",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+    ];
+    let lines = vec![
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("  + ", Style::default().fg(Color::Green)),
+            Span::styled(
+                input_line,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::raw(""),
+        Line::from(footer_spans),
+    ];
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
 pub(crate) fn render_rename_session(frame: &mut Frame, area: Rect, app: &App) {
     let mut input_line = app.rename_buffer.clone();
     input_line.push('▎');
