@@ -51,6 +51,11 @@ pub struct TaskItem {
 pub struct TaskBoard {
     #[serde(default)]
     tasks: Vec<TaskItem>,
+    /// cwd of the most recent assignment, kept across restarts. The assign
+    /// picker promotes it to the top of the places list so firing several
+    /// tasks at one project is a plain Enter each time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_assign_cwd: Option<String>,
 }
 
 fn now_secs() -> u64 {
@@ -88,6 +93,10 @@ impl TaskBoard {
 
     pub fn get(&self, id: &str) -> Option<&TaskItem> {
         self.tasks.iter().find(|t| t.id == id)
+    }
+
+    pub fn last_assign_cwd(&self) -> Option<&str> {
+        self.last_assign_cwd.as_deref()
     }
 
     /// Tasks in `status`, in insertion order.
@@ -141,6 +150,7 @@ impl TaskBoard {
             t.session_id = None;
             t.status = TaskItemStatus::InProgress;
             t.done_at = None;
+            self.last_assign_cwd = Some(cwd.to_string());
             let _ = self.save();
         }
     }
@@ -264,6 +274,20 @@ mod tests {
                 TaskBoard::load().get(&id).unwrap().tmux.as_deref(),
                 Some("cchub-1-43")
             );
+        });
+    }
+
+    #[test]
+    fn assign_records_last_assign_cwd_across_reloads() {
+        with_temp_home(|| {
+            let mut b = TaskBoard::load();
+            assert_eq!(b.last_assign_cwd(), None);
+            let id = b.add("t").unwrap();
+            b.assign(&id, "/tmp/proj", "claude", "cchub-1-42");
+            assert_eq!(TaskBoard::load().last_assign_cwd(), Some("/tmp/proj"));
+            // Deleting the task must not forget where it ran.
+            b.remove(&id);
+            assert_eq!(TaskBoard::load().last_assign_cwd(), Some("/tmp/proj"));
         });
     }
 

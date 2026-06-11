@@ -7,6 +7,7 @@ use crate::metrics::{MetricsAnalysis, SelectableSession};
 use crate::models::{ProjectGroup, SessionDetail, SessionInfo, SessionState};
 use crate::projects_scan::ProjectsSnapshot;
 use crate::session_count::SessionCounts;
+use crate::tasks::{TaskItem, TaskItemStatus};
 use crate::tmux_pane::TmuxPaneView;
 use crate::usage::UsageInfo;
 use ratatui::text::Line;
@@ -338,31 +339,86 @@ impl App {
         self.view = View::Grid;
         match self.tasks.board.add(&text) {
             Some(id) => {
-                self.tasks.focus(&id);
+                self.focus_task(&id);
                 true
             }
             None => false,
         }
     }
 
+    /// Tasks in `status` in display order: To-Do and Done keep the board's
+    /// insertion order; In Progress floats cards whose agent is blocked on
+    /// input to the top (stable within each group) so work that needs a
+    /// human is seen first. Selection ([`Self::selected_board_task`]) and
+    /// focus ([`Self::focus_task`]) resolve against this same ordering, so
+    /// cursor row N is always the Nth rendered card.
+    pub fn task_column(&self, status: TaskItemStatus) -> Vec<&TaskItem> {
+        let mut tasks = self.tasks.board.column(status);
+        if status == TaskItemStatus::InProgress {
+            let by_tmux = self.sessions_by_tmux();
+            tasks.sort_by_key(|t| {
+                !t.tmux
+                    .as_deref()
+                    .and_then(|n| by_tmux.get(n))
+                    .is_some_and(|s| s.needs_attention())
+            });
+        }
+        tasks
+    }
+
+    /// The task under the kanban cursor, resolved against the display
+    /// ordering of [`Self::task_column`].
+    pub fn selected_board_task(&self) -> Option<&TaskItem> {
+        self.task_column(self.tasks.col_status())
+            .get(self.tasks.row)
+            .copied()
+    }
+
+    /// Move the cursor to `id` wherever it now renders (e.g. after a status
+    /// transition or an assignment carried the card to another column).
+    pub fn focus_task(&mut self, id: &str) {
+        for (ci, status) in TASK_COLUMNS.iter().enumerate() {
+            let row = self.task_column(*status).iter().position(|t| t.id == id);
+            if let Some(ri) = row {
+                self.tasks.col = ci;
+                self.tasks.row = ri;
+                return;
+            }
+        }
+    }
+
     /// Flip the focused task between Done and To-Do (an In Progress task
     /// goes to Done — finishing an agent task by hand is always allowed).
-    /// Returns a status line describing the move, or `None` when no task
-    /// is focused.
+    /// Completing a task closes its live agent session; the binding
+    /// (`tmux`/`session_id`) is kept so `f` on the Done card can still
+    /// resume the transcript. Returns a status line describing the move,
+    /// or `None` when no task is focused.
     pub fn toggle_task_done(&mut self) -> Option<String> {
-        use crate::tasks::TaskItemStatus;
-        let t = self.tasks.selected_task()?;
+        let t = self.selected_board_task()?;
         let id = t.id.clone();
         let preview = crate::models::first_line_truncated(&t.text, 32);
+        let tmux = t.tmux.clone();
         let to = match t.status {
             TaskItemStatus::Done => TaskItemStatus::Todo,
             _ => TaskItemStatus::Done,
         };
         self.tasks.board.set_status(&id, to);
         self.tasks.clamp_row();
-        Some(match to {
-            TaskItemStatus::Done => format!("done: {}", preview),
-            _ => format!("reopened: {}", preview),
+        if to != TaskItemStatus::Done {
+            return Some(format!("reopened: {}", preview));
+        }
+        let live = tmux
+            .as_deref()
+            .filter(|n| crate::send::tmux_session_exists(n));
+        Some(match live {
+            Some(name) => match crate::send::kill_tmux_session(name) {
+                Ok(()) => format!("done: {} — closed agent session [{}]", preview, name),
+                Err(e) => format!(
+                    "done: {} — closing agent session [{}] failed: {}",
+                    preview, name, e
+                ),
+            },
+            None => format!("done: {}", preview),
         })
     }
 
@@ -418,14 +474,33 @@ impl App {
         out
     }
 
+    /// Places for the assign picker: [`Self::known_places`] with the most
+    /// recently assigned cwd promoted to the front (and thus selected by
+    /// default), so firing several tasks at one project is a plain Enter
+    /// each time. A last cwd no longer among the known places is
+    /// resurrected as a Recent entry.
+    fn assign_places(&self) -> Vec<Place> {
+        use crate::folder_picker::PlaceSource;
+        let mut places = self.known_places();
+        if let Some(last) = self.tasks.board.last_assign_cwd() {
+            let last = std::path::Path::new(last);
+            if let Some(idx) = places.iter().position(|p| p.path == last) {
+                let place = places.remove(idx);
+                places.insert(0, place);
+            } else {
+                places.insert(0, Place::new(None, last.to_path_buf(), PlaceSource::Recent));
+            }
+        }
+        places
+    }
+
     /// `s` on a focused task: open the places picker (registered projects,
     /// bookmarks, recent dirs — fuzzy-filterable) to choose the cwd the
     /// agent will run in, falling back to the filesystem browser when
     /// nothing is known yet. Returns false when no task is focused or the
     /// task is already Done.
     pub fn enter_task_assign_picker(&mut self) -> bool {
-        use crate::tasks::TaskItemStatus;
-        let Some(t) = self.tasks.selected_task() else {
+        let Some(t) = self.selected_board_task() else {
             return false;
         };
         if t.status == TaskItemStatus::Done {
@@ -433,7 +508,7 @@ impl App {
         }
         let id = t.id.clone();
         let prev_cwd = t.cwd.clone();
-        let places = self.known_places();
+        let places = self.assign_places();
         self.tasks.pending_assign = Some(id);
         if places.is_empty() {
             self.folder_picker = Some(FolderPicker::new(Self::assign_browse_start(
@@ -468,7 +543,7 @@ impl App {
                 )));
             }
             PickerMode::Browse => {
-                let places = self.known_places();
+                let places = self.assign_places();
                 if !places.is_empty() {
                     self.folder_picker = Some(FolderPicker::new_places(places));
                 }
@@ -517,7 +592,7 @@ impl App {
                     self.queue_pending_dispatch(tmux.clone(), prompt);
                 }
                 self.tasks.board.assign(&id, cwd, &agent_id, &tmux);
-                self.tasks.focus(&id);
+                self.focus_task(&id);
                 format!("assigned {} [{}] — task in progress", agent_id, tmux)
             }
             Err(e) => format!("assign failed: {}", e),
@@ -532,7 +607,7 @@ impl App {
     /// Delete the focused task. The bound agent session (if any) is left
     /// running — it still shows on the Sessions tab. Returns the status line.
     pub fn delete_selected_task(&mut self) -> Option<String> {
-        let id = self.tasks.selected_task()?.id.clone();
+        let id = self.selected_board_task()?.id.clone();
         let removed = self.tasks.board.remove(&id)?;
         self.tasks.clamp_row();
         let preview = crate::models::first_line_truncated(&removed.text, 32);
@@ -2470,7 +2545,7 @@ mod tests {
                 // A previous assignment on p-b: reopening the picker must
                 // land the cursor there, not on the first candidate.
                 app.tasks.board.assign(&id, "/tmp/p-b", "claude", "mux-1");
-                app.tasks.focus(&id);
+                app.focus_task(&id);
 
                 assert!(app.enter_task_assign_picker());
                 let picker = app.folder_picker.as_ref().unwrap();
@@ -2481,11 +2556,57 @@ mod tests {
         }
 
         #[test]
+        fn assign_picker_promotes_last_assigned_project_to_front() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                app.projects.snapshot =
+                    snapshot_many(vec![(project("p-a"), vec![]), (project("p-b"), vec![])]);
+                // An earlier task went to p-b: a fresh task's picker must
+                // open with p-b first and selected, ready for plain Enter.
+                let prev = app.tasks.board.add("earlier").unwrap();
+                app.tasks.board.assign(&prev, "/tmp/p-b", "claude", "mux-1");
+                let id = app.tasks.board.add("next").unwrap();
+                app.focus_task(&id);
+
+                assert!(app.enter_task_assign_picker());
+                let picker = app.folder_picker.as_ref().unwrap();
+                let names: Vec<&str> = picker
+                    .rows
+                    .iter()
+                    .map(|r| picker.places[r.place].name.as_str())
+                    .collect();
+                assert_eq!(names, vec!["p-b", "p-a"]);
+                assert_eq!(picker.selected_place().unwrap().name, "p-b");
+            });
+        }
+
+        #[test]
+        fn assign_picker_resurrects_last_cwd_missing_from_places() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                app.projects.snapshot = snapshot(project("p-a"), vec![]);
+                // The assigned task is deleted, so /tmp/gone is in no
+                // project/bookmark/recent — it must still lead the list.
+                let prev = app.tasks.board.add("earlier").unwrap();
+                app.tasks.board.assign(&prev, "/tmp/gone", "claude", "mux-1");
+                app.tasks.board.remove(&prev);
+                let id = app.tasks.board.add("next").unwrap();
+                app.focus_task(&id);
+
+                assert!(app.enter_task_assign_picker());
+                let picker = app.folder_picker.as_ref().unwrap();
+                let first = picker.selected_place().unwrap();
+                assert_eq!(first.name, "gone");
+                assert_eq!(first.source, PlaceSource::Recent);
+            });
+        }
+
+        #[test]
         fn assign_picker_falls_back_to_browse_when_nothing_known() {
             with_temp_home(|| {
                 let mut app = App::new();
                 let id = app.tasks.board.add("t").unwrap();
-                app.tasks.focus(&id);
+                app.focus_task(&id);
                 assert!(app.enter_task_assign_picker());
                 assert_eq!(app.folder_picker.as_ref().unwrap().mode, PickerMode::Browse);
             });
@@ -2497,7 +2618,7 @@ mod tests {
                 let mut app = App::new();
                 app.projects.snapshot = snapshot(project("p-a"), vec![]);
                 let id = app.tasks.board.add("t").unwrap();
-                app.tasks.focus(&id);
+                app.focus_task(&id);
                 assert!(app.enter_task_assign_picker());
                 let mode = |app: &App| app.folder_picker.as_ref().unwrap().mode;
                 assert_eq!(mode(&app), PickerMode::Places);
@@ -2512,6 +2633,64 @@ mod tests {
                 app.enter_folder_picker();
                 app.toggle_assign_picker_mode();
                 assert_eq!(mode(&app), PickerMode::Browse);
+            });
+        }
+    }
+
+    // `$HOME`-redirected like assign_picker (the board persists on
+    // mutation), so unix-only.
+    #[cfg(unix)]
+    mod board_order {
+        use super::*;
+        use crate::test_util::with_temp_home;
+
+        #[test]
+        fn in_progress_floats_needs_input_and_cursor_follows() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                let a = app.tasks.board.add("a").unwrap();
+                let b = app.tasks.board.add("b").unwrap();
+                let c = app.tasks.board.add("c").unwrap();
+                app.tasks.board.assign(&a, "/tmp", "claude", "mux-a");
+                app.tasks.board.assign(&b, "/tmp", "claude", "mux-b");
+                app.tasks.board.assign(&c, "/tmp", "claude", "mux-c");
+                app.sessions.last_sessions = vec![
+                    fake_session("mux-a", SessionState::Processing),
+                    fake_session("mux-b", SessionState::WaitingForInput),
+                    fake_session("mux-c", SessionState::Question),
+                ];
+
+                // Both flavors of blocked-on-input rise above the working
+                // agent, keeping their relative insertion order.
+                let order: Vec<&str> = app
+                    .task_column(TaskItemStatus::InProgress)
+                    .iter()
+                    .map(|t| t.id.as_str())
+                    .collect();
+                assert_eq!(order, vec![b.as_str(), c.as_str(), a.as_str()]);
+
+                // Selection and focus resolve against the rendered order,
+                // not the board file's insertion order.
+                app.focus_task(&a);
+                assert_eq!((app.tasks.col, app.tasks.row), (1, 2));
+                assert_eq!(app.selected_board_task().unwrap().id, a);
+            });
+        }
+
+        #[test]
+        fn toggle_done_completes_assigned_task_and_keeps_binding() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                let id = app.tasks.board.add("ship it").unwrap();
+                app.tasks.board.assign(&id, "/tmp", "claude", "mux-dead");
+                app.focus_task(&id);
+                // No live mux session in the test env: the close is skipped
+                // and the status stays the plain "done" line.
+                assert_eq!(app.toggle_task_done().unwrap(), "done: ship it");
+                let t = app.tasks.board.get(&id).unwrap();
+                assert_eq!(t.status, TaskItemStatus::Done);
+                // The binding survives completion so `f` can still resume.
+                assert_eq!(t.tmux.as_deref(), Some("mux-dead"));
             });
         }
     }

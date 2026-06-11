@@ -57,13 +57,15 @@ fn render_task_column(
     now_secs: u64,
 ) {
     let (label, icon, accent) = column_meta(col_idx);
-    let tasks = app.tasks.board.column(TASK_COLUMNS[col_idx]);
+    // Display order, not board order: In Progress puts needs-input cards
+    // first (see `App::task_column`), and the cursor indexes the same list.
+    let tasks = app.task_column(TASK_COLUMNS[col_idx]);
     let count = tasks.len();
     let col_focused = app.tasks.col == col_idx;
     // To-Do and In Progress carry a meta row under two text rows; Done cards
     // are compact (the column already says everything but the when).
     let card_height: u16 = if col_idx == 2 { 4 } else { 5 };
-    let gap: u16 = 1;
+    let gap: u16 = 0;
     let inner = Block::default().borders(Borders::ALL).inner(area);
     let max_cards =
         ((inner.height as u32 + gap as u32) / (card_height as u32 + gap as u32)) as usize;
@@ -233,8 +235,9 @@ fn meta_line(
             age_style,
         )];
         // A done task that ran through an agent keeps its transcript — `f`
-        // still opens/resumes it — so say who ran it and where. A still-live
-        // session gets a brighter dot: marking done doesn't close the agent.
+        // still opens/resumes it — so say who ran it and where. Marking done
+        // closes the live session, but one can outlive that (close failed,
+        // board edited by hand), so a survivor still gets the brighter dot.
         if t.tmux.is_some() || t.session_id.is_some() {
             let agent = t.agent_id.as_deref().unwrap_or("agent");
             spans.push(Span::styled(format!("  󰚩 {}", agent), age_style));

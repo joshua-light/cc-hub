@@ -305,18 +305,19 @@ A personal task board: **To-Do · In Progress · Done**. Cards live at
 `~/.cc-hub/tasks.json` (hand-editable). Assigning a task to an agent spawns
 a detached session and delivers the task text once the agent is idle; the
 card then shows the live session state (`⟳ working`, `󰂞 needs input`,
-`● idle`), the agent's folder, and age. Done cards keep their agent
-binding — `󰚩 claude · <dir>` marks a task an agent ran, and `f` still
-reopens its transcript.
+`● idle`), the agent's folder, and age. In Progress floats cards whose
+agent is blocked on input to the top of the column. Done cards keep their
+agent binding — `󰚩 claude · <dir>` marks a task an agent ran, and `f`
+still reopens its transcript.
 
 | Key | Action |
 |---|---|
 | `h` / `l` (or arrows) | Switch column |
 | `j` / `k` (or arrows) | Move within the column |
 | `a` / `n` | Add a task (lands in To-Do) |
-| `s` | Assign an agent: project picker (registered projects · bookmarks · recent dirs, fuzzy-filtered by typing — `Tab` flips to a plain folder browser) → spawn session there with the task text as prompt → card moves to In Progress |
+| `s` | Assign an agent: project picker (registered projects · bookmarks · recent dirs, fuzzy-filtered by typing — `Tab` flips to a plain folder browser; the last-assigned folder is preselected) → spawn session there with the task text as prompt → card moves to In Progress |
 | `Enter` / `f` | Attach the bound agent's pane (embedded); resumes the session if its tmux died; hints `s` when unassigned |
-| `Space` | Toggle Done / reopen |
+| `Space` | Toggle Done / reopen (completing closes the live agent session; the transcript binding is kept) |
 | `x` | Delete the task (a bound agent session is left running — close it from Sessions) |
 | `c` | Clear all Done tasks |
 

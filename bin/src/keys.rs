@@ -119,7 +119,7 @@ pub(crate) async fn handle_key(
         // session id is known, respawn with resume and rebind; otherwise
         // hint at `s`.
         (View::Grid, KeyCode::Char('f') | KeyCode::Enter) if on_tasks => {
-            let Some(task) = app.tasks.selected_task().cloned() else {
+            let Some(task) = app.selected_board_task().cloned() else {
                 app.set_status("no task focused".into());
                 return KeyOutcome::Continue;
             };

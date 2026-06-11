@@ -2,7 +2,7 @@
 //! cursor (column, row), the add-task input buffer, and the id of a task
 //! waiting on a folder pick for agent assignment.
 
-use crate::tasks::{TaskBoard, TaskItem, TaskItemStatus};
+use crate::tasks::{TaskBoard, TaskItemStatus};
 
 /// Column order on the board. Indices are the `col` cursor values.
 pub const TASK_COLUMNS: [TaskItemStatus; 3] = [
@@ -50,10 +50,6 @@ impl TasksView {
         self.board.column(TASK_COLUMNS[col.min(TASK_COLUMNS.len() - 1)]).len()
     }
 
-    pub fn selected_task(&self) -> Option<&TaskItem> {
-        self.board.column(self.col_status()).get(self.row).copied()
-    }
-
     pub fn row_down(&mut self) {
         let len = self.column_len(self.col);
         if len > 0 && self.row + 1 < len {
@@ -87,18 +83,6 @@ impl TasksView {
         let len = self.column_len(self.col);
         if self.row >= len {
             self.row = len.saturating_sub(1);
-        }
-    }
-
-    /// Move the cursor to `id` wherever it now lives (e.g. after a status
-    /// transition carried the card to another column).
-    pub fn focus(&mut self, id: &str) {
-        for (ci, status) in TASK_COLUMNS.iter().enumerate() {
-            if let Some(ri) = self.board.column(*status).iter().position(|t| t.id == id) {
-                self.col = ci;
-                self.row = ri;
-                return;
-            }
         }
     }
 }
