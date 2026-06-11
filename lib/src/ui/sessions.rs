@@ -1067,6 +1067,6 @@ mod tests {
         let buf = render(&s, 42, 7);
         let footer = row(&buf, 5);
         assert!(footer.contains("70%"), "pct missing:\n{}", footer);
-        assert!(footer.contains('█'), "bar missing:\n{}", footer);
+        assert!(footer.contains('━'), "bar missing:\n{}", footer);
     }
 }
