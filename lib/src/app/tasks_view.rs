@@ -5,8 +5,9 @@
 use crate::tasks::{TaskBoard, TaskItemStatus};
 
 /// Column order on the board. Indices are the `col` cursor values.
-pub const TASK_COLUMNS: [TaskItemStatus; 3] = [
+pub const TASK_COLUMNS: [TaskItemStatus; 4] = [
     TaskItemStatus::Todo,
+    TaskItemStatus::Planning,
     TaskItemStatus::InProgress,
     TaskItemStatus::Done,
 ];

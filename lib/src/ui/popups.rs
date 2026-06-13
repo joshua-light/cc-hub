@@ -678,7 +678,16 @@ pub(crate) fn render_task_input(frame: &mut Frame, area: Rect, app: &App) {
     input_line.push('▎');
 
     let desired_w = 70u16.min(area.width);
-    let desired_h = 9u16.min(area.height);
+    // Borders (2) plus the "  + " prefix (4) leave this much for the text, so
+    // the height estimate matches what the wrapped Paragraph will occupy.
+    let wrap_width = desired_w.saturating_sub(6) as usize;
+    let input_rows: u16 = if wrap_width == 0 {
+        1
+    } else {
+        let w = input_line.chars().count();
+        w.div_ceil(wrap_width).max(1).try_into().unwrap_or(u16::MAX)
+    };
+    let desired_h = 5u16.saturating_add(input_rows).max(9).min(area.height);
     let popup = centered_fixed(area, desired_w, desired_h);
     frame.render_widget(Clear, popup);
 
@@ -1537,6 +1546,61 @@ mod places_picker_tests {
                 "filtered-out row must not render:\n{}",
                 rendered
             );
+        });
+    }
+}
+
+// Unix-only: `with_temp_home` isolates `$HOME` for `App::new()`'s loads,
+// same as the todo-panel suite below.
+#[cfg(all(test, unix))]
+mod task_input_tests {
+    use crate::app::{App, View};
+    use crate::test_util::with_temp_home;
+    use crate::ui::common::buffer_to_string;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    #[test]
+    fn popup_grows_to_fit_long_input_instead_of_clipping() {
+        with_temp_home(|| {
+            let mut app = App::new();
+            // Longer than the fixed 9-row popup could hold once wrapped (>4
+            // rows at the ~64-column text width), so the popup must grow or
+            // the footer hints get pushed out the bottom.
+            let long = "investigate why the orchestrator retry backoff logic \
+                keeps hammering the upstream scheduler after a transient \
+                network partition and document every observed failure mode \
+                plus the exact sequence of reconnect attempts so we can \
+                finally write a deterministic regression test for it";
+            app.tasks.input = long.to_string();
+            app.view = View::TaskInput;
+
+            let backend = TestBackend::new(90, 26);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|f| super::render_task_input(f, f.area(), &app))
+                .expect("render");
+            let rendered = buffer_to_string(terminal.backend().buffer());
+
+            // The tail of the text would vanish first if the input clipped.
+            for word in long.split_whitespace() {
+                assert!(
+                    rendered.contains(word),
+                    "word {:?} should appear in the popup:\n{}",
+                    word,
+                    rendered
+                );
+            }
+            // The footer sits below the input, so it's the first casualty of
+            // a popup that didn't grow.
+            for hint in ["[enter]", "add", "[esc]", "cancel"] {
+                assert!(
+                    rendered.contains(hint),
+                    "footer hint {:?} should stay visible:\n{}",
+                    hint,
+                    rendered
+                );
+            }
         });
     }
 }

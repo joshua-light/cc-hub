@@ -288,7 +288,14 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         // (approve on Projects, ack on Sessions) is never the first thing
         // clipped off the right edge of this one-row, no-wrap status bar.
         let space_verb = match (&app.view, app.current_tab) {
-            (View::Grid, Tab::Tasks) => Some("done "),
+            // Space is status-aware on the Tasks board: it approves a
+            // focused Planning card's plan, and toggles Done elsewhere.
+            (View::Grid, Tab::Tasks) => Some(
+                match app.selected_board_task().map(|t| t.status) {
+                    Some(crate::tasks::TaskItemStatus::Planning) => "proceed ",
+                    _ => "done ",
+                },
+            ),
             (View::Grid, Tab::Projects) => Some("approve "),
             (View::Grid, Tab::Sessions) => Some("ack "),
             _ => None,

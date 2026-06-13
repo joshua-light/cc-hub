@@ -94,15 +94,17 @@ pub(crate) async fn handle_key(
         (View::Grid, KeyCode::Char('a') | KeyCode::Char('n')) if on_tasks => {
             app.enter_task_input();
         }
+        // Space is status-aware: approves a Planning card's plan (tells the
+        // agent to proceed, card → In Progress), toggles Done elsewhere.
         (View::Grid, KeyCode::Char(' ')) if on_tasks => {
-            match app.toggle_task_done() {
+            match app.task_space_action() {
                 Some(msg) => app.set_status(msg),
                 None => app.set_status("no task focused".into()),
             }
         }
         (View::Grid, KeyCode::Char('s')) if on_tasks => {
             if !app.enter_task_assign_picker() {
-                app.set_status("focus a To-Do/In Progress task to assign an agent".into());
+                app.set_status("focus an unfinished task to assign an agent".into());
             }
         }
         (View::Grid, KeyCode::Char('x')) if on_tasks => {

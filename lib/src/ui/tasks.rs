@@ -1,19 +1,26 @@
-//! Tasks-tab body: a three-column board (To-Do · In Progress · Done) over
-//! the personal task store. Visually a sibling of the Projects kanban, but
-//! each card is a flat task, optionally annotated with its bound agent
-//! session's live state (resolved by tmux name, same as project cards).
+//! Tasks-tab body: a four-column board (To-Do · Planning · In Progress ·
+//! Done) over the personal task store. Visually a sibling of the Projects
+//! kanban, but each card is a flat task, optionally annotated with its bound
+//! agent session's live state (resolved by tmux name, same as project
+//! cards). Planning holds cards whose agent is drafting a plan; Space
+//! approves it and the card moves to In Progress.
 
 use crate::app::{App, TASK_COLUMNS};
 use crate::models::{self, SessionInfo, SessionState};
 use crate::tasks::TaskItem;
 use crate::ui::now_ms;
-use crate::ui::palette::{ACCENT_BLUE, BACKLOG_BLUE, DIM_TEXT, DOT_IDLE, LABEL_GRAY, META_GRAY};
+use crate::ui::palette::{ACCENT_BLUE, BACKLOG_BLUE, DIM_TEXT, DOT_IDLE, LABEL_GRAY, META_GRAY, PURPLE};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use std::collections::HashMap;
+
+/// Column indices that get special rendering treatment. Must track
+/// [`TASK_COLUMNS`] ([`crate::app::TASK_COLUMNS`]) order.
+const PLANNING_COL: usize = 1;
+const DONE_COL: usize = 3;
 
 pub fn render_tasks_body(frame: &mut Frame, area: Rect, app: &App) {
     if area.height < 3 || area.width < 30 {
@@ -27,9 +34,10 @@ pub fn render_tasks_body(frame: &mut Frame, area: Rect, app: &App) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
         ])
         .split(area);
 
@@ -41,9 +49,12 @@ pub fn render_tasks_body(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn column_meta(col: usize) -> (&'static str, &'static str, Color) {
+    // Planning borrows the Projects kanban's planning icon/accent so the
+    // same phase reads the same across both boards.
     match col {
         0 => ("To-Do", "󰄱", BACKLOG_BLUE),
-        1 => ("In Progress", "󰒓", Color::LightYellow),
+        1 => ("Planning", "󰟶", PURPLE),
+        2 => ("In Progress", "󰒓", Color::LightYellow),
         _ => ("Done", "󰸞", Color::LightGreen),
     }
 }
@@ -62,9 +73,9 @@ fn render_task_column(
     let tasks = app.task_column(TASK_COLUMNS[col_idx]);
     let count = tasks.len();
     let col_focused = app.tasks.col == col_idx;
-    // To-Do and In Progress carry a meta row under two text rows; Done cards
-    // are compact (the column already says everything but the when).
-    let card_height: u16 = if col_idx == 2 { 4 } else { 5 };
+    // Live columns carry a meta row under two text rows; Done cards are
+    // compact (the column already says everything but the when).
+    let card_height: u16 = if col_idx == DONE_COL { 4 } else { 5 };
     let gap: u16 = 0;
     let inner = Block::default().borders(Borders::ALL).inner(area);
     let max_cards =
@@ -123,7 +134,8 @@ fn render_task_column(
     if tasks.is_empty() {
         let empty_hint = match col_idx {
             0 => "No tasks — press a to add one",
-            1 => "Nothing assigned — s hands a task to an agent",
+            1 => "Nothing planning — s hands a task to an agent",
+            2 => "Nothing running — Space approves a plan",
             _ => "Nothing done yet",
         };
         let hint = Paragraph::new(Line::from(Span::styled(
@@ -191,7 +203,7 @@ fn render_task_card(
         return;
     }
 
-    let done = col_idx == 2;
+    let done = col_idx == DONE_COL;
     let text_style = if done {
         Style::default().fg(DIM_TEXT).add_modifier(Modifier::ITALIC)
     } else if selected {
@@ -228,7 +240,7 @@ fn meta_line(
     now_secs: u64,
 ) -> Line<'static> {
     let age_style = Style::default().fg(META_GRAY);
-    if col_idx == 2 {
+    if col_idx == DONE_COL {
         let when = t.done_at.unwrap_or(t.created_at);
         let mut spans = vec![Span::styled(
             format!("✓ {}", models::relative_age(now_secs.saturating_sub(when))),
@@ -264,6 +276,11 @@ fn meta_line(
                 SessionState::Processing => ("⟳", "working", Color::LightYellow),
                 SessionState::WaitingForInput | SessionState::Question => {
                     ("󰂞", "needs input", Color::Yellow)
+                }
+                // An idle planning agent has finished its turn — the plan is
+                // sitting in the transcript waiting for a verdict.
+                SessionState::Idle if col_idx == PLANNING_COL => {
+                    ("●", "plan ready", Color::LightGreen)
                 }
                 SessionState::Idle => ("●", "idle", Color::LightGreen),
                 SessionState::Inactive => ("○", "inactive", DOT_IDLE),

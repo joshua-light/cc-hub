@@ -14,13 +14,15 @@ transcript. From the grid you can:
 - focus the real terminal window of a detached session (Unix only), and
 - browse per-session metrics and Anthropic API usage.
 
-A **Tasks** tab is the personal layer: a flat three-column board (**To-Do ·
-In Progress · Done**, stored at `~/.cc-hub/tasks.json`) where you jot tasks
-and either check them off by hand or hand one to an agent — `s` picks a
-folder, spawns a detached agent session there with the task text as its
-prompt, and binds it to the card. `f`/`Enter` on a bound card attaches the
-agent's pane exactly like the Sessions tab, including resume after the tmux
-session dies.
+A **Tasks** tab is the personal layer: a flat four-column board (**To-Do ·
+Planning · In Progress · Done**, stored at `~/.cc-hub/tasks.json`) where you
+jot tasks and either check them off by hand or hand one to an agent — `s`
+picks a folder, spawns a detached agent session there prompted to
+investigate the task and present a plan first, and binds it to the card,
+which sits in **Planning**. `Space` approves the plan ("Proceed with the
+implementation." is sent to the agent) and moves the card to In Progress.
+`f`/`Enter` on a bound card attaches the agent's pane exactly like the
+Sessions tab, including resume after the tmux session dies.
 
 A separate **Projects** tab (WIP — hidden by default, enable with
 `[ui] show_projects_tab = true`) adds a higher-level layer: register a
@@ -301,23 +303,26 @@ differ:
 
 ### Tasks tab
 
-A personal task board: **To-Do · In Progress · Done**. Cards live at
-`~/.cc-hub/tasks.json` (hand-editable). Assigning a task to an agent spawns
-a detached session and delivers the task text once the agent is idle; the
-card then shows the live session state (`⟳ working`, `󰂞 needs input`,
-`● idle`), the agent's folder, and age. In Progress floats cards whose
-agent is blocked on input to the top of the column. Done cards keep their
-agent binding — `󰚩 claude · <dir>` marks a task an agent ran, and `f`
-still reopens its transcript.
+A personal task board: **To-Do · Planning · In Progress · Done**. Cards
+live at `~/.cc-hub/tasks.json` (hand-editable). Assigning a task to an
+agent spawns a detached session and delivers the task text — wrapped in
+plan-first framing (investigate, present a plan, hold) — once the agent is
+idle; the card sits in **Planning** showing the live session state
+(`⟳ working`, `󰂞 needs input`, `● plan ready`), the agent's folder, and
+age. `Space` on a Planning card sends "Proceed with the implementation."
+to the agent and moves the card to In Progress. Planning and In Progress
+float cards whose agent is blocked on input to the top of the column. Done
+cards keep their agent binding — `󰚩 claude · <dir>` marks a task an agent
+ran, and `f` still reopens its transcript.
 
 | Key | Action |
 |---|---|
 | `h` / `l` (or arrows) | Switch column |
 | `j` / `k` (or arrows) | Move within the column |
 | `a` / `n` | Add a task (lands in To-Do) |
-| `s` | Assign an agent: project picker (registered projects · bookmarks · recent dirs, fuzzy-filtered by typing — `Tab` flips to a plain folder browser; the last-assigned folder is preselected) → spawn session there with the task text as prompt → card moves to In Progress |
+| `s` | Assign an agent: project picker (registered projects · bookmarks · recent dirs, fuzzy-filtered by typing — `Tab` flips to a plain folder browser; the last-assigned folder is preselected) → spawn session there prompted to plan first → card moves to Planning |
 | `Enter` / `f` | Attach the bound agent's pane (embedded); resumes the session if its tmux died; hints `s` when unassigned |
-| `Space` | Toggle Done / reopen (completing closes the live agent session; the transcript binding is kept) |
+| `Space` | On a Planning card: approve the plan — the agent is told to proceed and the card moves to In Progress (resumes the session first if its tmux died). Elsewhere: toggle Done / reopen (completing closes the live agent session; the transcript binding is kept) |
 | `x` | Delete the task (a bound agent session is left running — close it from Sessions) |
 | `c` | Clear all Done tasks |
 

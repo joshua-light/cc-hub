@@ -2,7 +2,9 @@
 //! orchestrator tasks (heavyweight: orchestrator session, workers, PR
 //! pipeline), a board task is a plain to-do item that can optionally be
 //! handed to a single agent session: assigning spawns a detached agent in a
-//! chosen cwd with the task text as its prompt and records the binding, so
+//! chosen cwd, prompted to investigate and plan first — the card sits in
+//! Planning until the user approves the plan (Space), which tells the agent
+//! to proceed and moves the card to In Progress. The binding is recorded so
 //! `f` on the card attaches to that session exactly like the Sessions tab.
 //! Stored at `~/.cc-hub/tasks.json` as an ordered array so the file is
 //! trivially editable by hand if needed.
@@ -18,6 +20,9 @@ use crate::platform::paths::cc_hub_home;
 #[serde(rename_all = "snake_case")]
 pub enum TaskItemStatus {
     Todo,
+    /// An agent is investigating the task and drafting a plan; it was told
+    /// not to implement until the user approves (Space on the card).
+    Planning,
     InProgress,
     Done,
 }
@@ -138,7 +143,9 @@ impl TaskBoard {
     }
 
     /// Record an agent assignment: where it runs, which agent, and the mux
-    /// session it lives in. Moves the task to In Progress. Persists.
+    /// session it lives in. Moves the task to Planning — the agent is
+    /// prompted to plan first and the user promotes the card to In Progress
+    /// by approving the plan. Persists.
     pub fn assign(&mut self, id: &str, cwd: &str, agent_id: &str, tmux: &str) {
         if let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) {
             t.cwd = Some(cwd.to_string());
@@ -148,7 +155,7 @@ impl TaskBoard {
             // longer matches the new tmux, so drop it until the next scan
             // re-resolves.
             t.session_id = None;
-            t.status = TaskItemStatus::InProgress;
+            t.status = TaskItemStatus::Planning;
             t.done_at = None;
             self.last_assign_cwd = Some(cwd.to_string());
             let _ = self.save();
@@ -258,14 +265,14 @@ mod tests {
     }
 
     #[test]
-    fn assign_moves_to_in_progress_and_rebind_keeps_session() {
+    fn assign_moves_to_planning_and_rebind_keeps_session() {
         with_temp_home(|| {
             let mut b = TaskBoard::load();
             let id = b.add("write the parser").unwrap();
             b.assign(&id, "/tmp/proj", "claude", "cchub-1-42");
             let t = TaskBoard::load();
             let task = t.get(&id).unwrap();
-            assert_eq!(task.status, TaskItemStatus::InProgress);
+            assert_eq!(task.status, TaskItemStatus::Planning);
             assert_eq!(task.cwd.as_deref(), Some("/tmp/proj"));
             assert_eq!(task.tmux.as_deref(), Some("cchub-1-42"));
             assert_eq!(task.session_id, None);
@@ -300,6 +307,7 @@ mod tests {
             b.set_status(&a, TaskItemStatus::Done);
             assert_eq!(b.column(TaskItemStatus::Todo).len(), 1);
             assert_eq!(b.column(TaskItemStatus::Done).len(), 1);
+            assert_eq!(b.column(TaskItemStatus::Planning).len(), 0);
             assert_eq!(b.column(TaskItemStatus::InProgress).len(), 0);
         });
     }

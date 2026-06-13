@@ -31,6 +31,24 @@ pub fn status_msg_ttl() -> Duration {
     config::get().ui.status_msg_ttl()
 }
 
+/// What Space on a Planning card sends to the bound agent. Kept terse: the
+/// plan-first framing in [`planning_prompt`] already told the agent what
+/// "proceed" means.
+pub const PROCEED_PROMPT: &str = "Proceed with the implementation.";
+
+/// Wrap a board task's text in plan-first framing: the agent investigates
+/// and presents a plan, then holds until the user approves (Space sends
+/// [`PROCEED_PROMPT`]). This is what makes the Planning column honest — the
+/// agent genuinely isn't implementing while the card sits there.
+fn planning_prompt(text: &str) -> String {
+    format!(
+        "{text}\n\nFirst investigate the codebase and figure out what this task needs, \
+         then present a short implementation plan: approach, files you'll touch, open \
+         questions. Do NOT implement yet — stop after the plan and wait for me to say \
+         \"proceed\"."
+    )
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum View {
     Grid,
@@ -347,14 +365,14 @@ impl App {
     }
 
     /// Tasks in `status` in display order: To-Do and Done keep the board's
-    /// insertion order; In Progress floats cards whose agent is blocked on
-    /// input to the top (stable within each group) so work that needs a
-    /// human is seen first. Selection ([`Self::selected_board_task`]) and
-    /// focus ([`Self::focus_task`]) resolve against this same ordering, so
-    /// cursor row N is always the Nth rendered card.
+    /// insertion order; Planning and In Progress float cards whose agent is
+    /// blocked on input to the top (stable within each group) so work that
+    /// needs a human is seen first. Selection ([`Self::selected_board_task`])
+    /// and focus ([`Self::focus_task`]) resolve against this same ordering,
+    /// so cursor row N is always the Nth rendered card.
     pub fn task_column(&self, status: TaskItemStatus) -> Vec<&TaskItem> {
         let mut tasks = self.tasks.board.column(status);
-        if status == TaskItemStatus::InProgress {
+        if matches!(status, TaskItemStatus::Planning | TaskItemStatus::InProgress) {
             let by_tmux = self.sessions_by_tmux();
             tasks.sort_by_key(|t| {
                 !t.tmux
@@ -384,6 +402,78 @@ impl App {
                 self.tasks.row = ri;
                 return;
             }
+        }
+    }
+
+    /// Space on the board, status-aware: a Planning card tells its agent to
+    /// proceed with the implementation; anything else toggles Done. Returns
+    /// `None` when no task is focused.
+    pub fn task_space_action(&mut self) -> Option<String> {
+        match self.selected_board_task()?.status {
+            TaskItemStatus::Planning => Some(self.proceed_selected_task()),
+            _ => self.toggle_task_done(),
+        }
+    }
+
+    /// Approve the focused Planning card's plan: deliver
+    /// [`PROCEED_PROMPT`] to the bound agent and move the card to In
+    /// Progress. A live session gets the prompt immediately (if the agent is
+    /// still planning, it lands as the queued next message); a dead tmux
+    /// with a known session id is respawned with resume and the prompt
+    /// queued for dispatch once it reports Idle. With nothing to deliver to,
+    /// the card stays in Planning so the column never lies about an agent
+    /// actually implementing.
+    pub fn proceed_selected_task(&mut self) -> String {
+        let Some(t) = self.selected_board_task() else {
+            return "no task focused".into();
+        };
+        let id = t.id.clone();
+        let preview = crate::models::first_line_truncated(&t.text, 32);
+        let live_tmux = t
+            .tmux
+            .clone()
+            .filter(|n| crate::send::tmux_session_exists(n));
+        if let Some(tmux) = live_tmux {
+            return match crate::send::send_prompt(&tmux, PROCEED_PROMPT) {
+                Ok(()) => {
+                    self.tasks.board.set_status(&id, TaskItemStatus::InProgress);
+                    self.focus_task(&id);
+                    format!("proceeding: {} — agent told to implement [{}]", preview, tmux)
+                }
+                Err(e) => format!("proceed failed: {} — task stays in planning", e),
+            };
+        }
+        let (sid, cwd, agent_id) = {
+            let Some(t) = self.tasks.board.get(&id) else {
+                return "task vanished".into();
+            };
+            match (t.session_id.clone(), t.cwd.clone()) {
+                (Some(sid), Some(cwd)) => (
+                    sid,
+                    cwd,
+                    t.agent_id.clone().unwrap_or_else(|| "claude".into()),
+                ),
+                _ => {
+                    return "agent session is gone and its session id was never seen — press s to re-assign"
+                        .into();
+                }
+            }
+        };
+        match crate::spawn::spawn_agent_session(
+            &agent_id,
+            &cwd,
+            Some(crate::spawn::ResumeTarget::SessionId(sid)),
+            None,
+            false,
+        ) {
+            Ok(tmux) => {
+                self.queue_pending_dispatch(tmux.clone(), PROCEED_PROMPT.to_string());
+                self.tasks.board.rebind_tmux(&id, &tmux);
+                self.tasks.board.set_status(&id, TaskItemStatus::InProgress);
+                self.focus_task(&id);
+                format!("proceeding: {} — agent resumed [{}]", preview, tmux)
+            }
+            Err(e) => format!("proceed failed: resume error: {}", e),
         }
     }
 
@@ -562,10 +652,12 @@ impl App {
     }
 
     /// Picker chose `cwd` for the pending assignment: spawn the default
-    /// agent there, hand it the task text (inline when the agent supports a
-    /// spawn-time prompt, otherwise queued for dispatch once the session
-    /// reports Idle — Claude ignores spawn-time prompts), record the
-    /// binding, and move the card to In Progress. Returns the status line.
+    /// agent there, hand it the task text wrapped in plan-first framing
+    /// ([`planning_prompt`] — inline when the agent supports a spawn-time
+    /// prompt, otherwise queued for dispatch once the session reports Idle —
+    /// Claude ignores spawn-time prompts), record the binding, and move the
+    /// card to Planning. Space on the card later approves the plan and
+    /// promotes it to In Progress. Returns the status line.
     pub fn assign_task_agent(&mut self, cwd: &str) -> String {
         let pending = self.tasks.pending_assign.take();
         self.close_folder_picker();
@@ -575,7 +667,7 @@ impl App {
         let Some(task) = self.tasks.board.get(&id) else {
             return "task vanished before assignment".into();
         };
-        let prompt = task.text.clone();
+        let prompt = planning_prompt(&task.text);
         let agent_id = config::get().default_session_agent_id();
         let supports_initial_prompt = config::get()
             .agent(&agent_id)
@@ -593,7 +685,7 @@ impl App {
                 }
                 self.tasks.board.assign(&id, cwd, &agent_id, &tmux);
                 self.focus_task(&id);
-                format!("assigned {} [{}] — task in progress", agent_id, tmux)
+                format!("assigned {} [{}] — planning (Space approves the plan)", agent_id, tmux)
             }
             Err(e) => format!("assign failed: {}", e),
         }
@@ -2645,7 +2737,7 @@ mod tests {
         use crate::test_util::with_temp_home;
 
         #[test]
-        fn in_progress_floats_needs_input_and_cursor_follows() {
+        fn live_columns_float_needs_input_and_cursor_follows() {
             with_temp_home(|| {
                 let mut app = App::new();
                 let a = app.tasks.board.add("a").unwrap();
@@ -2661,7 +2753,19 @@ mod tests {
                 ];
 
                 // Both flavors of blocked-on-input rise above the working
-                // agent, keeping their relative insertion order.
+                // agent, keeping their relative insertion order. Assignment
+                // lands the cards in Planning, which sorts like In Progress.
+                let order: Vec<&str> = app
+                    .task_column(TaskItemStatus::Planning)
+                    .iter()
+                    .map(|t| t.id.as_str())
+                    .collect();
+                assert_eq!(order, vec![b.as_str(), c.as_str(), a.as_str()]);
+
+                // The same ordering applies once the cards are promoted.
+                for id in [&a, &b, &c] {
+                    app.tasks.board.set_status(id, TaskItemStatus::InProgress);
+                }
                 let order: Vec<&str> = app
                     .task_column(TaskItemStatus::InProgress)
                     .iter()
@@ -2672,8 +2776,27 @@ mod tests {
                 // Selection and focus resolve against the rendered order,
                 // not the board file's insertion order.
                 app.focus_task(&a);
-                assert_eq!((app.tasks.col, app.tasks.row), (1, 2));
+                assert_eq!((app.tasks.col, app.tasks.row), (2, 2));
                 assert_eq!(app.selected_board_task().unwrap().id, a);
+            });
+        }
+
+        #[test]
+        fn space_on_planning_without_session_stays_planning() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                let id = app.tasks.board.add("plan me").unwrap();
+                app.tasks.board.assign(&id, "/tmp", "claude", "mux-dead");
+                app.focus_task(&id);
+                // No live mux and no resolved session id: nothing to deliver
+                // the proceed prompt to, so the card must not move — an In
+                // Progress card with no agent working it would be a lie.
+                let msg = app.task_space_action().unwrap();
+                assert!(msg.contains("press s to re-assign"), "msg: {msg}");
+                assert_eq!(
+                    app.tasks.board.get(&id).unwrap().status,
+                    TaskItemStatus::Planning
+                );
             });
         }
 
