@@ -126,7 +126,7 @@ pub(crate) fn render_tab_strip(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
     spans.push(Span::styled(
-        "   ⇥ next tab",
+        "   ⇥/K next · ⇧⇥/J prev tab",
         Style::default().fg(Color::Rgb(80, 80, 95)).bg(BAND_BG),
     ));
 
@@ -246,7 +246,7 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 // wrap); rare project-management verbs trail. The Space:approve
                 // chip is rendered separately *ahead* of this string below so
                 // it is never the first thing clipped.
-                Tab::Tasks => "a/n:add  enter/f:focus agent  s:assign agent  h/l:col  j/k:task  x:delete  c:clear done  tab:next  q:quit",
+                Tab::Tasks => "a/n:add  enter/f:focus agent  s:assign agent  S:agent in ~  h/l:col  j/k:task  1-4:priority  r:rename  x:delete  c:clear done  tab:next  q:quit",
                 Tab::Projects => "enter:focus orch  n:new task  r:result  f:agent terminal/resurrect  R:restart  b:backlog  h/l:col  j/k:task  H/L:project  N:register project  c:copy id  x:delete task  X:remove project  tab:next  q:quit",
                 Tab::Sessions => "enter/f:focus/resume  n:new  i:info  r:rename  t:to-do  o:shell  N:new in…  M:bookmarks  D:why?  h/j/k/l:nav  x:close  H:inactive  W:workers  tab:next  q:quit",
                 Tab::Metrics => "enter:view transcript  j/k:select  r:refresh  tab:next  q:quit",
@@ -280,7 +280,13 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 }
             },
             View::GhCreateInput => "type name  tab:toggle public/private  enter:create  esc:cancel",
-            View::TaskInput => "type task  enter:add  esc:cancel",
+            View::TaskInput => {
+                if app.tasks.renaming.is_some() {
+                    "edit task  enter:rename  esc:cancel"
+                } else {
+                    "type task  enter:add  esc:cancel"
+                }
+            }
             View::ProjectsResult => "j/k:artifact  e:expand  PgUp/PgDn:scroll  c:copy path  o:xdg-open  esc/r:close",
             View::Backlog => "j/k:select  s/enter:start  x:delete  esc/q:close",
         };

@@ -7,7 +7,7 @@ use crate::metrics::{MetricsAnalysis, SelectableSession};
 use crate::models::{ProjectGroup, SessionDetail, SessionInfo, SessionState};
 use crate::projects_scan::ProjectsSnapshot;
 use crate::session_count::SessionCounts;
-use crate::tasks::{TaskItem, TaskItemStatus};
+use crate::tasks::{TaskItem, TaskItemStatus, TaskPriority};
 use crate::tmux_pane::TmuxPaneView;
 use crate::usage::UsageInfo;
 use ratatui::text::Line;
@@ -114,7 +114,6 @@ impl Tab {
             Tab::Metrics => "Metrics",
         }
     }
-
 }
 
 pub const TABS: &[Tab] = &[Tab::Tasks, Tab::Projects, Tab::Sessions, Tab::Metrics];
@@ -342,19 +341,39 @@ impl App {
     /// Open the add-task popup on the Tasks tab.
     pub fn enter_task_input(&mut self) {
         self.tasks.input.clear();
+        self.tasks.renaming = None;
         self.view = View::TaskInput;
+    }
+
+    /// `r` on a focused task: reopen the task popup prefilled with the
+    /// current text; Enter commits it in place (id, status and any agent
+    /// binding survive). Returns false when no task is focused.
+    pub fn enter_task_rename(&mut self) -> bool {
+        let Some(t) = self.selected_board_task() else {
+            return false;
+        };
+        let (id, text) = (t.id.clone(), t.text.clone());
+        self.tasks.renaming = Some(id);
+        self.tasks.input = text;
+        self.view = View::TaskInput;
+        true
     }
 
     pub fn close_task_input(&mut self) {
         self.tasks.input.clear();
+        self.tasks.renaming = None;
         self.view = View::Grid;
     }
 
-    /// Commit the add-task popup: append to To-Do and move the cursor to the
-    /// new card. Returns false when the input was empty (nothing added).
+    /// Commit the task popup: append to To-Do and move the cursor to the
+    /// new card, or — when renaming — replace the task's text in place.
+    /// Returns false when the input was empty (nothing changed).
     pub fn submit_task_input(&mut self) -> bool {
         let text = std::mem::take(&mut self.tasks.input);
         self.view = View::Grid;
+        if let Some(id) = self.tasks.renaming.take() {
+            return self.tasks.board.rename(&id, &text);
+        }
         match self.tasks.board.add(&text) {
             Some(id) => {
                 self.focus_task(&id);
@@ -365,23 +384,52 @@ impl App {
     }
 
     /// Tasks in `status` in display order: To-Do and Done keep the board's
-    /// insertion order; Planning and In Progress float cards whose agent is
-    /// blocked on input to the top (stable within each group) so work that
-    /// needs a human is seen first. Selection ([`Self::selected_board_task`])
-    /// and focus ([`Self::focus_task`]) resolve against this same ordering,
-    /// so cursor row N is always the Nth rendered card.
+    /// insertion order; the live columns (Planning and In Progress) follow
+    /// the frozen needs-input float captured on tab entry
+    /// ([`TasksView::in_progress_order`]), with tasks that joined since then
+    /// after it in insertion order. Every column then sorts by priority (P1
+    /// at the top). Selection ([`Self::selected_board_task`]) and focus
+    /// ([`Self::focus_task`]) resolve against this same ordering, so cursor
+    /// row N is always the Nth rendered card.
     pub fn task_column(&self, status: TaskItemStatus) -> Vec<&TaskItem> {
         let mut tasks = self.tasks.board.column(status);
         if matches!(status, TaskItemStatus::Planning | TaskItemStatus::InProgress) {
-            let by_tmux = self.sessions_by_tmux();
-            tasks.sort_by_key(|t| {
-                !t.tmux
-                    .as_deref()
-                    .and_then(|n| by_tmux.get(n))
-                    .is_some_and(|s| s.needs_attention())
-            });
+            let frozen = |id: &str| self.tasks.in_progress_order.iter().position(|x| x == id);
+            // Stable sort: ids missing from the frozen order all key to MAX
+            // and keep their relative insertion order at the tail.
+            tasks.sort_by_key(|t| frozen(&t.id).unwrap_or(usize::MAX));
         }
+        // Priority is the primary order in every column (P1 at the top). The
+        // sort is stable, so equal-priority tasks keep the order established
+        // above — insertion order, or the live columns' frozen needs-input
+        // float.
+        tasks.sort_by_key(|t| t.priority);
         tasks
+    }
+
+    /// Recompute the live columns' display order: cards whose agent is
+    /// blocked on input float to the top of their column (stable within each
+    /// group) so work that needs a human is seen first. Spans both Planning
+    /// and In Progress. Called on Tasks-tab entry — not on scan ticks — so
+    /// live state flips never reorder cards under the cursor while the user
+    /// is navigating; the float settles each time the tab is (re-)opened.
+    pub fn refresh_in_progress_order(&mut self) {
+        let order: Vec<String> = {
+            let by_tmux = self.sessions_by_tmux();
+            let mut order = Vec::new();
+            for status in [TaskItemStatus::Planning, TaskItemStatus::InProgress] {
+                let mut tasks = self.tasks.board.column(status);
+                tasks.sort_by_key(|t| {
+                    !t.tmux
+                        .as_deref()
+                        .and_then(|n| by_tmux.get(n))
+                        .is_some_and(|s| s.needs_attention())
+                });
+                order.extend(tasks.iter().map(|t| t.id.clone()));
+            }
+            order
+        };
+        self.tasks.in_progress_order = order;
     }
 
     /// The task under the kanban cursor, resolved against the display
@@ -512,6 +560,19 @@ impl App {
         })
     }
 
+    /// `1`–`4` on a focused task: set its priority. Priority is the column's
+    /// primary sort key, so the card may jump to a new row; the cursor rides
+    /// with it (resolved by id through [`Self::focus_task`]). Returns a status
+    /// line, or `None` when no task is focused.
+    pub fn set_selected_task_priority(&mut self, priority: TaskPriority) -> Option<String> {
+        let t = self.selected_board_task()?;
+        let id = t.id.clone();
+        let preview = crate::models::first_line_truncated(&t.text, 32);
+        self.tasks.board.set_priority(&id, priority);
+        self.focus_task(&id);
+        Some(format!("{} · {}", priority.label(), preview))
+    }
+
     /// Candidates for the task-assign places picker: registered projects
     /// first, then bookmarks, then recently-used directories (other board
     /// tasks, scanned sessions) newest-first — deduped by path with the
@@ -574,6 +635,11 @@ impl App {
         let mut places = self.known_places();
         if let Some(last) = self.tasks.board.last_assign_cwd() {
             let last = std::path::Path::new(last);
+            // `S` quick-assigns at $HOME; that's not a project choice
+            // worth promoting (or resurrecting) here.
+            if Some(last) == dirs::home_dir().as_deref() {
+                return places;
+            }
             if let Some(idx) = places.iter().position(|p| p.path == last) {
                 let place = places.remove(idx);
                 places.insert(0, place);
@@ -615,25 +681,49 @@ impl App {
         true
     }
 
-    /// Tab in the assign picker: flip between the known-places list and
-    /// the filesystem browser. No-op outside the task-assign flow (places
-    /// are only built there), or when there is nothing to flip to.
-    pub fn toggle_assign_picker_mode(&mut self) {
-        let Some(id) = self.tasks.pending_assign.clone() else {
+    /// `S` on a focused task: skip the picker and spawn the agent right
+    /// away with `$HOME` as the cwd — for broad questions not tied to any
+    /// project yet; where to go next gets figured out with the agent.
+    /// Returns None when no task is focused or the task is already Done.
+    pub fn assign_selected_task_at_home(&mut self) -> Option<String> {
+        let t = self.selected_board_task()?;
+        if t.status == TaskItemStatus::Done {
+            return None;
+        }
+        let id = t.id.clone();
+        self.tasks.pending_assign = Some(id);
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+        Some(self.assign_task_agent(&home.display().to_string()))
+    }
+
+    /// Tab in the places/browse picker: flip between the known-places list
+    /// and the filesystem browser. Serves both the task-assign flow and the
+    /// Sessions-tab `N` flow; no-op in the Projects flows (register/new
+    /// task) and when there is nothing to flip to.
+    pub fn toggle_places_picker_mode(&mut self) {
+        if self.projects.creating_task || self.projects.registering_only {
             return;
-        };
+        }
         let Some(picker) = self.folder_picker.as_ref() else {
             return;
         };
+        let assigning = self.tasks.pending_assign.clone();
         match picker.mode {
             PickerMode::Places => {
-                let prev_cwd = self.tasks.board.get(&id).and_then(|t| t.cwd.clone());
+                let prev_cwd = match &assigning {
+                    Some(id) => self.tasks.board.get(id).and_then(|t| t.cwd.clone()),
+                    None => self.selected_session_info().map(|s| s.cwd.clone()),
+                };
                 self.folder_picker = Some(FolderPicker::new(Self::assign_browse_start(
                     prev_cwd.as_deref(),
                 )));
             }
             PickerMode::Browse => {
-                let places = self.assign_places();
+                let places = if assigning.is_some() {
+                    self.assign_places()
+                } else {
+                    self.known_places()
+                };
                 if !places.is_empty() {
                     self.folder_picker = Some(FolderPicker::new_places(places));
                 }
@@ -739,9 +829,20 @@ impl App {
     pub fn set_tab(&mut self, tab: Tab) {
         // Entering the Tasks tab re-reads the board so edits from another
         // instance (or a hand-edited tasks.json) show up, mirroring the
-        // to-do panel's reload-on-open.
+        // to-do panel's reload-on-open. The reload and the re-floated
+        // In Progress order can both rearrange rows, so the cursor is
+        // re-anchored to the task it was on (by id) rather than left at a
+        // stale (col, row) pointing at whatever card landed there.
         if tab == Tab::Tasks && self.current_tab != Tab::Tasks {
+            let keep = self.selected_board_task().map(|t| t.id.clone());
             self.tasks.reload();
+            self.refresh_in_progress_order();
+            if let Some(id) = keep {
+                self.focus_task(&id);
+            }
+            // No-op after a successful re-focus; catches the id having been
+            // deleted out from under us (and the no-selection case).
+            self.tasks.clamp_row();
         }
         self.current_tab = tab;
     }
@@ -756,6 +857,15 @@ impl App {
             None => tabs.first().copied().unwrap_or(Tab::Sessions),
         };
         self.set_tab(next);
+    }
+
+    pub fn cycle_tab_back(&mut self) {
+        let tabs = visible_tabs();
+        let prev = match tabs.iter().position(|t| *t == self.current_tab) {
+            Some(i) => tabs[(i + tabs.len() - 1) % tabs.len()],
+            None => tabs.first().copied().unwrap_or(Tab::Sessions),
+        };
+        self.set_tab(prev);
     }
 
     /// Apply a fresh projects snapshot. Returns true when the snapshot
@@ -1010,6 +1120,25 @@ impl App {
             .or_else(dirs::home_dir)
             .unwrap_or_else(|| PathBuf::from("/"));
         self.folder_picker = Some(FolderPicker::new(start));
+        self.view = View::FolderPicker;
+    }
+
+    /// `N` on the Sessions tab: the same places picker the task-assign
+    /// flow uses (registered projects, bookmarks, recent dirs —
+    /// fuzzy-filterable) to choose where the new session spawns, falling
+    /// back to the filesystem browser when nothing is known yet. The
+    /// selected session's cwd starts highlighted.
+    pub fn enter_session_places_picker(&mut self) {
+        let places = self.known_places();
+        if places.is_empty() {
+            self.enter_folder_picker();
+            return;
+        }
+        let mut picker = FolderPicker::new_places(places);
+        if let Some(cwd) = self.selected_session_info().map(|s| s.cwd.clone()) {
+            picker.select_path(std::path::Path::new(&cwd));
+        }
+        self.folder_picker = Some(picker);
         self.view = View::FolderPicker;
     }
 
@@ -2680,7 +2809,9 @@ mod tests {
                 // The assigned task is deleted, so /tmp/gone is in no
                 // project/bookmark/recent — it must still lead the list.
                 let prev = app.tasks.board.add("earlier").unwrap();
-                app.tasks.board.assign(&prev, "/tmp/gone", "claude", "mux-1");
+                app.tasks
+                    .board
+                    .assign(&prev, "/tmp/gone", "claude", "mux-1");
                 app.tasks.board.remove(&prev);
                 let id = app.tasks.board.add("next").unwrap();
                 app.focus_task(&id);
@@ -2705,7 +2836,7 @@ mod tests {
         }
 
         #[test]
-        fn tab_toggles_between_places_and_browse_only_while_assigning() {
+        fn tab_toggles_between_places_and_browse_in_assign_and_session_flows() {
             with_temp_home(|| {
                 let mut app = App::new();
                 app.projects.snapshot = snapshot(project("p-a"), vec![]);
@@ -2714,17 +2845,80 @@ mod tests {
                 assert!(app.enter_task_assign_picker());
                 let mode = |app: &App| app.folder_picker.as_ref().unwrap().mode;
                 assert_eq!(mode(&app), PickerMode::Places);
-                app.toggle_assign_picker_mode();
+                app.toggle_places_picker_mode();
                 assert_eq!(mode(&app), PickerMode::Browse);
-                app.toggle_assign_picker_mode();
+                app.toggle_places_picker_mode();
                 assert_eq!(mode(&app), PickerMode::Places);
 
-                // Outside the assign flow (sessions-tab browse) the toggle
-                // must not fire — places are an assign-only concept.
+                // The sessions-tab `N` flow toggles the same way.
                 app.close_folder_picker();
-                app.enter_folder_picker();
-                app.toggle_assign_picker_mode();
+                app.enter_session_places_picker();
+                assert_eq!(mode(&app), PickerMode::Places);
+                app.toggle_places_picker_mode();
                 assert_eq!(mode(&app), PickerMode::Browse);
+                app.toggle_places_picker_mode();
+                assert_eq!(mode(&app), PickerMode::Places);
+
+                // The Projects flows keep their plain browser: no flip.
+                app.close_folder_picker();
+                app.enter_folder_picker_for_register_only();
+                app.toggle_places_picker_mode();
+                assert_eq!(mode(&app), PickerMode::Browse);
+            });
+        }
+
+        #[test]
+        fn session_places_picker_opens_places_without_pending_assign() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                app.projects.snapshot = snapshot(project("p-a"), vec![]);
+                app.enter_session_places_picker();
+                let picker = app.folder_picker.as_ref().unwrap();
+                assert_eq!(picker.mode, PickerMode::Places);
+                assert!(app.tasks.pending_assign.is_none());
+                assert_eq!(app.view, View::FolderPicker);
+            });
+        }
+
+        #[test]
+        fn session_places_picker_falls_back_to_browse_when_nothing_known() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                app.enter_session_places_picker();
+                assert_eq!(app.folder_picker.as_ref().unwrap().mode, PickerMode::Browse);
+            });
+        }
+
+        #[test]
+        fn assign_places_does_not_promote_home_quick_assign() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                app.projects.snapshot =
+                    snapshot_many(vec![(project("p-a"), vec![]), (project("p-b"), vec![])]);
+                let home = dirs::home_dir().unwrap().display().to_string();
+                let prev = app.tasks.board.add("broad question").unwrap();
+                app.tasks.board.assign(&prev, &home, "claude", "mux-1");
+                let id = app.tasks.board.add("next").unwrap();
+                app.focus_task(&id);
+
+                assert!(app.enter_task_assign_picker());
+                let picker = app.folder_picker.as_ref().unwrap();
+                // $HOME must neither lead the list nor appear resurrected.
+                assert_eq!(picker.selected_place().unwrap().name, "p-a");
+            });
+        }
+
+        #[test]
+        fn quick_assign_at_home_requires_focused_undone_task() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                // No task focused: refuse rather than spawn.
+                assert!(app.assign_selected_task_at_home().is_none());
+                let id = app.tasks.board.add("t").unwrap();
+                app.tasks.board.set_status(&id, TaskItemStatus::Done);
+                app.focus_task(&id);
+                assert!(app.assign_selected_task_at_home().is_none());
+                assert!(app.tasks.pending_assign.is_none());
             });
         }
     }
@@ -2732,9 +2926,68 @@ mod tests {
     // `$HOME`-redirected like assign_picker (the board persists on
     // mutation), so unix-only.
     #[cfg(unix)]
+    mod task_rename {
+        use super::*;
+        use crate::test_util::with_temp_home;
+
+        #[test]
+        fn rename_prefills_commits_in_place_and_empty_keeps_text() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                // Nothing focused: refuse instead of opening an empty popup.
+                assert!(!app.enter_task_rename());
+
+                let id = app.tasks.board.add("old text").unwrap();
+                app.focus_task(&id);
+                assert!(app.enter_task_rename());
+                assert_eq!(app.view, View::TaskInput);
+                assert_eq!(app.tasks.input, "old text");
+
+                app.tasks.input = "new text".into();
+                assert!(app.submit_task_input());
+                assert_eq!(app.tasks.board.get(&id).unwrap().text, "new text");
+                assert_eq!(app.view, View::Grid);
+                assert!(app.tasks.renaming.is_none());
+
+                // A whitespace-only commit must not wipe the task.
+                assert!(app.enter_task_rename());
+                app.tasks.input = "   ".into();
+                assert!(!app.submit_task_input());
+                assert_eq!(app.tasks.board.get(&id).unwrap().text, "new text");
+            });
+        }
+
+        #[test]
+        fn rename_does_not_touch_status_or_binding() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                let id = app.tasks.board.add("t").unwrap();
+                app.tasks.board.assign(&id, "/tmp/proj", "claude", "mux-1");
+                app.focus_task(&id);
+                assert!(app.enter_task_rename());
+                app.tasks.input = "sharper wording".into();
+                assert!(app.submit_task_input());
+                let t = app.tasks.board.get(&id).unwrap();
+                assert_eq!(t.text, "sharper wording");
+                assert_eq!(t.status, TaskItemStatus::Planning);
+                assert_eq!(t.tmux.as_deref(), Some("mux-1"));
+            });
+        }
+    }
+
+    #[cfg(unix)]
     mod board_order {
         use super::*;
         use crate::test_util::with_temp_home;
+
+        // Assignment lands cards in Planning, so the float tests inspect that
+        // column; Planning sorts exactly like In Progress.
+        fn column_order(app: &App) -> Vec<String> {
+            app.task_column(TaskItemStatus::Planning)
+                .iter()
+                .map(|t| t.id.clone())
+                .collect()
+        }
 
         #[test]
         fn live_columns_float_needs_input_and_cursor_follows() {
@@ -2751,6 +3004,7 @@ mod tests {
                     fake_session("mux-b", SessionState::WaitingForInput),
                     fake_session("mux-c", SessionState::Question),
                 ];
+                app.refresh_in_progress_order();
 
                 // Both flavors of blocked-on-input rise above the working
                 // agent, keeping their relative insertion order. Assignment
@@ -2797,6 +3051,129 @@ mod tests {
                     app.tasks.board.get(&id).unwrap().status,
                     TaskItemStatus::Planning
                 );
+            });
+        }
+
+        #[test]
+        fn scan_state_flips_do_not_reorder_under_the_cursor() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                let a = app.tasks.board.add("a").unwrap();
+                let b = app.tasks.board.add("b").unwrap();
+                app.tasks.board.assign(&a, "/tmp", "claude", "mux-a");
+                app.tasks.board.assign(&b, "/tmp", "claude", "mux-b");
+                app.sessions.last_sessions = vec![
+                    fake_session("mux-a", SessionState::Processing),
+                    fake_session("mux-b", SessionState::WaitingForInput),
+                ];
+                app.refresh_in_progress_order();
+                assert_eq!(column_order(&app), vec![b.clone(), a.clone()]);
+                app.focus_task(&a);
+
+                // A scan tick flips both states. The frozen order (and so
+                // the card under the cursor) must not move until the tab is
+                // re-entered — live re-sorting is how the Sessions grid used
+                // to swap cards under the cursor.
+                app.sessions.last_sessions = vec![
+                    fake_session("mux-a", SessionState::Question),
+                    fake_session("mux-b", SessionState::Idle),
+                ];
+                assert_eq!(column_order(&app), vec![b.clone(), a.clone()]);
+                assert_eq!(app.selected_board_task().unwrap().id, a);
+
+                // A task assigned mid-tab joins below the frozen order
+                // instead of re-shuffling it.
+                let c = app.tasks.board.add("c").unwrap();
+                app.tasks.board.assign(&c, "/tmp", "claude", "mux-c");
+                assert_eq!(column_order(&app), vec![b, a, c]);
+            });
+        }
+
+        #[test]
+        fn tab_reentry_refloats_and_keeps_cursor_on_the_same_task() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                let a = app.tasks.board.add("a").unwrap();
+                let b = app.tasks.board.add("b").unwrap();
+                app.tasks.board.assign(&a, "/tmp", "claude", "mux-a");
+                app.tasks.board.assign(&b, "/tmp", "claude", "mux-b");
+                app.set_tab(Tab::Tasks);
+                assert_eq!(column_order(&app), vec![a.clone(), b.clone()]);
+                app.focus_task(&b);
+
+                // While the user is elsewhere, b's agent blocks on input;
+                // coming back re-floats the column and follows b to its new
+                // row instead of leaving the cursor parked on a's card.
+                app.set_tab(Tab::Sessions);
+                app.sessions.last_sessions =
+                    vec![fake_session("mux-b", SessionState::WaitingForInput)];
+                app.set_tab(Tab::Tasks);
+                assert_eq!(column_order(&app), vec![b.clone(), a]);
+                assert_eq!((app.tasks.col, app.tasks.row), (1, 0));
+                assert_eq!(app.selected_board_task().unwrap().id, b);
+            });
+        }
+
+        #[test]
+        fn columns_sort_by_priority_stable_within_level() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                // All start at the default P3 and keep insertion order.
+                let a = app.tasks.board.add("a").unwrap();
+                let b = app.tasks.board.add("b").unwrap();
+                let c = app.tasks.board.add("c").unwrap();
+                let d = app.tasks.board.add("d").unwrap();
+                app.tasks.board.set_priority(&c, TaskPriority::P1);
+                app.tasks.board.set_priority(&d, TaskPriority::P2);
+
+                // P1, then P2, then the untouched P3s in their original order.
+                let order: Vec<String> = app
+                    .task_column(TaskItemStatus::Todo)
+                    .iter()
+                    .map(|t| t.id.clone())
+                    .collect();
+                assert_eq!(order, vec![c, d, a, b]);
+            });
+        }
+
+        #[test]
+        fn raising_priority_moves_card_and_cursor_follows() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                app.tasks.board.add("a").unwrap();
+                app.tasks.board.add("b").unwrap();
+                let c = app.tasks.board.add("c").unwrap();
+                app.focus_task(&c);
+                assert_eq!((app.tasks.col, app.tasks.row), (0, 2));
+
+                // Bumping c to P1 floats it to the top; the cursor rides along.
+                app.set_selected_task_priority(TaskPriority::P1);
+                assert_eq!((app.tasks.col, app.tasks.row), (0, 0));
+                assert_eq!(app.selected_board_task().unwrap().id, c);
+            });
+        }
+
+        #[test]
+        fn priority_outranks_in_progress_needs_input_float() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                let a = app.tasks.board.add("a").unwrap();
+                let b = app.tasks.board.add("b").unwrap();
+                app.tasks.board.assign(&a, "/tmp", "claude", "mux-a");
+                app.tasks.board.assign(&b, "/tmp", "claude", "mux-b");
+                // a is just working; b is blocked on input, so the float alone
+                // would put b first.
+                app.sessions.last_sessions = vec![
+                    fake_session("mux-a", SessionState::Processing),
+                    fake_session("mux-b", SessionState::WaitingForInput),
+                ];
+                app.refresh_in_progress_order();
+                assert_eq!(column_order(&app), vec![b.clone(), a.clone()]);
+
+                // Raising a to P1 lifts it above b despite b needing input —
+                // priority is the primary key, the float only a tie-break.
+                app.tasks.board.set_priority(&a, TaskPriority::P1);
+                assert_eq!(column_order(&app), vec![a, b]);
             });
         }
 

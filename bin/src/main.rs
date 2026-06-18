@@ -1065,8 +1065,7 @@ async fn run(
                                 app.view == View::Grid && app.current_tab == Tab::Metrics;
                             let on_projects =
                                 app.view == View::Grid && app.current_tab == Tab::Projects;
-                            let on_tasks =
-                                app.view == View::Grid && app.current_tab == Tab::Tasks;
+                            let on_tasks = app.view == View::Grid && app.current_tab == Tab::Tasks;
 
                             let sel_before = (app.sessions.sel_group, app.sessions.sel_in_group);
                             // KeyOutcome::Continue used to skip this pass's

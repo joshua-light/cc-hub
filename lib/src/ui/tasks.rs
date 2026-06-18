@@ -7,7 +7,7 @@
 
 use crate::app::{App, TASK_COLUMNS};
 use crate::models::{self, SessionInfo, SessionState};
-use crate::tasks::TaskItem;
+use crate::tasks::{TaskItem, TaskPriority};
 use crate::ui::now_ms;
 use crate::ui::palette::{ACCENT_BLUE, BACKLOG_BLUE, DIM_TEXT, DOT_IDLE, LABEL_GRAY, META_GRAY, PURPLE};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -44,7 +44,14 @@ pub fn render_tasks_body(frame: &mut Frame, area: Rect, app: &App) {
     let sessions_by_tmux = app.sessions_by_tmux();
     let now_secs = now_ms() / 1000;
     for col_idx in 0..TASK_COLUMNS.len() {
-        render_task_column(frame, cols[col_idx], app, col_idx, &sessions_by_tmux, now_secs);
+        render_task_column(
+            frame,
+            cols[col_idx],
+            app,
+            col_idx,
+            &sessions_by_tmux,
+            now_secs,
+        );
     }
 }
 
@@ -69,7 +76,8 @@ fn render_task_column(
 ) {
     let (label, icon, accent) = column_meta(col_idx);
     // Display order, not board order: In Progress puts needs-input cards
-    // first (see `App::task_column`), and the cursor indexes the same list.
+    // first, frozen at tab entry so scan ticks can't reorder cards under
+    // the cursor (see `App::task_column`); the cursor indexes the same list.
     let tasks = app.task_column(TASK_COLUMNS[col_idx]);
     let count = tasks.len();
     let col_focused = app.tasks.col == col_idx;
@@ -193,10 +201,22 @@ fn render_task_card(
             Style::default().fg(Color::Rgb(60, 60, 80)),
         )
     };
+    // Priority badge rides the top-right of the border (`P1`–`P4`): black
+    // text on a color-filled chip, prominent without stealing a text row. It
+    // keeps its own colours even when the selected border turns the accent.
+    let priority_badge = Line::from(Span::styled(
+        format!(" {} ", t.priority.label()),
+        Style::default()
+            .fg(Color::Black)
+            .bg(priority_color(t.priority))
+            .add_modifier(Modifier::BOLD),
+    ))
+    .alignment(Alignment::Right);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(border_type)
-        .border_style(border_style);
+        .border_style(border_style)
+        .title(priority_badge);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -307,6 +327,17 @@ fn meta_line(
     Line::from(spans)
 }
 
+/// Card badge colour per priority: P1 red, P2 yellow, P3 green, P4 blue.
+/// Light variants so the bold badge stays legible on the dark board.
+fn priority_color(p: TaskPriority) -> Color {
+    match p {
+        TaskPriority::P1 => Color::LightRed,
+        TaskPriority::P2 => Color::LightYellow,
+        TaskPriority::P3 => Color::LightGreen,
+        TaskPriority::P4 => Color::LightBlue,
+    }
+}
+
 fn dir_basename(cwd: &str) -> String {
     std::path::Path::new(cwd)
         .file_name()
@@ -347,4 +378,74 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     }
     out.push(line);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tasks::TaskItemStatus;
+    use crate::ui::common::buffer_to_string;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn card(priority: TaskPriority) -> TaskItem {
+        TaskItem {
+            id: "tk-1".into(),
+            text: "fix the parser".into(),
+            status: TaskItemStatus::Todo,
+            priority,
+            created_at: 1,
+            done_at: None,
+            cwd: None,
+            agent_id: None,
+            tmux: None,
+            session_id: None,
+        }
+    }
+
+    /// Render a To-Do card and return its painted buffer.
+    fn render(priority: TaskPriority) -> ratatui::buffer::Buffer {
+        let t = card(priority);
+        let sessions = HashMap::new();
+        let backend = TestBackend::new(28, 5);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                render_task_card(f, f.area(), &t, false, 0, BACKLOG_BLUE, &sessions, 1_000);
+            })
+            .expect("render");
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn card_shows_priority_badge() {
+        let buf = render(TaskPriority::P2);
+        assert!(
+            buffer_to_string(&buf).contains("P2"),
+            "card should show its priority badge:\n{}",
+            buffer_to_string(&buf)
+        );
+    }
+
+    #[test]
+    fn badge_is_color_coded_per_priority() {
+        for (p, want) in [
+            (TaskPriority::P1, Color::LightRed),
+            (TaskPriority::P2, Color::LightYellow),
+            (TaskPriority::P3, Color::LightGreen),
+            (TaskPriority::P4, Color::LightBlue),
+        ] {
+            let buf = render(p);
+            let area = *buf.area();
+            // Find the badge's "P" cell: the hue fills the background, with
+            // black text on top.
+            let (fg, bg) = (0..area.width)
+                .flat_map(|x| (0..area.height).map(move |y| (x, y)))
+                .find(|&(x, y)| buf[(x, y)].symbol() == "P")
+                .map(|(x, y)| (buf[(x, y)].fg, buf[(x, y)].bg))
+                .expect("badge P cell present");
+            assert_eq!(bg, want, "{} badge fill", p.label());
+            assert_eq!(fg, Color::Black, "{} badge text", p.label());
+        }
+    }
 }

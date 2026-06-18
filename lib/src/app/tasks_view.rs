@@ -18,11 +18,25 @@ pub struct TasksView {
     pub col: usize,
     /// Row cursor within the focused column.
     pub row: usize,
-    /// In-progress text for the add-task popup ([`crate::app::View::TaskInput`]).
+    /// In-progress text for the add/rename-task popup
+    /// ([`crate::app::View::TaskInput`]).
     pub input: String,
+    /// Task id being renamed: set when `r` opens the popup, consumed on
+    /// submit, cleared if the popup is cancelled. None means the popup
+    /// adds a new task.
+    pub renaming: Option<String>,
     /// Task id awaiting a folder pick: set when `s` opens the picker, consumed
     /// by the pick handler, cleared if the picker is cancelled.
     pub pending_assign: Option<String>,
+    /// Frozen display order (task ids) for the In Progress column. The
+    /// needs-input float is computed once on tab entry
+    /// ([`crate::app::App::refresh_in_progress_order`]) instead of live in
+    /// every render: live session state flips on scan ticks, and re-sorting
+    /// the column by it swapped cards under the positional cursor — the
+    /// exact bug the Sessions grid had before it moved to stable sort keys.
+    /// Ids no longer in the column are skipped; tasks not in the list (e.g.
+    /// assigned since entry) render after it in insertion order.
+    pub in_progress_order: Vec<String>,
 }
 
 impl TasksView {
@@ -32,7 +46,9 @@ impl TasksView {
             col: 0,
             row: 0,
             input: String::new(),
+            renaming: None,
             pending_assign: None,
+            in_progress_order: Vec::new(),
         }
     }
 
@@ -48,7 +64,9 @@ impl TasksView {
     }
 
     pub fn column_len(&self, col: usize) -> usize {
-        self.board.column(TASK_COLUMNS[col.min(TASK_COLUMNS.len() - 1)]).len()
+        self.board
+            .column(TASK_COLUMNS[col.min(TASK_COLUMNS.len() - 1)])
+            .len()
     }
 
     pub fn row_down(&mut self) {

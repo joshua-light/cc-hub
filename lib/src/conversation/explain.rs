@@ -2,12 +2,11 @@
 //! while recording every rule's inputs and verdict for the debug popup.
 
 use super::state::{
-    assistant_asks_question, assistant_awaits_user_input, is_meaningful_entry, QUESTION_TOOLS,
-    USER_INPUT_TOOLS,
+    assistant_asks_question, assistant_awaits_user_input, is_interrupt_marker, is_meaningful_entry,
+    INTERRUPT_MARKER_PREFIX, QUESTION_TOOLS, USER_INPUT_TOOLS,
 };
 use crate::models::SessionState;
 use serde_json::Value;
-use std::collections::HashSet;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Verdict {
@@ -48,18 +47,6 @@ pub struct StateExplanation {
 /// that records every rule's inputs and verdict for the debug popup.
 pub fn explain_state(entries: &[Value], mtime_age_secs: Option<u64>) -> StateExplanation {
     let mut steps = Vec::new();
-
-    let int_step = explain_interrupted_tool_use(entries);
-    let interrupted = matches!(int_step.verdict, Verdict::Decided(_));
-    steps.push(int_step);
-    if interrupted {
-        return finalize(
-            SessionState::WaitingForInput,
-            mtime_age_secs,
-            entries,
-            steps,
-        );
-    }
 
     let (last_step, base_state) = explain_last_meaningful(entries);
     steps.push(last_step);
@@ -110,99 +97,6 @@ fn finalize(
     }
 }
 
-fn explain_interrupted_tool_use(entries: &[Value]) -> ExplanationStep {
-    let mut unresolved: Vec<(usize, String, Option<String>)> = Vec::new();
-    let mut results: HashSet<String> = HashSet::new();
-    let mut last_prompt_idx: Option<usize> = None;
-
-    for (i, entry) in entries.iter().enumerate() {
-        let t = entry.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        if t == "last-prompt" {
-            last_prompt_idx = Some(i);
-            continue;
-        }
-        let arr = match entry
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_array())
-        {
-            Some(a) => a,
-            None => continue,
-        };
-        for block in arr {
-            let bt = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            if t == "assistant" && bt == "tool_use" {
-                if let Some(id) = block.get("id").and_then(|v| v.as_str()) {
-                    let name = block
-                        .get("name")
-                        .and_then(|n| n.as_str())
-                        .map(|s| s.to_string());
-                    unresolved.push((i, id.to_string(), name));
-                }
-            } else if t == "user" && bt == "tool_result" {
-                if let Some(id) = block.get("tool_use_id").and_then(|v| v.as_str()) {
-                    results.insert(id.to_string());
-                }
-            }
-        }
-    }
-
-    let mut details = vec![
-        format!("scanned {} entries", entries.len()),
-        format!("found {} assistant tool_use blocks", unresolved.len()),
-        format!("found {} user tool_result blocks", results.len()),
-        format!(
-            "last-prompt entry idx: {}",
-            last_prompt_idx.map_or("none".to_string(), |i| i.to_string())
-        ),
-    ];
-
-    let Some(lp_idx) = last_prompt_idx else {
-        details.push("no last-prompt → not interrupted".into());
-        return ExplanationStep {
-            name: "interrupted_tool_use",
-            verdict: Verdict::Skipped,
-            details,
-        };
-    };
-
-    let dangling: Vec<&(usize, String, Option<String>)> = unresolved
-        .iter()
-        .filter(|(idx, id, _)| *idx < lp_idx && !results.contains(id))
-        .collect();
-
-    if dangling.is_empty() {
-        details.push(format!(
-            "all tool_uses before idx {} have matching tool_results → not interrupted",
-            lp_idx
-        ));
-        ExplanationStep {
-            name: "interrupted_tool_use",
-            verdict: Verdict::Passed,
-            details,
-        }
-    } else {
-        for (idx, id, name) in &dangling {
-            details.push(format!(
-                "  dangling tool_use idx={} name={} id={} (before last-prompt idx {})",
-                idx,
-                name.as_deref().unwrap_or("?"),
-                short_id(id),
-                lp_idx
-            ));
-        }
-        details.push(format!(
-            "{} dangling tool_use(s) before last-prompt → INTERRUPTED → WaitingForInput",
-            dangling.len()
-        ));
-        ExplanationStep {
-            name: "interrupted_tool_use",
-            verdict: Verdict::Decided(SessionState::WaitingForInput),
-            details,
-        }
-    }
-}
-
 fn explain_last_meaningful(entries: &[Value]) -> (ExplanationStep, SessionState) {
     let last = entries
         .iter()
@@ -244,6 +138,13 @@ fn explain_last_meaningful(entries: &[Value]) -> (ExplanationStep, SessionState)
     )];
 
     let state = match entry_type {
+        "user" if is_interrupt_marker(last) => {
+            details.push(format!(
+                "trailing \"{}…\" marker → user hit Esc, nothing running → WaitingForInput",
+                INTERRUPT_MARKER_PREFIX
+            ));
+            SessionState::WaitingForInput
+        }
         "user" => {
             details.push("user message → Processing (assistant about to respond)".into());
             SessionState::Processing
@@ -389,11 +290,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn explain_state_flags_parallel_agent_false_positive() {
-        // Reproduces the bug: 3 parallel Agent tool_uses, only 1 resolved,
-        // and a `last-prompt` entry sits between the resolved ones — current
-        // `interrupted_tool_use` fires and (incorrectly) returns WaitingForInput.
-        // The explanation should make the reason explicit.
+    fn explain_state_running_parallel_agents_with_last_prompt_is_processing() {
+        // 3 parallel Agent tool_uses, only 1 resolved, and a `last-prompt`
+        // entry sits between the results. Claude Code flushes `last-prompt`
+        // checkpoints mid-turn while tools are still running, so this is a
+        // session hard at work — it must read Processing, not WaitingForInput.
         let entries = vec![
             serde_json::json!({
                 "type": "assistant",
@@ -429,21 +330,45 @@ mod tests {
         ];
 
         let exp = explain_state(&entries, Some(5));
-        assert_eq!(exp.final_state, SessionState::WaitingForInput);
+        assert_eq!(exp.final_state, SessionState::Processing);
+    }
 
-        let int_step = exp
+    #[test]
+    fn explain_state_trailing_interrupt_marker_is_waiting() {
+        // Esc-interrupt: Claude Code resolves the running tool with a
+        // synthetic tool_result and writes the interrupt marker. With the
+        // marker last, the user hasn't submitted anything new → waiting.
+        let entries = vec![
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]}
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": {"role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "t1",
+                        "content": "[Request interrupted by user for tool use]"}]}
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": {"role": "user",
+                    "content": [{"type": "text", "text": "[Request interrupted by user]"}]}
+            }),
+        ];
+
+        let exp = explain_state(&entries, Some(5));
+        assert_eq!(exp.final_state, SessionState::WaitingForInput);
+        let step = exp
             .steps
             .iter()
-            .find(|s| s.name == "interrupted_tool_use")
-            .expect("interrupted_tool_use step present");
-        assert_eq!(
-            int_step.verdict,
-            Verdict::Decided(SessionState::WaitingForInput),
-            "current heuristic still misfires here — that's the bug"
-        );
+            .find(|s| s.name == "last_meaningful_entry")
+            .expect("last_meaningful_entry step present");
         assert!(
-            int_step.details.iter().any(|d| d.contains("agent_c")),
-            "explanation should name the dangling tool_use that triggered the verdict"
+            step.details
+                .iter()
+                .any(|d| d.contains("Request interrupted")),
+            "explanation should mention the interrupt marker"
         );
     }
 }

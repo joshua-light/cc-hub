@@ -27,11 +27,45 @@ pub enum TaskItemStatus {
     Done,
 }
 
+/// Task priority, P1 (most urgent) through P4 (lowest). Drives the board's
+/// within-column ordering: cards sort by priority first, so P1 floats to the
+/// top of its column. Derived `Ord` follows declaration order
+/// (`P1 < P2 < P3 < P4`), so a plain ascending sort puts the most urgent
+/// first. New tasks (and any loaded from a pre-priority `tasks.json`) default
+/// to `P3` — explicitly raising a task is what lifts it above the pack.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskPriority {
+    P1,
+    P2,
+    #[default]
+    P3,
+    P4,
+}
+
+impl TaskPriority {
+    /// Short badge label shown on the card (`P1`–`P4`).
+    pub fn label(self) -> &'static str {
+        match self {
+            TaskPriority::P1 => "P1",
+            TaskPriority::P2 => "P2",
+            TaskPriority::P3 => "P3",
+            TaskPriority::P4 => "P4",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskItem {
     pub id: String,
     pub text: String,
     pub status: TaskItemStatus,
+    /// Sort priority within the column. Absent in pre-priority boards, so
+    /// `serde(default)` fills it with [`TaskPriority::default`] (`P3`).
+    #[serde(default)]
+    pub priority: TaskPriority,
     #[serde(default)]
     pub created_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -121,6 +155,7 @@ impl TaskBoard {
             id: id.clone(),
             text: text.to_string(),
             status: TaskItemStatus::Todo,
+            priority: TaskPriority::default(),
             created_at: now_secs(),
             done_at: None,
             cwd: None,
@@ -130,6 +165,34 @@ impl TaskBoard {
         });
         let _ = self.save();
         Some(id)
+    }
+
+    /// Replace a task's text (trimmed), leaving status and any agent
+    /// binding untouched. Empty/whitespace-only input and unknown ids are
+    /// ignored (returns false). Persists.
+    pub fn rename(&mut self, id: &str, text: &str) -> bool {
+        let text = text.trim();
+        if text.is_empty() {
+            return false;
+        }
+        let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) else {
+            return false;
+        };
+        t.text = text.to_string();
+        let _ = self.save();
+        true
+    }
+
+    /// Set a task's priority. Skips the disk write when the priority is
+    /// unchanged (re-pressing the same level is a no-op). No-op on unknown
+    /// id. Persists when it changes.
+    pub fn set_priority(&mut self, id: &str, priority: TaskPriority) {
+        if let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) {
+            if t.priority != priority {
+                t.priority = priority;
+                let _ = self.save();
+            }
+        }
     }
 
     /// Move a task between columns, stamping/clearing `done_at` so the Done
@@ -183,7 +246,10 @@ impl TaskBoard {
             let Some(tmux) = t.tmux.as_deref() else {
                 continue;
             };
-            if let Some(s) = sessions.iter().find(|s| s.tmux_session.as_deref() == Some(tmux)) {
+            if let Some(s) = sessions
+                .iter()
+                .find(|s| s.tmux_session.as_deref() == Some(tmux))
+            {
                 t.session_id = Some(s.session_id.clone());
                 changed = true;
             }
@@ -296,6 +362,41 @@ mod tests {
             b.remove(&id);
             assert_eq!(TaskBoard::load().last_assign_cwd(), Some("/tmp/proj"));
         });
+    }
+
+    #[test]
+    fn new_tasks_default_priority_and_set_priority_round_trips() {
+        with_temp_home(|| {
+            let mut b = TaskBoard::load();
+            let id = b.add("triage the backlog").unwrap();
+            // New tasks start at the default priority (P3).
+            assert_eq!(b.get(&id).unwrap().priority, TaskPriority::default());
+            b.set_priority(&id, TaskPriority::P1);
+            assert_eq!(
+                TaskBoard::load().get(&id).unwrap().priority,
+                TaskPriority::P1
+            );
+            // Re-setting the same level is a no-op (and still persisted state
+            // is unchanged).
+            b.set_priority(&id, TaskPriority::P1);
+            assert_eq!(b.get(&id).unwrap().priority, TaskPriority::P1);
+        });
+    }
+
+    #[test]
+    fn missing_priority_field_deserializes_to_default() {
+        // A task written by a pre-priority build has no `priority` key; it
+        // must load as the default rather than failing the whole board parse.
+        let json = r#"{"id":"tk-1","text":"old","status":"todo","created_at":1}"#;
+        let t: TaskItem = serde_json::from_str(json).unwrap();
+        assert_eq!(t.priority, TaskPriority::P3);
+    }
+
+    #[test]
+    fn priority_orders_p1_before_p4() {
+        assert!(TaskPriority::P1 < TaskPriority::P2);
+        assert!(TaskPriority::P2 < TaskPriority::P3);
+        assert!(TaskPriority::P3 < TaskPriority::P4);
     }
 
     #[test]

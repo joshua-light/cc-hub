@@ -193,10 +193,7 @@ pub(crate) fn ctx_bar(pct: u8, width: usize) -> Vec<Span<'static>> {
     let filled = (pct * width + 50) / 100; // round to nearest column
     let color = ctx_color(pct as u8);
     let mut out = Vec::with_capacity(2);
-    out.push(Span::styled(
-        "━".repeat(filled),
-        Style::default().fg(color),
-    ));
+    out.push(Span::styled("━".repeat(filled), Style::default().fg(color)));
     if filled < width {
         out.push(Span::styled(
             "╌".repeat(width - filled),

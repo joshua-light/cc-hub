@@ -20,12 +20,12 @@ pub(crate) fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
     let Some(picker) = app.folder_picker.as_ref() else {
         return;
     };
+    let assigning = app.tasks.pending_assign.is_some();
     if picker.mode == PickerMode::Places {
-        render_places_picker(frame, area, picker);
+        render_places_picker(frame, area, picker, assigning);
         return;
     }
     let bookmarks_mode = picker.mode == PickerMode::Bookmarks;
-    let assigning = app.tasks.pending_assign.is_some();
 
     let popup = centered_fixed(area, 80, 24);
     frame.render_widget(Clear, popup);
@@ -142,15 +142,20 @@ pub(crate) fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), list_area);
 }
 
-/// Places mode of the assign picker: a flat, fuzzy-filterable list of known
-/// directories (registered projects, bookmarks, recent cwds). The top row
-/// is the live filter; matched chars are highlighted in each row.
-fn render_places_picker(frame: &mut Frame, area: Rect, picker: &FolderPicker) {
+/// Places mode of the assign / new-session picker: a flat, fuzzy-filterable
+/// list of known directories (registered projects, bookmarks, recent cwds).
+/// The top row is the live filter; matched chars are highlighted in each row.
+fn render_places_picker(frame: &mut Frame, area: Rect, picker: &FolderPicker, assigning: bool) {
     let popup = centered_fixed(area, 80, 24);
     frame.render_widget(Clear, popup);
 
+    let title = if assigning {
+        " Assign task · pick project "
+    } else {
+        " New session · pick project "
+    };
     let block = popup_block(Span::styled(
-        " Assign task · pick project ",
+        title,
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
@@ -676,6 +681,7 @@ pub(crate) fn render_todo_panel(frame: &mut Frame, area: Rect, app: &App) {
 pub(crate) fn render_task_input(frame: &mut Frame, area: Rect, app: &App) {
     let mut input_line = app.tasks.input.clone();
     input_line.push('▎');
+    let renaming = app.tasks.renaming.is_some();
 
     let desired_w = 70u16.min(area.width);
     // Borders (2) plus the "  + " prefix (4) leave this much for the text, so
@@ -691,14 +697,19 @@ pub(crate) fn render_task_input(frame: &mut Frame, area: Rect, app: &App) {
     let popup = centered_fixed(area, desired_w, desired_h);
     frame.render_widget(Clear, popup);
 
+    let (title, hint) = if renaming {
+        (" Rename task ", " edits the text in place ")
+    } else {
+        (" New task ", " lands in To-Do ")
+    };
     let block = popup_block(Span::styled(
-        " New task ",
+        title,
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
     ))
     .title_bottom(Span::styled(
-        " lands in To-Do ",
+        hint,
         Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::ITALIC),
@@ -719,7 +730,10 @@ pub(crate) fn render_task_input(frame: &mut Frame, area: Rect, app: &App) {
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" add   ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            if renaming { " rename   " } else { " add   " },
+            Style::default().fg(Color::DarkGray),
+        ),
         Span::styled(
             "[esc]",
             Style::default()

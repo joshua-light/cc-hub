@@ -51,9 +51,17 @@ pub(crate) async fn handle_key(
         (View::Grid, KeyCode::Char('q')) => {
             app.should_quit = true;
         }
-        (View::Grid, KeyCode::Tab | KeyCode::BackTab) => {
+        // Shift+K / Tab cycles forward, Shift+J / BackTab cycles backward.
+        (View::Grid, KeyCode::Tab | KeyCode::Char('K')) => {
             let was_metrics = app.current_tab == Tab::Metrics;
             app.cycle_tab();
+            if !was_metrics && app.current_tab == Tab::Metrics && app.metrics.analysis.is_none() {
+                spawn_metrics();
+            }
+        }
+        (View::Grid, KeyCode::BackTab | KeyCode::Char('J')) => {
+            let was_metrics = app.current_tab == Tab::Metrics;
+            app.cycle_tab_back();
             if !was_metrics && app.current_tab == Tab::Metrics && app.metrics.analysis.is_none() {
                 spawn_metrics();
             }
@@ -107,12 +115,36 @@ pub(crate) async fn handle_key(
                 app.set_status("focus an unfinished task to assign an agent".into());
             }
         }
-        (View::Grid, KeyCode::Char('x')) if on_tasks => {
-            match app.delete_selected_task() {
+        // `S`: skip the picker — spawn the agent in $HOME for broad,
+        // not-yet-project-shaped questions.
+        (View::Grid, KeyCode::Char('S')) if on_tasks => match app.assign_selected_task_at_home() {
+            Some(msg) => app.set_status(msg),
+            None => app.set_status("focus a To-Do/In Progress task to start an agent".into()),
+        },
+        (View::Grid, KeyCode::Char('r')) if on_tasks => {
+            if !app.enter_task_rename() {
+                app.set_status("no task focused".into());
+            }
+        }
+        // `1`–`4` set the focused task's priority; the column re-sorts P1-first
+        // and the cursor follows the card.
+        (View::Grid, KeyCode::Char(c @ ('1' | '2' | '3' | '4'))) if on_tasks => {
+            use cc_hub_lib::tasks::TaskPriority;
+            let priority = match c {
+                '1' => TaskPriority::P1,
+                '2' => TaskPriority::P2,
+                '3' => TaskPriority::P3,
+                _ => TaskPriority::P4,
+            };
+            match app.set_selected_task_priority(priority) {
                 Some(msg) => app.set_status(msg),
                 None => app.set_status("no task focused".into()),
             }
         }
+        (View::Grid, KeyCode::Char('x')) if on_tasks => match app.delete_selected_task() {
+            Some(msg) => app.set_status(msg),
+            None => app.set_status("no task focused".into()),
+        },
         (View::Grid, KeyCode::Char('c')) if on_tasks => {
             app.clear_done_tasks();
         }
@@ -135,9 +167,7 @@ pub(crate) async fn handle_key(
                     Ok(pane) => app.enter_tmux_pane(pane),
                     Err(e) => app.set_status(format!("tmux attach failed: {}", e)),
                 }
-            } else if let (Some(sid), Some(cwd)) =
-                (task.session_id.clone(), task.cwd.clone())
-            {
+            } else if let (Some(sid), Some(cwd)) = (task.session_id.clone(), task.cwd.clone()) {
                 let agent_id = task.agent_id.clone().unwrap_or_else(|| "claude".into());
                 match spawn::spawn_agent_session(
                     &agent_id,
@@ -182,8 +212,13 @@ pub(crate) async fn handle_key(
             app.tasks.input.pop();
         }
         (View::TaskInput, KeyCode::Enter) => {
+            let renaming = app.tasks.renaming.is_some();
             if !app.submit_task_input() {
-                app.set_status("empty task — nothing added".into());
+                app.set_status(if renaming {
+                    "empty task — rename cancelled".into()
+                } else {
+                    "empty task — nothing added".into()
+                });
             }
         }
         (View::TaskInput, KeyCode::Char(c)) => {
@@ -841,7 +876,7 @@ pub(crate) async fn handle_key(
             }
         }
         (View::Grid, KeyCode::Char('N')) if on_sessions => {
-            app.enter_folder_picker();
+            app.enter_session_places_picker();
         }
         (View::Grid, KeyCode::Char('M')) if on_sessions => {
             if !app.enter_bookmarks_picker() {
@@ -870,7 +905,7 @@ pub(crate) async fn handle_key(
                         crate::pick_from_folder_picker(app);
                     }
                 }
-                KeyCode::Tab => app.toggle_assign_picker_mode(),
+                KeyCode::Tab => app.toggle_places_picker_mode(),
                 KeyCode::Down => {
                     if let Some(p) = app.folder_picker.as_mut() {
                         p.move_down();
@@ -906,9 +941,9 @@ pub(crate) async fn handle_key(
         (View::FolderPicker, KeyCode::Esc | KeyCode::Char('q')) => {
             app.close_folder_picker();
         }
-        // Browse → back to the places list (no-op outside task assign).
+        // Browse → back to the places list (no-op in the Projects flows).
         (View::FolderPicker, KeyCode::Tab) => {
-            app.toggle_assign_picker_mode();
+            app.toggle_places_picker_mode();
         }
         (View::FolderPicker, KeyCode::Down | KeyCode::Char('j')) => {
             if let Some(p) = app.folder_picker.as_mut() {

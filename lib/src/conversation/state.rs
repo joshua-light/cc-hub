@@ -105,50 +105,35 @@ fn assistant_has_blocking_tool(entry: &Value, tools: &[&str]) -> bool {
     })
 }
 
-/// Returns true if there's a dangling assistant `tool_use` (no matching
-/// `tool_result`) AND a `last-prompt` entry appears after it — the signature
-/// of an interrupted turn where the user typed a new message. A dangling
-/// `tool_use` alone can just mean the tool is still running, so we require
-/// the `last-prompt` marker to disambiguate.
-fn interrupted_tool_use(entries: &[Value]) -> bool {
-    let mut unresolved: Vec<(usize, &str)> = Vec::new();
-    let mut results: HashSet<&str> = HashSet::new();
-    let mut last_prompt_idx: Option<usize> = None;
+/// Prefix of the synthetic user entry Claude Code writes when the user
+/// Esc-interrupts a turn: `[Request interrupted by user]` (or
+/// `…for tool use]` when a tool was running — that variant also gets a
+/// synthetic `tool_result` so the `tool_use` never stays dangling).
+pub(super) const INTERRUPT_MARKER_PREFIX: &str = "[Request interrupted by user";
 
-    for (i, entry) in entries.iter().enumerate() {
-        let t = entry.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        if t == "last-prompt" {
-            last_prompt_idx = Some(i);
-            continue;
-        }
-        let arr = match entry
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_array())
-        {
-            Some(a) => a,
-            None => continue,
-        };
-        for block in arr {
-            let bt = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            if t == "assistant" && bt == "tool_use" {
-                if let Some(id) = block.get("id").and_then(|v| v.as_str()) {
-                    unresolved.push((i, id));
-                }
-            } else if t == "user" && bt == "tool_result" {
-                if let Some(id) = block.get("tool_use_id").and_then(|v| v.as_str()) {
-                    results.insert(id);
-                }
-            }
-        }
+/// Returns true if the entry is the synthetic interrupt marker. When it is
+/// the *last* meaningful entry the turn was cut short and nothing is running
+/// — the session is waiting for the user's next prompt. (A submitted
+/// follow-up prompt lands after it, so it stops being last as soon as the
+/// user actually sends something.)
+pub(super) fn is_interrupt_marker(entry: &Value) -> bool {
+    if entry.get("type").and_then(|t| t.as_str()) != Some("user") {
+        return false;
     }
-
-    let Some(lp_idx) = last_prompt_idx else {
+    let Some(content) = entry.get("message").and_then(|m| m.get("content")) else {
         return false;
     };
-    unresolved
-        .iter()
-        .any(|(idx, id)| *idx < lp_idx && !results.contains(id))
+    if let Some(text) = content.as_str() {
+        return text.starts_with(INTERRUPT_MARKER_PREFIX);
+    }
+    content.as_array().is_some_and(|arr| {
+        arr.iter().any(|b| {
+            b.get("type").and_then(|t| t.as_str()) == Some("text")
+                && b.get("text")
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| t.starts_with(INTERRUPT_MARKER_PREFIX))
+        })
+    })
 }
 
 /// Determine session state from the last meaningful user/assistant entry.
@@ -162,14 +147,6 @@ fn interrupted_tool_use(entries: &[Value]) -> bool {
 /// assistant's tool_use request and the tool result, causing a false
 /// WaitingForInput while the agent is actually executing a tool.
 pub fn extract_state(entries: &[Value]) -> SessionState {
-    // Interrupted turn: dangling tool_use + trailing `last-prompt` marker
-    // indicates the user hit Esc mid-tool and typed a new message — the
-    // session is waiting for them to submit it.
-    if interrupted_tool_use(entries) {
-        debug!("extract_state: interrupted tool_use (last-prompt follows) → WaitingForInput");
-        return SessionState::WaitingForInput;
-    }
-
     let last = match entries
         .iter()
         .rev()
@@ -189,6 +166,12 @@ pub fn extract_state(entries: &[Value]) -> SessionState {
 
     let entry_type = last.get("type").and_then(|t| t.as_str()).unwrap_or("");
     let state = match entry_type {
+        // A trailing interrupt marker means the user hit Esc and hasn't
+        // submitted a new prompt yet — the agent stopped, nothing runs.
+        "user" if is_interrupt_marker(last) => {
+            debug!("extract_state: trailing interrupt marker → WaitingForInput");
+            SessionState::WaitingForInput
+        }
         "user" => SessionState::Processing,
         "assistant" => {
             let stop = last
@@ -575,6 +558,72 @@ mod tests {
                     "input": {"questions": []}}]}
         })];
         assert_eq!(extract_state(&entries), SessionState::Question);
+    }
+
+    #[test]
+    fn extract_state_running_tool_with_later_last_prompt_is_processing() {
+        // Claude Code flushes `last-prompt` checkpoints mid-turn, so one
+        // landing after a still-running (dangling) Bash tool_use does NOT
+        // mean the turn was interrupted — the shell command is executing
+        // and the session is working.
+        let entries = vec![
+            serde_json::json!({
+                "type": "user",
+                "message": {"role": "user", "content": "Bump version, commit and push"}
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                        "input": {"command": "cargo check && git push"}}]}
+            }),
+            serde_json::json!({"type": "last-prompt", "lastPrompt": "Bump version, commit and push"}),
+        ];
+        assert_eq!(extract_state(&entries), SessionState::Processing);
+    }
+
+    #[test]
+    fn extract_state_trailing_interrupt_marker_is_waiting() {
+        // Esc-interrupt resolves the tool with a synthetic tool_result and
+        // appends the marker entry; with the marker last, nothing is running
+        // and the user hasn't submitted a new prompt.
+        let entries = vec![
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "stop_reason": "tool_use",
+                    "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]}
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": {"role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "t1",
+                        "content": "[Request interrupted by user for tool use]"}]}
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": {"role": "user",
+                    "content": [{"type": "text", "text": "[Request interrupted by user]"}]}
+            }),
+        ];
+        assert_eq!(extract_state(&entries), SessionState::WaitingForInput);
+    }
+
+    #[test]
+    fn extract_state_prompt_after_interrupt_marker_is_processing() {
+        // Once the user submits a follow-up prompt the marker is no longer
+        // last — the agent is processing the new message.
+        let entries = vec![
+            serde_json::json!({
+                "type": "user",
+                "message": {"role": "user",
+                    "content": [{"type": "text", "text": "[Request interrupted by user]"}]}
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": {"role": "user", "content": "Wait, use 5 ms instead."}
+            }),
+        ];
+        assert_eq!(extract_state(&entries), SessionState::Processing);
     }
 
     #[test]

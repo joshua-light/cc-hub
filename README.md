@@ -311,15 +311,20 @@ idle; the card sits in **Planning** showing the live session state
 (`⟳ working`, `󰂞 needs input`, `● plan ready`), the agent's folder, and
 age. `Space` on a Planning card sends "Proceed with the implementation."
 to the agent and moves the card to In Progress. Planning and In Progress
-float cards whose agent is blocked on input to the top of the column. Done
-cards keep their agent binding — `󰚩 claude · <dir>` marks a task an agent
-ran, and `f` still reopens its transcript.
+float cards whose agent is blocked on input to the top of the column; the
+order settles when you open the tab and stays put while you navigate (state
+flips update a card's badge in place, never its row). Done cards keep their
+agent binding — `󰚩 claude · <dir>` marks a task an agent ran, and `f`
+still reopens its transcript. Every card carries a priority badge on its
+top-right (`P1` red · `P2` yellow · `P3` green · `P4` blue, `1`–`4` to set);
+columns sort by priority first, so the most urgent cards float to the top.
 
 | Key | Action |
 |---|---|
 | `h` / `l` (or arrows) | Switch column |
 | `j` / `k` (or arrows) | Move within the column |
 | `a` / `n` | Add a task (lands in To-Do) |
+| `1` – `4` | Set priority P1–P4 (sorts the column P1-first; P1 red · P2 yellow · P3 green · P4 blue) |
 | `s` | Assign an agent: project picker (registered projects · bookmarks · recent dirs, fuzzy-filtered by typing — `Tab` flips to a plain folder browser; the last-assigned folder is preselected) → spawn session there prompted to plan first → card moves to Planning |
 | `Enter` / `f` | Attach the bound agent's pane (embedded); resumes the session if its tmux died; hints `s` when unassigned |
 | `Space` | On a Planning card: approve the plan — the agent is told to proceed and the card moves to In Progress (resumes the session first if its tmux died). Elsewhere: toggle Done / reopen (completing closes the live agent session; the transcript binding is kept) |
