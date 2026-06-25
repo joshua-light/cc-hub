@@ -126,6 +126,12 @@ pub(crate) async fn handle_key(
                 app.set_status("no task focused".into());
             }
         }
+        // `t` opens the inline tag editor for the focused task.
+        (View::Grid, KeyCode::Char('t')) if on_tasks => {
+            if !app.enter_task_tags() {
+                app.set_status("no task focused".into());
+            }
+        }
         // `1`–`4` set the focused task's priority; the column re-sorts P1-first
         // and the cursor follows the card.
         (View::Grid, KeyCode::Char(c @ ('1' | '2' | '3' | '4'))) if on_tasks => {
@@ -222,6 +228,18 @@ pub(crate) async fn handle_key(
             }
         }
         (View::TaskInput, KeyCode::Char(c)) => {
+            app.tasks.input.push(c);
+        }
+        (View::TaskTags, KeyCode::Esc) => {
+            app.close_task_tags();
+        }
+        (View::TaskTags, KeyCode::Backspace) => {
+            app.tasks.input.pop();
+        }
+        (View::TaskTags, KeyCode::Enter) => {
+            app.submit_task_tags();
+        }
+        (View::TaskTags, KeyCode::Char(c)) => {
             app.tasks.input.push(c);
         }
         // Kanban: j/k moves the row cursor within the focused

@@ -9,7 +9,9 @@ use crate::app::{App, TASK_COLUMNS};
 use crate::models::{self, SessionInfo, SessionState};
 use crate::tasks::{TaskItem, TaskPriority};
 use crate::ui::now_ms;
-use crate::ui::palette::{ACCENT_BLUE, BACKLOG_BLUE, DIM_TEXT, DOT_IDLE, LABEL_GRAY, META_GRAY, PURPLE};
+use crate::ui::palette::{
+    ACCENT_BLUE, BACKLOG_BLUE, DIM_TEXT, DOT_IDLE, LABEL_GRAY, META_GRAY, PURPLE, TAG_SLATE,
+};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -212,11 +214,23 @@ fn render_task_card(
             .add_modifier(Modifier::BOLD),
     ))
     .alignment(Alignment::Right);
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(border_type)
         .border_style(border_style)
         .title(priority_badge);
+    // Tags ride the top-left of the border, mirroring the priority chip on the
+    // right. Budget the width against what the priority chip leaves (corners +
+    // chip + a one-column gap) so the two badges never collide; overflow folds
+    // into a `+N` marker.
+    let prio_w = t.priority.label().chars().count() + 2;
+    let tag_budget = (area.width as usize).saturating_sub(2 + prio_w + 1);
+    if let Some(text) = tags_title_text(&t.tags, tag_budget) {
+        block = block.title(
+            Line::from(Span::styled(text, Style::default().fg(TAG_SLATE)))
+                .alignment(Alignment::Left),
+        );
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -327,6 +341,41 @@ fn meta_line(
     Line::from(spans)
 }
 
+/// Build the left-border tag badge text (`#a #b`) that fits in `budget`
+/// columns. Takes whole tags greedily; if any don't fit, the leftover count
+/// folds into a trailing `+N` (reserving room for it, single-digit since the
+/// tag set is capped). Returns `None` when there are no tags or no room.
+fn tags_title_text(tags: &[String], budget: usize) -> Option<String> {
+    if tags.is_empty() || budget < 3 {
+        return None;
+    }
+    // Each piece carries its own leading space so the run insets from the
+    // corner like the priority chip's ` P1 `.
+    let pieces: Vec<String> = tags.iter().map(|t| format!(" #{}", t)).collect();
+    let mut used = 0usize;
+    let mut shown = 0usize;
+    for (i, piece) in pieces.iter().enumerate() {
+        let more_after = i + 1 < pieces.len();
+        // Keep room for a ` +N` marker (≤3 cols) whenever tags would remain.
+        let reserve = if more_after { 3 } else { 0 };
+        if used + piece.chars().count() + reserve > budget {
+            break;
+        }
+        used += piece.chars().count();
+        shown += 1;
+    }
+    let hidden = tags.len() - shown;
+    if shown == 0 {
+        // Not even one tag fits beside the priority chip — show just the count.
+        return Some(format!(" +{}", tags.len()));
+    }
+    let mut out: String = pieces[..shown].concat();
+    if hidden > 0 {
+        out.push_str(&format!(" +{}", hidden));
+    }
+    Some(out)
+}
+
 /// Card badge colour per priority: P1 red, P2 yellow, P3 green, P4 blue.
 /// Light variants so the bold badge stays legible on the dark board.
 fn priority_color(p: TaskPriority) -> Color {
@@ -394,6 +443,7 @@ mod tests {
             text: "fix the parser".into(),
             status: TaskItemStatus::Todo,
             priority,
+            tags: Vec::new(),
             created_at: 1,
             done_at: None,
             cwd: None,
@@ -405,13 +455,17 @@ mod tests {
 
     /// Render a To-Do card and return its painted buffer.
     fn render(priority: TaskPriority) -> ratatui::buffer::Buffer {
-        let t = card(priority);
+        render_card(&card(priority))
+    }
+
+    /// Render an arbitrary card (wide enough for badges) and return its buffer.
+    fn render_card(t: &TaskItem) -> ratatui::buffer::Buffer {
         let sessions = HashMap::new();
         let backend = TestBackend::new(28, 5);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|f| {
-                render_task_card(f, f.area(), &t, false, 0, BACKLOG_BLUE, &sessions, 1_000);
+                render_task_card(f, f.area(), t, false, 0, BACKLOG_BLUE, &sessions, 1_000);
             })
             .expect("render");
         terminal.backend().buffer().clone()
@@ -425,6 +479,35 @@ mod tests {
             "card should show its priority badge:\n{}",
             buffer_to_string(&buf)
         );
+    }
+
+    #[test]
+    fn card_shows_tags_alongside_priority() {
+        let mut t = card(TaskPriority::P1);
+        t.tags = vec!["bug".into(), "api".into()];
+        let painted = buffer_to_string(&render_card(&t));
+        assert!(
+            painted.contains("#bug") && painted.contains("#api"),
+            "card should show its tag badges:\n{}",
+            painted
+        );
+        // The priority chip must survive alongside the tags.
+        assert!(
+            painted.contains("P1"),
+            "tags must not displace the priority badge:\n{}",
+            painted
+        );
+    }
+
+    #[test]
+    fn tags_title_overflows_to_count_marker() {
+        // Plenty of tags but a tiny budget folds the leftovers into `+N`.
+        let tags: Vec<String> = vec!["alpha".into(), "bravo".into(), "charlie".into()];
+        let text = tags_title_text(&tags, 10).expect("some tags fit");
+        assert!(text.contains('+'), "expected overflow marker in {:?}", text);
+        // No tags at all, or no room, yields nothing.
+        assert_eq!(tags_title_text(&[], 20), None);
+        assert_eq!(tags_title_text(&tags, 2), None);
     }
 
     #[test]

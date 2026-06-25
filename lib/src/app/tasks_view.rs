@@ -25,6 +25,11 @@ pub struct TasksView {
     /// submit, cleared if the popup is cancelled. None means the popup
     /// adds a new task.
     pub renaming: Option<String>,
+    /// Task id whose tags are being edited: set when `t` opens the tag popup
+    /// ([`crate::app::View::TaskTags`]), consumed on submit, cleared on cancel.
+    /// Shares the `input` buffer with the add/rename popup (only one is ever
+    /// open at a time).
+    pub tagging: Option<String>,
     /// Task id awaiting a folder pick: set when `s` opens the picker, consumed
     /// by the pick handler, cleared if the picker is cancelled.
     pub pending_assign: Option<String>,
@@ -47,6 +52,7 @@ impl TasksView {
             row: 0,
             input: String::new(),
             renaming: None,
+            tagging: None,
             pending_assign: None,
             in_progress_order: Vec::new(),
         }

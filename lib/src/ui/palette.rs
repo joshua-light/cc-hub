@@ -43,3 +43,7 @@ pub(crate) const DOT_IDLE: Color = Color::Rgb(140, 140, 160);
 
 /// Backlog accent blue (chip backlog count, backlog popup arrows/title).
 pub(crate) const BACKLOG_BLUE: Color = Color::Rgb(120, 140, 200);
+
+/// Muted slate for task `#tag` badges — distinct from the priority hues and
+/// column accents, reads as secondary metadata on the card border.
+pub(crate) const TAG_SLATE: Color = Color::Rgb(150, 170, 200);

@@ -67,6 +67,8 @@ pub enum View {
     TodoPanel,
     /// Centered single-line input for adding a task on the Tasks tab.
     TaskInput,
+    /// Centered single-line input for editing the focused task's tags.
+    TaskTags,
 }
 
 /// Outcome of pressing Space on a focused Projects-tab task. The caller
@@ -381,6 +383,42 @@ impl App {
             }
             None => false,
         }
+    }
+
+    /// `t` on a focused task: open the inline tag editor prefilled with the
+    /// task's current tags (space-separated). Returns false when no task is
+    /// focused.
+    pub fn enter_task_tags(&mut self) -> bool {
+        let Some(t) = self.selected_board_task() else {
+            return false;
+        };
+        let (id, prefill) = (t.id.clone(), t.tags.join(" "));
+        self.tasks.tagging = Some(id);
+        self.tasks.input = prefill;
+        self.view = View::TaskTags;
+        true
+    }
+
+    pub fn close_task_tags(&mut self) {
+        self.tasks.input.clear();
+        self.tasks.tagging = None;
+        self.view = View::Grid;
+    }
+
+    /// Commit the tag editor: parse the buffer into the normalized tag set and
+    /// replace the task's tags (an empty buffer clears them). The cursor
+    /// follows the card by id — tags don't reorder columns, but this keeps the
+    /// same focus contract as the other task mutations. Returns false when no
+    /// task was being edited.
+    pub fn submit_task_tags(&mut self) -> bool {
+        let text = std::mem::take(&mut self.tasks.input);
+        self.view = View::Grid;
+        let Some(id) = self.tasks.tagging.take() else {
+            return false;
+        };
+        self.tasks.board.set_tags(&id, crate::tasks::parse_tags(&text));
+        self.focus_task(&id);
+        true
     }
 
     /// Tasks in `status` in display order: To-Do and Done keep the board's

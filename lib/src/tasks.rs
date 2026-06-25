@@ -57,6 +57,36 @@ impl TaskPriority {
     }
 }
 
+/// Longest a single tag may be after normalization; longer ones are truncated.
+const MAX_TAG_LEN: usize = 16;
+/// Most tags a task may carry; extras are dropped so the border badge fits.
+const MAX_TAGS: usize = 6;
+
+/// Parse a free-text tag line (from the inline editor) into the normalized set
+/// stored on a task. Splits on whitespace *and* commas, strips a leading `#`,
+/// lowercases, trims, drops empties, and dedupes (keeping first-seen order).
+/// Each tag is capped at [`MAX_TAG_LEN`] chars and the set at [`MAX_TAGS`], so
+/// the card's border badge always has a sane bound. Editing replaces the whole
+/// set, so this is the single chokepoint for what a task's tags can be.
+pub fn parse_tags(input: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in input.split([',', ' ', '\t', '\n']) {
+        let tag = raw.trim().trim_start_matches('#').trim().to_lowercase();
+        if tag.is_empty() {
+            continue;
+        }
+        let tag: String = tag.chars().take(MAX_TAG_LEN).collect();
+        if out.iter().any(|t| t == &tag) {
+            continue;
+        }
+        out.push(tag);
+        if out.len() >= MAX_TAGS {
+            break;
+        }
+    }
+    out
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskItem {
     pub id: String,
@@ -66,6 +96,12 @@ pub struct TaskItem {
     /// `serde(default)` fills it with [`TaskPriority::default`] (`P3`).
     #[serde(default)]
     pub priority: TaskPriority,
+    /// Short free-form labels shown as `#tag` badges on the card. Normalized
+    /// by [`parse_tags`] (lowercased, deduped, capped). Omitted from the JSON
+    /// when empty, and absent in pre-tags boards, so `serde(default)` fills it
+    /// with an empty vec.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
     #[serde(default)]
     pub created_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -156,6 +192,7 @@ impl TaskBoard {
             text: text.to_string(),
             status: TaskItemStatus::Todo,
             priority: TaskPriority::default(),
+            tags: Vec::new(),
             created_at: now_secs(),
             done_at: None,
             cwd: None,
@@ -190,6 +227,18 @@ impl TaskBoard {
         if let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) {
             if t.priority != priority {
                 t.priority = priority;
+                let _ = self.save();
+            }
+        }
+    }
+
+    /// Replace a task's tags with `tags` (already normalized by
+    /// [`parse_tags`]). Skips the disk write when unchanged. No-op on unknown
+    /// id. Persists when it changes.
+    pub fn set_tags(&mut self, id: &str, tags: Vec<String>) {
+        if let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) {
+            if t.tags != tags {
+                t.tags = tags;
                 let _ = self.save();
             }
         }
@@ -390,6 +439,49 @@ mod tests {
         let json = r#"{"id":"tk-1","text":"old","status":"todo","created_at":1}"#;
         let t: TaskItem = serde_json::from_str(json).unwrap();
         assert_eq!(t.priority, TaskPriority::P3);
+    }
+
+    #[test]
+    fn missing_tags_field_deserializes_to_empty() {
+        // A pre-tags board has no `tags` key; it must load as an empty vec.
+        let json = r#"{"id":"tk-1","text":"old","status":"todo","created_at":1}"#;
+        let t: TaskItem = serde_json::from_str(json).unwrap();
+        assert!(t.tags.is_empty());
+    }
+
+    #[test]
+    fn parse_tags_normalizes_and_caps() {
+        // Splits on commas and whitespace, strips '#', lowercases, dedupes.
+        assert_eq!(
+            parse_tags("#Bug,  api   bug BACKEND"),
+            vec!["bug", "api", "backend"]
+        );
+        assert!(parse_tags("   ").is_empty());
+        // Per-tag length cap.
+        let long = "a".repeat(40);
+        assert_eq!(parse_tags(&long), vec!["a".repeat(MAX_TAG_LEN)]);
+        // Set-size cap (seven distinct tags → MAX_TAGS kept).
+        let many = "t1 t2 t3 t4 t5 t6 t7";
+        assert_eq!(parse_tags(many).len(), MAX_TAGS);
+    }
+
+    #[test]
+    fn set_tags_round_trips_and_skips_unchanged() {
+        with_temp_home(|| {
+            let mut b = TaskBoard::load();
+            let id = b.add("label me").unwrap();
+            assert!(b.get(&id).unwrap().tags.is_empty());
+            b.set_tags(&id, parse_tags("bug api"));
+            assert_eq!(
+                TaskBoard::load().get(&id).unwrap().tags,
+                vec!["bug", "api"]
+            );
+            // Re-setting the same set is a no-op; clearing removes them.
+            b.set_tags(&id, parse_tags("bug api"));
+            assert_eq!(b.get(&id).unwrap().tags, vec!["bug", "api"]);
+            b.set_tags(&id, Vec::new());
+            assert!(TaskBoard::load().get(&id).unwrap().tags.is_empty());
+        });
     }
 
     #[test]
