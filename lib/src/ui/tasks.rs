@@ -1,13 +1,14 @@
-//! Tasks-tab body: a four-column board (To-Do · Planning · In Progress ·
-//! Done) over the personal task store. Visually a sibling of the Projects
-//! kanban, but each card is a flat task, optionally annotated with its bound
-//! agent session's live state (resolved by tmux name, same as project
-//! cards). Planning holds cards whose agent is drafting a plan; Space
-//! approves it and the card moves to In Progress.
+//! Tasks-tab body: a kanban board (To-Do · Planning · In Progress · Done)
+//! over the personal task store. Visually a sibling of the Projects kanban,
+//! but each card is a flat task, optionally annotated with its bound agent
+//! session's live state (resolved by tmux name, same as project cards).
+//! Planning holds cards whose agent is drafting a plan; Space approves it and
+//! the card moves to In Progress. The Planning column is optional
+//! (`ui.show_planning_column`); when hidden its cards fold into In Progress.
 
-use crate::app::{App, TASK_COLUMNS};
+use crate::app::{visible_task_columns, App};
 use crate::models::{self, SessionInfo, SessionState};
-use crate::tasks::{TaskItem, TaskPriority};
+use crate::tasks::{TaskItem, TaskItemStatus, TaskPriority};
 use crate::ui::now_ms;
 use crate::ui::palette::{
     ACCENT_BLUE, BACKLOG_BLUE, DIM_TEXT, DOT_IDLE, LABEL_GRAY, META_GRAY, PURPLE, TAG_SLATE,
@@ -19,11 +20,6 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use std::collections::HashMap;
 
-/// Column indices that get special rendering treatment. Must track
-/// [`TASK_COLUMNS`] ([`crate::app::TASK_COLUMNS`]) order.
-const PLANNING_COL: usize = 1;
-const DONE_COL: usize = 3;
-
 pub fn render_tasks_body(frame: &mut Frame, area: Rect, app: &App) {
     if area.height < 3 || area.width < 30 {
         let hint = Paragraph::new("(terminal too narrow — resize or switch to Sessions)")
@@ -33,38 +29,43 @@ pub fn render_tasks_body(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(hint, area);
         return;
     }
+    // Column set is config-driven: Planning is optional, so split the row
+    // into equal shares of however many columns are visible.
+    let columns = visible_task_columns();
+    let n = columns.len() as u32;
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Ratio(1, 4),
-            Constraint::Ratio(1, 4),
-            Constraint::Ratio(1, 4),
-            Constraint::Ratio(1, 4),
-        ])
+        .constraints(
+            columns
+                .iter()
+                .map(|_| Constraint::Ratio(1, n))
+                .collect::<Vec<_>>(),
+        )
         .split(area);
 
     let sessions_by_tmux = app.sessions_by_tmux();
     let now_secs = now_ms() / 1000;
-    for col_idx in 0..TASK_COLUMNS.len() {
+    for (col_idx, status) in columns.iter().enumerate() {
         render_task_column(
             frame,
             cols[col_idx],
             app,
             col_idx,
+            *status,
             &sessions_by_tmux,
             now_secs,
         );
     }
 }
 
-fn column_meta(col: usize) -> (&'static str, &'static str, Color) {
+fn column_meta(status: TaskItemStatus) -> (&'static str, &'static str, Color) {
     // Planning borrows the Projects kanban's planning icon/accent so the
     // same phase reads the same across both boards.
-    match col {
-        0 => ("To-Do", "󰄱", BACKLOG_BLUE),
-        1 => ("Planning", "󰟶", PURPLE),
-        2 => ("In Progress", "󰒓", Color::LightYellow),
-        _ => ("Done", "󰸞", Color::LightGreen),
+    match status {
+        TaskItemStatus::Todo => ("To-Do", "󰄱", BACKLOG_BLUE),
+        TaskItemStatus::Planning => ("Planning", "󰟶", PURPLE),
+        TaskItemStatus::InProgress => ("In Progress", "󰒓", Color::LightYellow),
+        TaskItemStatus::Done => ("Done", "󰸞", Color::LightGreen),
     }
 }
 
@@ -73,19 +74,21 @@ fn render_task_column(
     area: Rect,
     app: &App,
     col_idx: usize,
+    status: TaskItemStatus,
     sessions_by_tmux: &HashMap<&str, &SessionInfo>,
     now_secs: u64,
 ) {
-    let (label, icon, accent) = column_meta(col_idx);
-    // Display order, not board order: In Progress puts needs-input cards
+    let (label, icon, accent) = column_meta(status);
+    // Display order, not board order: live columns put needs-input cards
     // first, frozen at tab entry so scan ticks can't reorder cards under
-    // the cursor (see `App::task_column`); the cursor indexes the same list.
-    let tasks = app.task_column(TASK_COLUMNS[col_idx]);
+    // the cursor (see `App::task_display_column`); the cursor indexes the
+    // same list. With Planning hidden, In Progress also carries its cards.
+    let tasks = app.task_display_column(status);
     let count = tasks.len();
     let col_focused = app.tasks.col == col_idx;
     // Live columns carry a meta row under two text rows; Done cards are
     // compact (the column already says everything but the when).
-    let card_height: u16 = if col_idx == DONE_COL { 4 } else { 5 };
+    let card_height: u16 = if status == TaskItemStatus::Done { 4 } else { 5 };
     let gap: u16 = 0;
     let inner = Block::default().borders(Borders::ALL).inner(area);
     let max_cards =
@@ -142,11 +145,11 @@ fn render_task_column(
     frame.render_widget(block, area);
 
     if tasks.is_empty() {
-        let empty_hint = match col_idx {
-            0 => "No tasks — press a to add one",
-            1 => "Nothing planning — s hands a task to an agent",
-            2 => "Nothing running — Space approves a plan",
-            _ => "Nothing done yet",
+        let empty_hint = match status {
+            TaskItemStatus::Todo => "No tasks — press a to add one",
+            TaskItemStatus::Planning => "Nothing planning — s hands a task to an agent",
+            TaskItemStatus::InProgress => "Nothing running — Space approves a plan",
+            TaskItemStatus::Done => "Nothing done yet",
         };
         let hint = Paragraph::new(Line::from(Span::styled(
             empty_hint,
@@ -172,7 +175,7 @@ fn render_task_column(
             card_area,
             t,
             selected,
-            col_idx,
+            status,
             accent,
             sessions_by_tmux,
             now_secs,
@@ -190,7 +193,7 @@ fn render_task_card(
     area: Rect,
     t: &TaskItem,
     selected: bool,
-    col_idx: usize,
+    status: TaskItemStatus,
     accent: Color,
     sessions_by_tmux: &HashMap<&str, &SessionInfo>,
     now_secs: u64,
@@ -237,7 +240,7 @@ fn render_task_card(
         return;
     }
 
-    let done = col_idx == DONE_COL;
+    let done = status == TaskItemStatus::Done;
     let text_style = if done {
         Style::default().fg(DIM_TEXT).add_modifier(Modifier::ITALIC)
     } else if selected {
@@ -260,7 +263,7 @@ fn render_task_card(
     while lines.len() < text_rows {
         lines.push(Line::raw(""));
     }
-    lines.push(meta_line(t, col_idx, sessions_by_tmux, now_secs));
+    lines.push(meta_line(t, status, sessions_by_tmux, now_secs));
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -269,12 +272,12 @@ fn render_task_card(
 /// session is in right now.
 fn meta_line(
     t: &TaskItem,
-    col_idx: usize,
+    status: TaskItemStatus,
     sessions_by_tmux: &HashMap<&str, &SessionInfo>,
     now_secs: u64,
 ) -> Line<'static> {
     let age_style = Style::default().fg(META_GRAY);
-    if col_idx == DONE_COL {
+    if status == TaskItemStatus::Done {
         let when = t.done_at.unwrap_or(t.created_at);
         let mut spans = vec![Span::styled(
             format!("✓ {}", models::relative_age(now_secs.saturating_sub(when))),
@@ -312,8 +315,11 @@ fn meta_line(
                     ("󰂞", "needs input", Color::Yellow)
                 }
                 // An idle planning agent has finished its turn — the plan is
-                // sitting in the transcript waiting for a verdict.
-                SessionState::Idle if col_idx == PLANNING_COL => {
+                // sitting in the transcript waiting for a verdict. Keyed off
+                // the card's own status so it still reads "plan ready" when a
+                // Planning card is folded into a hidden-Planning In Progress
+                // column.
+                SessionState::Idle if t.status == TaskItemStatus::Planning => {
                     ("●", "plan ready", Color::LightGreen)
                 }
                 SessionState::Idle => ("●", "idle", Color::LightGreen),
@@ -465,7 +471,16 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|f| {
-                render_task_card(f, f.area(), t, false, 0, BACKLOG_BLUE, &sessions, 1_000);
+                render_task_card(
+                    f,
+                    f.area(),
+                    t,
+                    false,
+                    TaskItemStatus::Todo,
+                    BACKLOG_BLUE,
+                    &sessions,
+                    1_000,
+                );
             })
             .expect("render");
         terminal.backend().buffer().clone()

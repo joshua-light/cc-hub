@@ -215,6 +215,10 @@ cell_width = 42
 # The Projects tab (orchestrator kanban) is WIP and hidden from the tab
 # strip + Tab cycle by default. Set true to bring it back.
 show_projects_tab = false
+# The Planning column on the Tasks board. On by default. Set false to drop
+# it; its cards fold into In Progress (Space still approves a plan-ready
+# card — the action keys off the card's status, not the column).
+show_planning_column = true
 
 [metrics]
 # Minimum assistant turns before a session is eligible for context-growth
@@ -318,6 +322,11 @@ agent binding — `󰚩 claude · <dir>` marks a task an agent ran, and `f`
 still reopens its transcript. Every card carries a priority badge on its
 top-right (`P1` red · `P2` yellow · `P3` green · `P4` blue, `1`–`4` to set);
 columns sort by priority first, so the most urgent cards float to the top.
+
+The **Planning** column is optional — set `[ui] show_planning_column = false`
+to drop it. Its cards then fold into **In Progress** (still showing
+`● plan ready`), and `Space` on such a card still approves the plan, so the
+plan-first workflow keeps working with one fewer column.
 
 | Key | Action |
 |---|---|

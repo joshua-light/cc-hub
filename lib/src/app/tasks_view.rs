@@ -2,15 +2,52 @@
 //! cursor (column, row), the add-task input buffer, and the id of a task
 //! waiting on a folder pick for agent assignment.
 
+use crate::config;
 use crate::tasks::{TaskBoard, TaskItemStatus};
 
-/// Column order on the board. Indices are the `col` cursor values.
+/// Full board column order. Planning is optional at render time (see
+/// [`visible_task_columns`]); this stays the canonical set the board logic
+/// and on-disk statuses are defined against.
 pub const TASK_COLUMNS: [TaskItemStatus; 4] = [
     TaskItemStatus::Todo,
     TaskItemStatus::Planning,
     TaskItemStatus::InProgress,
     TaskItemStatus::Done,
 ];
+
+/// Columns shown on the Tasks board, in cursor (`col`) order. The Planning
+/// column is optional (`ui.show_planning_column`); when off it's dropped here
+/// and its cards fold into In Progress (see [`column_statuses`]), so the
+/// status stays reachable — only the dedicated column disappears.
+pub fn visible_task_columns() -> Vec<TaskItemStatus> {
+    visible_columns(config::get().ui.show_planning_column)
+}
+
+/// The board statuses one visible column renders. One status per column,
+/// except In Progress absorbs Planning when the Planning column is hidden so
+/// plan-ready cards still appear (and Space still approves them — the action
+/// keys off the card's own status).
+pub fn column_statuses(col: TaskItemStatus) -> Vec<TaskItemStatus> {
+    statuses_for(col, config::get().ui.show_planning_column)
+}
+
+/// Pure core of [`visible_task_columns`], split out so the column logic is
+/// testable without the global config singleton.
+fn visible_columns(show_planning: bool) -> Vec<TaskItemStatus> {
+    TASK_COLUMNS
+        .into_iter()
+        .filter(|s| show_planning || *s != TaskItemStatus::Planning)
+        .collect()
+}
+
+/// Pure core of [`column_statuses`].
+fn statuses_for(col: TaskItemStatus, show_planning: bool) -> Vec<TaskItemStatus> {
+    if col == TaskItemStatus::InProgress && !show_planning {
+        vec![TaskItemStatus::Planning, TaskItemStatus::InProgress]
+    } else {
+        vec![col]
+    }
+}
 
 pub struct TasksView {
     pub board: TaskBoard,
@@ -66,13 +103,17 @@ impl TasksView {
     }
 
     pub fn col_status(&self) -> TaskItemStatus {
-        TASK_COLUMNS[self.col.min(TASK_COLUMNS.len() - 1)]
+        let cols = visible_task_columns();
+        cols[self.col.min(cols.len() - 1)]
     }
 
     pub fn column_len(&self, col: usize) -> usize {
-        self.board
-            .column(TASK_COLUMNS[col.min(TASK_COLUMNS.len() - 1)])
-            .len()
+        let cols = visible_task_columns();
+        let status = cols[col.min(cols.len() - 1)];
+        column_statuses(status)
+            .into_iter()
+            .map(|s| self.board.column(s).len())
+            .sum()
     }
 
     pub fn row_down(&mut self) {
@@ -89,7 +130,7 @@ impl TasksView {
     }
 
     pub fn col_right(&mut self) {
-        if self.col + 1 < TASK_COLUMNS.len() {
+        if self.col + 1 < visible_task_columns().len() {
             self.col += 1;
             self.row = 0;
         }
@@ -109,5 +150,53 @@ impl TasksView {
         if self.row >= len {
             self.row = len.saturating_sub(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn planning_shown_keeps_all_four_columns() {
+        assert_eq!(
+            visible_columns(true),
+            vec![
+                TaskItemStatus::Todo,
+                TaskItemStatus::Planning,
+                TaskItemStatus::InProgress,
+                TaskItemStatus::Done,
+            ]
+        );
+        // Each visible column maps to exactly its own status.
+        for col in visible_columns(true) {
+            assert_eq!(statuses_for(col, true), vec![col]);
+        }
+    }
+
+    #[test]
+    fn planning_hidden_drops_column_and_folds_into_in_progress() {
+        assert_eq!(
+            visible_columns(false),
+            vec![
+                TaskItemStatus::Todo,
+                TaskItemStatus::InProgress,
+                TaskItemStatus::Done,
+            ]
+        );
+        // In Progress now also renders Planning cards; the other columns are
+        // unchanged.
+        assert_eq!(
+            statuses_for(TaskItemStatus::InProgress, false),
+            vec![TaskItemStatus::Planning, TaskItemStatus::InProgress]
+        );
+        assert_eq!(
+            statuses_for(TaskItemStatus::Todo, false),
+            vec![TaskItemStatus::Todo]
+        );
+        assert_eq!(
+            statuses_for(TaskItemStatus::Done, false),
+            vec![TaskItemStatus::Done]
+        );
     }
 }

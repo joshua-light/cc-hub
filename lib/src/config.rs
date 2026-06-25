@@ -219,6 +219,11 @@ pub struct UiConfig {
     /// The Projects tab (orchestrator kanban) is WIP and hidden from the
     /// tab strip + ⇥ cycle by default. Set true to bring it back.
     pub show_projects_tab: bool,
+    /// The Planning column on the Tasks board. On by default. When off the
+    /// column disappears and its cards fold into In Progress, so plan-ready
+    /// work stays visible and Space still approves it (the action keys off
+    /// the card's status, not the column it renders in).
+    pub show_planning_column: bool,
 }
 
 impl UiConfig {
@@ -242,6 +247,7 @@ impl Default for UiConfig {
             cell_height: 6,
             cell_width: 42,
             show_projects_tab: false,
+            show_planning_column: true,
         }
     }
 }

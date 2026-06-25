@@ -24,7 +24,7 @@ mod todo_panel;
 pub use metrics_view::MetricsView;
 pub use projects_view::ProjectsView;
 pub use sessions_view::SessionsView;
-pub use tasks_view::{TasksView, TASK_COLUMNS};
+pub use tasks_view::{column_statuses, visible_task_columns, TasksView, TASK_COLUMNS};
 pub use todo_panel::TodoPanelState;
 
 pub fn status_msg_ttl() -> Duration {
@@ -470,19 +470,47 @@ impl App {
         self.tasks.in_progress_order = order;
     }
 
+    /// Cards rendered under one visible board column, in display order. Same
+    /// as [`Self::task_column`] for a normal column; when the Planning column
+    /// is hidden, the In Progress column also carries Planning cards (folded
+    /// in via [`column_statuses`]) so plan-ready work stays visible. The
+    /// merged set keeps the live columns' needs-input float and priority sort.
+    pub fn task_display_column(&self, col: TaskItemStatus) -> Vec<&TaskItem> {
+        let statuses = column_statuses(col);
+        if statuses.len() == 1 {
+            return self.task_column(statuses[0]);
+        }
+        // Merged In Progress (absorbing Planning): both are live columns, so
+        // apply the same frozen needs-input float then priority sort as
+        // `task_column` does for a single live column.
+        let mut tasks: Vec<&TaskItem> = statuses
+            .iter()
+            .flat_map(|s| self.tasks.board.column(*s))
+            .collect();
+        let frozen = |id: &str| self.tasks.in_progress_order.iter().position(|x| x == id);
+        tasks.sort_by_key(|t| frozen(&t.id).unwrap_or(usize::MAX));
+        tasks.sort_by_key(|t| t.priority);
+        tasks
+    }
+
     /// The task under the kanban cursor, resolved against the display
-    /// ordering of [`Self::task_column`].
+    /// ordering of [`Self::task_display_column`].
     pub fn selected_board_task(&self) -> Option<&TaskItem> {
-        self.task_column(self.tasks.col_status())
+        self.task_display_column(self.tasks.col_status())
             .get(self.tasks.row)
             .copied()
     }
 
     /// Move the cursor to `id` wherever it now renders (e.g. after a status
     /// transition or an assignment carried the card to another column).
+    /// Resolves against the visible columns, so a Planning card lands under
+    /// In Progress when the Planning column is hidden.
     pub fn focus_task(&mut self, id: &str) {
-        for (ci, status) in TASK_COLUMNS.iter().enumerate() {
-            let row = self.task_column(*status).iter().position(|t| t.id == id);
+        for (ci, col) in visible_task_columns().iter().enumerate() {
+            let row = self
+                .task_display_column(*col)
+                .iter()
+                .position(|t| t.id == id);
             if let Some(ri) = row {
                 self.tasks.col = ci;
                 self.tasks.row = ri;
@@ -3066,9 +3094,15 @@ mod tests {
                 assert_eq!(order, vec![b.as_str(), c.as_str(), a.as_str()]);
 
                 // Selection and focus resolve against the rendered order,
-                // not the board file's insertion order.
+                // not the board file's insertion order. Derive In Progress's
+                // column index so the test holds whether or not the optional
+                // Planning column is configured in.
+                let ip_col = visible_task_columns()
+                    .iter()
+                    .position(|s| *s == TaskItemStatus::InProgress)
+                    .unwrap();
                 app.focus_task(&a);
-                assert_eq!((app.tasks.col, app.tasks.row), (2, 2));
+                assert_eq!((app.tasks.col, app.tasks.row), (ip_col, 2));
                 assert_eq!(app.selected_board_task().unwrap().id, a);
             });
         }
