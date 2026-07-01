@@ -700,7 +700,7 @@ pub(crate) fn render_task_input(frame: &mut Frame, area: Rect, app: &App) {
     let (title, hint) = if renaming {
         (" Rename task ", " edits the text in place ")
     } else {
-        (" New task ", " lands in To-Do ")
+        (" New task ", " lands in To-Do · #tag !1–!4 inline ")
     };
     let block = popup_block(Span::styled(
         title,

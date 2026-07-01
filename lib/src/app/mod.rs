@@ -69,6 +69,9 @@ pub enum View {
     TaskInput,
     /// Centered single-line input for editing the focused task's tags.
     TaskTags,
+    /// Typing edits the Tasks-board filter live; the board renders
+    /// underneath, already narrowed. Enter keeps the filter, Esc clears it.
+    TaskFilter,
 }
 
 /// Outcome of pressing Space on a focused Projects-tab task. The caller
@@ -369,15 +372,26 @@ impl App {
 
     /// Commit the task popup: append to To-Do and move the cursor to the
     /// new card, or — when renaming — replace the task's text in place.
-    /// Returns false when the input was empty (nothing changed).
+    /// Adds run through the quick syntax ([`crate::tasks::parse_quick_add`]):
+    /// `#tag` and `!1`–`!4` tokens set tags/priority without extra
+    /// round-trips through `t` and `1`–`4`. An input that is *only* syntax
+    /// leaves no text, so nothing is added. Returns false when nothing
+    /// changed.
     pub fn submit_task_input(&mut self) -> bool {
         let text = std::mem::take(&mut self.tasks.input);
         self.view = View::Grid;
         if let Some(id) = self.tasks.renaming.take() {
             return self.tasks.board.rename(&id, &text);
         }
-        match self.tasks.board.add(&text) {
+        let quick = crate::tasks::parse_quick_add(&text);
+        match self.tasks.board.add(&quick.text) {
             Some(id) => {
+                if !quick.tags.is_empty() {
+                    self.tasks.board.set_tags(&id, quick.tags);
+                }
+                if let Some(p) = quick.priority {
+                    self.tasks.board.set_priority(&id, p);
+                }
                 self.focus_task(&id);
                 true
             }
@@ -416,7 +430,9 @@ impl App {
         let Some(id) = self.tasks.tagging.take() else {
             return false;
         };
-        self.tasks.board.set_tags(&id, crate::tasks::parse_tags(&text));
+        self.tasks
+            .board
+            .set_tags(&id, crate::tasks::parse_tags(&text));
         self.focus_task(&id);
         true
     }
@@ -431,7 +447,11 @@ impl App {
     /// row N is always the Nth rendered card.
     pub fn task_column(&self, status: TaskItemStatus) -> Vec<&TaskItem> {
         let mut tasks = self.tasks.board.column(status);
-        if matches!(status, TaskItemStatus::Planning | TaskItemStatus::InProgress) {
+        tasks.retain(|t| self.tasks.matches_filter(t));
+        if matches!(
+            status,
+            TaskItemStatus::Planning | TaskItemStatus::InProgress
+        ) {
             let frozen = |id: &str| self.tasks.in_progress_order.iter().position(|x| x == id);
             // Stable sort: ids missing from the frozen order all key to MAX
             // and keep their relative insertion order at the tail.
@@ -445,23 +465,24 @@ impl App {
         tasks
     }
 
-    /// Recompute the live columns' display order: cards whose agent is
-    /// blocked on input float to the top of their column (stable within each
-    /// group) so work that needs a human is seen first. Spans both Planning
-    /// and In Progress. Called on Tasks-tab entry — not on scan ticks — so
-    /// live state flips never reorder cards under the cursor while the user
-    /// is navigating; the float settles each time the tab is (re-)opened.
+    /// Recompute the live columns' display order: cards whose agent waits on
+    /// a human float to the top of their column (stable within each group) —
+    /// blocked-on-input first, then idle agents (a plan or an implementation
+    /// sitting ready for a verdict), then everything else. Spans both
+    /// Planning and In Progress. Called on Tasks-tab entry — not on scan
+    /// ticks — so live state flips never reorder cards under the cursor
+    /// while the user is navigating; the float settles each time the tab is
+    /// (re-)opened.
     pub fn refresh_in_progress_order(&mut self) {
         let order: Vec<String> = {
             let by_tmux = self.sessions_by_tmux();
             let mut order = Vec::new();
             for status in [TaskItemStatus::Planning, TaskItemStatus::InProgress] {
                 let mut tasks = self.tasks.board.column(status);
-                tasks.sort_by_key(|t| {
-                    !t.tmux
-                        .as_deref()
-                        .and_then(|n| by_tmux.get(n))
-                        .is_some_and(|s| s.needs_attention())
+                tasks.sort_by_key(|t| match t.tmux.as_deref().and_then(|n| by_tmux.get(n)) {
+                    Some(s) if s.needs_attention() => 0u8,
+                    Some(s) if s.state == SessionState::Idle => 1,
+                    _ => 2,
                 });
                 order.extend(tasks.iter().map(|t| t.id.clone()));
             }
@@ -486,6 +507,7 @@ impl App {
         let mut tasks: Vec<&TaskItem> = statuses
             .iter()
             .flat_map(|s| self.tasks.board.column(*s))
+            .filter(|t| self.tasks.matches_filter(t))
             .collect();
         let frozen = |id: &str| self.tasks.in_progress_order.iter().position(|x| x == id);
         tasks.sort_by_key(|t| frozen(&t.id).unwrap_or(usize::MAX));
@@ -552,7 +574,10 @@ impl App {
                 Ok(()) => {
                     self.tasks.board.set_status(&id, TaskItemStatus::InProgress);
                     self.focus_task(&id);
-                    format!("proceeding: {} — agent told to implement [{}]", preview, tmux)
+                    format!(
+                        "proceeding: {} — agent told to implement [{}]",
+                        preview, tmux
+                    )
                 }
                 Err(e) => format!("proceed failed: {} — task stays in planning", e),
             };
@@ -602,19 +627,22 @@ impl App {
         let id = t.id.clone();
         let preview = crate::models::first_line_truncated(&t.text, 32);
         let tmux = t.tmux.clone();
-        let to = match t.status {
-            TaskItemStatus::Done => TaskItemStatus::Todo,
-            _ => TaskItemStatus::Done,
-        };
-        self.tasks.board.set_status(&id, to);
-        self.tasks.clamp_row();
-        if to != TaskItemStatus::Done {
+        if t.status == TaskItemStatus::Done {
+            self.tasks.board.set_status(&id, TaskItemStatus::Todo);
+            self.tasks.clamp_row();
             return Some(format!("reopened: {}", preview));
         }
-        let live = tmux
-            .as_deref()
-            .filter(|n| crate::send::tmux_session_exists(n));
-        Some(match live {
+        Some(self.finish_task(&id, &preview, tmux.as_deref()))
+    }
+
+    /// Mark `id` Done and close its live agent session; the binding is kept
+    /// so `f` on the Done card can still resume the transcript. Shared by
+    /// Space (toggle) and the manual column move (`L` into Done).
+    fn finish_task(&mut self, id: &str, preview: &str, tmux: Option<&str>) -> String {
+        self.tasks.board.set_status(id, TaskItemStatus::Done);
+        self.tasks.clamp_row();
+        let live = tmux.filter(|n| crate::send::tmux_session_exists(n));
+        match live {
             Some(name) => match crate::send::kill_tmux_session(name) {
                 Ok(()) => format!("done: {} — closed agent session [{}]", preview, name),
                 Err(e) => format!(
@@ -623,6 +651,53 @@ impl App {
                 ),
             },
             None => format!("done: {}", preview),
+        }
+    }
+
+    /// `H`/`L`: move the focused card one column left (`dir < 0`) or right
+    /// by hand. Planning is agent-owned — assignment is the only way in —
+    /// so manual moves hop over it: To-Do ↔ In Progress ↔ Done. A Planning
+    /// card can still be moved out: left parks it back in To-Do, right
+    /// takes it to In Progress *without* telling the agent to proceed
+    /// (Space stays the approve path). Moving into Done closes the live
+    /// agent session exactly like Space; moving a Done card left reopens it
+    /// into In Progress. The cursor rides with the card. Returns `None`
+    /// when no task is focused or the move runs off the board's edge.
+    pub fn move_selected_task(&mut self, dir: i8) -> Option<String> {
+        let t = self.selected_board_task()?;
+        let id = t.id.clone();
+        let preview = crate::models::first_line_truncated(&t.text, 32);
+        let tmux = t.tmux.clone();
+        let to = match (t.status, dir < 0) {
+            (TaskItemStatus::Todo, false) => TaskItemStatus::InProgress,
+            (TaskItemStatus::Planning, false) => TaskItemStatus::InProgress,
+            (TaskItemStatus::InProgress, false) => TaskItemStatus::Done,
+            (TaskItemStatus::Planning, true) => TaskItemStatus::Todo,
+            (TaskItemStatus::InProgress, true) => TaskItemStatus::Todo,
+            (TaskItemStatus::Done, true) => TaskItemStatus::InProgress,
+            (TaskItemStatus::Todo, true) | (TaskItemStatus::Done, false) => return None,
+        };
+        if to == TaskItemStatus::Done {
+            let msg = self.finish_task(&id, &preview, tmux.as_deref());
+            self.focus_task(&id);
+            return Some(msg);
+        }
+        let from_planning = t.status == TaskItemStatus::Planning;
+        self.tasks.board.set_status(&id, to);
+        self.focus_task(&id);
+        self.tasks.clamp_row();
+        let label = match to {
+            TaskItemStatus::Todo => "To-Do",
+            TaskItemStatus::InProgress => "In Progress",
+            _ => unreachable!("manual moves only land in To-Do/In Progress here"),
+        };
+        Some(if from_planning && to == TaskItemStatus::InProgress {
+            format!(
+                "moved: {} → {} — agent not told to proceed (Space does that)",
+                preview, label
+            )
+        } else {
+            format!("moved: {} → {}", preview, label)
         })
     }
 
@@ -841,7 +916,10 @@ impl App {
                 }
                 self.tasks.board.assign(&id, cwd, &agent_id, &tmux);
                 self.focus_task(&id);
-                format!("assigned {} [{}] — planning (Space approves the plan)", agent_id, tmux)
+                format!(
+                    "assigned {} [{}] — planning (Space approves the plan)",
+                    agent_id, tmux
+                )
             }
             Err(e) => format!("assign failed: {}", e),
         }
@@ -853,33 +931,97 @@ impl App {
     }
 
     /// Delete the focused task. The bound agent session (if any) is left
-    /// running — it still shows on the Sessions tab. Returns the status line.
+    /// running — it still shows on the Sessions tab. The task lands in the
+    /// undo slot (`u`) and the on-disk archive. Returns the status line.
     pub fn delete_selected_task(&mut self) -> Option<String> {
         let id = self.selected_board_task()?.id.clone();
         let removed = self.tasks.board.remove(&id)?;
         self.tasks.clamp_row();
         let preview = crate::models::first_line_truncated(&removed.text, 32);
-        Some(match removed.tmux {
+        let tmux = removed.tmux.clone();
+        self.tasks.undo = Some(vec![removed]);
+        Some(match tmux {
             Some(tmux) => format!(
-                "deleted: {} — agent session [{}] left running (close it from Sessions)",
+                "deleted: {} (u undoes) — agent session [{}] left running (close it from Sessions)",
                 preview, tmux
             ),
-            None => format!("deleted: {}", preview),
+            None => format!("deleted: {} (u undoes)", preview),
         })
     }
 
     pub fn clear_done_tasks(&mut self) {
         let removed = self.tasks.board.clear_done();
         self.tasks.clamp_row();
-        if removed > 0 {
-            self.set_status(format!(
-                "cleared {} done task{}",
-                removed,
-                if removed == 1 { "" } else { "s" }
-            ));
-        } else {
+        if removed.is_empty() {
             self.set_status("no done tasks to clear".to_string());
+        } else {
+            self.set_status(format!(
+                "cleared {} done task{} (u undoes)",
+                removed.len(),
+                if removed.len() == 1 { "" } else { "s" }
+            ));
+            self.tasks.undo = Some(removed);
         }
+    }
+
+    /// `u`: restore the last `x`/`c` removal (one batch deep). Tasks whose
+    /// id somehow returned to the board (hand edit) are skipped. The cursor
+    /// jumps to the first restored card. Returns `None` when there is
+    /// nothing to undo.
+    pub fn undo_task_delete(&mut self) -> Option<String> {
+        let batch = self.tasks.undo.take()?;
+        let mut first: Option<String> = None;
+        let mut restored = 0usize;
+        for item in batch {
+            let id = item.id.clone();
+            if self.tasks.board.restore(item) {
+                restored += 1;
+                first.get_or_insert(id);
+            }
+        }
+        if restored == 0 {
+            return Some("nothing to restore — the tasks are already back".into());
+        }
+        if let Some(id) = first {
+            self.focus_task(&id);
+        }
+        Some(format!(
+            "restored {} task{}",
+            restored,
+            if restored == 1 { "" } else { "s" }
+        ))
+    }
+
+    /// `/` on the board: start editing the filter. Whatever was typed
+    /// before stays as the starting query, so `/` re-opens an applied
+    /// filter for refinement.
+    pub fn enter_task_filter(&mut self) {
+        self.view = View::TaskFilter;
+    }
+
+    /// Enter while filtering: keep the query applied and go back to normal
+    /// board navigation. An empty query just closes the bar.
+    pub fn apply_task_filter(&mut self) {
+        self.view = View::Grid;
+        self.tasks.clamp_row();
+    }
+
+    /// Esc (while filtering, or on a filtered board): drop the filter and
+    /// show the full board again.
+    pub fn clear_task_filter(&mut self) {
+        self.tasks.filter.clear();
+        self.view = View::Grid;
+        self.tasks.clamp_row();
+    }
+
+    pub fn task_filter_push(&mut self, c: char) {
+        self.tasks.filter.push(c);
+        self.tasks.clamp_row();
+    }
+
+    pub fn task_filter_pop(&mut self) {
+        self.tasks.filter.pop();
+        self.tasks.clamp_row();
     }
 
     pub fn toggle_show_inactive(&mut self) {
@@ -3263,6 +3405,260 @@ mod tests {
                 assert_eq!(t.status, TaskItemStatus::Done);
                 // The binding survives completion so `f` can still resume.
                 assert_eq!(t.tmux.as_deref(), Some("mux-dead"));
+            });
+        }
+
+        #[test]
+        fn idle_agents_float_above_working_below_needs_input() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                let a = app.tasks.board.add("a").unwrap();
+                let b = app.tasks.board.add("b").unwrap();
+                let c = app.tasks.board.add("c").unwrap();
+                app.tasks.board.assign(&a, "/tmp", "claude", "mux-a");
+                app.tasks.board.assign(&b, "/tmp", "claude", "mux-b");
+                app.tasks.board.assign(&c, "/tmp", "claude", "mux-c");
+                app.sessions.last_sessions = vec![
+                    fake_session("mux-a", SessionState::Processing),
+                    fake_session("mux-b", SessionState::Idle),
+                    fake_session("mux-c", SessionState::WaitingForInput),
+                ];
+                app.refresh_in_progress_order();
+                // Blocked-on-input first, then the idle agent (a plan or an
+                // implementation waiting for a verdict), then the one still
+                // working.
+                assert_eq!(column_order(&app), vec![c, b, a]);
+            });
+        }
+    }
+
+    #[cfg(unix)]
+    mod manual_moves {
+        use super::*;
+        use crate::test_util::with_temp_home;
+
+        #[test]
+        fn l_walks_todo_to_done_and_h_back_skipping_planning() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                let id = app.tasks.board.add("hands-on work").unwrap();
+                app.focus_task(&id);
+                // Right: To-Do → In Progress (Planning is agent-owned, so
+                // the manual move hops over it).
+                let msg = app.move_selected_task(1).unwrap();
+                assert!(msg.contains("In Progress"), "msg: {msg}");
+                assert_eq!(
+                    app.tasks.board.get(&id).unwrap().status,
+                    TaskItemStatus::InProgress
+                );
+                // The cursor rides with the card.
+                assert_eq!(app.selected_board_task().unwrap().id, id);
+                // Right again: → Done, stamping done_at exactly like Space.
+                let msg = app.move_selected_task(1).unwrap();
+                assert!(msg.starts_with("done:"), "msg: {msg}");
+                let t = app.tasks.board.get(&id).unwrap();
+                assert_eq!(t.status, TaskItemStatus::Done);
+                assert!(t.done_at.is_some());
+                // Off the right edge: refused.
+                app.focus_task(&id);
+                assert!(app.move_selected_task(1).is_none());
+                // Left: Done → In Progress reopens (done_at cleared).
+                app.move_selected_task(-1).unwrap();
+                let t = app.tasks.board.get(&id).unwrap();
+                assert_eq!(t.status, TaskItemStatus::InProgress);
+                assert!(t.done_at.is_none());
+                // Left again: → To-Do; then off the left edge.
+                app.move_selected_task(-1).unwrap();
+                assert_eq!(
+                    app.tasks.board.get(&id).unwrap().status,
+                    TaskItemStatus::Todo
+                );
+                assert!(app.move_selected_task(-1).is_none());
+            });
+        }
+
+        #[test]
+        fn planning_card_moves_out_without_proceed_prompt() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                let id = app.tasks.board.add("agent task").unwrap();
+                app.tasks.board.assign(&id, "/tmp", "claude", "mux-x");
+                app.focus_task(&id);
+                // Right: Planning → In Progress, but the agent is NOT told
+                // to proceed — approving stays Space's job.
+                let msg = app.move_selected_task(1).unwrap();
+                assert!(msg.contains("not told to proceed"), "msg: {msg}");
+                let t = app.tasks.board.get(&id).unwrap();
+                assert_eq!(t.status, TaskItemStatus::InProgress);
+                assert_eq!(t.tmux.as_deref(), Some("mux-x"));
+                // A Planning card can also be parked back in To-Do.
+                app.tasks.board.set_status(&id, TaskItemStatus::Planning);
+                app.focus_task(&id);
+                app.move_selected_task(-1).unwrap();
+                assert_eq!(
+                    app.tasks.board.get(&id).unwrap().status,
+                    TaskItemStatus::Todo
+                );
+            });
+        }
+    }
+
+    #[cfg(unix)]
+    mod board_filter {
+        use super::*;
+        use crate::test_util::with_temp_home;
+
+        fn type_filter(app: &mut App, query: &str) {
+            app.enter_task_filter();
+            for c in query.chars() {
+                app.task_filter_push(c);
+            }
+        }
+
+        #[test]
+        fn filter_narrows_columns_counts_and_selection_consistently() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                let a = app.tasks.board.add("fix the parser").unwrap();
+                let b = app.tasks.board.add("write docs").unwrap();
+                app.tasks.board.set_tags(&b, vec!["docs".into()]);
+                app.tasks.board.add("refactor scanner").unwrap();
+
+                type_filter(&mut app, "parser");
+                assert_eq!(app.view, View::TaskFilter);
+                let col: Vec<&str> = app
+                    .task_column(TaskItemStatus::Todo)
+                    .iter()
+                    .map(|t| t.id.as_str())
+                    .collect();
+                assert_eq!(col, vec![a.as_str()]);
+                // The cursor bound counts exactly what renders.
+                assert_eq!(app.tasks.column_len(0), 1);
+                assert_eq!(app.selected_board_task().unwrap().id, a);
+
+                // Tags match as `#tag`, so a `#` query reaches only tagged
+                // cards — "docs" also appears in b's text, but "#docs" only
+                // in its tag.
+                app.clear_task_filter();
+                type_filter(&mut app, "#docs");
+                let col: Vec<&str> = app
+                    .task_column(TaskItemStatus::Todo)
+                    .iter()
+                    .map(|t| t.id.as_str())
+                    .collect();
+                assert_eq!(col, vec![b.as_str()]);
+
+                // Enter keeps the filter applied; Esc clears it.
+                app.apply_task_filter();
+                assert_eq!(app.view, View::Grid);
+                assert_eq!(app.tasks.column_len(0), 1);
+                app.clear_task_filter();
+                assert_eq!(app.tasks.column_len(0), 3);
+            });
+        }
+
+        #[test]
+        fn narrowing_filter_clamps_the_cursor() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                app.tasks.board.add("alpha").unwrap();
+                app.tasks.board.add("beta").unwrap();
+                let c = app.tasks.board.add("beta two").unwrap();
+                app.focus_task(&c);
+                assert_eq!(app.tasks.row, 2);
+                type_filter(&mut app, "beta");
+                // Two cards survive; the row-2 cursor is pulled in range so
+                // the selection stays on a real card.
+                assert_eq!(app.tasks.column_len(0), 2);
+                assert!(app.tasks.row < 2);
+                assert!(app.selected_board_task().is_some());
+            });
+        }
+    }
+
+    #[cfg(unix)]
+    mod task_undo {
+        use super::*;
+        use crate::test_util::with_temp_home;
+
+        #[test]
+        fn undo_restores_deleted_task_once() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                let id = app.tasks.board.add("precious").unwrap();
+                app.focus_task(&id);
+                let msg = app.delete_selected_task().unwrap();
+                assert!(msg.contains("u undoes"), "msg: {msg}");
+                assert!(app.tasks.board.get(&id).is_none());
+                assert_eq!(app.undo_task_delete().unwrap(), "restored 1 task");
+                assert_eq!(app.tasks.board.get(&id).unwrap().text, "precious");
+                // The slot is one batch deep: a second undo finds nothing.
+                assert!(app.undo_task_delete().is_none());
+            });
+        }
+
+        #[test]
+        fn undo_restores_cleared_done_batch_with_statuses() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                let a = app.tasks.board.add("a").unwrap();
+                let b = app.tasks.board.add("b").unwrap();
+                app.tasks.board.set_status(&a, TaskItemStatus::Done);
+                app.tasks.board.set_status(&b, TaskItemStatus::Done);
+                app.clear_done_tasks();
+                assert!(app.tasks.board.tasks().is_empty());
+                assert_eq!(app.undo_task_delete().unwrap(), "restored 2 tasks");
+                // They come back Done, not To-Do — undo is not a reopen.
+                assert_eq!(
+                    app.tasks.board.get(&a).unwrap().status,
+                    TaskItemStatus::Done
+                );
+                assert_eq!(
+                    app.tasks.board.get(&b).unwrap().status,
+                    TaskItemStatus::Done
+                );
+            });
+        }
+    }
+
+    #[cfg(unix)]
+    mod quick_add {
+        use super::*;
+        use crate::test_util::with_temp_home;
+
+        #[test]
+        fn add_popup_parses_tags_and_priority_inline() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                app.enter_task_input();
+                app.tasks.input = "fix the parser #bug #api !1".into();
+                assert!(app.submit_task_input());
+                let t = app.selected_board_task().unwrap();
+                assert_eq!(t.text, "fix the parser");
+                assert_eq!(t.tags, vec!["bug", "api"]);
+                assert_eq!(t.priority, TaskPriority::P1);
+            });
+        }
+
+        #[test]
+        fn syntax_only_input_adds_nothing_and_rename_is_verbatim() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                app.enter_task_input();
+                app.tasks.input = "#bug !1".into();
+                assert!(!app.submit_task_input());
+                assert!(app.tasks.board.tasks().is_empty());
+
+                // Rename keeps the syntax as literal text — the sugar is
+                // add-only, so hashes in existing task text survive edits.
+                let id = app.tasks.board.add("plain").unwrap();
+                app.focus_task(&id);
+                assert!(app.enter_task_rename());
+                app.tasks.input = "now with #hash !1".into();
+                assert!(app.submit_task_input());
+                let t = app.tasks.board.get(&id).unwrap();
+                assert_eq!(t.text, "now with #hash !1");
+                assert!(t.tags.is_empty());
             });
         }
     }

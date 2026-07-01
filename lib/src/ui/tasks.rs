@@ -6,7 +6,7 @@
 //! the card moves to In Progress. The Planning column is optional
 //! (`ui.show_planning_column`); when hidden its cards fold into In Progress.
 
-use crate::app::{visible_task_columns, App};
+use crate::app::{visible_task_columns, App, View};
 use crate::models::{self, SessionInfo, SessionState};
 use crate::tasks::{TaskItem, TaskItemStatus, TaskPriority};
 use crate::ui::now_ms;
@@ -28,6 +28,20 @@ pub fn render_tasks_body(frame: &mut Frame, area: Rect, app: &App) {
             .wrap(Wrap { trim: false });
         frame.render_widget(hint, area);
         return;
+    }
+    // Filter bar: one row above the columns, shown while editing (`/`,
+    // live cursor) and as long as a committed filter narrows the board —
+    // an invisible filter would read as vanished tasks.
+    let mut area = area;
+    let editing = app.view == View::TaskFilter;
+    if editing || !app.tasks.filter.is_empty() {
+        let bar = Rect { height: 1, ..area };
+        area = Rect {
+            y: area.y + 1,
+            height: area.height - 1,
+            ..area
+        };
+        render_filter_bar(frame, bar, app, editing);
     }
     // Column set is config-driven: Planning is optional, so split the row
     // into equal shares of however many columns are visible.
@@ -56,6 +70,43 @@ pub fn render_tasks_body(frame: &mut Frame, area: Rect, app: &App) {
             now_secs,
         );
     }
+}
+
+/// The one-row filter strip: query (with a cursor while editing), how many
+/// cards survive across the visible columns, and the key hints for the
+/// current mode.
+fn render_filter_bar(frame: &mut Frame, area: Rect, app: &App, editing: bool) {
+    let matches: usize = (0..visible_task_columns().len())
+        .map(|c| app.tasks.column_len(c))
+        .sum();
+    let mut query = app.tasks.filter.clone();
+    if editing {
+        query.push('▎');
+    }
+    let hint = if editing {
+        "  enter:apply  esc:clear"
+    } else {
+        "  /:edit  esc:clear"
+    };
+    let line = Line::from(vec![
+        Span::styled(" / ", Style::default().fg(ACCENT_BLUE)),
+        Span::styled(
+            query,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "  ({} match{})",
+                matches,
+                if matches == 1 { "" } else { "es" }
+            ),
+            Style::default().fg(LABEL_GRAY),
+        ),
+        Span::styled(hint, Style::default().fg(DIM_TEXT)),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn column_meta(status: TaskItemStatus) -> (&'static str, &'static str, Color) {
@@ -322,6 +373,13 @@ fn meta_line(
                 SessionState::Idle if t.status == TaskItemStatus::Planning => {
                     ("●", "plan ready", Color::LightGreen)
                 }
+                // The implementation counterpart of "plan ready": an
+                // approved agent that went idle has finished (or stalled) —
+                // either way the work waits for the user's review. LightCyan
+                // matches the Projects board's Review accent.
+                SessionState::Idle if t.status == TaskItemStatus::InProgress => {
+                    ("●", "review ready", Color::LightCyan)
+                }
                 SessionState::Idle => ("●", "idle", Color::LightGreen),
                 SessionState::Inactive => ("○", "inactive", DOT_IDLE),
             },
@@ -523,6 +581,51 @@ mod tests {
         // No tags at all, or no room, yields nothing.
         assert_eq!(tags_title_text(&[], 20), None);
         assert_eq!(tags_title_text(&tags, 2), None);
+    }
+
+    fn idle_session(tmux: &str) -> SessionInfo {
+        SessionInfo {
+            agent_id: "claude".into(),
+            agent_kind: crate::agent::AgentKind::Claude,
+            pid: 1,
+            session_id: tmux.into(),
+            cwd: "/tmp".into(),
+            project_name: "tmp".into(),
+            started_at: 0,
+            last_activity: None,
+            state: SessionState::Idle,
+            last_user_message: None,
+            summary: None,
+            title: None,
+            titling: false,
+            model: None,
+            git_branch: None,
+            version: None,
+            jsonl_path: None,
+            tmux_session: Some(tmux.into()),
+            current_tool: None,
+            is_thinking: false,
+            context_tokens: None,
+            tool_uses_count: 0,
+        }
+    }
+
+    #[test]
+    fn idle_agent_badge_depends_on_card_status() {
+        // The same idle session reads differently by phase: a Planning card
+        // has a plan waiting, an In Progress card an implementation.
+        let session = idle_session("mux-1");
+        let sessions: HashMap<&str, &SessionInfo> = [("mux-1", &session)].into();
+        let mut t = card(TaskPriority::P3);
+        t.tmux = Some("mux-1".into());
+
+        t.status = TaskItemStatus::Planning;
+        let line = meta_line(&t, t.status, &sessions, 1_000).to_string();
+        assert!(line.contains("plan ready"), "line: {line}");
+
+        t.status = TaskItemStatus::InProgress;
+        let line = meta_line(&t, t.status, &sessions, 1_000).to_string();
+        assert!(line.contains("review ready"), "line: {line}");
     }
 
     #[test]

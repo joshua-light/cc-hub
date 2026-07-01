@@ -314,14 +314,25 @@ plan-first framing (investigate, present a plan, hold) — once the agent is
 idle; the card sits in **Planning** showing the live session state
 (`⟳ working`, `󰂞 needs input`, `● plan ready`), the agent's folder, and
 age. `Space` on a Planning card sends "Proceed with the implementation."
-to the agent and moves the card to In Progress. Planning and In Progress
-float cards whose agent is blocked on input to the top of the column; the
-order settles when you open the tab and stays put while you navigate (state
-flips update a card's badge in place, never its row). Done cards keep their
-agent binding — `󰚩 claude · <dir>` marks a task an agent ran, and `f`
-still reopens its transcript. Every card carries a priority badge on its
-top-right (`P1` red · `P2` yellow · `P3` green · `P4` blue, `1`–`4` to set);
-columns sort by priority first, so the most urgent cards float to the top.
+to the agent and moves the card to In Progress; once that agent goes idle
+the card reads `● review ready` (cyan) — the implementation counterpart of
+plan ready. Planning and In Progress float cards whose agent waits on a
+human — blocked on input first, then idle plan/review-ready — to the top
+of the column; the order settles when you open the tab and stays put while
+you navigate (state flips update a card's badge in place, never its row).
+Done cards keep their agent binding — `󰚩 claude · <dir>` marks a task an
+agent ran, and `f` still reopens its transcript. Every card carries a
+priority badge on its top-right (`P1` red · `P2` yellow · `P3` green ·
+`P4` blue, `1`–`4` to set); columns sort by priority first, so the most
+urgent cards float to the top.
+
+The add popup understands a quick syntax: `#tag` tokens become tags and
+`!1`–`!4` sets the priority, so `fix the parser #bug !1` lands a tagged P1
+card in one round-trip (rename leaves such tokens as literal text). `/`
+filters the board — the query fuzzy-matches card text and `#tag`s across
+all columns, Enter keeps it applied, Esc clears it. Deletions are
+recoverable: `u` restores the last `x`/`c` removal, and every removed task
+is also appended to `~/.cc-hub/tasks-archive.json`.
 
 The **Planning** column is optional — set `[ui] show_planning_column = false`
 to drop it. Its cards then fold into **In Progress** (still showing
@@ -332,13 +343,16 @@ plan-first workflow keeps working with one fewer column.
 |---|---|
 | `h` / `l` (or arrows) | Switch column |
 | `j` / `k` (or arrows) | Move within the column |
-| `a` / `n` | Add a task (lands in To-Do) |
+| `H` / `L` | Move the focused card one column left/right by hand. Planning is agent-owned, so manual moves hop over it (To-Do ↔ In Progress ↔ Done); moving a Planning card right takes it to In Progress *without* telling the agent to proceed. Into Done closes the live agent session like `Space`; out of Done reopens |
+| `a` / `n` | Add a task (lands in To-Do; `#tag` and `!1`–`!4` tokens set tags/priority inline) |
+| `/` | Filter the board (fuzzy over text and `#tag`s; Enter keeps it applied, Esc clears — also from the board) |
 | `1` – `4` | Set priority P1–P4 (sorts the column P1-first; P1 red · P2 yellow · P3 green · P4 blue) |
 | `s` | Assign an agent: project picker (registered projects · bookmarks · recent dirs, fuzzy-filtered by typing — `Tab` flips to a plain folder browser; the last-assigned folder is preselected) → spawn session there prompted to plan first → card moves to Planning |
 | `Enter` / `f` | Attach the bound agent's pane (embedded); resumes the session if its tmux died; hints `s` when unassigned |
 | `Space` | On a Planning card: approve the plan — the agent is told to proceed and the card moves to In Progress (resumes the session first if its tmux died). Elsewhere: toggle Done / reopen (completing closes the live agent session; the transcript binding is kept) |
-| `x` | Delete the task (a bound agent session is left running — close it from Sessions) |
-| `c` | Clear all Done tasks |
+| `x` | Delete the task (a bound agent session is left running — close it from Sessions); archived to `tasks-archive.json` |
+| `u` | Undo the last `x`/`c` removal (one batch deep, this session only) |
+| `c` | Clear all Done tasks (archived; `u` restores) |
 
 ### Sessions tab (grid view)
 

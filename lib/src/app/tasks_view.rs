@@ -3,7 +3,8 @@
 //! waiting on a folder pick for agent assignment.
 
 use crate::config;
-use crate::tasks::{TaskBoard, TaskItemStatus};
+use crate::fuzzy::fuzzy_match;
+use crate::tasks::{TaskBoard, TaskItem, TaskItemStatus};
 
 /// Full board column order. Planning is optional at render time (see
 /// [`visible_task_columns`]); this stays the canonical set the board logic
@@ -79,6 +80,15 @@ pub struct TasksView {
     /// Ids no longer in the column are skipped; tasks not in the list (e.g.
     /// assigned since entry) render after it in insertion order.
     pub in_progress_order: Vec<String>,
+    /// Active board filter (`/`). Empty means no filter. Applied by
+    /// [`Self::matches_filter`] to every column's cards and counts; edited
+    /// live in [`crate::app::View::TaskFilter`] and kept when that view
+    /// closes with Enter, so the board stays narrowed until Esc clears it.
+    pub filter: String,
+    /// Last `x`/`c` removal, one batch deep, for `u` to restore. Held in
+    /// memory only — restarts forget it, but the on-disk archive
+    /// (`tasks-archive.json`) still has every removed task.
+    pub undo: Option<Vec<TaskItem>>,
 }
 
 impl TasksView {
@@ -92,7 +102,23 @@ impl TasksView {
             tagging: None,
             pending_assign: None,
             in_progress_order: Vec::new(),
+            filter: String::new(),
+            undo: None,
         }
+    }
+
+    /// Does `t` survive the active filter? An empty filter passes
+    /// everything. The query fuzzy-matches the card text, or any tag as
+    /// `#tag` — so a `#bug` query narrows to tagged cards without also
+    /// matching arbitrary text.
+    pub fn matches_filter(&self, t: &TaskItem) -> bool {
+        if self.filter.is_empty() {
+            return true;
+        }
+        fuzzy_match(&self.filter, &t.text).is_some()
+            || t.tags
+                .iter()
+                .any(|tag| fuzzy_match(&self.filter, &format!("#{}", tag)).is_some())
     }
 
     /// Reload the board from disk (picks up hand edits / other instances),
@@ -107,12 +133,20 @@ impl TasksView {
         cols[self.col.min(cols.len() - 1)]
     }
 
+    /// Cards under visible column `col`, after the filter — the cursor's
+    /// bound, so it must count exactly what the column renders.
     pub fn column_len(&self, col: usize) -> usize {
         let cols = visible_task_columns();
         let status = cols[col.min(cols.len() - 1)];
         column_statuses(status)
             .into_iter()
-            .map(|s| self.board.column(s).len())
+            .map(|s| {
+                self.board
+                    .column(s)
+                    .into_iter()
+                    .filter(|t| self.matches_filter(t))
+                    .count()
+            })
             .sum()
     }
 

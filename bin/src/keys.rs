@@ -99,17 +99,38 @@ pub(crate) async fn handle_key(
         (View::Grid, KeyCode::Left | KeyCode::Char('h')) if on_tasks => {
             app.tasks.col_left();
         }
+        // `H`/`L` move the focused card one column left/right by hand
+        // (Planning is agent-owned, so manual moves hop over it).
+        (View::Grid, KeyCode::Char('L')) if on_tasks => match app.move_selected_task(1) {
+            Some(msg) => app.set_status(msg),
+            None => app.set_status("nothing to move right".into()),
+        },
+        (View::Grid, KeyCode::Char('H')) if on_tasks => match app.move_selected_task(-1) {
+            Some(msg) => app.set_status(msg),
+            None => app.set_status("nothing to move left".into()),
+        },
         (View::Grid, KeyCode::Char('a') | KeyCode::Char('n')) if on_tasks => {
             app.enter_task_input();
         }
+        // `/` edits the board filter; on an already-filtered board Esc
+        // clears it without entering the edit mode.
+        (View::Grid, KeyCode::Char('/')) if on_tasks => {
+            app.enter_task_filter();
+        }
+        (View::Grid, KeyCode::Esc) if on_tasks && !app.tasks.filter.is_empty() => {
+            app.clear_task_filter();
+        }
+        // `u` restores the last `x`/`c` removal.
+        (View::Grid, KeyCode::Char('u')) if on_tasks => match app.undo_task_delete() {
+            Some(msg) => app.set_status(msg),
+            None => app.set_status("nothing to undo".into()),
+        },
         // Space is status-aware: approves a Planning card's plan (tells the
         // agent to proceed, card → In Progress), toggles Done elsewhere.
-        (View::Grid, KeyCode::Char(' ')) if on_tasks => {
-            match app.task_space_action() {
-                Some(msg) => app.set_status(msg),
-                None => app.set_status("no task focused".into()),
-            }
-        }
+        (View::Grid, KeyCode::Char(' ')) if on_tasks => match app.task_space_action() {
+            Some(msg) => app.set_status(msg),
+            None => app.set_status("no task focused".into()),
+        },
         (View::Grid, KeyCode::Char('s')) if on_tasks => {
             if !app.enter_task_assign_picker() {
                 app.set_status("focus an unfinished task to assign an agent".into());
@@ -241,6 +262,20 @@ pub(crate) async fn handle_key(
         }
         (View::TaskTags, KeyCode::Char(c)) => {
             app.tasks.input.push(c);
+        }
+        // Board filter: typing narrows the columns live; Enter keeps the
+        // query applied, Esc drops it.
+        (View::TaskFilter, KeyCode::Esc) => {
+            app.clear_task_filter();
+        }
+        (View::TaskFilter, KeyCode::Enter) => {
+            app.apply_task_filter();
+        }
+        (View::TaskFilter, KeyCode::Backspace) => {
+            app.task_filter_pop();
+        }
+        (View::TaskFilter, KeyCode::Char(c)) => {
+            app.task_filter_push(c);
         }
         // Kanban: j/k moves the row cursor within the focused
         // column; h/l switches column; H/L (or [/]) cycles project chips.

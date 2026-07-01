@@ -33,9 +33,7 @@ pub enum TaskItemStatus {
 /// (`P1 < P2 < P3 < P4`), so a plain ascending sort puts the most urgent
 /// first. New tasks (and any loaded from a pre-priority `tasks.json`) default
 /// to `P3` — explicitly raising a task is what lifts it above the pack.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskPriority {
     P1,
@@ -85,6 +83,47 @@ pub fn parse_tags(input: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Parsed form of the add popup's quick syntax: `#word` tokens become tags
+/// and a `!1`–`!4` token sets the priority; everything else stays as the
+/// task text. Rename leaves text verbatim — the syntax is capture-time
+/// sugar only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuickAdd {
+    pub text: String,
+    pub tags: Vec<String>,
+    pub priority: Option<TaskPriority>,
+}
+
+/// Split the add popup's buffer into text, tags, and priority. Tag tokens
+/// run through [`parse_tags`], so the tag editor's normalization and caps
+/// apply here too. Several `!N` tokens keep the last one; a bare `#` or an
+/// out-of-range `!5` is ordinary text.
+pub fn parse_quick_add(input: &str) -> QuickAdd {
+    let mut words: Vec<&str> = Vec::new();
+    let mut tag_words: Vec<&str> = Vec::new();
+    let mut priority = None;
+    for tok in input.split_whitespace() {
+        if let Some(rest) = tok.strip_prefix('#') {
+            if !rest.is_empty() {
+                tag_words.push(rest);
+                continue;
+            }
+        }
+        match tok {
+            "!1" => priority = Some(TaskPriority::P1),
+            "!2" => priority = Some(TaskPriority::P2),
+            "!3" => priority = Some(TaskPriority::P3),
+            "!4" => priority = Some(TaskPriority::P4),
+            _ => words.push(tok),
+        }
+    }
+    QuickAdd {
+        text: words.join(" "),
+        tags: parse_tags(&tag_words.join(" ")),
+        priority,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -310,24 +349,41 @@ impl TaskBoard {
     }
 
     /// Remove the task with `id`, returning it so the caller can describe
-    /// what was deleted (and whether an agent session survives it). Persists.
+    /// what was deleted (and whether an agent session survives it). The
+    /// removed task is appended to the on-disk archive. Persists.
     pub fn remove(&mut self, id: &str) -> Option<TaskItem> {
         let idx = self.tasks.iter().position(|t| t.id == id)?;
         let removed = self.tasks.remove(idx);
         let _ = self.save();
+        archive_tasks(std::slice::from_ref(&removed));
         Some(removed)
     }
 
-    /// Drop every Done task, preserving the order of the rest. Returns the
-    /// number removed. Only persists when something actually changed.
-    pub fn clear_done(&mut self) -> usize {
-        let before = self.tasks.len();
-        self.tasks.retain(|t| t.status != TaskItemStatus::Done);
-        let removed = before - self.tasks.len();
-        if removed > 0 {
-            let _ = self.save();
+    /// Re-insert a previously removed task (undo of `x`/`c`). Skips ids
+    /// already on the board (double-undo, hand edits); returns whether it
+    /// landed. Persists.
+    pub fn restore(&mut self, item: TaskItem) -> bool {
+        if self.get(&item.id).is_some() {
+            return false;
         }
-        removed
+        self.tasks.push(item);
+        let _ = self.save();
+        true
+    }
+
+    /// Drop every Done task, preserving the order of the rest. The removed
+    /// tasks are appended to the on-disk archive and returned so the caller
+    /// can offer undo. Only persists when something actually changed.
+    pub fn clear_done(&mut self) -> Vec<TaskItem> {
+        let (done, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut self.tasks)
+            .into_iter()
+            .partition(|t| t.status == TaskItemStatus::Done);
+        self.tasks = keep;
+        if !done.is_empty() {
+            let _ = self.save();
+            archive_tasks(&done);
+        }
+        done
     }
 
     fn save(&self) -> std::io::Result<()> {
@@ -340,6 +396,29 @@ impl TaskBoard {
 
 fn tasks_path() -> Option<PathBuf> {
     cc_hub_home().map(|h| h.join("tasks.json"))
+}
+
+fn archive_path() -> Option<PathBuf> {
+    cc_hub_home().map(|h| h.join("tasks-archive.json"))
+}
+
+/// Append removed tasks to `~/.cc-hub/tasks-archive.json` (a bare JSON
+/// array), so `x` and `c` are recoverable beyond the in-session undo slot.
+/// The archive is a log, not a ledger: an undone delete leaves its copy
+/// behind, and a corrupt file starts fresh — same policy as the board.
+fn archive_tasks(items: &[TaskItem]) {
+    if items.is_empty() {
+        return;
+    }
+    let Some(path) = archive_path() else {
+        return;
+    };
+    let mut archived: Vec<TaskItem> = fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    archived.extend(items.iter().cloned());
+    let _ = crate::persist::save_json(&path, &archived);
 }
 
 // Unix-only for the same reason as todo.rs: isolation works by redirecting
@@ -472,10 +551,7 @@ mod tests {
             let id = b.add("label me").unwrap();
             assert!(b.get(&id).unwrap().tags.is_empty());
             b.set_tags(&id, parse_tags("bug api"));
-            assert_eq!(
-                TaskBoard::load().get(&id).unwrap().tags,
-                vec!["bug", "api"]
-            );
+            assert_eq!(TaskBoard::load().get(&id).unwrap().tags, vec!["bug", "api"]);
             // Re-setting the same set is a no-op; clearing removes them.
             b.set_tags(&id, parse_tags("bug api"));
             assert_eq!(b.get(&id).unwrap().tags, vec!["bug", "api"]);
@@ -512,11 +588,56 @@ mod tests {
             let a = b.add("a").unwrap();
             let c = b.add("c").unwrap();
             b.set_status(&a, TaskItemStatus::Done);
-            assert_eq!(b.clear_done(), 1);
-            assert_eq!(b.clear_done(), 0);
+            let cleared = b.clear_done();
+            assert_eq!(cleared.len(), 1);
+            assert_eq!(cleared[0].id, a);
+            assert!(b.clear_done().is_empty());
             assert!(b.remove(&c).is_some());
             assert!(b.remove(&c).is_none());
             assert!(TaskBoard::load().tasks().is_empty());
         });
+    }
+
+    #[test]
+    fn removals_land_in_archive_and_restore_reinserts() {
+        with_temp_home(|| {
+            let mut b = TaskBoard::load();
+            let a = b.add("deleted one").unwrap();
+            let d = b.add("done one").unwrap();
+            b.set_status(&d, TaskItemStatus::Done);
+            let removed = b.remove(&a).unwrap();
+            b.clear_done();
+            // Both removal paths append to the archive file.
+            let raw = fs::read_to_string(archive_path().unwrap()).unwrap();
+            let archived: Vec<TaskItem> = serde_json::from_str(&raw).unwrap();
+            assert_eq!(
+                archived.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+                vec![a.as_str(), d.as_str()]
+            );
+            // Undo restores the task (with its id); a second restore of the
+            // same id is refused.
+            assert!(b.restore(removed.clone()));
+            assert!(!b.restore(removed));
+            assert_eq!(TaskBoard::load().get(&a).unwrap().text, "deleted one");
+        });
+    }
+
+    #[test]
+    fn parse_quick_add_splits_text_tags_priority() {
+        let q = parse_quick_add("fix the parser #bug #api !2");
+        assert_eq!(q.text, "fix the parser");
+        assert_eq!(q.tags, vec!["bug", "api"]);
+        assert_eq!(q.priority, Some(TaskPriority::P2));
+        // Syntax tokens can sit anywhere; the last `!N` wins; a bare `#`
+        // and an out-of-range `!5` stay text.
+        let q = parse_quick_add("!4 ship #Infra it !1 # !5");
+        assert_eq!(q.text, "ship it # !5");
+        assert_eq!(q.tags, vec!["infra"]);
+        assert_eq!(q.priority, Some(TaskPriority::P1));
+        // Plain input passes through untouched.
+        let q = parse_quick_add("just words");
+        assert_eq!(q.text, "just words");
+        assert!(q.tags.is_empty());
+        assert_eq!(q.priority, None);
     }
 }
