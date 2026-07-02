@@ -6,8 +6,16 @@
 //! shifting under it.
 //!
 //! The lock lives at `~/.cc-hub/projects/<pid>/merge.lock` and contains a
-//! JSON record naming the holder. Acquisition is `O_EXCL` create — the
-//! filesystem decides who wins a race. Release is a simple delete.
+//! JSON record naming the holder. Every mutation (acquire, refresh, steal,
+//! phase/prior_ref update, release) runs under an exclusive advisory flock on
+//! a sidecar `merge.guard` file — the same fs2 pattern the per-task
+//! `state.lock` uses — so read-decide-write sequences can't interleave across
+//! processes. The guard is held only for the milliseconds of the mutation,
+//! never across the Merging phase itself; the merge.lock *record* is what
+//! persists (and what stale detection reasons about), while the advisory
+//! guard auto-releases on process death and therefore can't go stale itself.
+//! The record is always written via tempfile+rename, so unguarded readers
+//! never observe a partial file.
 //!
 //! Stale-lock detection: if the holder's tmux session is gone, the lock is
 //! treated as released and a fresh acquisition is allowed. This rescues
@@ -82,6 +90,14 @@ pub struct MergeLock {
     pub orchestrator_tmux: Option<String>,
     #[serde(default)]
     pub phase: MergePhase,
+    /// The branch/ref the project root was on before `pr merge` checked out
+    /// `base`. Stashed here so `pr finalize` can restore HEAD *after* the whole
+    /// on-main Merging phase (build gate + /simplify + /bump) instead of
+    /// `pr merge` bouncing HEAD back to the feature branch — which would run
+    /// those on-main steps on the wrong branch. `None` when HEAD was detached
+    /// or undeterminable, or before `pr merge` records it.
+    #[serde(default)]
+    pub prior_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,65 +130,103 @@ pub fn acquire(
         fs::create_dir_all(parent)?;
     }
 
-    if let Some(existing) = read_lock(&path)? {
-        if existing.task_id == task_id {
-            // We already hold it — refresh and return Acquired. Preserve
-            // phase so a re-acquire mid-/simplify/-bump doesn't bounce
-            // back to Merging.
-            let refreshed = MergeLock {
-                task_id: task_id.to_string(),
-                acquired_at: orchestrator::now_unix_secs(),
-                orchestrator_tmux: orchestrator_tmux.map(str::to_string),
-                phase: existing.phase,
-            };
-            write_lock(&path, &refreshed)?;
-            return Ok(AcquireOutcome::Acquired);
-        }
-        if !is_stale(&existing) {
-            return Ok(AcquireOutcome::Held(existing));
-        }
-        log::info!(
-            "merge_lock: clearing stale lock held by {} (age {}s, tmux alive: {})",
-            existing.task_id,
-            orchestrator::now_unix_secs() - existing.acquired_at,
-            existing
-                .orchestrator_tmux
-                .as_deref()
-                .map(crate::send::tmux_session_exists)
-                .unwrap_or(false),
-        );
-        // Fall through: stale, can be overwritten.
-    }
+    with_guard(&path, || {
+        let existing = read_lock_guarded(&path)?;
 
-    let lock = MergeLock {
-        task_id: task_id.to_string(),
-        acquired_at: orchestrator::now_unix_secs(),
-        orchestrator_tmux: orchestrator_tmux.map(str::to_string),
-        phase: MergePhase::Merging,
-    };
-    write_lock(&path, &lock)?;
-    Ok(AcquireOutcome::Acquired)
+        if let Some(existing) = existing {
+            if existing.task_id == task_id {
+                // We already hold it — refresh `acquired_at`, preserving phase
+                // and prior_ref so a re-acquire mid-/simplify/-bump doesn't
+                // reset them.
+                let refreshed = MergeLock {
+                    task_id: task_id.to_string(),
+                    acquired_at: orchestrator::now_unix_secs(),
+                    orchestrator_tmux: orchestrator_tmux.map(str::to_string),
+                    phase: existing.phase,
+                    prior_ref: existing.prior_ref,
+                };
+                write_lock(&path, &refreshed)?;
+                return Ok(AcquireOutcome::Acquired);
+            }
+
+            if !is_stale(&existing) {
+                return Ok(AcquireOutcome::Held(existing));
+            }
+
+            log::info!(
+                "merge_lock: clearing stale lock held by {} (age {}s, tmux alive: {})",
+                existing.task_id,
+                orchestrator::now_unix_secs() - existing.acquired_at,
+                existing
+                    .orchestrator_tmux
+                    .as_deref()
+                    .map(crate::send::tmux_session_exists)
+                    .unwrap_or(false),
+            );
+            // Fall through: stale — the guard makes overwriting race-free.
+        }
+
+        let lock = MergeLock {
+            task_id: task_id.to_string(),
+            acquired_at: orchestrator::now_unix_secs(),
+            orchestrator_tmux: orchestrator_tmux.map(str::to_string),
+            phase: MergePhase::Merging,
+            prior_ref: None,
+        };
+        write_lock(&path, &lock)?;
+        Ok(AcquireOutcome::Acquired)
+    })
 }
 
 /// Update the lock's phase if `task_id` is the current holder. Returns
 /// `Ok(true)` on success, `Ok(false)` if there's no lock or the holder is
-/// someone else. Atomic via the existing `write_lock` rename helper.
+/// someone else.
 pub fn set_phase(project_id: &str, task_id: &str, phase: MergePhase) -> io::Result<bool> {
     let path = merge_lock_path(project_id).ok_or_else(|| io::Error::other("no home dir"))?;
-    let Some(mut existing) = read_lock(&path)? else {
-        return Ok(false);
-    };
-    if existing.task_id != task_id {
-        log::warn!(
-            "merge_lock: task {} tried to set phase on lock held by {}",
-            task_id,
-            existing.task_id,
-        );
-        return Ok(false);
-    }
-    existing.phase = phase;
-    write_lock(&path, &existing)?;
-    Ok(true)
+    with_guard(&path, || {
+        let Some(mut existing) = read_lock_guarded(&path)? else {
+            return Ok(false);
+        };
+        if existing.task_id != task_id {
+            log::warn!(
+                "merge_lock: task {} tried to set phase on lock held by {}",
+                task_id,
+                existing.task_id,
+            );
+            return Ok(false);
+        }
+        existing.phase = phase;
+        write_lock(&path, &existing)?;
+        Ok(true)
+    })
+}
+
+/// Record the ref the project root was on before `pr merge` checked out the
+/// base branch, so `pr finalize` can restore it after the on-main Merging
+/// phase. Same holder-guard + atomic-write semantics as [`set_phase`]: returns
+/// `Ok(false)` if there's no lock or the caller isn't the holder.
+pub fn set_prior_ref(
+    project_id: &str,
+    task_id: &str,
+    prior_ref: Option<String>,
+) -> io::Result<bool> {
+    let path = merge_lock_path(project_id).ok_or_else(|| io::Error::other("no home dir"))?;
+    with_guard(&path, || {
+        let Some(mut existing) = read_lock_guarded(&path)? else {
+            return Ok(false);
+        };
+        if existing.task_id != task_id {
+            log::warn!(
+                "merge_lock: task {} tried to set prior_ref on lock held by {}",
+                task_id,
+                existing.task_id,
+            );
+            return Ok(false);
+        }
+        existing.prior_ref = prior_ref;
+        write_lock(&path, &existing)?;
+        Ok(true)
+    })
 }
 
 /// Blocking variant of [`acquire`] for orchestrators that want to wait
@@ -210,19 +264,26 @@ pub fn acquire_blocking(
 /// double-release is not an error). Returns `Ok(true)` on actual release.
 pub fn release(project_id: &str, task_id: &str) -> io::Result<bool> {
     let path = merge_lock_path(project_id).ok_or_else(|| io::Error::other("no home dir"))?;
-    let Some(existing) = read_lock(&path)? else {
-        return Ok(false);
-    };
-    if existing.task_id != task_id {
-        log::warn!(
-            "merge_lock: task {} tried to release lock held by {}",
-            task_id,
-            existing.task_id
-        );
-        return Ok(false);
-    }
-    fs::remove_file(&path)?;
-    Ok(true)
+    with_guard(&path, || {
+        let Some(existing) = read_lock_guarded(&path)? else {
+            return Ok(false);
+        };
+        if existing.task_id != task_id {
+            log::warn!(
+                "merge_lock: task {} tried to release lock held by {}",
+                task_id,
+                existing.task_id
+            );
+            return Ok(false);
+        }
+        // Holder verified under the guard — no steal can interleave before
+        // the delete.
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
+    })
 }
 
 /// Read the current holder, if any. Returns `Ok(None)` if no lock exists.
@@ -256,6 +317,45 @@ fn read_lock(path: &std::path::Path) -> io::Result<Option<MergeLock>> {
         },
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
+    }
+}
+
+/// Serialize a merge.lock mutation across processes: exclusive advisory flock
+/// on the sidecar `merge.guard`, held for the duration of `f`. flock follows
+/// the inode, so the guard must be a stable sidecar — the record itself is
+/// tempfile+rename'd and can't be locked directly. The advisory lock
+/// auto-releases on process death, so the guard can't strand the project the
+/// way a stale record could.
+fn with_guard<T>(path: &std::path::Path, f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    use fs2::FileExt;
+    // Callers can run before the project state dir exists (e.g. a release or
+    // prior_ref no-op against a never-locked project) — the guard file's
+    // parent must exist to take the flock at all.
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let guard = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("guard"))?;
+    guard.lock_exclusive()?;
+    let result = f();
+    let _ = guard.unlock();
+    result
+}
+
+/// [`read_lock`] for use inside a guarded mutation: a corrupt record is
+/// logged and treated as absent so the guarded writer can recover the
+/// project by overwriting it, instead of every future acquire hard-failing.
+/// Unguarded readers ([`current_holder`]) keep the strict error.
+fn read_lock_guarded(path: &std::path::Path) -> io::Result<Option<MergeLock>> {
+    match read_lock(path) {
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+            log::warn!("merge_lock: discarding corrupt lock record: {}", e);
+            Ok(None)
+        }
+        other => other,
     }
 }
 
@@ -345,6 +445,7 @@ mod tests {
                 acquired_at: orchestrator::now_unix_secs() - STALE_TTL_SECS - 10,
                 orchestrator_tmux: None,
                 phase: MergePhase::Merging,
+                prior_ref: None,
             };
             write_lock(&path, &stale).unwrap();
 
@@ -421,6 +522,110 @@ mod tests {
             let _ = acquire("p1", "t-1", None).expect("refresh");
             let lock = current_holder("p1").expect("read").expect("present");
             assert_eq!(lock.phase, MergePhase::Simplify);
+        });
+    }
+
+    #[test]
+    fn fresh_acquire_has_no_prior_ref() {
+        with_tempdir(|| {
+            let _ = acquire("p1", "t-1", None).expect("acquire");
+            let lock = current_holder("p1").expect("read").expect("present");
+            assert_eq!(lock.prior_ref, None);
+        });
+    }
+
+    #[test]
+    fn set_prior_ref_persists_and_survives_refresh() {
+        with_tempdir(|| {
+            let _ = acquire("p1", "t-1", None).expect("acquire");
+            assert!(set_prior_ref("p1", "t-1", Some("dev".into())).expect("set_prior_ref"));
+            let lock = current_holder("p1").expect("read").expect("present");
+            assert_eq!(lock.prior_ref.as_deref(), Some("dev"));
+
+            // A same-task re-acquire must not clobber the stashed prior_ref.
+            let _ = acquire("p1", "t-1", None).expect("refresh");
+            let lock = current_holder("p1").expect("read").expect("present");
+            assert_eq!(lock.prior_ref.as_deref(), Some("dev"));
+        });
+    }
+
+    #[test]
+    fn set_prior_ref_rejects_non_holder() {
+        with_tempdir(|| {
+            let _ = acquire("p1", "t-1", None).expect("acquire");
+            assert!(!set_prior_ref("p1", "t-2", Some("dev".into())).expect("set_prior_ref"));
+            let lock = current_holder("p1").expect("read").expect("present");
+            assert_eq!(lock.prior_ref, None);
+        });
+    }
+
+    #[test]
+    fn set_prior_ref_without_lock_is_noop() {
+        with_tempdir(|| {
+            assert!(!set_prior_ref("p1", "t-1", Some("dev".into())).expect("set_prior_ref"));
+        });
+    }
+
+    #[test]
+    fn acquire_over_existing_is_atomic_create_then_held() {
+        // Two sequential acquires by different tasks: the first creates the
+        // record under the guard, the second reads it under the guard and
+        // returns Held without touching it.
+        with_tempdir(|| {
+            match acquire("p1", "t-1", None).expect("first") {
+                AcquireOutcome::Acquired => {}
+                other => panic!("expected Acquired, got {:?}", other),
+            }
+            match acquire("p1", "t-2", None).expect("second") {
+                AcquireOutcome::Held(l) => assert_eq!(l.task_id, "t-1"),
+                other => panic!("expected Held, got {:?}", other),
+            }
+            // Holder unchanged — the losing acquire must not have overwritten it.
+            let lock = current_holder("p1").expect("read").expect("present");
+            assert_eq!(lock.task_id, "t-1");
+        });
+    }
+
+    #[test]
+    fn acquire_recovers_from_corrupt_lock_record() {
+        // A truncated/garbage merge.lock (disk corruption; the guarded writers
+        // themselves never leave one) must not brick the project: a guarded
+        // acquire logs, discards it, and takes the lock.
+        with_tempdir(|| {
+            let path = merge_lock_path("p1").expect("path");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "{ not json").unwrap();
+
+            match acquire("p1", "t-1", None).expect("acquire over corrupt") {
+                AcquireOutcome::Acquired => {}
+                other => panic!("expected Acquired, got {:?}", other),
+            }
+            let lock = current_holder("p1").expect("read").expect("present");
+            assert_eq!(lock.task_id, "t-1");
+        });
+    }
+
+    #[test]
+    fn concurrent_acquires_yield_exactly_one_winner() {
+        // 8 threads race a fresh acquire for distinct tasks; the guard must
+        // hand the lock to exactly one (the rest see Held).
+        with_tempdir(|| {
+            let home = std::env::var("HOME").expect("HOME set by with_tempdir");
+            let handles: Vec<_> = (0..8)
+                .map(|i| {
+                    let home = home.clone();
+                    std::thread::spawn(move || {
+                        std::env::set_var("HOME", &home);
+                        acquire("p1", &format!("t-{}", i), None).expect("acquire")
+                    })
+                })
+                .collect();
+            let outcomes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            let winners = outcomes
+                .iter()
+                .filter(|o| matches!(o, AcquireOutcome::Acquired))
+                .count();
+            assert_eq!(winners, 1, "outcomes: {:?}", outcomes);
         });
     }
 

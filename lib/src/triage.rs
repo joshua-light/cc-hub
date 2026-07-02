@@ -85,8 +85,9 @@ pub fn tick() -> TickOutcome {
 
     // Stamp every considered task that wasn't picked, so a Claude failure
     // (or a hold) doesn't put us in a tight retry loop. The picked task is
-    // skipped — start_backlog_task rewrites its state with status=Planning,
-    // and stamping an already-promoted task is just a wasted disk write.
+    // skipped here: on success start_backlog_task rewrites its state with
+    // status=Planning, and on failure the Err arm below stamps it — either
+    // way an extra write here would be redundant or wasted.
     // The no-touch variant skips `touch()` so the kanban doesn't reshuffle
     // every TTL purely from triage stamping.
     for t in &tasks {
@@ -121,6 +122,21 @@ pub fn tick() -> TickOutcome {
                 }
                 Err(e) => {
                     warn!("triage: start_backlog_task failed for {}: {}", task_id, e);
+                    // start_backlog_task did NOT rewrite the task's state, so its
+                    // old triaged_at still stands and it stays the sole eligible
+                    // candidate — without this stamp triage would re-ask Claude
+                    // (a paid call) every tick. Stamp it now so the TTL throttle
+                    // applies until the next window.
+                    if let Err(stamp_err) =
+                        update_task_state_no_touch(&project.id, &task_id, |s| {
+                            s.triaged_at = Some(now);
+                        })
+                    {
+                        warn!(
+                            "triage: failed to stamp triaged_at on {}: {}",
+                            task_id, stamp_err
+                        );
+                    }
                     TickOutcome {
                         promotion: None,
                         status: Some(format!("triage: failed to promote {}: {}", task_id, e)),

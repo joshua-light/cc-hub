@@ -205,80 +205,103 @@ pub fn task_report(
     opts: ReportOpts,
 ) -> Result<ReportOutcome, OpError> {
     let raw_status = opts.status;
-
-    let prev_status = orchestrator::read_task_state(project_id, task_id)
-        .ok()
-        .map(|s| s.status);
-
-    // Backlog is only a valid target from a Backlog state. Flipping a
-    // running task to Backlog would hide it from the kanban while leaving
-    // the orchestrator/tmux session alive — a zombie.
-    if raw_status.as_ref() == Some(&TaskStatus::Backlog)
-        && prev_status.as_ref() != Some(&TaskStatus::Backlog)
-    {
-        return Err(OpError::Usage(
-            "--status backlog is only valid from a Backlog state".into(),
-        ));
-    }
-
-    // Symmetric guard: leaving Backlog requires an orchestrator spawn,
-    // which only `task start` provides. A bare status flip would mutate
-    // the on-disk state to e.g. Running without any tmux/session, leaving
-    // a zombie that the `s` keybind can't recover (it requires Backlog).
-    if raw_status.is_some()
-        && prev_status.as_ref() == Some(&TaskStatus::Backlog)
-        && raw_status.as_ref() != Some(&TaskStatus::Backlog)
-    {
-        return Err(OpError::Usage(
-            "use cc-hub task start --task ID to launch a Backlog task; \
-             task report --status cannot spawn an orchestrator"
-                .into(),
-        ));
-    }
-
-    // `--status running` on a Review task with a live PR would silently
-    // clobber the Review state the PR flow just established — a recurring
-    // orchestrator mistake right after `pr create`. The sanctioned path
-    // back to Running is `pr request-changes`. PR-less Review tasks keep
-    // the direct path: they have no PR verb to do it for them.
-    if raw_status.as_ref() == Some(&TaskStatus::Running)
-        && prev_status.as_ref() == Some(&TaskStatus::Review)
-    {
-        let live_pr = matches!(
-            crate::pr::read_pr(project_id, task_id),
-            Ok(Some(p)) if !matches!(
-                p.review_state,
-                crate::pr::ReviewState::Merged | crate::pr::ReviewState::Closed
-            )
-        );
-        if live_pr {
-            return Err(OpError::Usage(
-                "task is in Review with a live PR — use `cc-hub pr request-changes` \
-                 to send it back to Running (or `--status review` / no --status to \
-                 report progress)"
-                    .into(),
-            ));
-        }
-    }
-
-    // An orchestrator's `--status done` means "I'm finished" — it does NOT
-    // mean the work is approved. Route that into Review so a human (or
-    // future agentic reviewer) signs off via the TUI's `Space` keybind.
-    // The exception: if the task is already in Review, an explicit `done`
-    // is the approval path (used by `approve_review_task`'s subprocess
-    // fallback, if any) — let it through.
-    let effective_status = match (raw_status.clone(), prev_status.as_ref()) {
-        (Some(TaskStatus::Done), prev) if prev != Some(&TaskStatus::Review) => {
-            Some(TaskStatus::Review)
-        }
-        (other, _) => other,
-    };
-
-    let was_running = prev_status.as_ref() == Some(&TaskStatus::Running);
     let note = opts.note.clone();
     let summary = opts.summary.clone();
-    let state = orchestrator::update_task_state(project_id, task_id, |s| {
+
+    // All rejection guards are evaluated against the LOCKED current status
+    // inside the update closure (an unlocked pre-read raced the guards against
+    // concurrent writers). The closure sets `rejection` and returns `false`,
+    // which makes `try_update_task_state` abort WITHOUT writing — a refused
+    // command must not bump `updated_at` and reshuffle the kanban.
+    // `locked_prev` carries the pre-mutation status back out for the
+    // terminal-cleanup check.
+    let mut rejection: Option<OpError> = None;
+    let mut locked_prev: Option<TaskStatus> = None;
+
+    let (state, _written) = orchestrator::try_update_task_state(project_id, task_id, |s| {
         let prev = s.status.clone();
+        locked_prev = Some(prev.clone());
+
+        // Backlog is only a valid target from a Backlog state. Flipping a
+        // running task to Backlog would hide it from the kanban while leaving
+        // the orchestrator/tmux session alive — a zombie.
+        if raw_status.as_ref() == Some(&TaskStatus::Backlog) && prev != TaskStatus::Backlog {
+            rejection = Some(OpError::Usage(
+                "--status backlog is only valid from a Backlog state".into(),
+            ));
+            return false;
+        }
+
+        // Symmetric guard: leaving Backlog requires an orchestrator spawn,
+        // which only `task start` provides. A bare status flip would mutate
+        // the on-disk state to e.g. Running without any tmux/session, leaving
+        // a zombie that the `s` keybind can't recover (it requires Backlog).
+        if raw_status.is_some()
+            && prev == TaskStatus::Backlog
+            && raw_status.as_ref() != Some(&TaskStatus::Backlog)
+        {
+            rejection = Some(OpError::Usage(
+                "use cc-hub task start --task ID to launch a Backlog task; \
+                 task report --status cannot spawn an orchestrator"
+                    .into(),
+            ));
+            return false;
+        }
+
+        // A Merging task is mid-merge with the project merge lock held. A
+        // `done`/`review` report here would route through `effective_status`
+        // to Review (a legal Merging→Review edge reserved for conflict
+        // demotion) and demote an already-merged task while the lock stays held
+        // for up to STALE_TTL. Completing a merge goes through `pr finalize`,
+        // not `task report`.
+        if prev == TaskStatus::Merging
+            && matches!(
+                raw_status.as_ref(),
+                Some(&TaskStatus::Done) | Some(&TaskStatus::Review)
+            )
+        {
+            rejection = Some(OpError::Usage(format!(
+                "task {} is Merging — run `cc-hub pr finalize` to complete the merge; \
+                 `task report --status {}` can't finish it",
+                task_id,
+                raw_status.as_ref().map(TaskStatus::as_str).unwrap_or("")
+            )));
+            return false;
+        }
+
+        // `--status running` on a Review task with a live PR would silently
+        // clobber the Review state the PR flow just established — a recurring
+        // orchestrator mistake right after `pr create`. The sanctioned path
+        // back to Running is `pr request-changes`. PR-less Review tasks keep
+        // the direct path: they have no PR verb to do it for them.
+        if raw_status.as_ref() == Some(&TaskStatus::Running) && prev == TaskStatus::Review {
+            let live_pr = matches!(
+                crate::pr::read_pr(project_id, task_id),
+                Ok(Some(p)) if !matches!(
+                    p.review_state,
+                    crate::pr::ReviewState::Merged | crate::pr::ReviewState::Closed
+                )
+            );
+            if live_pr {
+                rejection = Some(OpError::Usage(
+                    "task is in Review with a live PR — use `cc-hub pr request-changes` \
+                     to send it back to Running (or `--status review` / no --status to \
+                     report progress)"
+                        .into(),
+                ));
+                return false;
+            }
+        }
+
+        // An orchestrator's `--status done` means "I'm finished" — it does NOT
+        // mean the work is approved. Route that into Review so a human (or
+        // future agentic reviewer) signs off via the TUI's `Space` keybind.
+        // The exception: if the task is already in Review, an explicit `done`
+        // is the approval path — let it through.
+        let effective_status = match (raw_status.clone(), prev.clone()) {
+            (Some(TaskStatus::Done), p) if p != TaskStatus::Review => Some(TaskStatus::Review),
+            (other, _) => other,
+        };
         if let Some(st) = effective_status {
             s.status = st;
         }
@@ -293,7 +316,7 @@ pub fn task_report(
         // has already landed on the project's main branch, so the manifest
         // at `project_root` reflects the version that was just shipped.
         let leaving_running =
-            was_running && matches!(s.status, TaskStatus::Review | TaskStatus::Done);
+            prev == TaskStatus::Running && matches!(s.status, TaskStatus::Review | TaskStatus::Done);
         if leaving_running && s.shipped_version.is_none() {
             s.shipped_version = crate::version::detect(&s.project_root);
         }
@@ -302,15 +325,20 @@ pub fn task_report(
         if s.status == TaskStatus::Review && prev != TaskStatus::Review {
             s.last_auto_reviewed_at = None;
         }
+        true
     })
     .map_err(|e| OpError::Other(format!("update state: {}", e)))?;
+
+    if let Some(e) = rejection {
+        return Err(e);
+    }
 
     // Cleanup runs only when the task actually leaves the active flow:
     // Done is the only terminal state, and it's only reached via Review → Done
     // (fresh `done` reports go to Review and keep the orchestrator alive in
     // case the human wants follow-up).
     let became_terminal =
-        state.status == TaskStatus::Done && prev_status.as_ref() != Some(&state.status);
+        state.status == TaskStatus::Done && locked_prev.as_ref() != Some(&TaskStatus::Done);
     if became_terminal {
         orchestrator::cleanup_task_sessions(&state);
     }
@@ -583,4 +611,110 @@ pub(crate) fn resolve_worktree_path(state: &TaskState, branch: &str) -> Option<P
         &state.task_id,
         name,
     ))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::orchestrator::TaskState;
+    use std::path::PathBuf;
+
+    fn seed(project_id: &str, task_id: &str, status: TaskStatus) {
+        let mut state = TaskState::new(
+            project_id.into(),
+            PathBuf::from("/tmp/proj"),
+            "do thing".into(),
+        );
+        state.task_id = task_id.into();
+        state.status = status;
+        orchestrator::write_task_state(&state).expect("write state");
+    }
+
+    fn report(
+        project_id: &str,
+        task_id: &str,
+        status: Option<TaskStatus>,
+    ) -> Result<ReportOutcome, OpError> {
+        task_report(
+            project_id,
+            task_id,
+            ReportOpts {
+                status,
+                note: None,
+                summary: None,
+            },
+        )
+    }
+
+    #[test]
+    fn report_done_while_merging_is_rejected_pointing_at_finalize() {
+        // BUG 6: `--status done` while Merging must NOT demote the merged task
+        // to Review (which would strand the held merge lock) — reject it and
+        // point at `pr finalize`.
+        crate::test_util::with_temp_home(|| {
+            let (p, t) = ("p-merging", "t-merging");
+            seed(p, t, TaskStatus::Merging);
+            match report(p, t, Some(TaskStatus::Done)) {
+                Err(OpError::Usage(msg)) => {
+                    assert!(msg.contains("pr finalize"), "message: {}", msg)
+                }
+                Err(other) => panic!("expected Usage, got {:?}", other),
+                Ok(_) => panic!("done while Merging must be rejected"),
+            }
+            let after = orchestrator::read_task_state(p, t).expect("read state");
+            assert_eq!(
+                after.status,
+                TaskStatus::Merging,
+                "a merged task must not be demoted by a `done` report"
+            );
+        });
+    }
+
+    #[test]
+    fn report_review_while_merging_is_rejected() {
+        crate::test_util::with_temp_home(|| {
+            let (p, t) = ("p-merging2", "t-merging2");
+            seed(p, t, TaskStatus::Merging);
+            match report(p, t, Some(TaskStatus::Review)) {
+                Err(OpError::Usage(_)) => {}
+                Err(other) => panic!("expected Usage, got {:?}", other),
+                Ok(_) => panic!("review while Merging must be rejected"),
+            }
+            let after = orchestrator::read_task_state(p, t).expect("read state");
+            assert_eq!(after.status, TaskStatus::Merging);
+        });
+    }
+
+    #[test]
+    fn report_progress_note_while_merging_is_allowed() {
+        crate::test_util::with_temp_home(|| {
+            let (p, t) = ("p-merging3", "t-merging3");
+            seed(p, t, TaskStatus::Merging);
+            // No --status, just a note: must pass and stay Merging.
+            let out = task_report(
+                p,
+                t,
+                ReportOpts {
+                    status: None,
+                    note: Some("still merging".into()),
+                    summary: None,
+                },
+            )
+            .expect("progress note allowed while Merging");
+            assert_eq!(out.state.status, TaskStatus::Merging);
+            assert_eq!(out.state.note.as_deref(), Some("still merging"));
+        });
+    }
+
+    #[test]
+    fn report_fresh_done_from_running_routes_to_review() {
+        crate::test_util::with_temp_home(|| {
+            let (p, t) = ("p-fresh-done", "t-fresh-done");
+            seed(p, t, TaskStatus::Running);
+            let out = report(p, t, Some(TaskStatus::Done)).expect("done from Running ok");
+            // Fresh `done` routes to Review for sign-off, not straight to Done.
+            assert_eq!(out.state.status, TaskStatus::Review);
+            assert_eq!(out.requested_status, Some(TaskStatus::Done));
+        });
+    }
 }

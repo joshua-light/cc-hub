@@ -225,7 +225,7 @@ fn compute_resolve() -> Option<Vec<String>> {
         return None;
     }
     let raw = String::from_utf8_lossy(&output.stdout);
-    let argv = parse_resolution(&raw);
+    let argv = parse_resolution(&raw, cmd_name);
     match &argv {
         Some(v) => debug!("title: resolved {} → {:?}", cmd_name, v),
         None => warn!(
@@ -268,24 +268,32 @@ fn resolve_command(name: &str) -> Command {
     cmd
 }
 
-/// Parse the output of `command -v <name>; alias <name>`. Prefers a full
-/// path on the first line; otherwise looks for an alias body between the
-/// first `=` and the trailing newline, stripping surrounding single or
-/// double quotes. Returns `None` if no usable line is present.
-fn parse_resolution(raw: &str) -> Option<Vec<String>> {
+/// Parse the output of `command -v <cmd>; alias <cmd>` (or PowerShell's
+/// `(Get-Command <cmd>).Definition`) into the argv to exec.
+///
+/// Only lines that actually resolve `cmd` are accepted: a path whose basename
+/// is `cmd`, or an alias line of the form `<cmd>=…` / `alias <cmd>=…`. This is
+/// deliberate — a `zsh -ic` runs the user's rc files first, so startup chatter
+/// like `EDITOR=nvim` precedes the real output. The old "first line with `=`"
+/// rule parsed that chatter as the alias body and cached the wrong binary for
+/// an hour. Returns `None` when nothing resolves `cmd`, so the caller falls
+/// back to running through the shell.
+fn parse_resolution(raw: &str, cmd: &str) -> Option<Vec<String>> {
     for line in raw.lines().map(str::trim).filter(|l| !l.is_empty()) {
         // `command -v` (POSIX) emits an absolute path; PowerShell's
         // `(Get-Command exe).Definition` emits a drive-letter `…\foo.exe`
-        // path. Either is a binary we exec verbatim — matched before the
-        // splits below since a Windows path may contain spaces.
-        if line.starts_with('/') || is_windows_exe_path(line) {
+        // path. Accept it only when its basename is the command we queried —
+        // rc-file chatter can print unrelated absolute paths we must not exec.
+        // Matched before the splits below since a Windows path may contain
+        // spaces.
+        if (line.starts_with('/') || is_windows_exe_path(line)) && path_resolves_cmd(line, cmd) {
             return Some(vec![line.to_string()]);
         }
-        // `alias cc-hub-new` emits `cc-hub-new='claude …'` (zsh) or
-        // `alias cc-hub-new='claude …'` (bash). Both have one `=`
-        // separating the name from a quoted body.
-        if let Some(eq) = line.find('=') {
-            let body = line[eq + 1..].trim();
+        // `alias <cmd>` emits `<cmd>='claude …'` (zsh) or
+        // `alias <cmd>='claude …'` (bash). Only the line that defines THIS
+        // command is the resolution; a stray `EDITOR=nvim` is ignored.
+        if let Some(body) = alias_body_for(line, cmd) {
+            let body = body.trim();
             let body = body
                 .strip_prefix('\'')
                 .and_then(|s| s.strip_suffix('\''))
@@ -312,6 +320,29 @@ fn parse_resolution(raw: &str) -> Option<Vec<String>> {
         }
     }
     None
+}
+
+/// True when `line` (a POSIX absolute path or Windows `…\foo.exe`) names the
+/// command we asked `command -v` / `Get-Command` about: its final path
+/// component equals `cmd`, ignoring a trailing `.exe`. Guards against exec'ing
+/// an unrelated absolute path printed by rc-file startup chatter.
+fn path_resolves_cmd(line: &str, cmd: &str) -> bool {
+    let base = line.rsplit(['/', '\\']).next().unwrap_or(line);
+    let base = base
+        .strip_suffix(".exe")
+        .or_else(|| base.strip_suffix(".EXE"))
+        .unwrap_or(base);
+    base.eq_ignore_ascii_case(cmd)
+}
+
+/// Extract the alias body for `cmd` from one line of `alias <cmd>` output.
+/// Matches `<cmd>=<body>` (zsh) and `alias <cmd>=<body>` (bash), requiring the
+/// `=` to sit immediately after the command name so a foreign assignment like
+/// `EDITOR=nvim` (or a var whose name merely shares a prefix) never matches.
+/// Returns the raw text after `=`; the caller trims and unquotes it.
+fn alias_body_for<'a>(line: &'a str, cmd: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix("alias ").unwrap_or(line);
+    rest.strip_prefix(cmd)?.strip_prefix('=')
 }
 
 /// True when `s` looks like an absolute Windows path to an `.exe` (drive-letter
@@ -450,7 +481,7 @@ mod tests {
     #[test]
     fn parse_resolution_prefers_absolute_path() {
         assert_eq!(
-            parse_resolution("/usr/local/bin/cc-hub-new\n"),
+            parse_resolution("/usr/local/bin/cc-hub-new\n", "cc-hub-new"),
             Some(vec!["/usr/local/bin/cc-hub-new".into()])
         );
     }
@@ -459,7 +490,10 @@ mod tests {
     fn parse_resolution_zsh_alias() {
         // `alias cc-hub-new` in zsh prints `cc-hub-new='claude --flag'`.
         assert_eq!(
-            parse_resolution("cc-hub-new='claude --dangerously-skip-permissions'\n"),
+            parse_resolution(
+                "cc-hub-new='claude --dangerously-skip-permissions'\n",
+                "cc-hub-new"
+            ),
             Some(vec![
                 "claude".into(),
                 "--dangerously-skip-permissions".into()
@@ -471,7 +505,7 @@ mod tests {
     fn parse_resolution_bash_alias() {
         // `alias cc-hub-new` in bash prints `alias cc-hub-new='claude …'`.
         assert_eq!(
-            parse_resolution("alias cc-hub-new='claude --model haiku'\n"),
+            parse_resolution("alias cc-hub-new='claude --model haiku'\n", "cc-hub-new"),
             Some(vec!["claude".into(), "--model".into(), "haiku".into()])
         );
     }
@@ -480,8 +514,51 @@ mod tests {
     fn parse_resolution_path_wins_over_alias() {
         // Both lines present: pick the path, skip the alias.
         assert_eq!(
-            parse_resolution("/opt/bin/cc-hub-new\ncc-hub-new='claude'\n"),
+            parse_resolution("/opt/bin/cc-hub-new\ncc-hub-new='claude'\n", "cc-hub-new"),
             Some(vec!["/opt/bin/cc-hub-new".into()])
+        );
+    }
+
+    #[test]
+    fn parse_resolution_ignores_rc_chatter_before_alias() {
+        // `zsh -ic` sources rc files first, so assignments print before the
+        // real alias output. A stray `EDITOR=nvim` must NOT be taken as the
+        // resolution — only the line that actually defines cc-hub-new is.
+        let raw = "EDITOR=nvim\nLESS=-R\ncc-hub-new='claude --flag'\n";
+        assert_eq!(
+            parse_resolution(raw, "cc-hub-new"),
+            Some(vec!["claude".into(), "--flag".into()])
+        );
+    }
+
+    #[test]
+    fn parse_resolution_ignores_unrelated_path_chatter() {
+        // An unrelated absolute path from startup chatter is not the
+        // resolution; the alias line for the queried command is.
+        let raw = "/opt/tools/some-other-bin\ncc-hub-new='claude'\n";
+        assert_eq!(
+            parse_resolution(raw, "cc-hub-new"),
+            Some(vec!["claude".into()])
+        );
+    }
+
+    #[test]
+    fn parse_resolution_rejects_foreign_assignments_only() {
+        // Nothing resolves the queried command → None, so the caller falls
+        // back to spawning through the shell rather than exec'ing garbage.
+        assert_eq!(
+            parse_resolution("EDITOR=nvim\nPAGER=less\nGREP_OPTIONS=--color\n", "cc-hub-new"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_resolution_rejects_prefix_named_assignment() {
+        // `cc-hub-newer=x` shares a prefix with the command but is a different
+        // var — the `=` must sit immediately after the exact command name.
+        assert_eq!(
+            parse_resolution("cc-hub-newer='wrong'\n", "cc-hub-new"),
+            None
         );
     }
 
@@ -491,7 +568,7 @@ mod tests {
         // PowerShell `(Get-Command cc-hub-new).Definition` for a $PROFILE
         // function prints its body; split it and drop the `@args` splat.
         assert_eq!(
-            parse_resolution("claude --dangerously-skip-permissions @args\n"),
+            parse_resolution("claude --dangerously-skip-permissions @args\n", "cc-hub-new"),
             Some(vec![
                 "claude".into(),
                 "--dangerously-skip-permissions".into()
@@ -502,16 +579,17 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn parse_resolution_windows_application_path() {
-        // An application resolves to its exe path, exec'd verbatim.
+        // An application resolves to its exe path, exec'd verbatim. Its
+        // basename matches the queried command (`claude` → `claude.exe`).
         assert_eq!(
-            parse_resolution("C:\\Users\\me\\.local\\bin\\claude.exe\n"),
+            parse_resolution("C:\\Users\\me\\.local\\bin\\claude.exe\n", "claude"),
             Some(vec!["C:\\Users\\me\\.local\\bin\\claude.exe".into()])
         );
     }
 
     #[test]
     fn parse_resolution_empty_returns_none() {
-        assert_eq!(parse_resolution(""), None);
-        assert_eq!(parse_resolution("\n\n  \n"), None);
+        assert_eq!(parse_resolution("", "cc-hub-new"), None);
+        assert_eq!(parse_resolution("\n\n  \n", "cc-hub-new"), None);
     }
 }

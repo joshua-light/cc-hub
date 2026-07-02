@@ -5,7 +5,7 @@ use crate::ui::palette::FAINT_TEXT;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use std::path::Path;
 
@@ -170,10 +170,14 @@ pub(crate) fn render_text_card_body(
         },
         Some((content, truncated)) => {
             let start = scroll_lines.min(content.len());
-            let hidden_below =
-                content.len().saturating_sub(start + area.height as usize) + truncated;
-            let body_rows =
-                (area.height as usize).saturating_sub(if hidden_below > 0 { 1 } else { 0 });
+            // Decide the footer first, then size the body — the footer eats one
+            // content row, so counting hidden lines against the full height
+            // (before that row is reserved) under-reports by one.
+            let (body_rows, hidden_below) = footer_split(
+                content.len().saturating_sub(start),
+                area.height as usize,
+                truncated,
+            );
             let end = (start + body_rows).min(content.len());
             let mut out: Vec<Line<'static>> = content[start..end]
                 .iter()
@@ -190,8 +194,30 @@ pub(crate) fn render_text_card_body(
             out
         }
     };
-    let p = Paragraph::new(lines).wrap(Wrap { trim: false });
+    // No wrap: `footer_split` sizes the body assuming one visual row per
+    // excerpt line — a wrapped over-long line would push the footer (and the
+    // lines after it) out of the fixed-height card. Long lines clip instead.
+    let p = Paragraph::new(lines);
     frame.render_widget(p, area);
+}
+
+/// Splits a card body of `height` rows between visible content and the
+/// "(truncated, N more)" footer. `remaining` is the number of content lines
+/// from the scroll offset to the end of the excerpt; `truncated` is how many
+/// further lines exist in the file beyond the excerpt.
+///
+/// Returns `(body_rows, hidden_below)`: how many content rows to draw and the
+/// count for the footer (0 ⇒ draw no footer). When everything left fits and
+/// nothing was truncated, the whole height is content and there is no footer;
+/// otherwise one row is reserved for the footer and `hidden_below` counts what
+/// the reserved row displaced plus the truncated tail.
+pub(crate) fn footer_split(remaining: usize, height: usize, truncated: usize) -> (usize, usize) {
+    if remaining <= height && truncated == 0 {
+        return (height, 0);
+    }
+    let body_rows = height.saturating_sub(1);
+    let hidden_below = remaining.saturating_sub(body_rows) + truncated;
+    (body_rows, hidden_below)
 }
 
 pub(crate) fn truncated_footer(n: usize) -> Line<'static> {
@@ -221,5 +247,37 @@ pub(crate) fn artifact_preview_total_lines(
             build_diff_lines(content, area_width).len() + usize::from(truncated > 0)
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod footer_split_tests {
+    use super::footer_split;
+
+    #[test]
+    fn no_footer_when_everything_fits() {
+        assert_eq!(footer_split(5, 10, 0), (10, 0));
+        assert_eq!(footer_split(10, 10, 0), (10, 0)); // exact fit
+    }
+
+    #[test]
+    fn reserves_a_row_and_counts_the_displaced_line() {
+        // 20-line file in a 10-row card at scroll 0: 9 content rows shown, so
+        // 11 are hidden — the pre-fix code reserved the footer row *after*
+        // counting and reported 10.
+        assert_eq!(footer_split(20, 10, 0), (9, 11));
+        assert_eq!(footer_split(11, 10, 0), (9, 2));
+    }
+
+    #[test]
+    fn truncated_tail_forces_a_footer_even_when_content_fits() {
+        // All 5 remaining excerpt lines fit, but 3 more exist beyond the
+        // excerpt, so the footer must appear and report them.
+        assert_eq!(footer_split(5, 10, 3), (9, 3));
+    }
+
+    #[test]
+    fn single_row_card_shows_only_the_footer() {
+        assert_eq!(footer_split(20, 1, 0), (0, 20));
     }
 }

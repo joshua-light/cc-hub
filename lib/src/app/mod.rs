@@ -1638,6 +1638,15 @@ impl App {
                 }
             }
         }
+        // Keep the snapshot rebuild_groups derives from in sync, so a rebuild
+        // before the next scan doesn't revert to the old title (same hazard as
+        // ack_selected). The next scan restores it from the title cache.
+        for session in &mut self.sessions.last_sessions {
+            if session.session_id == sid {
+                session.title = Some(title.clone());
+                session.titling = false;
+            }
+        }
         Some((sid, title))
     }
 
@@ -1984,6 +1993,17 @@ impl App {
         {
             s.state = SessionState::Idle;
         }
+        // Mirror the downgrade onto the snapshot rebuild_groups derives from,
+        // so a rebuild before the next scan (filter toggle, projects snapshot)
+        // doesn't revert the ack. The next scan re-derives it via is_acked.
+        if let Some(s) = self
+            .sessions
+            .last_sessions
+            .iter_mut()
+            .find(|s| s.session_id == id)
+        {
+            s.state = SessionState::Idle;
+        }
         true
     }
 
@@ -2206,8 +2226,12 @@ impl App {
             })
             .collect();
 
-        // Sort groups alphabetically by name for stable ordering.
-        groups.sort_by_key(|a| a.name.to_lowercase());
+        // Sort groups by lowercased name, tie-broken by cwd. `name` is only
+        // the cwd basename, so distinct projects that share a basename
+        // (~/work/api vs ~/personal/api) tie; without the cwd tie-break the
+        // stable sort would preserve HashMap's random per-instance iteration
+        // order and those groups would swap slots between scan ticks.
+        groups.sort_by_key(|a| (a.name.to_lowercase(), a.cwd.clone()));
         groups
     }
 
@@ -2277,6 +2301,29 @@ impl App {
     fn rebuild_groups(&mut self) {
         let groups = self.build_groups(&self.sessions.last_sessions);
         self.adopt_groups(groups);
+        // A rebuild (filter toggle, or a projects snapshot reclassifying tmux
+        // names) can reveal already-seen sessions without a scan. Register
+        // them as known now so the next genuine membership change doesn't
+        // mistake one for a fresh arrival and teleport the cursor onto it.
+        self.sync_known_session_ids();
+    }
+
+    /// Refresh `known_session_ids` to the currently-visible session ids, but
+    /// only once the first scan has seeded it. Rebuilds that happen outside a
+    /// scan call this so a later scan's focus-jump fires only for genuinely
+    /// new sessions — never for one a rebuild merely made visible. Skipping
+    /// the `None` case preserves `update_sessions`' skip-jump-on-first-load.
+    fn sync_known_session_ids(&mut self) {
+        if self.sessions.known_session_ids.is_none() {
+            return;
+        }
+        let current: HashSet<String> = self
+            .sessions
+            .groups
+            .iter()
+            .flat_map(|g| g.sessions.iter().map(|s| s.session_id.clone()))
+            .collect();
+        self.sessions.known_session_ids = Some(current);
     }
 
     pub fn update_detail(&mut self, detail: SessionDetail) {
@@ -2486,6 +2533,86 @@ mod tests {
             context_tokens: None,
             tool_uses_count: 0,
         }
+    }
+
+    #[test]
+    fn build_groups_tie_breaks_equal_names_by_cwd() {
+        let app = App::new();
+        // Two projects share the basename "api" but live at different paths,
+        // so `name` alone ties. The sort must be deterministic (by cwd), not
+        // dependent on HashMap iteration order.
+        let mut work = fake_session("s-work", SessionState::Idle);
+        work.cwd = "/home/work/api".into();
+        work.project_name = "api".into();
+        let mut personal = fake_session("s-personal", SessionState::Idle);
+        personal.cwd = "/home/personal/api".into();
+        personal.project_name = "api".into();
+
+        let order = |gs: &[ProjectGroup]| gs.iter().map(|g| g.cwd.clone()).collect::<Vec<_>>();
+        let a = app.build_groups(&[work.clone(), personal.clone()]);
+        let b = app.build_groups(&[personal, work]);
+        // Insertion order must not change the result.
+        assert_eq!(order(&a), order(&b));
+        assert_eq!(
+            order(&a),
+            vec![
+                "/home/personal/api".to_string(),
+                "/home/work/api".to_string()
+            ],
+        );
+    }
+
+    #[test]
+    fn ack_survives_rebuild() {
+        let mut app = App::new();
+        let mut s = fake_session("only", SessionState::WaitingForInput);
+        s.tmux_session = None;
+        assert!(app.update_sessions(vec![s]));
+        app.sessions.sel_group = 0;
+        app.sessions.sel_in_group = 0;
+
+        assert!(app.ack_selected());
+        assert_eq!(
+            app.selected_session_info().map(|s| s.state.clone()),
+            Some(SessionState::Idle)
+        );
+
+        // A rebuild before the next scan (here via a filter toggle) must not
+        // revert the ack — the mutation is mirrored onto last_sessions.
+        app.toggle_show_orch_workers();
+        assert_eq!(
+            app.selected_session_info().map(|s| s.state.clone()),
+            Some(SessionState::Idle),
+            "ack must survive a rebuild before the next scan"
+        );
+    }
+
+    #[test]
+    fn rebuild_revealed_session_does_not_teleport_cursor() {
+        let mut app = App::new();
+        let mut a = fake_session("A", SessionState::WaitingForInput);
+        a.tmux_session = None;
+        let mut b = fake_session("B", SessionState::Inactive);
+        b.tmux_session = None;
+
+        // First scan: B is inactive and hidden, so only A is visible/known.
+        assert!(app.update_sessions(vec![a.clone(), b.clone()]));
+        assert_eq!(app.selected_session_id().as_deref(), Some("A"));
+
+        // Toggling show_inactive reveals B via a rebuild (no scan). B must get
+        // registered as known so it isn't mistaken for a fresh arrival later.
+        app.toggle_show_inactive();
+
+        // Next scan adds a genuinely new session C. The focus jump must land
+        // on C, not teleport onto B — which the user has already been seeing.
+        let mut c = fake_session("C", SessionState::WaitingForInput);
+        c.tmux_session = None;
+        assert!(app.update_sessions(vec![a, b, c]));
+        assert_eq!(
+            app.selected_session_id().as_deref(),
+            Some("C"),
+            "focus jump should target the new session, not the revealed one"
+        );
     }
 
     #[test]

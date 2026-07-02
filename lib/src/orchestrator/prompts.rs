@@ -317,31 +317,67 @@ pub fn spawn_orchestrator_for_new_task(
 /// User-initiated transition from Backlog to Running. Mirrors
 /// spawn_orchestrator_for_new_task but operates on an existing Backlog task
 /// instead of creating a new one. Called from the TUI when the user hits the
-/// start-task keybind, and from \ on the CLI. The state transition is only
-/// persisted after the agent session spawns successfully, so a launch failure
-/// leaves the task safely in Backlog.
+/// start-task keybind, and from \ on the CLI.
+///
+/// Claim-first: the Backlog → Running flip is committed under the lock BEFORE
+/// the seconds-long agent spawn, so a concurrent second start sees a non-
+/// Backlog status and bails instead of spawning a duplicate orchestrator that
+/// would silently overwrite the first's tmux. If the spawn then fails, the
+/// claim is rolled back to Backlog so the task stays retryable.
 pub fn start_backlog_task(
     project_id: &str,
     task_id: &str,
     agent_id_override: Option<&str>,
 ) -> io::Result<(TaskState, String, Option<String>)> {
-    let mut state = read_task_state(project_id, task_id)?;
-    if state.status != TaskStatus::Backlog {
+    // Claim the task under the lock, re-verifying the precondition there. A
+    // captured flag distinguishes "we claimed it" from "someone else already
+    // did" — Running → Running is a legal self-transition, so the status flip
+    // alone can't detect a lost race.
+    let mut lost_race = false;
+    let mut claimed = update_task_state(project_id, task_id, |s| {
+        if s.status != TaskStatus::Backlog {
+            lost_race = true;
+            return;
+        }
+        s.status = TaskStatus::Running;
+        // A Backlog task has no live orchestrator; clearing the runtime refs
+        // here makes `orchestrator_tmux == None` a reliable "claim not yet
+        // fulfilled" marker for the rollback guard below.
+        s.orchestrator_session_id = None;
+        s.orchestrator_tmux = None;
+    })?;
+    if lost_race {
         return Err(io::Error::other(format!(
-            "task is not in backlog (status = {:?})",
-            state.status
+            "task already started (status = {:?}); refusing to spawn a second orchestrator",
+            claimed.status
         )));
     }
-    state.status = TaskStatus::Running;
 
     let (tmux_name, prompt_to_dispatch) =
-        launch_orchestrator_session(&mut state, agent_id_override)?;
+        match launch_orchestrator_session(&mut claimed, agent_id_override) {
+            Ok(v) => v,
+            Err(e) => {
+                // Spawn failed after the claim — roll the status back so the
+                // task returns to Backlog instead of stranding in Running
+                // with no orchestrator. The tmux guard keeps the rollback from
+                // stomping a competitor (e.g. a concurrent `restart_task`)
+                // that has since claimed the task and recorded its own live
+                // orchestrator.
+                let _ = update_task_state(project_id, task_id, |s| {
+                    if s.status == TaskStatus::Running && s.orchestrator_tmux.is_none() {
+                        s.status = TaskStatus::Backlog;
+                    }
+                });
+                return Err(e);
+            }
+        };
 
-    // Persist via a locked re-read + merge rather than writing the stale
-    // pre-spawn snapshot back wholesale: the spawn takes long enough that a
-    // concurrent `task report`/artifact write would otherwise be clobbered.
-    let agent_id = state.orchestrator_agent_id.clone();
-    let agent_kind = state.orchestrator_agent_kind;
+    // Record the tmux + resolved agent identity in a second locked update.
+    // Re-reading here (rather than writing the pre-spawn snapshot back
+    // wholesale) means a concurrent `task report`/artifact write isn't
+    // clobbered.
+    let agent_id = claimed.orchestrator_agent_id.clone();
+    let agent_kind = claimed.orchestrator_agent_kind;
     let state = update_task_state(project_id, task_id, |s| {
         s.status = TaskStatus::Running;
         s.orchestrator_agent_id = agent_id;
@@ -357,15 +393,23 @@ pub fn start_backlog_task(
 /// status back to Running, and spawns a fresh orchestrator. Workers,
 /// merges, artifacts, and the user prompt are preserved as history — only
 /// the orchestrator-side runtime state is reset. Refuses to interrupt Review,
-/// Done, or an in-progress merge. The replacement session is spawned before
-/// the old tmux is killed so spawn failures leave the old orchestrator intact.
+/// Done, or an in-progress merge.
+///
+/// Claim-first, like [`start_backlog_task`]: the flip to Running (and the
+/// clearing of the old runtime state) is committed under the lock BEFORE the
+/// spawn, re-verifying the task is still restartable there. The replacement
+/// session is spawned before the old tmux is killed, so a spawn failure rolls
+/// the claim back and leaves the old orchestrator intact and tracked.
 pub fn restart_task(
     project_id: &str,
     task_id: &str,
     agent_id_override: Option<&str>,
 ) -> io::Result<(TaskState, String, Option<String>)> {
-    let mut state = read_task_state(project_id, task_id)?;
-    match state.status {
+    // Read once for a friendly early error on the guarded states and to grab
+    // the old tmux. The authoritative precondition re-check happens inside
+    // the claim below, under the lock.
+    let pre = read_task_state(project_id, task_id)?;
+    match pre.status {
         TaskStatus::Done => {
             return Err(io::Error::other(
                 "task is Done — restart would re-run a finished task; use a new task instead",
@@ -383,25 +427,69 @@ pub fn restart_task(
         }
         TaskStatus::Backlog | TaskStatus::Running => {}
     }
+    let old_tmux = pre.orchestrator_tmux.clone();
 
-    let old_tmux = state.orchestrator_tmux.clone();
-    state.orchestrator_tmux = None;
-    state.orchestrator_session_id = None;
-    state.status = TaskStatus::Running;
+    // Claim under the lock: re-verify still-restartable, flip to Running, and
+    // clear the orchestrator runtime state. Committing the claim before the
+    // seconds-long spawn closes the window where a concurrent transition (or
+    // a second restart) could slip in and strand an orchestrator.
+    // `claimed_from` records the actual pre-claim status so a spawn failure
+    // rolls back to exactly where it started.
+    let mut lost_race = false;
+    let mut claimed_from: Option<TaskStatus> = None;
+    let mut claimed = update_task_state(project_id, task_id, |s| {
+        match s.status {
+            TaskStatus::Backlog | TaskStatus::Running => {}
+            _ => {
+                lost_race = true;
+                return;
+            }
+        }
+        claimed_from = Some(s.status.clone());
+        s.status = TaskStatus::Running;
+        s.orchestrator_session_id = None;
+        s.orchestrator_tmux = None;
+    })?;
+    if lost_race {
+        return Err(io::Error::other(format!(
+            "task is no longer restartable (status = {:?})",
+            claimed.status
+        )));
+    }
 
     let (tmux_name, prompt_to_dispatch) =
-        launch_orchestrator_session(&mut state, agent_id_override)?;
+        match launch_orchestrator_session(&mut claimed, agent_id_override) {
+            Ok(v) => v,
+            Err(e) => {
+                // Roll back to the pre-claim status and restore the old tmux
+                // ref: the previous orchestrator is still alive (we only kill
+                // it after a successful spawn), so it must stay tracked. Both
+                // restores are gated on the claim still being ours (status
+                // Running, no tmux recorded) — a competitor that re-claimed
+                // and recorded its own orchestrator must not be stomped.
+                let restore_status = claimed_from.unwrap_or(TaskStatus::Running);
+                let restore_tmux = old_tmux.clone();
+                let _ = update_task_state(project_id, task_id, |s| {
+                    if s.status == TaskStatus::Running && s.orchestrator_tmux.is_none() {
+                        s.status = restore_status;
+                        s.orchestrator_tmux = restore_tmux;
+                    }
+                });
+                return Err(e);
+            }
+        };
 
+    // Spawn succeeded — now it's safe to kill the previous orchestrator.
     if let Some(tmux) = old_tmux.as_deref() {
         if crate::send::tmux_session_exists(tmux) {
             let _ = crate::send::kill_tmux_session(tmux);
         }
     }
 
-    // Same merge-don't-clobber persist as `start_backlog_task`: the old
-    // orchestrator may have written state between our read and the spawn.
-    let agent_id = state.orchestrator_agent_id.clone();
-    let agent_kind = state.orchestrator_agent_kind;
+    // Second locked update records the new tmux; re-reading avoids clobbering
+    // a concurrent state write during the spawn.
+    let agent_id = claimed.orchestrator_agent_id.clone();
+    let agent_kind = claimed.orchestrator_agent_kind;
     let state = update_task_state(project_id, task_id, |s| {
         s.status = TaskStatus::Running;
         s.orchestrator_session_id = None;

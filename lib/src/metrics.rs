@@ -310,6 +310,12 @@ struct AssistantCall {
     timestamp_ms: u64,
     tool_uses: Vec<ToolUse>,
     cost_override: Option<f64>,
+    /// Stable cross-file identity: `requestId`, else `message.id`, else the
+    /// per-line uuid. Resume/fork copies history verbatim, so the same call
+    /// reappears in a new session's JSONL under the original key; aggregation
+    /// dedups on this so a resumed session isn't double-billed. Empty for Pi
+    /// sessions, which don't carry these ids.
+    dedup_key: String,
 }
 
 struct ParsedSession {
@@ -322,6 +328,15 @@ struct ParsedSession {
     calls: Vec<AssistantCall>,
     /// All tool_use_ids that received a tool_result (from user messages).
     tool_result_ids: HashSet<String>,
+    /// tool_use ids issued after the transcript's last genuine user turn (a
+    /// `type: "user"` entry carrying non-tool_result content — a new prompt or
+    /// the interrupt marker). The conversation never moved on past these, so a
+    /// missing result means in-flight or abandoned, not interrupted. Note:
+    /// Claude Code writes each content block as its OWN entry, so a parallel
+    /// tool batch spans several trailing entries, with non-conversational
+    /// chatter (file-history-snapshot, mode, …) freely interleaved — neither
+    /// may end the exemption; only a real user turn does.
+    in_flight_tool_use_ids: HashSet<String>,
 }
 
 fn parse_session_file(path: &Path, is_subagent: bool, kind: AgentKind) -> Option<ParsedSession> {
@@ -349,6 +364,15 @@ fn parse_claude_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSes
     let mut seen_tool_use_ids: HashSet<String> = HashSet::new();
     // Every tool_use_id that received a tool_result from a user message.
     let mut tool_result_ids: HashSet<String> = HashSet::new();
+    // Position of each tool_use in the entry stream, and of the last genuine
+    // user turn. An unmatched tool_use only counts as an interruption when a
+    // genuine user turn follows it — that's what "the user Esc'd / moved on"
+    // actually looks like in the transcript. Everything else (parallel batch
+    // entries at the tail, chatter entries between tool_use and result, a
+    // hard-killed session) is in-flight/abandoned and must not be charged.
+    let mut entry_idx: usize = 0;
+    let mut tool_use_pos: HashMap<String, usize> = HashMap::new();
+    let mut last_genuine_user_turn: Option<usize> = None;
 
     for line in reader.lines() {
         let line = match line {
@@ -362,6 +386,7 @@ fn parse_claude_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSes
             Ok(v) => v,
             Err(_) => continue,
         };
+        entry_idx += 1;
 
         if cwd.is_none() {
             if let Some(c) = v.get("cwd").and_then(|c| c.as_str()) {
@@ -378,33 +403,44 @@ fn parse_claude_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSes
 
         let entry_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
-        // User messages: harvest tool_result IDs so we can detect orphans.
+        // User messages: harvest tool_result IDs so we can detect orphans, and
+        // track genuine user turns (non-tool_result content: a fresh prompt or
+        // the "[Request interrupted by user]" marker; `isMeta` entries are
+        // harness-injected, not the human moving on).
         if entry_type == "user" {
-            if let Some(content) = v
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(|c| c.as_array())
-            {
+            let is_meta = v.get("isMeta").and_then(|m| m.as_bool()).unwrap_or(false);
+            let message_content = v.get("message").and_then(|m| m.get("content"));
+            let mut genuine = matches!(message_content.and_then(|c| c.as_str()), Some(s) if !s.trim().is_empty());
+            if let Some(content) = message_content.and_then(|c| c.as_array()) {
                 for block in content {
                     if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
                         if let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str()) {
                             tool_result_ids.insert(id.to_string());
                         }
+                    } else {
+                        genuine = true;
                     }
                 }
+            }
+            if genuine && !is_meta {
+                last_genuine_user_turn = Some(entry_idx);
             }
             continue;
         }
 
         if entry_type != "assistant" {
+            // Chatter entries (file-history-snapshot, mode, last-prompt, …)
+            // interleave freely between a tool_use and its result — they say
+            // nothing about whether the conversation moved on.
             continue;
         }
 
-        let req_id = v
-            .get("requestId")
-            .and_then(|r| r.as_str())
-            .or_else(|| v.get("uuid").and_then(|u| u.as_str()))
-            .unwrap_or("");
+        let request_id = v.get("requestId").and_then(|r| r.as_str()).unwrap_or("");
+        let req_id = if request_id.is_empty() {
+            v.get("uuid").and_then(|u| u.as_str()).unwrap_or("")
+        } else {
+            request_id
+        };
         if req_id.is_empty() {
             continue;
         }
@@ -436,6 +472,17 @@ fn parse_claude_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSes
         };
 
         let entry = by_req.entry(canonical_req).or_default();
+        if entry.dedup_key.is_empty() {
+            // Prefer requestId (survives resume/fork copies), fall back to
+            // message.id, then the per-line uuid.
+            entry.dedup_key = if !request_id.is_empty() {
+                request_id.to_string()
+            } else if !msg_id.is_empty() {
+                msg_id.to_string()
+            } else {
+                req_id.to_string()
+            };
+        }
         if entry.model.is_empty() && !model.is_empty() {
             entry.model = model;
         }
@@ -463,7 +510,9 @@ fn parse_claude_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSes
             }
         }
 
-        // Tool uses live in message.content[] as blocks with type=tool_use.
+        // Tool uses live in message.content[] as blocks with type=tool_use
+        // (one block per entry — Claude Code splits parallel batches across
+        // consecutive entries).
         if let Some(content) = inner
             .and_then(|m| m.get("content"))
             .and_then(|c| c.as_array())
@@ -477,6 +526,12 @@ fn parse_claude_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSes
                     continue;
                 }
                 let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                // Record where the tool_use was issued (first sighting wins —
+                // requestId-redundant lines repeat blocks) for the in-flight
+                // cutoff below, regardless of within-file dedup.
+                if !id.is_empty() {
+                    tool_use_pos.entry(id.to_string()).or_insert(entry_idx);
+                }
                 if !id.is_empty() && !seen_tool_use_ids.insert(id.to_string()) {
                     continue;
                 }
@@ -499,6 +554,15 @@ fn parse_claude_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSes
         }
     }
 
+    // Exempt every tool_use the conversation never moved past: issued after
+    // the last genuine user turn (or in a transcript with none). Their missing
+    // results are in-flight/abandoned, not user interruptions.
+    let in_flight_tool_use_ids: HashSet<String> = tool_use_pos
+        .into_iter()
+        .filter(|(_, pos)| last_genuine_user_turn.is_none_or(|u| *pos > u))
+        .map(|(id, _)| id)
+        .collect();
+
     let calls: Vec<AssistantCall> = by_req
         .into_values()
         .filter(|c| c.tokens.total() > 0)
@@ -517,6 +581,7 @@ fn parse_claude_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSes
         end_time_ms,
         calls,
         tool_result_ids,
+        in_flight_tool_use_ids,
     })
 }
 
@@ -530,6 +595,8 @@ fn parse_pi_session_file(path: &Path) -> Option<ParsedSession> {
     let mut end_time_ms = 0u64;
     let mut calls: Vec<AssistantCall> = Vec::new();
     let mut tool_result_ids: HashSet<String> = HashSet::new();
+    // Tool call ids at the transcript tail — in-flight, not interrupted.
+    let mut in_flight_tool_use_ids: HashSet<String> = HashSet::new();
 
     for line in reader.lines() {
         let line = match line {
@@ -600,6 +667,9 @@ fn parse_pi_session_file(path: &Path) -> Option<ParsedSession> {
                                 .unwrap_or(0),
                             tool_uses: Vec::new(),
                             cost_override,
+                            // Pi sessions carry no requestId/message.id; cross-file
+                            // dedup (BUG 5) doesn't apply, so leave the key empty.
+                            dedup_key: String::new(),
                         };
                         if let Some(content) = msg.get("content").and_then(|c| c.as_array()) {
                             for block in content {
@@ -628,6 +698,14 @@ fn parse_pi_session_file(path: &Path) -> Option<ParsedSession> {
                                 });
                             }
                         }
+                        // A trailing assistant toolCall with no result yet is
+                        // in-flight; any later entry clears this.
+                        in_flight_tool_use_ids = call
+                            .tool_uses
+                            .iter()
+                            .map(|t| t.id.clone())
+                            .filter(|id| !id.is_empty())
+                            .collect();
                         if call.tokens.total() > 0 || !call.tool_uses.is_empty() {
                             calls.push(call);
                         }
@@ -636,9 +714,14 @@ fn parse_pi_session_file(path: &Path) -> Option<ParsedSession> {
                         if let Some(id) = msg.get("toolCallId").and_then(|i| i.as_str()) {
                             tool_result_ids.insert(id.to_string());
                         }
+                        in_flight_tool_use_ids.clear();
                     }
-                    Some("user") => {}
-                    _ => {}
+                    Some("user") => {
+                        in_flight_tool_use_ids.clear();
+                    }
+                    _ => {
+                        in_flight_tool_use_ids.clear();
+                    }
                 }
             }
             _ => {}
@@ -658,6 +741,7 @@ fn parse_pi_session_file(path: &Path) -> Option<ParsedSession> {
         end_time_ms,
         calls,
         tool_result_ids,
+        in_flight_tool_use_ids,
     })
 }
 
@@ -761,6 +845,10 @@ pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> Metr
     let mut interruptions = InterruptionAnalysis::default();
     let mut growth = ContextGrowthAnalysis::default();
     let mut peak_ctx_findings: Vec<PeakContextFinding> = Vec::new();
+    // Cross-file dedup of canonical calls (BUG 5): resume/fork copies history
+    // verbatim, so the same call reappears in later files. The first parsed
+    // file that carries an id owns its cost/tokens/day; later files skip it.
+    let mut global_seen: HashSet<String> = HashSet::new();
 
     for s in &mut sessions {
         let mut session_tokens = Tokens::default();
@@ -772,8 +860,19 @@ pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> Metr
         let mut session_orphans = 0usize;
         let mut session_wasted = 0.0f64;
         let mut session_last_orphan_tool = String::new();
+        let mut session_messages = 0usize;
+        // Calls this session actually owns after cross-file dedup. Drives the
+        // context series so a resumed file's copied prefix (counted by the
+        // original file) isn't re-analyzed for peak/growth.
+        let mut owned_calls: Vec<&AssistantCall> = Vec::new();
 
         for call in &s.calls {
+            // Skip calls already counted by an earlier file (resume/fork copy).
+            if !call.dedup_key.is_empty() && !global_seen.insert(call.dedup_key.clone()) {
+                continue;
+            }
+            session_messages += 1;
+            owned_calls.push(call);
             let p = pricing_for(&call.model);
             let c = call
                 .cost_override
@@ -824,7 +923,10 @@ pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> Metr
                     entry.count += 1;
                     session_shell.insert(bc.as_str());
                 }
-                if !tu.id.is_empty() && !s.tool_result_ids.contains(&tu.id) {
+                if !tu.id.is_empty()
+                    && !s.tool_result_ids.contains(&tu.id)
+                    && !s.in_flight_tool_use_ids.contains(&tu.id)
+                {
                     call_orphans += 1;
                     call_last_orphan = name.as_str();
                 }
@@ -860,8 +962,11 @@ pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> Metr
         // Build the per-turn context series once; both peak-context and
         // growth-scoring read from it. Sessions with zero timestamped calls
         // contribute nothing to either.
-        let mut series_calls: Vec<&AssistantCall> =
-            s.calls.iter().filter(|c| c.timestamp_ms > 0).collect();
+        let mut series_calls: Vec<&AssistantCall> = owned_calls
+            .iter()
+            .copied()
+            .filter(|c| c.timestamp_ms > 0)
+            .collect();
         series_calls.sort_by_key(|c| c.timestamp_ms);
         let series: Vec<u64> = series_calls
             .iter()
@@ -905,7 +1010,10 @@ pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> Metr
                         score,
                         total_cost: session_cost,
                         peak_delta_tokens: peak_delta,
-                        peak_turn_index: peak_idx,
+                        // 1-based to match the display convention (`@ turn N/M`)
+                        // and the peak-context finding; peak_ts already points
+                        // at this same turn (series_calls[peak_idx]).
+                        peak_turn_index: peak_idx + 1,
                         peak_timestamp_ms: peak_ts,
                         assistant_turns: series.len(),
                     });
@@ -945,13 +1053,13 @@ pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> Metr
                 model,
                 cost: session_cost,
                 tokens: session_tokens,
-                message_count: s.calls.len(),
+                message_count: session_messages,
                 end_time_ms: s.end_time_ms,
                 is_subagent: s.is_subagent,
             });
 
             total_cost += session_cost;
-            total_messages += s.calls.len();
+            total_messages += session_messages;
             total_tokens.add(&session_tokens);
         }
     }
@@ -1125,4 +1233,86 @@ fn score_growth(series: &[u64]) -> Option<(f64, u64, usize)> {
     // session is itself the anomaly we want to surface.
     let denom = median_abs.max(1.0);
     Some((peak as f64 / denom, peak as u64, peak_idx))
+}
+
+#[cfg(test)]
+mod in_flight_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn assistant_tool_use(req: &str, msg: &str, tool_id: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","requestId":"{req}","message":{{"id":"{msg}","model":"claude-sonnet-5","usage":{{"input_tokens":100,"output_tokens":10}},"content":[{{"type":"tool_use","id":"{tool_id}","name":"Bash","input":{{"command":"ls"}}}}]}}}}"#
+        )
+    }
+
+    fn parse(lines: &[String]) -> ParsedSession {
+        let mut f = tempfile::NamedTempFile::new().expect("tempfile");
+        for l in lines {
+            writeln!(f, "{}", l).expect("write");
+        }
+        parse_claude_session_file(f.path(), false).expect("parse")
+    }
+
+    #[test]
+    fn parallel_batch_at_tail_is_in_flight() {
+        // Claude Code splits a parallel batch across consecutive entries; a
+        // result for one sibling must not mark the still-running other as an
+        // interruption (the tool_result-only user entry is not a genuine turn).
+        let s = parse(&[
+            assistant_tool_use("r1", "m1", "tu_a"),
+            assistant_tool_use("r1", "m1", "tu_b"),
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_a"}]}}"#.into(),
+        ]);
+        assert!(s.tool_result_ids.contains("tu_a"));
+        assert!(s.in_flight_tool_use_ids.contains("tu_b"));
+    }
+
+    #[test]
+    fn chatter_after_tool_use_stays_in_flight() {
+        // Non-conversational entries interleave between tool_use and result in
+        // ~11% of real executions; they must not end the exemption.
+        let s = parse(&[
+            assistant_tool_use("r1", "m1", "tu_a"),
+            r#"{"type":"file-history-snapshot","snapshot":{}}"#.into(),
+        ]);
+        assert!(s.in_flight_tool_use_ids.contains("tu_a"));
+    }
+
+    #[test]
+    fn genuine_user_turn_after_tool_use_is_interruption() {
+        // A real user turn (text content) after an unmatched tool_use is what
+        // an interruption actually looks like — no exemption.
+        let s = parse(&[
+            assistant_tool_use("r1", "m1", "tu_a"),
+            r#"{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#.into(),
+        ]);
+        assert!(!s.in_flight_tool_use_ids.contains("tu_a"));
+        assert!(!s.tool_result_ids.contains("tu_a"));
+    }
+
+    #[test]
+    fn killed_session_tail_is_not_interruption() {
+        // Transcript ends on the tool_use (hard-killed session): nothing moved
+        // on, so it's abandoned, not interrupted — deliberately uncounted.
+        let s = parse(&[assistant_tool_use("r1", "m1", "tu_a")]);
+        assert!(s.in_flight_tool_use_ids.contains("tu_a"));
+    }
+
+    #[test]
+    fn meta_and_string_content_user_turns() {
+        // isMeta user entries are harness-injected — not the human moving on.
+        let s = parse(&[
+            assistant_tool_use("r1", "m1", "tu_a"),
+            r#"{"type":"user","isMeta":true,"message":{"content":"injected caveat"}}"#.into(),
+        ]);
+        assert!(s.in_flight_tool_use_ids.contains("tu_a"));
+
+        // Plain string content is a genuine prompt.
+        let s = parse(&[
+            assistant_tool_use("r1", "m1", "tu_a"),
+            r#"{"type":"user","message":{"content":"new question"}}"#.into(),
+        ]);
+        assert!(!s.in_flight_tool_use_ids.contains("tu_a"));
+    }
 }

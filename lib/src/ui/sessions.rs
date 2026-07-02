@@ -8,6 +8,7 @@ use crate::ui::common::{
     state_indicator,
 };
 use crate::ui::palette::{CONTEXT_GRAY, MUTED_TEXT, PURPLE, SEP_GRAY};
+use crate::ui::popups::wrapped_total_rows;
 use crate::ui::{cell_height, now_ms};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -552,7 +553,7 @@ fn footer_line(session: &SessionInfo, now: u64, inner_w: usize) -> Line<'static>
     Line::from(spans)
 }
 
-pub(crate) fn render_popup(frame: &mut Frame, area: Rect, app: &App) {
+pub(crate) fn render_popup(frame: &mut Frame, area: Rect, app: &mut App) {
     let popup_area = centered_rect(area, 0.85);
 
     frame.render_widget(Clear, popup_area);
@@ -562,34 +563,43 @@ pub(crate) fn render_popup(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let detail = match &app.detail {
-        Some(d) => d,
+    let lines = match &app.detail {
+        Some(detail) => {
+            let session = &detail.info;
+            let title = format!(" {} (PID {}) ", session.project_name, session.pid);
+            let block = popup_block(Span::styled(
+                title,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            let inner = block.inner(popup_area);
+            frame.render_widget(block, popup_area);
+            (build_popup_content(detail, inner.width), inner)
+        }
         None => {
             frame.render_widget(popup_block(" No data "), popup_area);
             return;
         }
     };
+    let (lines, inner) = lines;
 
-    let session = &detail.info;
-    let title = format!(" {} (PID {}) ", session.project_name, session.pid);
+    // The Paragraph wraps, so scroll is in wrapped rows. Clamp the stored
+    // scroll to the real bottom each frame; the key handler only
+    // saturating_adds, so without this `j` scrolls into blank space while the
+    // N/N indicator pins at the end.
+    let total_rows = wrapped_total_rows(&lines, inner.width);
+    if inner.height > 0 {
+        let max_scroll = total_rows.saturating_sub(inner.height);
+        if app.popup_scroll > max_scroll {
+            app.popup_scroll = max_scroll;
+        }
+    }
 
-    let block = popup_block(Span::styled(
-        title,
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    ));
-
-    let inner = block.inner(popup_area);
-    frame.render_widget(block, popup_area);
-
-    let lines = build_popup_content(detail, inner.width);
-
-    let total_lines = lines.len() as u16;
     let scroll_info = format!(
         " {}/{} ",
-        (app.popup_scroll as usize).min(total_lines.saturating_sub(1) as usize) + 1,
-        total_lines
+        (app.popup_scroll as usize).min(total_rows.saturating_sub(1) as usize) + 1,
+        total_rows
     );
 
     let scroll_span = Paragraph::new(Line::from(Span::styled(

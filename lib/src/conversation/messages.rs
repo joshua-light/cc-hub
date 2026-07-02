@@ -4,6 +4,7 @@ use super::render::{extract_text_content, truncate_str};
 use super::state::is_meaningful_entry;
 use crate::models::ConversationMessage;
 use serde_json::Value;
+use std::collections::HashSet;
 
 pub fn extract_last_user_message(entries: &[Value]) -> Option<String> {
     entries
@@ -161,9 +162,22 @@ pub fn extract_messages(entries: &[Value], count: usize) -> Vec<ConversationMess
 pub fn extract_token_totals(entries: &[Value]) -> (u64, u64) {
     let mut total_input = 0u64;
     let mut total_output = 0u64;
+    // Claude Code writes each content block of one API message as its own
+    // JSONL entry, repeating byte-identical usage. Count each message.id once
+    // so totals aren't inflated 3-5x; entries lacking an id count individually.
+    let mut seen_ids: HashSet<&str> = HashSet::new();
 
     for entry in entries {
         if let Some(usage) = entry.get("message").and_then(|m| m.get("usage")) {
+            if let Some(id) = entry
+                .get("message")
+                .and_then(|m| m.get("id"))
+                .and_then(|v| v.as_str())
+            {
+                if !seen_ids.insert(id) {
+                    continue;
+                }
+            }
             if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
                 total_input += input;
             }
@@ -228,5 +242,35 @@ mod tests {
         let result = extract_last_activity(&entries);
         assert!(result.is_some());
         assert_eq!(result.unwrap() % 1000, 201);
+    }
+
+    #[test]
+    fn token_totals_dedup_repeated_message_ids() {
+        // Same API message split across three content-block entries with
+        // byte-identical usage — must count once, not 3x.
+        let usage = serde_json::json!({
+            "input_tokens": 10,
+            "cache_creation_input_tokens": 5,
+            "cache_read_input_tokens": 20,
+            "output_tokens": 7,
+        });
+        let entries = vec![
+            serde_json::json!({"message": {"id": "msg_a", "usage": usage}}),
+            serde_json::json!({"message": {"id": "msg_a", "usage": usage}}),
+            serde_json::json!({"message": {"id": "msg_a", "usage": usage}}),
+        ];
+        // input = 10 + 5 + 20 = 35, output = 7 — counted a single time.
+        assert_eq!(extract_token_totals(&entries), (35, 7));
+    }
+
+    #[test]
+    fn token_totals_distinct_ids_and_missing_ids() {
+        let entries = vec![
+            serde_json::json!({"message": {"id": "msg_a", "usage": {"input_tokens": 10, "output_tokens": 1}}}),
+            serde_json::json!({"message": {"id": "msg_b", "usage": {"input_tokens": 20, "output_tokens": 2}}}),
+            // No id — counts on its own, as before.
+            serde_json::json!({"message": {"usage": {"input_tokens": 3, "output_tokens": 4}}}),
+        ];
+        assert_eq!(extract_token_totals(&entries), (33, 7));
     }
 }

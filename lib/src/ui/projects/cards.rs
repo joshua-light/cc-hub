@@ -11,7 +11,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use std::path::Path;
 
-use super::{build_diff_lines, read_text_excerpt, truncated_footer};
+use super::{build_diff_lines, footer_split, read_text_excerpt, truncated_footer};
 
 pub(crate) fn render_diff_card_body(
     frame: &mut Frame,
@@ -38,10 +38,14 @@ pub(crate) fn render_diff_card_body(
         Some((content, truncated)) => {
             let all_rows = build_diff_lines(content, area.width);
             let start = scroll_lines.min(all_rows.len());
-            let hidden_below =
-                all_rows.len().saturating_sub(start + area.height as usize) + truncated;
-            let body_rows =
-                (area.height as usize).saturating_sub(if hidden_below > 0 { 1 } else { 0 });
+            // Decide the footer first, then size the body — the footer eats one
+            // content row, so counting hidden rows against the full height
+            // (before that row is reserved) under-reports by one.
+            let (body_rows, hidden_below) = footer_split(
+                all_rows.len().saturating_sub(start),
+                area.height as usize,
+                truncated,
+            );
             let end = (start + body_rows).min(all_rows.len());
             let mut visible = all_rows[start..end].to_vec();
             if hidden_below > 0 {

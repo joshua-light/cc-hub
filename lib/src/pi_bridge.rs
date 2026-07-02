@@ -25,7 +25,7 @@ pub struct Heartbeat {
 }
 
 const BRIDGE_SOURCE: &str = r#"import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 type State = "idle" | "processing";
@@ -57,6 +57,7 @@ export default function (pi: ExtensionAPI) {
 	const heartbeatPath = join(heartbeatDir, `${tmux}.json`);
 	let state: State = "idle";
 	let model = process.env.CC_HUB_MODEL;
+	let writeSeq = 0;
 
 	const writeHeartbeat = async (ctx: any) => {
 		const sessionFile = ctx.sessionManager.getSessionFile();
@@ -74,7 +75,13 @@ export default function (pi: ExtensionAPI) {
 			updatedAt: Date.now(),
 		};
 		await mkdir(dirname(heartbeatPath), { recursive: true });
-		await writeFile(heartbeatPath, JSON.stringify(payload), "utf8");
+		// Write a unique temp file in the same dir, then rename over the
+		// target. rename is atomic on POSIX, so the scanner reading heartbeats
+		// every tick never catches a half-written file and flickers the Pi
+		// session out for a tick (the reader also ignores these `.tmp` files).
+		const tmpPath = `${heartbeatPath}.${process.pid}.${writeSeq++}.tmp`;
+		await writeFile(tmpPath, JSON.stringify(payload), "utf8");
+		await rename(tmpPath, heartbeatPath);
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -135,6 +142,10 @@ pub fn load_heartbeats() -> Vec<Heartbeat> {
     };
     entries
         .flatten()
+        // Only committed `<tmux>.json` heartbeats — skip the `*.tmp` files the
+        // bridge renames into place, so a temp caught mid-write (or left behind
+        // by a crashed bridge) is never parsed as a stale session.
+        .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("json"))
         .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
         .filter_map(|raw| serde_json::from_str::<Heartbeat>(&raw).ok())
         .collect()

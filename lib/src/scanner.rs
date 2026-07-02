@@ -648,6 +648,15 @@ fn is_scratch_cwd(cwd: &str) -> bool {
         .is_some_and(|s| s == cwd)
 }
 
+/// The `~/.claude/projects/` subdirectory name that the titler's scratch cwd
+/// encodes to (e.g. `-tmp-cc-hub-summaries`), or `None` when that path isn't
+/// valid UTF-8. Every JSONL under this dir is a one-shot `cc-hub-new -p` /
+/// triage run — not a real session — so callers walking the projects tree skip
+/// it. Shared with [`crate::session_count`] so the exclusion can't drift.
+pub fn scratch_project_dir_name() -> Option<String> {
+    crate::title::scratch_cwd().to_str().map(encode_path)
+}
+
 /// Walk `~/.claude/projects/**/*.jsonl` and synthesize Inactive sessions for
 /// any JSONL touched within [`config::InactiveConfig::window_secs`] whose path
 /// isn't already represented by an alive session. Caps each project at
@@ -673,7 +682,7 @@ fn scan_orphan_jsonls(
     // Skipping this project dir up front avoids reading dozens of one-shot
     // `cc-hub-new -p` JSONLs every scan just to throw them away inside
     // `synthesize_inactive_from_jsonl`.
-    let scratch_proj_dir = crate::title::scratch_cwd().to_str().map(encode_path);
+    let scratch_proj_dir = scratch_project_dir_name();
 
     let mut out = Vec::new();
     let mut total_in_window = 0usize;
@@ -1008,6 +1017,18 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
             .collect();
         sessions.extend(pi_scanner::scan(&pi_agents, &titles));
     }
+
+    // The tool-use count cache is shared across Claude and Pi transcripts, so
+    // evict it here — after both scans — with every live path this tick.
+    // (conversation's caches are Claude-only and are retained inside
+    // scan_claude_sessions.) Without this the path-keyed cache grows one entry
+    // per JSONL ever scanned, for the whole process lifetime.
+    let live_paths: HashSet<PathBuf> = sessions
+        .iter()
+        .filter_map(|s| s.jsonl_path.clone())
+        .collect();
+    crate::tool_use_count::retain_cached(&live_paths);
+
     sort_stable(&mut sessions);
     sessions
 }

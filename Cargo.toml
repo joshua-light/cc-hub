@@ -3,11 +3,16 @@ resolver = "2"
 members = ["lib", "bin"]
 
 [workspace.package]
-version = "0.56.0"
+version = "0.57.0"
 edition = "2021"
 
 [workspace.dependencies]
-ratatui = "0.30"
+# unstable-rendered-line-info: Paragraph::line_count, the authoritative
+# wrapped-row count the scroll clamps in ui/ use. A hand-rolled mirror of
+# WordWrapper diverged on whitespace/tab/wide-char handling; counting with
+# the renderer's own implementation can't drift. Unstable only in API shape —
+# an upgrade that changes it fails the build, not the scroll math.
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 crossterm = "0.29"
 tokio = { version = "1", features = ["full"] }
 chrono = "0.4"

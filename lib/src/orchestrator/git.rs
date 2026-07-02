@@ -110,19 +110,75 @@ pub fn create_worktree(
         return Ok(path);
     }
     // git's "already exists" / "is already checked out" messages mean a
-    // previous run left this worktree behind; reuse rather than fail.
+    // previous run left *something* behind. Two distinct states hide here:
+    //   1. the worktree dir is still present  → reuse it as-is;
+    //   2. only the `cc-hub/*` branch survived (gc, `remove_task_worktrees`,
+    //      or a manual rm dropped the dir but branches are deleted
+    //      separately) → the dir is gone, so returning Ok would spawn a
+    //      worker into a nonexistent cwd. Re-attach a worktree to the
+    //      surviving branch instead.
     let stderr = out.stderr.trim();
     let already = stderr.contains("already exists") || stderr.contains("already checked out");
     if already {
-        log::info!(
-            "create_worktree: {} already exists, reusing",
-            path.display()
-        );
-        return Ok(path);
+        if path.exists() {
+            log::info!(
+                "create_worktree: {} already exists, reusing",
+                path.display()
+            );
+            return Ok(path);
+        }
+        return reattach_worktree(project_root, &path, &branch);
     }
     Err(io::Error::other(format!(
         "git worktree add failed: {}",
         stderr
+    )))
+}
+
+/// Re-attach a worktree at `path` to the pre-existing branch `branch` (no
+/// `-b`, so commits already on the branch are preserved). Used when the
+/// worktree dir was removed but its `cc-hub/*` branch outlived it. A stale
+/// worktree admin entry (dir removed with plain `rm` rather than `git
+/// worktree remove`) leaves the path "missing but already registered" / the
+/// branch still checked out; we clear it with `git worktree prune` and retry
+/// once.
+fn reattach_worktree(project_root: &Path, path: &Path, branch: &str) -> io::Result<PathBuf> {
+    let path_str = path.to_string_lossy();
+    let attach = run_git(project_root, &["worktree", "add", &path_str, branch])?;
+    if attach.status_ok {
+        log::info!(
+            "create_worktree: re-attached {} to surviving branch {}",
+            path.display(),
+            branch
+        );
+        return Ok(path.to_path_buf());
+    }
+    // A stale admin entry surfaces under a few git phrasings depending on
+    // version: a plain-rm'd dir is "a missing but already registered
+    // worktree"; a still-registered checkout is "already checked out" /
+    // "already used by worktree". All clear with a prune.
+    let stale = attach.stderr.contains("missing but already registered")
+        || attach.stderr.contains("already checked out")
+        || attach.stderr.contains("already used by worktree");
+    if stale {
+        let _ = run_git(project_root, &["worktree", "prune"]);
+        let retry = run_git(project_root, &["worktree", "add", &path_str, branch])?;
+        if retry.status_ok {
+            log::info!(
+                "create_worktree: re-attached {} to {} after prune",
+                path.display(),
+                branch
+            );
+            return Ok(path.to_path_buf());
+        }
+        return Err(io::Error::other(format!(
+            "git worktree re-attach (after prune) failed: {}",
+            retry.stderr.trim()
+        )));
+    }
+    Err(io::Error::other(format!(
+        "git worktree re-attach failed: {}",
+        attach.stderr.trim()
     )))
 }
 
@@ -286,5 +342,70 @@ mod tests {
     fn worktree_path_includes_task_id() {
         let p = worktree_path(Path::new("/repo"), "t-123", "edit");
         assert_eq!(p, PathBuf::from("/repo/.cc-hub-wt/t-123-edit"));
+    }
+
+    /// Init a bare-minimum git repo with one commit in a tempdir.
+    fn init_repo() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        run_git(root, &["init", "-q", "-b", "main"]).expect("git init");
+        run_git(root, &["config", "user.email", "t@example.com"]).expect("email");
+        run_git(root, &["config", "user.name", "t"]).expect("name");
+        run_git(root, &["config", "commit.gpgsign", "false"]).expect("gpgsign");
+        std::fs::write(root.join("seed.txt"), b"seed").expect("seed");
+        run_git(root, &["add", "."]).expect("add");
+        run_git(root, &["commit", "-q", "-m", "seed"]).expect("commit");
+        tmp
+    }
+
+    fn branch_exists(root: &Path, branch: &str) -> bool {
+        run_git(root, &["rev-parse", "--verify", "--quiet", branch])
+            .map(|o| o.status_ok)
+            .unwrap_or(false)
+    }
+
+    // The idempotent-reuse path must not hand back a path that no longer
+    // exists. When `git worktree remove` drops the dir but leaves the
+    // `cc-hub/*` branch, a re-run must re-attach a fresh worktree to that
+    // branch rather than returning Ok on a missing cwd.
+    #[test]
+    fn create_worktree_reattaches_when_only_branch_survives() {
+        let repo = init_repo();
+        let root = repo.path();
+
+        let p1 = create_worktree(root, "t-x", "edit", "main").expect("first create");
+        assert!(p1.exists());
+        let branch = worktree_branch("t-x", "edit");
+
+        // Drop the worktree but keep the branch (mirrors gc /
+        // remove_task_worktrees, which never delete the branch).
+        run_git(root, &["worktree", "remove", "--force", &p1.to_string_lossy()])
+            .expect("worktree remove");
+        assert!(!p1.exists(), "dir should be gone after remove");
+        assert!(branch_exists(root, &branch), "branch must survive the remove");
+
+        let p2 = create_worktree(root, "t-x", "edit", "main").expect("re-create");
+        assert_eq!(p1, p2);
+        assert!(p2.exists(), "re-attached worktree dir must exist");
+    }
+
+    // A stale worktree admin entry (dir removed with a plain `rm`, not `git
+    // worktree remove`) makes git report the branch as still checked out.
+    // The re-attach must prune the dead entry and retry.
+    #[test]
+    fn create_worktree_reattaches_after_pruning_stale_registration() {
+        let repo = init_repo();
+        let root = repo.path();
+
+        let p1 = create_worktree(root, "t-y", "edit", "main").expect("first create");
+        assert!(p1.exists());
+
+        // Plain rm leaves the admin entry in .git/worktrees behind.
+        std::fs::remove_dir_all(&p1).expect("rm -rf worktree dir");
+        assert!(!p1.exists());
+
+        let p2 = create_worktree(root, "t-y", "edit", "main").expect("re-create over stale");
+        assert_eq!(p1, p2);
+        assert!(p2.exists(), "worktree dir must exist after prune + re-attach");
     }
 }

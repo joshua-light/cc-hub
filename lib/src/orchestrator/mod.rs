@@ -465,6 +465,7 @@ pub(crate) fn lock_task_state(project_id: &str, task_id: &str) -> io::Result<Opt
 /// | from → to          | produced by                                          |
 /// |--------------------|------------------------------------------------------|
 /// | Backlog → Running  | `task start`, triage promotion                       |
+/// | Running → Backlog  | spawn-failure claim rollback (`start`/`restart`)     |
 /// | Running → Review   | `pr create`, `pr reopen`, `task report`              |
 /// | Running → Done     | `pr close` while iterating                           |
 /// | Review  → Running  | `pr request-changes`                                 |
@@ -474,13 +475,17 @@ pub(crate) fn lock_task_state(project_id: &str, task_id: &str) -> io::Result<Opt
 /// | Merging → Done     | `pr finalize`, `pr close`                            |
 ///
 /// Self-transitions are always allowed (idempotent re-reports). Done is
-/// terminal; Backlog is only ever left via an orchestrator spawn.
+/// terminal. Backlog is left via an orchestrator spawn and re-entered only
+/// when that spawn fails after the task was claimed to Running — the
+/// claim-first start/restart flow rolls the status back so the task stays
+/// retryable rather than stranded in Running with no orchestrator.
 pub fn validate_status_transition(from: &TaskStatus, to: &TaskStatus) -> Result<(), String> {
     use TaskStatus::*;
     let legal = from == to
         || matches!(
             (from, to),
             (Backlog, Running)
+                | (Running, Backlog)
                 | (Running, Review)
                 | (Running, Done)
                 | (Review, Running)
@@ -510,10 +515,44 @@ fn update_task_state_inner<F>(
 where
     F: FnOnce(&mut TaskState),
 {
+    try_update_task_state_inner(project_id, task_id, touch, |s| {
+        f(s);
+        true
+    })
+    .map(|(state, _)| state)
+}
+
+/// Locked read-mutate-write like [`update_task_state`], except the closure
+/// decides whether to persist: returning `false` aborts without writing (or
+/// touching), so a guard that REJECTS a command inside the lock doesn't bump
+/// `updated_at` — and reshuffle the kanban — as a side effect of refusing.
+/// Returns the (possibly unwritten) state plus whether it was written.
+pub fn try_update_task_state<F>(
+    project_id: &str,
+    task_id: &str,
+    f: F,
+) -> io::Result<(TaskState, bool)>
+where
+    F: FnOnce(&mut TaskState) -> bool,
+{
+    try_update_task_state_inner(project_id, task_id, true, f)
+}
+
+fn try_update_task_state_inner<F>(
+    project_id: &str,
+    task_id: &str,
+    touch: bool,
+    f: F,
+) -> io::Result<(TaskState, bool)>
+where
+    F: FnOnce(&mut TaskState) -> bool,
+{
     let _lock = lock_task_state(project_id, task_id)?;
     let mut state = read_task_state(project_id, task_id)?;
     let prev_status = state.status.clone();
-    f(&mut state);
+    if !f(&mut state) {
+        return Ok((state, false));
+    }
     if state.status != prev_status {
         validate_status_transition(&prev_status, &state.status)
             .map_err(|msg| io::Error::new(io::ErrorKind::InvalidInput, msg))?;
@@ -522,7 +561,7 @@ where
         state.touch();
     }
     write_task_state(&state)?;
-    Ok(state)
+    Ok((state, true))
 }
 
 #[cfg(test)]
@@ -534,6 +573,8 @@ mod status_transition_tests {
         use TaskStatus::*;
         for (from, to) in [
             (Backlog, Running),
+            // Spawn-failure rollback re-enters Backlog from Running.
+            (Running, Backlog),
             (Running, Review),
             (Running, Done),
             (Review, Running),
@@ -561,7 +602,6 @@ mod status_transition_tests {
             (Backlog, Review),
             (Backlog, Merging),
             (Backlog, Done),
-            (Running, Backlog),
             (Running, Merging),
             (Review, Backlog),
             (Merging, Running),
@@ -591,9 +631,11 @@ mod status_transition_tests {
             );
             write_task_state(&state).unwrap();
 
-            // Running → Backlog is illegal and must not be persisted.
+            // Running → Merging is illegal and must not be persisted.
+            // (Running → Backlog is now legal — it's the spawn-failure
+            // claim rollback — so pick an edge that's still forbidden.)
             let err = update_task_state(&state.project_id, &state.task_id, |s| {
-                s.status = TaskStatus::Backlog;
+                s.status = TaskStatus::Merging;
             })
             .unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
@@ -642,9 +684,11 @@ pub fn set_task_title(project_id: &str, task_id: &str, title: &str) -> io::Resul
 }
 
 /// Remove every `<root>/.cc-hub-wt/<task>-<name>` worktree recorded for
-/// `state`. `git worktree remove --force` also drops the local
-/// `cc-hub/<task>-<name>` branch — intended terminal-state behaviour. Best-
-/// effort: failures are logged and the loop continues.
+/// `state`. `git worktree remove --force` deletes the worktree dir and its
+/// admin entry but leaves the local `cc-hub/<task>-<name>` branch behind —
+/// branches must be deleted separately (see `gc.rs`, which does the `git
+/// branch -D` this function deliberately skips). Best-effort: failures are
+/// logged and the loop continues.
 pub fn remove_task_worktrees(state: &TaskState) {
     for w in &state.workers {
         let Some(name) = w.worktree.as_deref() else {
@@ -842,22 +886,73 @@ pub fn save_projects(file: &ProjectsFile) -> io::Result<()> {
     Ok(())
 }
 
+/// Cross-process advisory lock guarding read-modify-write of the projects
+/// registry. Held across `load_projects` → mutate → `save_projects` so two
+/// concurrent `task create` runs in different unregistered directories can't
+/// lose one registration to last-writer-wins on the atomic rename. Mirrors
+/// [`lock_task_state`], but for the single shared `projects.toml`.
+///
+/// The lock lives in a dedicated `projects.toml.lock` file (flock follows the
+/// inode, and the tempfile+rename store can't be locked directly). Unlike the
+/// per-task lock this never bails on a missing target: first-registration
+/// races happen precisely when `projects.toml` doesn't exist yet, so we create
+/// `~/.cc-hub` on demand and always take the lock. Pure readers
+/// ([`load_projects`], [`project_build_cmd`]) stay lock-free.
+fn lock_projects() -> io::Result<Option<fs::File>> {
+    use fs2::FileExt;
+    let Some(path) = projects_toml_path() else {
+        return Ok(None);
+    };
+    let Some(parent) = path.parent() else {
+        return Ok(None);
+    };
+    fs::create_dir_all(parent)?;
+    let f = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(parent.join("projects.toml.lock"))?;
+    f.lock_exclusive()?;
+    Ok(Some(f))
+}
+
+/// Read-modify-write the projects registry under [`lock_projects`]. The
+/// registry is (re)loaded *inside* the lock so a racing writer's committed
+/// change is visible before `f` runs. `f` mutates the loaded registry and
+/// returns `(persist, value)`: the mutated file is written back only when
+/// `persist` is `true`, and `value` is handed to the caller. Every registry
+/// mutation must route through here.
+fn update_projects<T>(
+    f: impl FnOnce(&mut ProjectsFile) -> io::Result<(bool, T)>,
+) -> io::Result<T> {
+    let _lock = lock_projects()?;
+    let mut file = load_projects();
+    let (persist, value) = f(&mut file)?;
+    if persist {
+        save_projects(&file)?;
+    }
+    Ok(value)
+}
+
 /// Register `root` if it isn't already, returning the project id either
 /// way. `name` is used only when inserting a new entry.
 pub fn ensure_project_registered(root: &Path, name: &str) -> io::Result<String> {
     let id = project_id_for_path(root);
-    let mut file = load_projects();
-    if !file.projects.iter().any(|p| p.id == id) {
+    let id_for_closure = id.clone();
+    update_projects(move |file| {
+        if file.projects.iter().any(|p| p.id == id_for_closure) {
+            return Ok((false, ()));
+        }
         let canon = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         file.projects.push(Project {
-            id: id.clone(),
+            id: id_for_closure,
             name: name.to_string(),
             root: canon,
             created_at: now_unix_secs(),
             build_cmd: None,
         });
-        save_projects(&file)?;
-    }
+        Ok((true, ()))
+    })?;
     Ok(id)
 }
 
@@ -867,41 +962,52 @@ pub fn ensure_project_registered(root: &Path, name: &str) -> io::Result<String> 
 /// any orchestrator for this project is still alive — the caller surfaces
 /// that to the user so they can clean up tasks first.
 pub fn remove_project(project_id: &str) -> io::Result<()> {
-    let mut file = load_projects();
-    if !file.projects.iter().any(|p| p.id == project_id) {
-        return Ok(());
-    }
-
     let proj_dir = project_state_dir(project_id);
     let tasks_dir = proj_dir.as_ref().map(|d| d.join("tasks"));
-    if let Some(tasks_dir) = tasks_dir.as_ref() {
-        if tasks_dir.is_dir() {
-            for entry in fs::read_dir(tasks_dir)? {
-                let entry = entry?;
-                let state_path = entry.path().join("state.json");
-                let raw = match fs::read_to_string(&state_path) {
-                    Ok(s) => s,
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                    Err(e) => return Err(e),
-                };
-                let state: TaskState = match serde_json::from_str(&raw) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                if let Some(orch) = state.orchestrator_tmux.as_deref() {
-                    if crate::send::tmux_session_exists(orch) {
-                        return Err(io::Error::other(format!(
-                            "refusing: orchestrator {} still alive for task {}",
-                            orch, state.task_id
-                        )));
+
+    // Registry read-check-write under the lock so a concurrent register /
+    // remove can't clobber our retain. The liveness scan lives inside the
+    // lock too — it gates whether we drop the entry at all. Returns whether
+    // the entry was actually removed.
+    let removed = update_projects(|file| {
+        if !file.projects.iter().any(|p| p.id == project_id) {
+            return Ok((false, false));
+        }
+        if let Some(tasks_dir) = tasks_dir.as_ref() {
+            if tasks_dir.is_dir() {
+                for entry in fs::read_dir(tasks_dir)? {
+                    let entry = entry?;
+                    let state_path = entry.path().join("state.json");
+                    let raw = match fs::read_to_string(&state_path) {
+                        Ok(s) => s,
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                        Err(e) => return Err(e),
+                    };
+                    let state: TaskState = match serde_json::from_str(&raw) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    if let Some(orch) = state.orchestrator_tmux.as_deref() {
+                        if crate::send::tmux_session_exists(orch) {
+                            return Err(io::Error::other(format!(
+                                "refusing: orchestrator {} still alive for task {}",
+                                orch, state.task_id
+                            )));
+                        }
                     }
                 }
             }
         }
+        file.projects.retain(|p| p.id != project_id);
+        Ok((true, true))
+    })?;
+
+    // Not registered — leave any stray state dir untouched, matching the
+    // original early-return.
+    if !removed {
+        return Ok(());
     }
 
-    file.projects.retain(|p| p.id != project_id);
-    save_projects(&file)?;
     if let Some(dir) = proj_dir.as_ref() {
         if dir.exists() {
             if let Err(e) = fs::remove_dir_all(dir) {
@@ -1358,6 +1464,44 @@ mod tests {
 
         // Idempotent: a second call against an already-removed id is Ok.
         remove_project(&project_id).expect("idempotent remove");
+
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn concurrent_registrations_all_survive() {
+        // Without the projects.toml lock, N racing registrations in distinct
+        // unregistered dirs lose all but one to last-writer-wins on the
+        // atomic rename. The advisory lock must serialise them so every
+        // registration lands. flock contends across the separate FDs each
+        // thread opens, so this exercises the real cross-writer path.
+        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let n: usize = 8;
+        let mut handles = Vec::new();
+        for i in 0..n {
+            let root = home.path().join(format!("proj-{}", i));
+            fs::create_dir_all(&root).expect("mkdir");
+            handles.push(std::thread::spawn(move || {
+                ensure_project_registered(&root, &format!("p{}", i)).expect("register");
+            }));
+        }
+        for h in handles {
+            h.join().expect("join");
+        }
+
+        let after = load_projects();
+        assert_eq!(
+            after.projects.len(),
+            n,
+            "every concurrent registration must survive the lock"
+        );
 
         match prev_home {
             Some(v) => std::env::set_var("HOME", v),

@@ -4,7 +4,7 @@
 
 use serde::Serialize;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 
 /// Serialise `value` as pretty JSON and atomically replace `path` with it,
@@ -17,6 +17,15 @@ pub fn save_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     }
     let raw = serde_json::to_string_pretty(value).map_err(io::Error::other)?;
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    fs::write(&tmp, raw)?;
+    // fsync the tempfile's bytes before the rename. `fs::write` alone leaves
+    // the data in the page cache: with delayed allocation a power loss can
+    // persist the rename while the bytes are still buffered, leaving a
+    // zero-length file — the exact torn write the rename is meant to prevent.
+    // Mirrors the atomic writer in spawn.rs::ensure_path_trusted.
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(raw.as_bytes())?;
+        f.sync_all()?;
+    }
     fs::rename(&tmp, path)
 }

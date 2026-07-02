@@ -261,6 +261,10 @@ mod tests {
     // head — even after the file's content (and mtime) change.
     #[test]
     fn first_user_message_cached_is_immutable_per_path() {
+        // Serialized with every other test that touches the process-global
+        // caches: retain_cached_evicts_unvisited_paths empties them mid-run,
+        // which flakes any unguarded concurrent cache assertion.
+        let _guard = PARSE_COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let p = fresh_jsonl("summary-immutable");
         write_jsonl(
             &p,
@@ -294,6 +298,7 @@ mod tests {
     // life of the process.
     #[test]
     fn first_user_message_cached_does_not_cache_none() {
+        let _guard = PARSE_COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let p = fresh_jsonl("summary-none-not-cached");
         write_jsonl(
             &p,
@@ -331,6 +336,7 @@ mod tests {
     // window must recover it.
     #[test]
     fn first_user_message_cached_finds_message_straddling_head_window() {
+        let _guard = PARSE_COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let p = fresh_jsonl("summary-straddle");
         let pad = "x".repeat(3500);
         let long_msg = format!("start of a long pasted prompt {}", "y".repeat(2000));

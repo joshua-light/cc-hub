@@ -8,7 +8,7 @@ use crate::ui::palette::{BACKLOG_BLUE, FAINT_PURPLE_GRAY};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph, Wrap};
+use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 use ratatui_image::StatefulImage;
 
@@ -195,7 +195,14 @@ pub(crate) fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut Ap
             .find(|(art_idx, _, _)| *art_idx == app.projects.result_artifact_sel)
             .and_then(|(art_idx, kind, body)| {
                 let max_bytes = 64 * 1024;
-                artifact_preview_total_lines(&t.artifacts[*art_idx], *kind, max_bytes, inner.width)
+                // Count at the card body's render width (`inner.width - 2`,
+                // see `body_rect` below). Today `build_diff_lines` emits one
+                // row per diff line at any width, so this only matters if a
+                // renderer ever starts wrapping — but counting at a different
+                // width than the render is exactly the class of drift that
+                // broke the popup scroll math before.
+                let body_width = inner.width.saturating_sub(2);
+                artifact_preview_total_lines(&t.artifacts[*art_idx], *kind, max_bytes, body_width)
                     .map(|total| total.saturating_sub(*body as usize).min(u16::MAX as usize) as u16)
             })
             .unwrap_or(0)
@@ -203,8 +210,13 @@ pub(crate) fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut Ap
         0
     };
 
-    // Auto-scroll so the selected card stays on-screen.
-    if !t.artifacts.is_empty() && body_h > 0 {
+    // Auto-scroll so the selected card stays on-screen — but only while
+    // collapsed. In expanded mode the user is deliberately scrolling INTO the
+    // selected card's long excerpt (header off the top is expected), and this
+    // frame-recurrent snap would pin `result_scroll ≤ sel_top`, making the
+    // expanded overscroll budget below unreachable for any card that isn't
+    // already at the canvas bottom.
+    if !t.artifacts.is_empty() && body_h > 0 && !app.projects.result_artifact_expanded {
         let sel_art_idx = app.projects.result_artifact_sel.min(t.artifacts.len() - 1);
         let sel_render_pos = render_order
             .iter()
@@ -225,6 +237,12 @@ pub(crate) fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut Ap
         app.projects.result_scroll = max_scroll;
     }
     let scroll = app.projects.result_scroll;
+    // The canvas itself pins at its own max; anything past that is the
+    // expanded card's overscroll, consumed by the card body's internal scroll
+    // (`body_scroll_lines` below). Feeding raw overscroll into the Paragraph
+    // and the overlay positions would push the whole canvas — card included —
+    // off the top, leaving the popup blank instead of revealing deeper lines.
+    let canvas_scroll = scroll.min(base_max_scroll);
 
     // The placeholder blank rows below each card header keep y-offsets honest
     // for the Paragraph's vertical scroll; per-card widgets paint over them in
@@ -249,9 +267,12 @@ pub(crate) fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut Ap
         }
     }
     canvas_lines.extend(summary_lines);
-    let canvas_para = Paragraph::new(canvas_lines)
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
+    // No wrap: `canvas_card_tops` and the overlay math below assume one visual
+    // row per canvas line. With `Wrap`, any over-long line (a long note, an
+    // artifact caption in the card header, a summary line) added extra wrapped
+    // rows that shoved the real content down while the overlays stayed put,
+    // painting card bodies over the wrong rows. Clipping keeps 1 line == 1 row.
+    let canvas_para = Paragraph::new(canvas_lines).scroll((canvas_scroll, 0));
     frame.render_widget(canvas_para, body_area);
 
     // Per-card widgets, painted on top of the placeholder rows.
@@ -259,7 +280,7 @@ pub(crate) fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut Ap
         let a = &t.artifacts[art_idx];
         let card_top_canvas = canvas_card_tops[rp];
         let body_top_canvas = card_top_canvas + 1;
-        let body_screen_top = body_area.y as i32 + body_top_canvas as i32 - scroll as i32;
+        let body_screen_top = body_area.y as i32 + body_top_canvas as i32 - canvas_scroll as i32;
         let body_screen_bot = body_screen_top + body as i32;
         let view_top = body_area.y as i32;
         let view_bot = (body_area.y + body_h) as i32;
@@ -454,14 +475,27 @@ mod result_popup_tests {
             .expect("render");
         let second = buffer_to_string(terminal.backend().buffer());
         assert!(
-            second.contains("line 16") || second.contains("line 17"),
-            "scrolling should reveal later lines of the text artifact\n{}",
+            second.contains("line 29") || second.contains("line 30"),
+            "expanded overscroll should advance the excerpt ~1:1 with the popup scroll\n{}",
             second
         );
         assert!(
             !second.contains("line 01"),
             "once scrolled down, the preview should not stay pinned to the first line\n{}",
             second
+        );
+
+        // The end of the excerpt must be reachable: a huge scroll clamps to
+        // the expanded budget and lands on the last line, not short of it.
+        app.projects.result_scroll_by(1000);
+        terminal
+            .draw(|f| super::render_projects_result(f, f.area(), &mut app))
+            .expect("render");
+        let third = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            third.contains("line 80"),
+            "max overscroll should reveal the final line of the excerpt\n{}",
+            third
         );
     }
 

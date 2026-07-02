@@ -28,6 +28,25 @@ pub fn pr_create(
     let state = orchestrator::read_task_state(project_id, task_id)
         .map_err(|e| OpError::Other(format!("load state: {}", e)))?;
 
+    // Validate the Running → Review transition BEFORE allocating a PR id or
+    // writing pr.json. A `pr create` against a Backlog/Done task otherwise
+    // burns a PR id and strands an orphan pr.json that permanently blocks every
+    // future `pr create` for the task ("a PR already exists").
+    orchestrator::validate_status_transition(&state.status, &TaskStatus::Review)
+        .map_err(|e| OpError::Usage(format!("cannot open PR: {}", e)))?;
+
+    let branch = orchestrator::worktree_branch(task_id, worktree_name);
+    let base = orchestrator::detect_main_branch(&state.project_root);
+
+    // Serialize the whole exists-check → create → transition under the per-task
+    // advisory lock (the same lock `update_task_state` / `update_pr` take) so
+    // two overlapping `pr create`s can't both pass the exists-check and both
+    // write pr.json. We write state.json by hand rather than via
+    // `update_task_state`: that helper re-takes this same flock, which would
+    // deadlock while we hold it.
+    let _lock = orchestrator::lock_task_state(project_id, task_id)
+        .map_err(|e| OpError::Other(format!("lock task: {}", e)))?;
+
     if pr::read_pr(project_id, task_id)
         .map_err(|e| OpError::Other(format!("read pr: {}", e)))?
         .is_some()
@@ -37,20 +56,24 @@ pub fn pr_create(
         ));
     }
 
-    let branch = orchestrator::worktree_branch(task_id, worktree_name);
-    let base = orchestrator::detect_main_branch(&state.project_root);
+    // Re-read + re-validate under the lock so a status change between the
+    // up-front read and here is still caught before we create the PR.
+    let mut fresh = orchestrator::read_task_state(project_id, task_id)
+        .map_err(|e| OpError::Other(format!("load state: {}", e)))?;
+    orchestrator::validate_status_transition(&fresh.status, &TaskStatus::Review)
+        .map_err(|e| OpError::Usage(format!("cannot open PR: {}", e)))?;
 
-    let pr = pr::create_pr(&state, branch, base, title, description)
+    let pr = pr::create_pr(&fresh, branch, base, title, description)
         .map_err(|e| OpError::Other(format!("create pr: {}", e)))?;
 
     // PR open → task transitions Running → Review. The orchestrator's
     // tmux stays alive so it can iterate when the user requests changes.
-    orchestrator::update_task_state(project_id, task_id, |s| {
-        s.status = TaskStatus::Review;
-        s.note = Some(format!("PR #{}: {}", pr.id, pr.title));
-        s.last_auto_reviewed_at = None;
-    })
-    .map_err(|e| OpError::Other(format!("update state: {}", e)))?;
+    fresh.status = TaskStatus::Review;
+    fresh.note = Some(format!("PR #{}: {}", pr.id, pr.title));
+    fresh.last_auto_reviewed_at = None;
+    fresh.touch();
+    orchestrator::write_task_state(&fresh)
+        .map_err(|e| OpError::Other(format!("update state: {}", e)))?;
 
     Ok(pr)
 }
@@ -84,6 +107,20 @@ pub fn pr_approve(project_id: &str, task_id: &str) -> Result<PullRequest, OpErro
         .map_err(|e| OpError::Other(format!("read pr: {}", e)))?
         .ok_or_else(|| OpError::NotFound("no PR for this task".into()))?;
     guard_pr_mutable("approve", pr.review_state)?;
+
+    // Approval is only meaningful for a task in Review: it's the reviewer
+    // signing off on a proposed diff. Approving a Running task (mid-iteration)
+    // or a Merging one (already past sign-off) is a mistake — reject it rather
+    // than silently stamping the PR. Placed after `guard_pr_mutable` so a
+    // Merged/Closed PR still surfaces the conflict error, not this one.
+    if state.status != TaskStatus::Review {
+        return Err(OpError::Usage(format!(
+            "cannot approve: task {} is {} (approval only applies to a task in Review)",
+            task_id,
+            state.status.as_str()
+        )));
+    }
+
     let pr_branch = pr.branch.clone();
     let base_branch = orchestrator::detect_main_branch(&project_root);
 
@@ -274,6 +311,10 @@ pub enum MergeOutcomeOp {
         branch: String,
         base: String,
         stdout: String,
+        /// Always `None`: `pr merge` deliberately leaves HEAD on `base` so the
+        /// on-main Merging phase (/simplify, /bump, finalize build gate) runs
+        /// on main. The pre-merge ref is stashed in the merge lock and restored
+        /// by `pr finalize`. Retained only for the CLI's JSON shape.
         restored_ref: Option<String>,
     },
     /// Another task holds the merge lock.
@@ -329,6 +370,33 @@ pub fn pr_merge(
         )));
     }
 
+    // Guard the task-status transition up front, before touching the merge lock
+    // or git. `pr_merge` only flips the task to Merging at the very end — after
+    // the merge has already landed on main. Validating here, through the same
+    // `validate_status_transition` the write path enforces, refuses a task from
+    // which `→ Merging` is illegal (e.g. one bounced back to Running by
+    // `pr request-changes`). Without this the merge lands, then the final
+    // transition fails, stranding main mutated with no MergeRecord and a wedged
+    // task that retries re-merge on every run.
+    orchestrator::validate_status_transition(&state.status, &TaskStatus::Merging)
+        .map_err(|e| {
+            OpError::Usage(format!(
+                "cannot merge: {} — merge only applies to an approved task in Review",
+                e
+            ))
+        })?;
+
+    // Stale-detection liveness proxy: only hand the lock the orchestrator's
+    // tmux if that session is actually alive right now. A human running
+    // `cc-hub pr merge` from a plain shell after the orchestrator died would
+    // otherwise record a DEAD tmux, making the lock look stale at age 0 so any
+    // concurrent `acquire` steals it mid-merge. Passing None falls staleness
+    // back to the TTL. (See merge_lock::is_stale.)
+    let live_tmux = state
+        .orchestrator_tmux
+        .as_deref()
+        .filter(|t| send::tmux_session_exists(t));
+
     // Acquire the project-wide merge lock. Held across the entire merging
     // phase — released by `pr finalize` after /simplify and /bump.
     let acquire = if wait {
@@ -336,13 +404,13 @@ pub fn pr_merge(
         merge_lock::acquire_blocking(
             project_id,
             task_id,
-            state.orchestrator_tmux.as_deref(),
+            live_tmux,
             timeout,
             std::time::Duration::from_millis(500),
         )
         .map_err(|e| OpError::Other(format!("acquire merge lock: {}", e)))?
     } else {
-        merge_lock::acquire(project_id, task_id, state.orchestrator_tmux.as_deref())
+        merge_lock::acquire(project_id, task_id, live_tmux)
             .map_err(|e| OpError::Other(format!("acquire merge lock: {}", e)))?
     };
     if let merge_lock::AcquireOutcome::Held(holder) = acquire {
@@ -367,6 +435,39 @@ pub fn pr_merge(
         let _ = merge_lock::release(project_id, task_id);
         OpError::Other(msg)
     };
+
+    // Re-validate now that the lock is held: with `--wait` the pre-lock guards
+    // may be up to 30 minutes stale, and a concurrent `pr request-changes` /
+    // `pr close` in that window would otherwise reproduce the merge-then-wedge
+    // failure the early guard exists to prevent (merge lands on main, final
+    // transition fails). Re-reading shrinks the exposure to the moments between
+    // this check and the merge itself.
+    let state = orchestrator::read_task_state(project_id, task_id)
+        .map_err(|e| unlock(format!("reload state under lock: {}", e)))?;
+    let pr = match pr::read_pr(project_id, task_id) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            let _ = merge_lock::release(project_id, task_id);
+            return Err(OpError::NotFound(
+                "PR disappeared while waiting for the merge lock".into(),
+            ));
+        }
+        Err(e) => return Err(unlock(format!("re-read pr under lock: {}", e))),
+    };
+    if pr.review_state != ReviewState::Approved {
+        let _ = merge_lock::release(project_id, task_id);
+        return Err(OpError::Other(format!(
+            "PR is no longer approved (state: {}); it changed while waiting for the merge lock",
+            pr.review_state.as_str()
+        )));
+    }
+    if let Err(e) = orchestrator::validate_status_transition(&state.status, &TaskStatus::Merging) {
+        let _ = merge_lock::release(project_id, task_id);
+        return Err(OpError::Usage(format!(
+            "cannot merge: {} — the task status changed while waiting for the merge lock",
+            e
+        )));
+    }
 
     // Step 1: bring main into the feature branch so the conflict
     // resolution happens on the feature branch (where the worker can
@@ -497,9 +598,13 @@ pub fn pr_merge(
     }
 
     // Capture which ref the project root was on before we check out `base` to
-    // run the merge, so we can put the user's branch back afterward instead of
-    // silently leaving them on main. `None` means we couldn't determine it
-    // (detached / git error) — we then skip the restore rather than guess.
+    // run the merge. We deliberately do NOT restore it here: /simplify, /bump,
+    // and `pr finalize`'s build gate all run ON MAIN, so HEAD must stay on
+    // `base` through the whole Merging phase. Instead we stash the ref in the
+    // merge lock (below, once the merge lands) and `pr finalize` restores it
+    // after the on-main phase completes. `None` means we couldn't determine it
+    // (detached / git error) — finalize then skips the restore rather than
+    // guess.
     let prior_ref = capture_head_ref(&project_root);
 
     // Step 3: merge feature branch into main. Should be conflict-free
@@ -536,32 +641,19 @@ pub fn pr_merge(
         });
     }
 
-    // Restore the project root to whatever ref it was on before step 3's
-    // checkout, so the user isn't silently left on `base`. Skip when we were
-    // already on `base` (the merge advanced it; nothing to do) or couldn't
-    // determine the prior ref. Best-effort: a failure is reported, not fatal —
-    // the merge already landed.
-    let restored_ref = match &prior_ref {
-        Some(r) if r != &pr.base => {
-            let out = orchestrator::run_git(&project_root, &["checkout", r]);
-            match out {
-                Ok(o) if o.status_ok => Some(r.clone()),
-                Ok(o) => {
-                    log::warn!(
-                        "pr merge: restore HEAD to {} failed: {}",
-                        r,
-                        o.stderr.trim()
-                    );
-                    None
-                }
-                Err(e) => {
-                    log::warn!("pr merge: restore HEAD to {} errored: {}", r, e);
-                    None
-                }
+    // Stash the pre-merge ref in the lock (unless it was already `base`, or we
+    // couldn't determine it) so `pr finalize` can restore HEAD after the
+    // on-main phase. We intentionally leave the project root ON `base` here.
+    // Best-effort: if the lock write fails, the restore is simply skipped — the
+    // merge already landed and the user is on main, which is where /simplify
+    // and /bump run anyway.
+    if let Some(r) = &prior_ref {
+        if r != &pr.base {
+            if let Err(e) = merge_lock::set_prior_ref(project_id, task_id, Some(r.clone())) {
+                log::warn!("pr merge: stash prior ref {} for finalize failed: {}", r, e);
             }
         }
-        _ => None,
-    };
+    }
 
     // Transition task to Merging. /simplify and /bump still need to run;
     // `pr finalize` flips to Done afterwards.
@@ -580,11 +672,14 @@ pub fn pr_merge(
     })
     .map_err(|e| unlock(format!("update state: {}", e)))?;
 
+    // `restored_ref` is now always None: `pr merge` no longer restores HEAD
+    // (it stays on `base` for the on-main Merging phase). The field is kept for
+    // the CLI's JSON shape; the actual restore is deferred to `pr finalize`.
     Ok(MergeOutcomeOp::Merged {
         branch: pr.branch,
         base: pr.base,
         stdout: merge_into_main.stdout,
-        restored_ref,
+        restored_ref: None,
     })
 }
 
@@ -716,10 +811,11 @@ pub enum FinalizeOutcome {
 }
 
 /// `cc-hub pr finalize` body: run the build gate on main, then (on success)
-/// release the merge lock BEFORE flipping PR + task to terminal states. If the
+/// restore HEAD to the stashed prior ref while the lock is still held, release
+/// the merge lock, and only then flip PR + task to terminal states. If the
 /// release fails the task stays Merging so a re-run can complete the
-/// transition. The side-effect ORDER (release → update_pr → update_task_state)
-/// is identical to the pre-refactor body.
+/// transition. Side-effect ORDER: restore → release → update_pr →
+/// update_task_state.
 pub fn pr_finalize(
     project_id: &str,
     task_id: &str,
@@ -784,6 +880,36 @@ pub fn pr_finalize(
         }
     }
 
+    // Read the ref `pr merge` stashed before it checked out `base`, so we can
+    // restore HEAD after the on-main phase. Best-effort: a missing/foreign
+    // lock means nothing to restore.
+    let prior_ref = merge_lock::current_holder(project_id)
+        .ok()
+        .flatten()
+        .filter(|l| l.task_id == task_id)
+        .and_then(|l| l.prior_ref);
+
+    // Restore the project root to the ref it was on before `pr merge` checked
+    // out `base`. Deferred to here — after the build gate — so the gate and the
+    // preceding /simplify + /bump all run ON MAIN, not on the user's prior
+    // branch. Crucially this happens while the merge lock is still HELD: a
+    // queued `pr merge --wait` acquires the instant we release, and its
+    // checkout-base + merge must never interleave with our checkout of the
+    // prior ref — that could land the successor's PR on the user's branch.
+    // Best-effort: a failure is a warning, not fatal (the merge already landed
+    // and main is a sane place to be left).
+    if let Some(r) = &prior_ref {
+        match orchestrator::run_git(&state.project_root, &["checkout", r]) {
+            Ok(o) if o.status_ok => {}
+            Ok(o) => log::warn!(
+                "pr finalize: restore HEAD to {} failed: {}",
+                r,
+                o.stderr.trim()
+            ),
+            Err(e) => log::warn!("pr finalize: restore HEAD to {} errored: {}", r, e),
+        }
+    }
+
     // Release the merge lock BEFORE flipping PR and task to terminal states.
     let released = merge_lock::release(project_id, task_id)
         .map_err(|e| OpError::Other(format!("release merge lock: {}", e)))?;
@@ -836,4 +962,102 @@ fn git_conflicting_paths(root: &std::path::Path) -> Result<Vec<String>, String> 
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::orchestrator::TaskState;
+    use std::path::PathBuf;
+
+    fn seed(project_id: &str, task_id: &str, status: TaskStatus) -> TaskState {
+        let mut state = TaskState::new(
+            project_id.into(),
+            PathBuf::from("/tmp/proj"),
+            "do thing".into(),
+        );
+        state.task_id = task_id.into();
+        state.status = status;
+        orchestrator::write_task_state(&state).expect("write state");
+        state
+    }
+
+    #[test]
+    fn pr_create_rejects_backlog_and_leaves_no_orphan_pr() {
+        // BUG 5: a `pr create` against a non-Running task must be rejected
+        // BEFORE burning a PR id / writing pr.json, or the orphan pr.json
+        // permanently blocks future `pr create`.
+        crate::test_util::with_temp_home(|| {
+            let (project_id, task_id) = ("p-create-guard", "t-create-guard");
+            let mut state = TaskState::new_backlog(
+                project_id.into(),
+                PathBuf::from("/tmp/proj"),
+                "do thing".into(),
+            );
+            state.task_id = task_id.into();
+            orchestrator::write_task_state(&state).expect("write state");
+
+            let err = pr_create(project_id, task_id, "wt", "t".into(), "d".into())
+                .expect_err("backlog task must be rejected");
+            assert!(matches!(err, OpError::Usage(_)), "got {:?}", err);
+
+            // No orphan pr.json was written.
+            assert!(
+                pr::read_pr(project_id, task_id)
+                    .expect("read pr")
+                    .is_none(),
+                "a rejected create must not leave a pr.json behind"
+            );
+        });
+    }
+
+    #[test]
+    fn pr_create_from_running_succeeds_and_flips_to_review() {
+        crate::test_util::with_temp_home(|| {
+            let (project_id, task_id) = ("p-create-ok", "t-create-ok");
+            seed(project_id, task_id, TaskStatus::Running);
+
+            let pr = pr_create(project_id, task_id, "wt", "title".into(), "desc".into())
+                .expect("create ok from Running");
+            assert_eq!(pr.review_state, ReviewState::Open);
+
+            let after = orchestrator::read_task_state(project_id, task_id).expect("read state");
+            assert_eq!(after.status, TaskStatus::Review);
+            assert!(after.last_auto_reviewed_at.is_none());
+        });
+    }
+
+    #[test]
+    fn pr_create_second_time_reports_already_exists() {
+        crate::test_util::with_temp_home(|| {
+            let (project_id, task_id) = ("p-create-dup", "t-create-dup");
+            seed(project_id, task_id, TaskStatus::Running);
+            pr_create(project_id, task_id, "wt", "t".into(), "d".into()).expect("first create");
+            // Task is now Review; a second create hits the exists-check under
+            // the lock and refuses.
+            let err = pr_create(project_id, task_id, "wt", "t".into(), "d".into())
+                .expect_err("second create must be refused");
+            assert!(matches!(err, OpError::Other(_)), "got {:?}", err);
+        });
+    }
+
+    #[test]
+    fn pr_approve_rejects_non_review_task() {
+        // BUG 3: approval is only meaningful for a task in Review.
+        crate::test_util::with_temp_home(|| {
+            let (project_id, task_id) = ("p-approve-guard", "t-approve-guard");
+            let state = seed(project_id, task_id, TaskStatus::Running);
+            pr::create_pr(&state, "feature".into(), "main".into(), "t".into(), "d".into())
+                .expect("create pr");
+
+            let err = pr_approve(project_id, task_id).expect_err("non-Review must be rejected");
+            assert!(matches!(err, OpError::Usage(_)), "got {:?}", err);
+
+            // PR untouched (still Open, not Approved).
+            let after = pr::read_pr(project_id, task_id)
+                .expect("read pr")
+                .expect("present");
+            assert_eq!(after.review_state, ReviewState::Open);
+        });
+    }
 }

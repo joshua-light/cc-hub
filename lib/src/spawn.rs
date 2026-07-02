@@ -66,6 +66,26 @@ pub fn spawn_agent_session_with_config(
     Ok(name)
 }
 
+/// Prefix `cmd` with an environment-variable assignment the target shell can
+/// parse. On Unix the command runs through a POSIX shell (`$SHELL -ic`, see
+/// [`mux::spawn_detached`]); on Windows it lands in pwsh. `VAR=value cmd` is
+/// POSIX-only — pwsh reads it as an argument, not an assignment, so the agent
+/// never starts.
+///
+/// Unix keeps the exact `VAR='value' cmd` form (POSIX single-quote escaping via
+/// [`shell_quote`]); Windows emits `$env:VAR = 'value'; cmd` with pwsh
+/// single-quote-literal escaping (double any embedded single quote). Pure and
+/// `windows`-parameterised so both branches are unit-testable on any host — we
+/// can't run pwsh in CI.
+fn prefix_env(var: &str, value: &str, cmd: &str, windows: bool) -> String {
+    if windows {
+        let escaped = value.replace('\'', "''");
+        format!("$env:{} = '{}'; {}", var, escaped, cmd)
+    } else {
+        format!("{}={} {}", var, shell_quote(value), cmd)
+    }
+}
+
 fn build_agent_command(
     agent: &AgentConfig,
     cwd: &str,
@@ -96,11 +116,7 @@ fn build_agent_command(
             // session attaches to a possibly-pre-existing tmux server whose
             // captured environment may not include it — so set it explicitly.
             if let Some(dir) = paths::claude_config_dir() {
-                cmd = format!(
-                    "CLAUDE_CONFIG_DIR={} {}",
-                    shell_quote(&dir.to_string_lossy()),
-                    cmd
-                );
+                cmd = prefix_env("CLAUDE_CONFIG_DIR", &dir.to_string_lossy(), &cmd, cfg!(windows));
             }
         }
         AgentKind::Pi => {
@@ -155,6 +171,32 @@ fn ensure_path_trusted(cwd: &str) -> io::Result<()> {
     let Some(config_path) = paths::claude_config_json() else {
         return Ok(());
     };
+    // Nothing to trust-mark until claude has written its config at least once
+    // (the original read short-circuits on NotFound). Bailing here also avoids
+    // creating a sidecar lock in a config dir that may not exist yet.
+    if !config_path.exists() {
+        return Ok(());
+    }
+    // Serialize cc-hub's own read-modify-write of this account-wide file so a
+    // concurrent spawn (e.g. an auto_review tick racing a keypress spawn) can't
+    // clobber another project's freshly written trust entry via last-writer-
+    // wins. The lock lives in a sidecar file because the store is tempfile+
+    // rename — flock follows the inode, so the target itself can't be locked
+    // across a replace. Residual limitation: the running `claude` process does
+    // NOT take this lock, so it only prevents cc-hub-vs-cc-hub lost updates and
+    // narrows — does not close — the window against an external writer.
+    use fs2::FileExt;
+    let mut lock_path = config_path.clone().into_os_string();
+    lock_path.push(".cc-hub.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(PathBuf::from(lock_path))?;
+    lock.lock_exclusive()?;
+    // Read AFTER taking the lock so the mutation applies to fresh state, not a
+    // snapshot another cc-hub writer has since superseded. `lock` stays live
+    // to the end of the function; Drop releases the flock after the rename.
     let canon = std::fs::canonicalize(cwd).unwrap_or_else(|_| Path::new(cwd).to_path_buf());
     let data = match std::fs::read_to_string(&config_path) {
         Ok(s) => s,
@@ -267,4 +309,33 @@ fn unique_session_name(prefix: &str) -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{}-{}-{}", prefix, std::process::id(), nanos)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{prefix_env, shell_quote};
+
+    #[test]
+    fn prefix_env_unix_is_posix_and_byte_identical() {
+        // Must match the pre-fix `VAR='value' cmd` form exactly.
+        assert_eq!(
+            prefix_env("CLAUDE_CONFIG_DIR", "/home/u/.claude", "claude --resume x", false),
+            format!("CLAUDE_CONFIG_DIR={} claude --resume x", shell_quote("/home/u/.claude")),
+        );
+        // A value with a single quote gets POSIX close/escape/reopen quoting.
+        assert_eq!(
+            prefix_env("V", "a'b c", "cmd", false),
+            format!("V={} cmd", shell_quote("a'b c")),
+        );
+    }
+
+    #[test]
+    fn prefix_env_windows_is_pwsh() {
+        assert_eq!(
+            prefix_env("CLAUDE_CONFIG_DIR", r"C:\Users\u\.claude", "claude --resume x", true),
+            r"$env:CLAUDE_CONFIG_DIR = 'C:\Users\u\.claude'; claude --resume x",
+        );
+        // pwsh single-quote literal: an embedded single quote is doubled.
+        assert_eq!(prefix_env("V", "a'b", "cmd", true), "$env:V = 'a''b'; cmd");
+    }
 }

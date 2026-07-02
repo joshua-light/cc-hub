@@ -10,7 +10,7 @@ use chrono::Duration as ChronoDuration;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 pub(crate) fn render_metrics_body(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -90,9 +90,11 @@ pub(crate) fn render_metrics_body(frame: &mut Frame, area: Rect, app: &mut App) 
     );
 
     let body_area = Rect::new(area.x, area.y, area.width, body_height);
-    let content = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
+    // No wrap: the rows are tabular and `max_scroll`/`row_lines`/`view_height`
+    // are all counted in logical lines. Wrapping made `.scroll` count wrapped
+    // rows instead, so on a narrow terminal the clamp and the selection-follow
+    // targeted the wrong rows. Clipping over-long rows keeps 1 line == 1 row.
+    let content = Paragraph::new(lines).scroll((scroll, 0));
     frame.render_widget(content, body_area);
 }
 

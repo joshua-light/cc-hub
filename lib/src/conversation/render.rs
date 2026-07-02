@@ -85,28 +85,53 @@ pub(super) fn extract_text_content(entry: &Value) -> String {
 
 /// Strip XML-like tags (e.g. `<bash-stdout>`, `<system-reminder>`) that leak
 /// from Claude Code's internal JSONL format.
+///
+/// Only spans that plausibly are such tags are removed: `<`, an optional `/`,
+/// a leading letter, then tag-name chars `[-_A-Za-z0-9]`, closed by `>`. A `<`
+/// that doesn't start such a tag is emitted verbatim, so prose and inequalities
+/// like `why is a < b here?` and `x < 5 and y > 3` survive intact.
 fn strip_xml_tags(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '<' {
-            // Consume everything up to and including the closing '>'
-            let mut found_close = false;
-            for inner in chars.by_ref() {
-                if inner == '>' {
-                    found_close = true;
-                    break;
-                }
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '<' {
+            if let Some(close) = tag_close_index(&chars, i) {
+                i = close + 1; // skip the whole `<...>`
+                continue;
             }
-            if !found_close {
-                // Malformed — put the '<' back
-                out.push('<');
-            }
-        } else {
-            out.push(c);
         }
+        out.push(chars[i]);
+        i += 1;
     }
     out
+}
+
+/// If `chars[start] == '<'` begins a plausible leaked tag, return the index of
+/// its closing `>`. Otherwise `None`, meaning the `<` is ordinary text.
+fn tag_close_index(chars: &[char], start: usize) -> Option<usize> {
+    let mut j = start + 1;
+    if chars.get(j) == Some(&'/') {
+        j += 1;
+    }
+    // First char after the optional `/` must be a letter.
+    match chars.get(j) {
+        Some(c) if c.is_ascii_alphabetic() => j += 1,
+        _ => return None,
+    }
+    // Remaining tag-name chars, closed by `>`. Anything else (whitespace,
+    // punctuation) means this isn't a tag.
+    while let Some(&c) = chars.get(j) {
+        if c == '>' {
+            return Some(j);
+        }
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            j += 1;
+        } else {
+            return None;
+        }
+    }
+    None
 }
 
 fn tool_display(block: &serde_json::Value) -> String {
@@ -165,4 +190,29 @@ fn tool_brief_arg(name: &str, input: &serde_json::Value) -> Option<String> {
 pub(super) fn truncate_str(s: &str, max: usize) -> String {
     let s = strip_xml_tags(s);
     crate::models::first_line_truncated(s.trim(), max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_xml_tags_removes_leaked_tags() {
+        assert_eq!(strip_xml_tags("<bash-stdout>ok</bash-stdout>"), "ok");
+        assert_eq!(strip_xml_tags("before<system-reminder>after"), "beforeafter");
+    }
+
+    #[test]
+    fn strip_xml_tags_keeps_inequalities_and_prose() {
+        // A `<` with no matching tag must not swallow the rest of the string.
+        assert_eq!(strip_xml_tags("why is a < b here?"), "why is a < b here?");
+        // A non-tag `<`…`>` pair must be left untouched.
+        assert_eq!(strip_xml_tags("x < 5 and y > 3"), "x < 5 and y > 3");
+    }
+
+    #[test]
+    fn strip_xml_tags_handles_dangling_and_empty_angles() {
+        assert_eq!(strip_xml_tags("a <> b"), "a <> b");
+        assert_eq!(strip_xml_tags("trailing <"), "trailing <");
+    }
 }

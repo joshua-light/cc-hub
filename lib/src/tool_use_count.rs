@@ -8,7 +8,7 @@
 //! suffix; if it shrank (rewrite), we recount from scratch.
 
 use crate::{conversation, pi_conversation};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -37,6 +37,16 @@ fn cache() -> &'static Mutex<HashMap<PathBuf, Cached>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Evict cached counts for transcripts not in `live`. Call once per scan tick
+/// with the set of JSONL paths that surfaced, so this path-keyed cache can't
+/// grow one entry per JSONL ever scanned for the whole process lifetime.
+/// Mirrors [`conversation::retain_cached`].
+pub fn retain_cached(live: &HashSet<PathBuf>) {
+    if let Ok(mut guard) = cache().lock() {
+        guard.retain(|path, _| live.contains(path));
+    }
+}
+
 /// Cumulative `tool_use` count for a Claude JSONL transcript. Returns 0
 /// when the file is missing or unreadable.
 pub fn count_claude(path: &Path) -> u64 {
@@ -62,7 +72,12 @@ fn count_with_kind(path: &Path, kind: Kind) -> u64 {
 
     let (count, clean_offset) = match prev {
         Some(c) if c.size == size => return c.count,
-        Some(c) if size >= c.clean_offset => {
+        // Detect shrink against the cached *size*, not the clean offset: a
+        // rewrite that shrinks the file into `[clean_offset, old_size)` still
+        // has `size >= clean_offset`, so comparing to clean_offset would
+        // misread it as append-only growth and corrupt the count. Only a file
+        // that actually grew past its cached size gets the incremental path.
+        Some(c) if size > c.size => {
             // Append-only growth: pick up at the last clean line boundary
             // and tally only complete new lines.
             let Some((delta, new_offset)) = count_from(path, c.clean_offset, kind) else {
@@ -130,6 +145,12 @@ mod tests {
     use super::*;
     use std::fs::OpenOptions;
     use std::io::Write;
+    use std::sync::Mutex;
+
+    // The count cache is a process-global static. Tests that depend on its
+    // persistence across calls (or evict it) must not interleave with each
+    // other, so every cache-touching test holds this lock for its duration.
+    static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn write_assistant_with_tool_uses(path: &Path, n: usize) {
         let mut f = OpenOptions::new()
@@ -156,6 +177,7 @@ mod tests {
 
     #[test]
     fn first_call_counts_everything() {
+        let _g = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let p = fresh_path("first");
         write_assistant_with_tool_uses(&p, 3);
         assert_eq!(count_claude(&p), 3);
@@ -164,6 +186,7 @@ mod tests {
 
     #[test]
     fn cached_value_used_when_size_unchanged() {
+        let _g = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let p = fresh_path("cached");
         write_assistant_with_tool_uses(&p, 2);
         assert_eq!(count_claude(&p), 2);
@@ -191,6 +214,7 @@ mod tests {
 
     #[test]
     fn appended_lines_grow_count_incrementally() {
+        let _g = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let p = fresh_path("append");
         write_assistant_with_tool_uses(&p, 4);
         assert_eq!(count_claude(&p), 4);
@@ -209,6 +233,48 @@ mod tests {
 
         write_assistant_with_tool_uses(&p, 2);
         assert_eq!(count_claude(&p), 9);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn shrink_recounts_from_scratch() {
+        let _g = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let p = fresh_path("shrink");
+        write_assistant_with_tool_uses(&p, 2);
+        let size = std::fs::metadata(&p).unwrap().len();
+
+        // Simulate a cache entry from when the file was larger, with a clean
+        // offset *below* the current (shrunk) size. The old buggy guard
+        // (`size >= clean_offset`) would treat this as append-only growth and
+        // keep the stale count 99; the fix compares against the cached size,
+        // sees a shrink, and recounts from scratch → 2.
+        {
+            let mut guard = cache().lock().unwrap();
+            guard.insert(
+                p.clone(),
+                Cached {
+                    size: size + 1000,
+                    clean_offset: size.saturating_sub(10),
+                    count: 99,
+                },
+            );
+        }
+
+        assert_eq!(count_claude(&p), 2);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn retain_cached_evicts_unlisted_paths() {
+        let _g = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let p = fresh_path("retain");
+        write_assistant_with_tool_uses(&p, 1);
+        assert_eq!(count_claude(&p), 1);
+        assert!(cache().lock().unwrap().contains_key(&p));
+
+        // Path absent from the live set → evicted.
+        retain_cached(&HashSet::new());
+        assert!(!cache().lock().unwrap().contains_key(&p));
         let _ = std::fs::remove_file(&p);
     }
 

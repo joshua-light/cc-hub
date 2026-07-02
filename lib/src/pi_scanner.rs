@@ -205,8 +205,23 @@ fn scan_external_live_sessions(
         files.sort_by_key(|b| std::cmp::Reverse(b.1));
     }
 
+    // Pair heartbeat-less Pi processes to transcripts DETERMINISTICALLY. Without
+    // a heartbeat we can't know which process wrote which transcript, and the
+    // platform layer exposes no process start time, so we approximate "newest
+    // process first" by descending pid (higher pids are generally started
+    // later) and hand each process the next-newest unclaimed transcript in its
+    // cwd. The point is a STABLE mapping: the bug was arbitrary list_pids()
+    // order flip-flopping the transcript↔pid/tmux pairing between ticks, so
+    // focus/send could target a different terminal each tick.
+    //
+    // Residual ambiguity: two heartbeat-less Pi processes sharing one cwd whose
+    // pid order doesn't match their transcripts' creation order stay
+    // mis-paired. Only heartbeats (the normal path) resolve this exactly.
+    let mut pids = process::list_pids();
+    pids.sort_unstable_by(|a, b| b.cmp(a));
+
     let mut out = Vec::new();
-    for pid in process::list_pids() {
+    for pid in pids {
         if !process::is_agent_process(AgentKind::Pi, pid) {
             continue;
         }

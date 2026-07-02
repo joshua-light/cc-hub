@@ -37,7 +37,7 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
     if matches!(verb.as_str(), "help" | "--help" | "-h") {
         return Some(handle(help::print_cli_help(rest)));
     }
-    if rest.iter().any(|a| matches!(a.as_str(), "--help" | "-h")) {
+    if args_request_help(rest) {
         return Some(handle(help::print_cli_help(args)));
     }
     match verb.as_str() {
@@ -429,6 +429,56 @@ fn next_value(args: &[String], i: &mut usize, name: &str) -> Result<String, CliE
     Ok(v)
 }
 
+/// Boolean flags that take no value — the no-argument arms of [`parse_flags`].
+/// Every other recognized `--flag` consumes the following token as its value.
+const BOOL_FLAGS: &[&str] = &[
+    "--readonly",
+    "--lead",
+    "--dry-run",
+    "--backlog",
+    "--all",
+    "--wait",
+    "--progress",
+    "--json",
+    "--force",
+    "--skip-build",
+    "--keep-tmux",
+];
+
+/// Flag-aware scan for a help request among a verb's args.
+///
+/// A naive `args.iter().any(|a| a == "-h" || a == "--help")` misfires when a
+/// flag VALUE equals `-h`/`--help` — e.g. `pr comment --comment "-h"` would
+/// silently reroute to help and exit 0, which the orchestrator reads as a
+/// success no-op. So mirror [`next_value`]'s tokenizer: a value-consuming flag
+/// swallows its next token (free-text flags take any token; structured flags
+/// reject a `--`-prefixed one, treating it as an omitted value). Only a
+/// `-h`/`--help` in true argument position triggers help.
+fn args_request_help(args: &[String]) -> bool {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if matches!(a, "-h" | "--help") {
+            return true;
+        }
+        // Any `--flag` that isn't a known boolean — including flags this scan
+        // doesn't recognize — swallows the following token as its value, so a
+        // `-h`-shaped value can't masquerade as a help request. (For unknown
+        // flags that means `--bogus -h` surfaces the unknown-flag usage error
+        // rather than help — the more informative failure.)
+        if a.starts_with("--") && !BOOL_FLAGS.contains(&a) {
+            if let Some(next) = args.get(i + 1) {
+                if FREE_TEXT_FLAGS.contains(&a) || !next.starts_with("--") {
+                    i += 2;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 fn require_task(f: &Flags) -> Result<String, CliError> {
     f.task
         .clone()
@@ -540,6 +590,39 @@ mod tests {
             dispatch(&["task".to_string(), "--help".to_string()]),
             Some(0)
         );
+    }
+
+    #[test]
+    fn help_scan_ignores_free_text_flag_value() {
+        // Regression: `pr comment --comment "-h"` — the `-h` is the comment
+        // VALUE, not a help request. Rerouting to help here is a silent exit-0
+        // no-op the orchestrator misreads as success.
+        assert!(!args_request_help(&[
+            "comment".to_string(),
+            "--comment".to_string(),
+            "-h".to_string(),
+        ]));
+        // A `--help`-shaped free-text value is equally inert.
+        assert!(!args_request_help(&[
+            "comment".to_string(),
+            "--comment".to_string(),
+            "--help".to_string(),
+        ]));
+        // A positional -h / --help still triggers help.
+        assert!(args_request_help(&[
+            "comment".to_string(),
+            "-h".to_string()
+        ]));
+        assert!(args_request_help(&[
+            "comment".to_string(),
+            "--help".to_string()
+        ]));
+        // Structured flag consuming a `-h` value stays tokenizer-consistent:
+        // the value binds to the flag (parse_flags would too), so no help.
+        assert!(!args_request_help(&[
+            "--status".to_string(),
+            "-h".to_string()
+        ]));
     }
 
     #[test]

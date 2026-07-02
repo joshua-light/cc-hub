@@ -104,10 +104,11 @@ impl LiveView {
         let entries = conversation::read_jsonl_tail(&self.path, 128 * 1024);
         let messages = extract_messages(self.agent_kind, &entries, 100);
 
-        if messages.len() == self.messages.len() {
-            return false;
-        }
-
+        // The file grew (checked above), so re-parse and adopt the result.
+        // Comparing `messages.len()` was wrong: the tail is capped at 100
+        // messages, so once a busy session stays pinned at that cap the length
+        // never changes even as content scrolls in — the old code parsed the
+        // fresh tail then threw it away, freezing the tail forever.
         self.messages = messages;
         true
     }

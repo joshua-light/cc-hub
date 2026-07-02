@@ -12,7 +12,7 @@ use crate::ui::main_layout;
 use crate::ui::palette::{ACCENT_BLUE, CONTEXT_GRAY, DIM_TEXT, GRAY_80};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
@@ -525,6 +525,29 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// Visual rows one logical `Line` occupies when a `Paragraph` with
+/// `Wrap { trim: false }` renders it into `width` columns. ratatui scrolls a
+/// wrapped paragraph by these *wrapped rows*, not by logical lines, so every
+/// scroll clamp and jump target has to be summed in this unit — counting
+/// logical lines leaves the last wrapped screenful permanently unreachable.
+///
+/// Delegates to ratatui's own `Paragraph::line_count` (the
+/// `unstable-rendered-line-info` feature) so the count is by construction the
+/// renderer's: a hand-rolled mirror of `WordWrapper` diverged on
+/// whitespace-led rows, trailing spaces, tabs, and wide (CJK/emoji) chars —
+/// under-counts made the last screenful unreachable again, over-counts let
+/// auto-follow scroll past the bottom into blank rows.
+pub(crate) fn wrapped_total_rows(lines: &[Line], width: u16) -> u16 {
+    if width == 0 {
+        return lines.len().min(u16::MAX as usize) as u16;
+    }
+    Paragraph::new(Text::from(lines.to_vec()))
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+        .max(lines.len().min(1))
+        .min(u16::MAX as usize) as u16
+}
+
 /// Scratch to-do list, drawn as a right-anchored side panel over the body
 /// region so the tab strip and status bar (which carries the panel's own key
 /// hints) stay visible behind it.
@@ -1018,7 +1041,7 @@ pub(crate) fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-pub(crate) fn render_state_debug(frame: &mut Frame, area: Rect, app: &App) {
+pub(crate) fn render_state_debug(frame: &mut Frame, area: Rect, app: &mut App) {
     let popup_area = centered_rect(area, 0.9);
     frame.render_widget(Clear, popup_area);
 
@@ -1044,12 +1067,26 @@ pub(crate) fn render_state_debug(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 
-    let total_lines = app.state_debug_lines.len() as u16;
+    // Too small to host content plus the bottom-border indicator; bail before
+    // `popup_area.height - 1` below can underflow on a 1-row terminal.
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    // The Paragraph wraps, so scroll counts wrapped rows. Clamp the stored
+    // scroll to the real bottom each frame — the key handler only
+    // saturating_adds, so without this `j` runs off into blank space while the
+    // N/N indicator pins.
+    let total_rows = wrapped_total_rows(&app.state_debug_lines, inner.width);
+    let max_scroll = total_rows.saturating_sub(inner.height);
+    if app.state_debug_scroll > max_scroll {
+        app.state_debug_scroll = max_scroll;
+    }
 
     let scroll_info = format!(
         " {}/{} ",
-        (app.state_debug_scroll as usize).min(total_lines.saturating_sub(1) as usize) + 1,
-        total_lines
+        (app.state_debug_scroll as usize).min(total_rows.saturating_sub(1) as usize) + 1,
+        total_rows
     );
     let indicator_area = Rect::new(
         inner.x,
@@ -1223,12 +1260,16 @@ pub(crate) fn render_live_tail(frame: &mut Frame, area: Rect, app: &mut App) {
     );
 
     let (lines, highlight_range) = build_live_tail_content(&lv.messages, lv.highlight_msg_idx);
-    let total_lines = lines.len() as u16;
+    // The Paragraph wraps, so `.scroll` counts wrapped rows, not logical lines.
+    // Any line wider than the popup adds rows the logical count misses, which
+    // is what left the bottom rows unreachable and the highlight off-target.
+    let wrap_w = content_area.width;
+    let total_rows = wrapped_total_rows(&lines, wrap_w);
 
-    lv.total_content_lines = total_lines;
+    lv.total_content_lines = total_rows;
 
-    if lv.auto_scroll && total_lines > content_area.height {
-        lv.scroll = total_lines.saturating_sub(content_area.height);
+    if lv.auto_scroll && total_rows > content_area.height {
+        lv.scroll = total_rows.saturating_sub(content_area.height);
     }
 
     // One-shot: consuming the flag lets manual scrolls stick afterwards.
@@ -1237,8 +1278,11 @@ pub(crate) fn render_live_tail(frame: &mut Frame, area: Rect, app: &mut App) {
     if lv.scroll_to_highlight.is_some() {
         if let Some((start, _end)) = highlight_range {
             let h = content_area.height.max(1);
-            let target = (start as u16).saturating_sub(h / 3);
-            let max_scroll = total_lines.saturating_sub(h);
+            // `start` is a logical-line index; translate it to the wrapped-row
+            // offset the scroll actually operates in.
+            let target_row = wrapped_total_rows(&lines[..start.min(lines.len())], wrap_w);
+            let target = target_row.saturating_sub(h / 3);
+            let max_scroll = total_rows.saturating_sub(h);
             lv.scroll = target.min(max_scroll);
             lv.scroll_to_highlight = None;
         } else if !lv.messages.is_empty() {
@@ -1246,7 +1290,7 @@ pub(crate) fn render_live_tail(frame: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
-    let max_scroll = total_lines.saturating_sub(content_area.height);
+    let max_scroll = total_rows.saturating_sub(content_area.height);
     if lv.scroll > max_scroll {
         lv.scroll = max_scroll;
     }
@@ -1270,8 +1314,8 @@ pub(crate) fn render_live_tail(frame: &mut Frame, area: Rect, app: &mut App) {
     // Scroll indicator on the right of the bottom border
     let scroll_info = format!(
         " {}/{} ",
-        (lv.scroll as usize).min(total_lines.saturating_sub(1) as usize) + 1,
-        total_lines
+        (lv.scroll as usize).min(total_rows.saturating_sub(1) as usize) + 1,
+        total_rows
     );
     let indicator = Paragraph::new(Line::from(Span::styled(
         scroll_info,
@@ -1585,6 +1629,68 @@ mod wrap_text_tests {
     #[test]
     fn zero_width_is_clamped_to_one_column() {
         assert_eq!(wrap_text("ab", 0), vec!["a", "b"]);
+    }
+}
+
+#[cfg(test)]
+mod wrapped_rows_tests {
+    use super::wrapped_total_rows;
+    use ratatui::text::{Line, Span};
+
+    fn rows(s: &str, w: u16) -> usize {
+        wrapped_total_rows(&[Line::from(Span::raw(s.to_string()))], w) as usize
+    }
+
+    #[test]
+    fn empty_and_short_lines_are_one_row() {
+        assert_eq!(rows("", 10), 1);
+        assert_eq!(rows("hello", 10), 1);
+        assert_eq!(rows("hello", 5), 1); // exactly fills one row
+    }
+
+    #[test]
+    fn breaks_on_word_boundaries() {
+        assert_eq!(rows("the quick brown fox", 9), 2);
+        assert_eq!(rows("hello world", 5), 2);
+    }
+
+    #[test]
+    fn hard_splits_a_word_wider_than_the_row() {
+        assert_eq!(rows("abcdefgh", 3), 3); // abc/def/gh
+    }
+
+    #[test]
+    fn zero_width_never_divides_by_zero() {
+        assert_eq!(rows("abc", 0), 1); // degenerate area; renderer shows nothing
+    }
+
+    // The cases where the previous hand-rolled WordWrapper mirror diverged
+    // from the renderer (fuzz-verified against Paragraph rendering). These pin
+    // the renderer's actual behavior so a future reimplementation can't
+    // silently drift again.
+    #[test]
+    fn matches_renderer_on_divergent_shapes() {
+        // Leading whitespace before an overflowing token: WordWrapper packs
+        // the whitespace + word-head onto the first row.
+        assert_eq!(rows(" leading", 4), 2);
+        // Trailing space at exact row boundary is dropped, not wrapped.
+        assert_eq!(rows("aaaa ", 4), 1);
+        // Wide chars (CJK, emoji) occupy two columns each.
+        assert_eq!(rows("日本語のテキスト", 8), 2);
+        assert_eq!(rows("emoji 🚀🚀🚀 line", 8), 3);
+    }
+
+    #[test]
+    fn spans_concatenate_and_lines_sum() {
+        // Two spans concatenate into one logical line for wrap purposes.
+        let wide = Line::from(vec![Span::raw("the quick "), Span::raw("brown fox")]);
+        assert_eq!(wrapped_total_rows(&[wide], 9), 2);
+
+        let lines = vec![
+            Line::from(Span::raw("short")),           // 1 row
+            Line::from(Span::raw("the quick brown")), // 2 rows at width 9
+        ];
+        assert_eq!(wrapped_total_rows(&lines, 9), 3);
     }
 }
 

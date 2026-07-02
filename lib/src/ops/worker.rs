@@ -234,8 +234,78 @@ pub fn merge_worktree(
     let branch = orchestrator::worktree_branch(task_id, worktree_name);
     let main = orchestrator::detect_main_branch(&project_root);
 
-    let (outcome, stdout, stderr) = orchestrator::merge_branch(&project_root, &main, &branch)
-        .map_err(|e| OpError::Other(format!("merge: {}", e)))?;
+    // A task mid-Merging already holds the project merge lock from its own
+    // `pr merge`. Because `merge_lock::acquire` is same-task idempotent, this
+    // verb would "acquire" via refresh and then its unconditional release
+    // below would drop the Merging phase's lock mid-/simplify — letting a
+    // queued `pr merge` mutate main under the in-flight task. Refuse instead.
+    if state.status == orchestrator::TaskStatus::Merging {
+        return Err(OpError::conflict_with_recipe(
+            format!(
+                "task {} is mid-Merging (its `pr merge` holds the project merge lock)",
+                task_id
+            ),
+            "Finish the PR flow with `cc-hub pr finalize` instead of `merge-worktree`.",
+        ));
+    }
+
+    // Acquire the project merge lock so this legacy direct-merge path can't
+    // race a concurrent `pr merge` into main. Non-blocking: a held lock means
+    // another task owns the Merging phase right now. Only hand the lock a live
+    // orchestrator tmux (see pr_merge / merge_lock::is_stale) so a dead session
+    // doesn't make the lock look stale.
+    let live_tmux = state
+        .orchestrator_tmux
+        .as_deref()
+        .filter(|t| send::tmux_session_exists(t));
+    match crate::merge_lock::acquire(project_id, task_id, live_tmux)
+        .map_err(|e| OpError::Other(format!("acquire merge lock: {}", e)))?
+    {
+        crate::merge_lock::AcquireOutcome::Acquired => {}
+        crate::merge_lock::AcquireOutcome::Held(holder) => {
+            return Err(OpError::conflict_with_recipe(
+                format!(
+                    "merge in progress by task {} — the project merge lock is held",
+                    holder.task_id
+                ),
+                "Wait for the in-flight merge to finish (`cc-hub pr finalize`), then re-run \
+                 `cc-hub merge-worktree`.",
+            ));
+        }
+    }
+
+    // From here the lock is HELD: every return path must release it.
+    // Capture the ref HEAD was on before `merge_branch` checks out `main`, so we
+    // can restore it afterward instead of silently leaving the user on main.
+    let prior_ref = capture_head_ref(&project_root);
+
+    let (outcome, stdout, stderr) = match orchestrator::merge_branch(&project_root, &main, &branch) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = crate::merge_lock::release(project_id, task_id);
+            return Err(OpError::Other(format!("merge: {}", e)));
+        }
+    };
+
+    // Restore HEAD to the pre-merge ref on a clean merge. On a conflict the
+    // merge is left in progress on main for the user to resolve (a checkout
+    // would fail anyway), and the dirty-tree preflight never moved HEAD — both
+    // need no restore. Best-effort: a failure is a warning, not fatal.
+    if matches!(outcome, MergeOutcome::Ok) {
+        if let Some(r) = prior_ref.as_deref() {
+            if r != main.as_str() {
+                match orchestrator::run_git(&project_root, &["checkout", r]) {
+                    Ok(o) if o.status_ok => {}
+                    Ok(o) => log::warn!(
+                        "merge-worktree: restore HEAD to {} failed: {}",
+                        r,
+                        o.stderr.trim()
+                    ),
+                    Err(e) => log::warn!("merge-worktree: restore HEAD to {} errored: {}", r, e),
+                }
+            }
+        }
+    }
 
     // Don't persist a MergeRecord for the dirty-tree pre-flight refusal —
     // the merge never started, so recording it as "attempted" would
@@ -252,6 +322,10 @@ pub fn merge_worktree(
         });
     }
 
+    // Release on every terminal path — the direct merge owns the lock only for
+    // the duration of this call (there's no `pr finalize` to release it later).
+    let _ = crate::merge_lock::release(project_id, task_id);
+
     Ok(MergeWorktreeOutcome {
         outcome,
         worktree: worktree_name.to_string(),
@@ -260,6 +334,24 @@ pub fn merge_worktree(
         stdout,
         stderr,
     })
+}
+
+/// The branch HEAD points to in `root`, or `None` when detached or git fails.
+/// Used by [`merge_worktree`] to remember the user's branch before
+/// `merge_branch` checks out `main`, so it can be restored afterward. (Mirrors
+/// the private helper in `ops::pr`; kept local to avoid a cross-module coupling
+/// for six lines.)
+fn capture_head_ref(root: &std::path::Path) -> Option<String> {
+    let out = orchestrator::run_git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()?;
+    if !out.status_ok {
+        return None;
+    }
+    let name = out.stdout.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 /// Resolve the tmux-name targets for `worker wait` from the various
@@ -308,10 +400,14 @@ pub fn resolve_wait_targets(
         targets.push(t.clone());
     }
     for wt in worktree_targets {
+        // Resolve to the NEWEST matching record: a retry pushes a fresh Worker
+        // (new tmux) reusing the same worktree name, and the oldest record's
+        // tmux is usually dead — waiting on it blocks the whole timeout.
         match state
             .workers
             .iter()
-            .find(|w| w.worktree.as_deref() == Some(wt.as_str()))
+            .filter(|w| w.worktree.as_deref() == Some(wt.as_str()))
+            .max_by_key(|w| w.spawned_at)
         {
             Some(w) => targets.push(w.tmux_name.clone()),
             None => {
@@ -330,8 +426,34 @@ pub fn resolve_wait_targets(
         }
     }
     if all {
+        // Dedup by identity keeping the NEWEST record: retries push a fresh
+        // Worker (new tmux) on the same worktree, so a plain "every worker"
+        // sweep waits on dead first-attempt sessions and blocks the whole
+        // timeout. Identity is the worktree name (worktree workers) or the tmux
+        // name (readonly workers, which have no worktree). First-appearance
+        // order is preserved.
+        use std::collections::HashMap;
+        let mut slot: HashMap<String, usize> = HashMap::new();
+        let mut chosen: Vec<(String, i64)> = Vec::new();
         for w in &state.workers {
-            targets.push(w.tmux_name.clone());
+            let key = match &w.worktree {
+                Some(wt) => format!("wt:{}", wt),
+                None => format!("tmux:{}", w.tmux_name),
+            };
+            match slot.get(&key) {
+                Some(&i) => {
+                    if w.spawned_at >= chosen[i].1 {
+                        chosen[i] = (w.tmux_name.clone(), w.spawned_at);
+                    }
+                }
+                None => {
+                    slot.insert(key, chosen.len());
+                    chosen.push((w.tmux_name.clone(), w.spawned_at));
+                }
+            }
+        }
+        for (tmux, _) in chosen {
+            targets.push(tmux);
         }
     }
 
@@ -469,5 +591,71 @@ pub fn worker_wait(
         timed_out,
         elapsed_secs,
         workers,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::AgentKind;
+    use std::path::PathBuf;
+
+    fn worker(tmux: &str, worktree: Option<&str>, spawned_at: i64) -> Worker {
+        Worker {
+            agent_id: "claude".into(),
+            agent_kind: AgentKind::Claude,
+            tmux_name: tmux.into(),
+            cwd: PathBuf::from("/tmp"),
+            worktree: worktree.map(str::to_string),
+            readonly: worktree.is_none(),
+            spawned_at,
+        }
+    }
+
+    fn state_with(workers: Vec<Worker>) -> TaskState {
+        let mut s = TaskState::new("p".into(), PathBuf::from("/tmp/proj"), "do".into());
+        s.task_id = "t".into();
+        s.workers = workers;
+        s
+    }
+
+    #[test]
+    fn worktree_resolves_to_newest_matching_worker() {
+        // A retry pushes a second record reusing the "fix" worktree; the older
+        // record's tmux is usually dead, so resolve to the newest.
+        let state = state_with(vec![
+            worker("cchub-old", Some("fix"), 100),
+            worker("cchub-new", Some("fix"), 200),
+        ]);
+        let targets = resolve_wait_targets(&state, &[], &["fix".into()], false).expect("ok");
+        assert_eq!(targets, vec!["cchub-new".to_string()]);
+    }
+
+    #[test]
+    fn all_dedups_by_worktree_keeping_newest() {
+        let state = state_with(vec![
+            worker("cchub-old", Some("fix"), 100),
+            worker("cchub-new", Some("fix"), 200),
+            worker("cchub-ro", None, 150),
+        ]);
+        let targets = resolve_wait_targets(&state, &[], &[], true).expect("ok");
+        // One entry per identity: newest "fix" record, then the readonly worker.
+        assert_eq!(
+            targets,
+            vec!["cchub-new".to_string(), "cchub-ro".to_string()]
+        );
+    }
+
+    #[test]
+    fn all_keeps_distinct_readonly_workers() {
+        let state = state_with(vec![
+            worker("cchub-ro1", None, 100),
+            worker("cchub-ro2", None, 200),
+        ]);
+        let targets = resolve_wait_targets(&state, &[], &[], true).expect("ok");
+        assert_eq!(
+            targets,
+            vec!["cchub-ro1".to_string(), "cchub-ro2".to_string()]
+        );
     }
 }
