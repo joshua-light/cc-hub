@@ -1,35 +1,41 @@
 # cc-hub
 
-A TUI-based coding-agent hub. cc-hub can manage multiple backends: Claude
-Code sessions from `~/.claude/...` and Pi sessions from `~/.pi/agent/sessions`.
-It gives you a grid of every discovered session on the box: what state it's in
-(processing / waiting / idle), the running tool or pending approval/question,
-a live tool-call counter, context-window usage, and a live tail of the JSONL
-transcript. From the grid you can:
+A terminal (TUI) hub for coding agents. cc-hub discovers every agent session
+on your machine — Claude Code sessions from `~/.claude/...`, Pi sessions from
+`~/.pi/agent/sessions` — and shows them in one grid. Each card shows the
+session's state (processing / waiting / idle), the running tool or pending
+approval/question, a live tool-call counter, context-window usage, and a live
+tail of the JSONL transcript.
 
-- spawn new configured agent sessions in any folder,
-- dispatch a prompt to the first idle agent (or auto-spawn one if none
-  exist),
-- embed an existing session's terminal pane inside the TUI,
-- focus the real terminal window of a detached session (Unix only), and
+From the grid you can:
+
+- spawn new agent sessions in any folder,
+- send a prompt to the first idle agent (auto-spawning one if none exist),
+- embed a session's terminal pane inside the TUI,
+- focus the real terminal window of a detached session (Unix only),
 - browse per-session metrics and Anthropic API usage.
 
-A **Tasks** tab is the personal layer: a flat four-column board (**To-Do ·
-Planning · In Progress · Done**, stored at `~/.cc-hub/tasks.json`) where you
-jot tasks and either check them off by hand or hand one to an agent — `s`
-picks a folder, spawns a detached agent session there prompted to
-investigate the task and present a plan first, and binds it to the card,
-which sits in **Planning**. `Space` approves the plan ("Proceed with the
-implementation." is sent to the agent) and moves the card to In Progress.
-`f`/`Enter` on a bound card attaches the agent's pane exactly like the
-Sessions tab, including resume after the tmux session dies.
+## Tasks board
 
-A separate **Projects** tab (WIP — hidden by default, enable with
-`[ui] show_projects_tab = true`) adds a higher-level layer: register a
-directory as a project, file a free-form *task* against it, and cc-hub
-spawns an *orchestrator* session that decomposes the task and dispatches
-*worker* sessions (read-only research workers, or worktree-isolated edit
-workers) via scriptable CLI primitives:
+The personal layer: a four-column board — **To-Do · Planning · In Progress ·
+Done** — stored at `~/.cc-hub/tasks.json`. Jot tasks and check them off by
+hand, or hand one to an agent:
+
+1. `s` picks a folder and spawns a detached agent session there, prompted to
+   investigate the task and present a plan first. The card moves to
+   **Planning**.
+2. `Space` approves the plan — "Proceed with the implementation." is sent to
+   the agent — and the card moves to **In Progress**.
+3. `f` / `Enter` attaches the agent's pane, exactly like the Sessions tab,
+   including resume after the tmux session dies.
+
+## Projects layer (WIP)
+
+Hidden by default; enable with `[ui] show_projects_tab = true`. This is the
+higher-level layer: register a directory as a project and file a free-form
+*task* against it. cc-hub spawns an *orchestrator* session that breaks the
+task down and dispatches *worker* sessions — read-only research workers, or
+worktree-isolated edit workers — through scriptable CLI commands:
 
 - `cc-hub task create --prompt "…" [--backlog]` / `cc-hub task start --task ID [--agent AGENT]`
 - `cc-hub orchestrate start --task ID [--agent AGENT] [--dry-run]`
@@ -45,8 +51,8 @@ workers) via scriptable CLI primitives:
 - `cc-hub project list [--json]`
 
 Project state lives at `~/.cc-hub/projects.toml` and
-`~/.cc-hub/projects/<id>/tasks/<id>/state.json`; worktrees are placed under
-`<project-root>/.cc-hub-wt/` (add this to `.gitignore`).
+`~/.cc-hub/projects/<id>/tasks/<id>/state.json`. Worktrees go under
+`<project-root>/.cc-hub-wt/` — add that to `.gitignore`.
 
 ## Requirements
 
@@ -62,16 +68,15 @@ Project state lives at `~/.cc-hub/projects.toml` and
 
 ### Why these?
 
-- **Multiplexer.** Every session cc-hub spawns is wrapped in a detached
-  multiplexer session so the hub can inject prompts via `send-keys` without
-  stealing focus, and so the agent survives an accidentally-closed terminal.
-  On Unix this is tmux; on Windows it's psmux, a tmux-compatible mux that
-  uses ConPTY and ships a `tmux.exe` shim. The code calls both via the
-  `tmux` binary name — make sure the Windows `psmux` install exposes
-  `tmux.exe` on `PATH`.
-- **`cc-hub-new`.** cc-hub launches Claude with the single shell command
-  `cc-hub-new`. Define it however you like, but it needs to resolve inside
-  the shell that the multiplexer pane starts. A common pattern is:
+- **Multiplexer.** Every session cc-hub spawns runs in a detached multiplexer
+  session. That lets the hub inject prompts via `send-keys` without stealing
+  focus, and keeps the agent alive if you close its terminal. Unix uses tmux;
+  Windows uses psmux, a tmux-compatible mux built on ConPTY that ships a
+  `tmux.exe` shim. cc-hub calls both as `tmux` — make sure your psmux install
+  puts `tmux.exe` on `PATH`.
+- **`cc-hub-new`.** cc-hub launches Claude with one shell command:
+  `cc-hub-new`. Define it however you like, as long as it resolves in the
+  shell the multiplexer pane starts. A common setup:
   - bash/zsh (`~/.bashrc` or `~/.zshrc`):
     ```sh
     alias cc-hub-new='claude --dangerously-skip-permissions'
@@ -81,18 +86,17 @@ Project state lives at `~/.cc-hub/projects.toml` and
     function cc-hub-new { claude --dangerously-skip-permissions @args }
     ```
 
-  The name is deliberately distinct from the `cc-hub` binary so the alias
-  doesn't shadow the TUI on `PATH`. Use whatever flags you want — yolo mode
-  is a suggestion, not a requirement.
-- **Nerd Font.** State indicators and role markers in the UI use
-  Nerd-Font private-use-area glyphs. Without a Nerd Font you'll see tofu
-  boxes where icons should be. Any Nerd-Font patched font works
-  (JetBrainsMono Nerd Font, FiraCode Nerd Font, etc.).
-- **Terminal emulator (Unix).** Only consulted when you press `f` on a
-  detached session whose original terminal was closed — cc-hub opens a new
-  window of your emulator and runs `tmux attach` inside it. The selection
-  order is `$TERMINAL` first, then the first available of `kitty`, `foot`,
-  `alacritty`, `wezterm`, `ghostty`.
+  The name differs from the `cc-hub` binary on purpose, so the alias doesn't
+  shadow the TUI on `PATH`. Use whatever flags you want — yolo mode is a
+  suggestion, not a requirement.
+- **Nerd Font.** State indicators and role markers in the UI use Nerd-Font
+  glyphs. Without one you'll see tofu boxes where icons should be. Any
+  Nerd-Font patched font works (JetBrainsMono Nerd Font, FiraCode Nerd Font,
+  etc.).
+- **Terminal emulator (Unix).** Only used when you press `f` on a detached
+  session whose original terminal is gone: cc-hub opens a new emulator window
+  and runs `tmux attach` inside it. It tries `$TERMINAL` first, then the
+  first available of `kitty`, `foot`, `alacritty`, `wezterm`, `ghostty`.
 
 ## Build & run
 
@@ -113,13 +117,13 @@ cargo run --release -- --claude-config-dir ~/.claude-personal
 ### Running multiple accounts in parallel
 
 `--claude-config-dir <path>` mirrors Claude Code's own `CLAUDE_CONFIG_DIR`
-environment variable: when set, Claude relocates its entire user-data tree
-(`sessions/`, `projects/`, `history.jsonl`, `.credentials.json`) **and** its
-`.claude.json` state file into that directory. cc-hub honours the same variable
-for both *reading* (the session grid, usage, metrics, weekly counts) and
-*spawning* (every launched `claude` — interactive sessions, titles, backlog,
-auto-review — runs against that account), so one cc-hub instance maps cleanly to
-one account.
+environment variable. When set, Claude moves its whole user-data tree
+(`sessions/`, `projects/`, `history.jsonl`, `.credentials.json`) and its
+`.claude.json` state file into that directory. cc-hub honours the same
+variable for both reading (the session grid, usage, metrics, weekly counts)
+and spawning (every launched `claude` — interactive sessions, titles,
+backlog, auto-review — runs against that account). One cc-hub instance maps
+to one account.
 
 To run two accounts side by side, launch one cc-hub per account:
 
@@ -131,19 +135,19 @@ cc-hub
 cc-hub --claude-config-dir ~/.claude-personal
 ```
 
-The flag is just sugar for the env var, so `CLAUDE_CONFIG_DIR=~/.claude-personal
-cc-hub` is equivalent. Each instance namespaces its `/tmp` usage cache by config
-dir, so the two don't clobber each other's cached usage numbers.
+The flag is sugar for the env var, so `CLAUDE_CONFIG_DIR=~/.claude-personal
+cc-hub` works too. Each instance namespaces its `/tmp` usage cache by config
+dir, so the two don't overwrite each other's cached numbers.
 
-Logs are written to `$XDG_CACHE_HOME/cc-hub/` (Linux), `~/Library/Caches/cc-hub/`
+Logs go to `$XDG_CACHE_HOME/cc-hub/` (Linux), `~/Library/Caches/cc-hub/`
 (macOS), or `%LOCALAPPDATA%\cc-hub\` (Windows). The path is printed on exit.
 
 ## Configuration
 
-cc-hub reads `~/.cc-hub/config.toml` once at startup. The file is optional —
-every field falls back to the default below, and a missing file is equivalent
-to an empty one. Unknown fields are rejected so typos surface in the log
-instead of being silently ignored.
+cc-hub reads `~/.cc-hub/config.toml` once at startup. The file is optional:
+every field has a default, and a missing file equals an empty one. Unknown
+fields are rejected, so typos show up in the log instead of being silently
+ignored.
 
 Full schema with defaults:
 
@@ -172,7 +176,7 @@ default_session_agent = "claude"
 enabled = true
 # Passed as `--model <model>` to the resolved spawn command.
 model = "haiku"
-# Clamp on the sanitized Haiku output (utf8-safe).
+# Max length of the sanitized Haiku output (utf8-safe).
 max_length = 40
 # Per-call subprocess timeout. A hung `claude -p` is killed past this.
 run_timeout_secs = 45
@@ -232,10 +236,9 @@ top_growth_findings = 10
 top_peak_context_findings = 10
 
 [backlog]
-# Background backlog triager. When enabled, every interval cc-hub asks a
-# short Claude session whether one of the pending backlog tasks is ready to
-# be promoted to Running. Off by default — the tick spawns a Claude
-# subprocess and you probably don't want surprise billed calls.
+# Background backlog triager. Every interval, cc-hub asks a short Claude
+# session whether a pending backlog task is ready to be promoted to Running.
+# Off by default — each tick spawns a billed Claude subprocess.
 enabled = false
 # Passed as `--model <model>` to the resolved spawn command.
 model = "sonnet"
@@ -248,16 +251,15 @@ run_timeout_secs = 120
 ttl_secs = 300
 
 [auto_review]
-# Background autonomous reviewer. When enabled, every interval cc-hub picks
-# the oldest task in Review whose current review round hasn't been auto-
-# reviewed yet, and spawns a read-only reviewer agent session. The reviewer
-# inspects the diff, runs build/tests, and either approves the PR via
-# `cc-hub pr approve` or asks a clarifying question via
-# `cc-hub pr request-changes` (which flips the task back to Running so the
-# orchestrator iterates). Each Review round gets exactly one auto-review
-# pass — once the orchestrator addresses feedback and re-enters Review,
-# the next tick reviews again. Off by default — every tick may spawn a
-# billed agent session.
+# Background autonomous reviewer. Every interval, cc-hub picks the oldest
+# task in Review whose current round hasn't been auto-reviewed yet and spawns
+# a read-only reviewer session. The reviewer inspects the diff, runs
+# build/tests, and either approves the PR (`cc-hub pr approve`) or asks for
+# changes (`cc-hub pr request-changes`, which flips the task back to Running
+# so the orchestrator iterates). Each Review round gets exactly one
+# auto-review pass; when the orchestrator addresses feedback and re-enters
+# Review, the next tick reviews again. Off by default — each tick may spawn
+# a billed agent session.
 enabled = false
 # Reviewer backend. None → fall back to [projects].default_orchestrator_agent.
 # agent = "claude"
@@ -274,8 +276,8 @@ run_timeout_secs = 1800
 max_comments_in_prompt = 8
 ```
 
-Only the sections/fields you want to override need to be present — omit
-everything else to inherit defaults.
+Only include the sections and fields you want to override — everything else
+inherits defaults.
 
 ### Hot reload (development)
 
@@ -288,8 +290,7 @@ useful while hacking on UI code.
 
 ## Platform differences
 
-cc-hub tries to behave the same everywhere, but a few things genuinely
-differ:
+cc-hub behaves the same everywhere it can, but a few things genuinely differ:
 
 | Feature | Unix | Windows |
 |---|---|---|
@@ -307,43 +308,47 @@ differ:
 
 ### Tasks tab
 
-A personal task board: **To-Do · Planning · In Progress · Done**. Cards
-live at `~/.cc-hub/tasks.json` (hand-editable). Assigning a task to an
-agent spawns a detached session and delivers the task text — wrapped in
-plan-first framing (investigate, present a plan, hold) — once the agent is
-idle; the card sits in **Planning** showing the live session state
-(`⟳ working`, `󰂞 needs input`, `● plan ready`), the agent's folder, and
-age. `Space` on a Planning card sends "Proceed with the implementation."
-to the agent and moves the card to In Progress; once that agent goes idle
-the card reads `● review ready` (cyan) — the implementation counterpart of
-plan ready. Planning and In Progress float cards whose agent waits on a
-human — blocked on input first, then idle plan/review-ready — to the top
-of the column; the order settles when you open the tab and stays put while
-you navigate (state flips update a card's badge in place, never its row).
-Done cards keep their agent binding — `󰚩 claude · <dir>` marks a task an
-agent ran, and `f` still reopens its transcript. Every card carries a
-priority badge on its top-right (`P1` red · `P2` yellow · `P3` green ·
-`P4` blue, `1`–`4` to set); columns sort by priority first, so the most
-urgent cards float to the top.
+A personal task board: **To-Do · Planning · In Progress · Done**. Cards live
+at `~/.cc-hub/tasks.json` and are hand-editable.
+
+Assigning a task to an agent spawns a detached session and delivers the task
+text once the agent is idle, wrapped in plan-first framing: investigate,
+present a plan, hold. The card sits in **Planning**, showing the live session
+state (`⟳ working`, `󰂞 needs input`, `● plan ready`), the agent's folder,
+and age. `Space` on a Planning card sends "Proceed with the implementation."
+and moves it to In Progress. Once that agent goes idle, the card reads
+`● review ready` (cyan) — the implementation counterpart of plan ready.
+
+Planning and In Progress float cards whose agent waits on a human to the top
+of the column: blocked-on-input first, then idle plan/review-ready. The order
+settles when you open the tab and stays put while you navigate — state flips
+update a card's badge in place, never its row. Done cards keep their agent
+binding: `󰚩 claude · <dir>` marks a task an agent ran, and `f` still reopens
+its transcript.
+
+Every card carries a priority badge on its top-right (`P1` red · `P2` yellow
+· `P3` green · `P4` blue; press `1`–`4` to set). Columns sort by priority
+first, so the most urgent cards float to the top.
 
 The add popup understands a quick syntax: `#tag` tokens become tags and
 `!1`–`!4` sets the priority, so `fix the parser #bug !1` lands a tagged P1
 card in one round-trip (rename leaves such tokens as literal text). `/`
-filters the board — the query fuzzy-matches card text and `#tag`s across
-all columns, Enter keeps it applied, Esc clears it. Deletions are
-recoverable: `u` restores the last `x`/`c` removal, and every removed task
-is also appended to `~/.cc-hub/tasks-archive.json`.
+filters the board — the query fuzzy-matches card text and `#tag`s across all
+columns; Enter keeps it applied, Esc clears it.
 
-The **Planning** column is optional — set `[ui] show_planning_column = false`
-to drop it. Its cards then fold into **In Progress** (still showing
-`● plan ready`), and `Space` on such a card still approves the plan, so the
-plan-first workflow keeps working with one fewer column.
+Deletions are recoverable: `u` restores the last `x`/`c` removal, and every
+removed task is also appended to `~/.cc-hub/tasks-archive.json`.
+
+The **Planning** column is optional — set
+`[ui] show_planning_column = false` to drop it. Its cards fold into
+**In Progress** (still showing `● plan ready`), and `Space` still approves
+the plan, so the plan-first workflow works with one fewer column.
 
 | Key | Action |
 |---|---|
 | `h` / `l` (or arrows) | Switch column |
 | `j` / `k` (or arrows) | Move within the column |
-| `H` / `L` | Move the focused card one column left/right by hand. Planning is agent-owned, so manual moves hop over it (To-Do ↔ In Progress ↔ Done); moving a Planning card right takes it to In Progress *without* telling the agent to proceed. Into Done closes the live agent session like `Space`; out of Done reopens |
+| `H` / `L` | Move the focused card one column left/right by hand. Planning is agent-owned, so manual moves skip it (To-Do ↔ In Progress ↔ Done); moving a Planning card right lands in In Progress *without* telling the agent to proceed. Into Done closes the live agent session like `Space`; out of Done reopens |
 | `a` / `n` | Add a task (lands in To-Do; `#tag` and `!1`–`!4` tokens set tags/priority inline) |
 | `/` | Filter the board (fuzzy over text and `#tag`s; Enter keeps it applied, Esc clears — also from the board) |
 | `1` – `4` | Set priority P1–P4 (sorts the column P1-first; P1 red · P2 yellow · P3 green · P4 blue) |
@@ -379,12 +384,11 @@ plan-first workflow keeps working with one fewer column.
 
 > WIP — hidden by default; enable with `[ui] show_projects_tab = true`.
 
-The Projects tab is laid out as a horizontal strip of project chips above a
-five-column kanban: **Planning · Running · Review · Merging · Done**. Backlog
-tasks live off the kanban — open the Backlog popup with `b` to view and
-start them. A project's chip surfaces a small amber `󰒲 N` token after the
-kanban counts when that project has `N` queued backlog tasks, so you have a
-chip-level signal when there's pending work to triage.
+A horizontal strip of project chips sits above a five-column kanban:
+**Planning · Running · Review · Merging · Done**. Backlog tasks live off the
+kanban — press `b` to open the Backlog popup and start them. A chip shows a
+small amber `󰒲 N` token after its kanban counts when the project has `N`
+queued backlog tasks, so pending work is visible at chip level.
 
 | Key | Action |
 |---|---|
@@ -406,29 +410,28 @@ chip-level signal when there's pending work to triage.
 ## Known limitations
 
 - **Windows focus/close is a no-op.** psmux's `list-clients -F` ignores the
-  format string, so cc-hub can't resolve the attached-client PID chain
-  needed for Hyprland/xdotool-style window operations. Use the embedded
-  pane (`f` on a session with a mux session, or `o` for a fresh shell)
-  instead — this is the intended Windows flow.
+  format string, so cc-hub can't resolve the attached-client PID chain that
+  Hyprland/xdotool-style window operations need. Use the embedded pane
+  instead (`f` on a session with a mux session, or `o` for a fresh shell) —
+  that's the intended Windows flow.
 - **No native macOS window manager.** `focus` / `close` only work under
   Hyprland or X11 (via `xdotool`). On a plain macOS desktop those keys
-  no-op; attach via the embedded pane instead.
-- **`cc-hub-new` must be defined in your interactive shell.** cc-hub runs
-  it as the pane's inaugural command via `$SHELL -ic cc-hub-new` (Unix) or
-  by piping `cc-hub-new<Enter>` into the freshly-opened PowerShell
-  (Windows). If your rc/profile doesn't define it, the pane will just
-  print "command not found".
+  no-op; use the embedded pane instead.
+- **`cc-hub-new` must be defined in your interactive shell.** cc-hub runs it
+  as the pane's first command via `$SHELL -ic cc-hub-new` (Unix) or by piping
+  `cc-hub-new<Enter>` into the freshly-opened PowerShell (Windows). If your
+  rc/profile doesn't define it, the pane just prints "command not found".
 - **Usage cache path is fixed (default account).** Anthropic usage is cached
   at `/tmp/claude-statusline-usage.json` — a cross-process contract with an
-  external statusline helper. Changing this path is a breaking change, so it's
-  left untouched for the default account; a non-default `--claude-config-dir`
-  gets a per-account suffix instead, so parallel instances don't collide.
+  external statusline helper, so the path stays fixed for the default
+  account. A non-default `--claude-config-dir` gets a per-account suffix, so
+  parallel instances don't collide.
 - **Cleared sessions.** Claude Code's `/clear` command starts a new JSONL
-  under a new session-id without updating the session metadata. cc-hub
-  follows the `/clear` chain by matching clear-event timestamps against
-  new JSONL creation times; this is best-effort.
-- **Hot reload is dev-only.** Requires the `hot-reload` feature; don't
-  ship release builds with it.
+  under a new session id without updating the session metadata. cc-hub
+  follows the `/clear` chain by matching clear-event timestamps against new
+  JSONL creation times — best-effort.
+- **Hot reload is dev-only.** Requires the `hot-reload` feature; don't ship
+  release builds with it.
 
 ## License
 
