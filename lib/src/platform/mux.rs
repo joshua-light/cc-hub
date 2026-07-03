@@ -40,18 +40,41 @@ pub fn spawn_detached(name: &str, cwd: &str, initial_cmd: Option<&str>) -> io::R
 #[cfg(not(windows))]
 fn spawn_detached_impl(name: &str, cwd: &str, initial_cmd: Option<&str>) -> io::Result<()> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-    // tmux runs the trailing arg via `/bin/sh -c`, which word-splits on
-    // spaces. The command must be a single quoted token for `-c`, otherwise
-    // `zsh -ic cc-hub-new --resume SID` becomes `zsh -i -c cc-hub-new` with
-    // `--resume SID` attached to zsh's positional params — never reaching
-    // the alias. `-ic` keeps the user's shell rc in the loop (aliases, PATH).
     let shell_cmd = match initial_cmd {
-        Some(cmd) => format!("{} -ic {}", shell, super::terminal::shell_quote(cmd)),
+        Some(cmd) => initial_shell_cmd(&shell, cmd),
         None => shell,
     };
     let args = ["new-session", "-d", "-s", name, "-c", cwd, &shell_cmd];
     info!("spawn: {} {}", MUX_BIN, args.join(" "));
     run(&args, "new-session")
+}
+
+/// Shell invocation that runs a detached pane's inaugural command.
+///
+/// tmux runs the trailing arg via `/bin/sh -c`, which word-splits on spaces.
+/// The command must be a single quoted token for `-c`, otherwise
+/// `zsh -ic cc-hub-new --resume SID` becomes `zsh -i -c cc-hub-new` with
+/// `--resume SID` attached to zsh's positional params — never reaching the
+/// alias. `-ic` keeps the user's shell rc in the loop (aliases, PATH).
+///
+/// The interactive rc is also a hazard: rc frameworks may prompt on startup,
+/// and in a detached pane nobody can answer, so the agent command never runs.
+/// oh-my-zsh's updater is the known offender — every ~2 weeks it asks
+/// "[oh-my-zsh] Would you like to update? [Y/n]" and blocks before the
+/// command, leaving a zombie pane stuck at the prompt (and because the
+/// blocked shell holds omz's update lock, the *next* spawn skips the check
+/// and works — the classic "first `n` does nothing, second works" bug).
+/// `DISABLE_AUTO_UPDATE=true` is omz's env kill-switch for that check; other
+/// rc setups ignore the variable. It can't cover users who force the update
+/// mode via `zstyle` (which wins over the env var) — the spawn watchdog in
+/// the app layer catches those, and any other rc blocker, generically.
+#[cfg_attr(windows, allow(dead_code))] // Windows queues the cmd via send-keys instead.
+fn initial_shell_cmd(shell: &str, cmd: &str) -> String {
+    format!(
+        "DISABLE_AUTO_UPDATE=true {} -ic {}",
+        shell,
+        super::terminal::shell_quote(cmd)
+    )
 }
 
 #[cfg(windows)]
@@ -310,7 +333,18 @@ pub fn pane_content_shows_empty_input(pane: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::pane_content_shows_empty_input;
+    use super::{initial_shell_cmd, pane_content_shows_empty_input};
+
+    // The rc-prompt guard must precede the shell so zsh imports it as a
+    // parameter before .zshrc (and omz's update check) runs, and the command
+    // must stay one quoted token for tmux's `/bin/sh -c`.
+    #[test]
+    fn initial_shell_cmd_guards_rc_prompts_and_quotes_cmd() {
+        assert_eq!(
+            initial_shell_cmd("/bin/zsh", "cc-hub-new --resume SID"),
+            "DISABLE_AUTO_UPDATE=true /bin/zsh -ic 'cc-hub-new --resume SID'"
+        );
+    }
 
     /// Real `tmux capture-pane -p` output from a freshly-spawned
     /// `cc-hub-new` session, captured during the e2e debugging session.

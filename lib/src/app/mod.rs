@@ -264,7 +264,29 @@ pub struct App {
     /// Paths whose decode failed once — never retry, since decoding the same
     /// bytes will keep failing and we'd burn CPU on every redraw.
     pub artifact_image_failed: HashSet<String>,
+    /// Watchdogs for user-initiated detached spawns ('n', folder picker).
+    /// A spawn can succeed at the tmux level yet never start the agent —
+    /// e.g. a shell-rc prompt blocking the detached pane — and without a
+    /// watchdog that failure is invisible: the status bar said "started" and
+    /// no card ever appears. Checked against each scan snapshot; see
+    /// [`Self::check_spawn_watches`].
+    spawn_watches: Vec<SpawnWatch>,
 }
+
+/// One pending spawn-verification: the agent must show up in a scan snapshot
+/// hosted by `tmux_name` before `deadline`, else the user gets told.
+struct SpawnWatch {
+    tmux_name: String,
+    /// Display label for the status line (agent badge / id).
+    agent: String,
+    deadline: Instant,
+}
+
+/// How long a freshly spawned agent gets to appear in a scan snapshot before
+/// its watch fires. Claude typically registers its session file within ~3s of
+/// spawn; the slack covers slow cold starts. A false alarm costs one status
+/// line, so generous beats jumpy.
+const SPAWN_WATCH_TIMEOUT: Duration = Duration::from_secs(15);
 
 impl Default for App {
     fn default() -> Self {
@@ -309,6 +331,7 @@ impl App {
             image_picker: None,
             artifact_images: HashMap::new(),
             artifact_image_failed: HashSet::new(),
+            spawn_watches: Vec::new(),
         }
     }
 
@@ -2078,6 +2101,46 @@ impl App {
         self.sessions.selected_session_info()
     }
 
+    /// Register a watchdog for a just-spawned detached agent session.
+    pub fn watch_spawn(&mut self, tmux_name: String, agent: String) {
+        self.spawn_watches.push(SpawnWatch {
+            tmux_name,
+            agent,
+            deadline: Instant::now() + SPAWN_WATCH_TIMEOUT,
+        });
+    }
+
+    /// Resolve pending spawn watches against a scan snapshot. A watch clears
+    /// when any session is hosted by its tmux name; one that expires first
+    /// means the agent never came up (rc prompt, instant crash) — surface a
+    /// diagnosis instead of leaving the silent "started" status as the last
+    /// word. Returns true when a diagnosis was set, so the caller repaints
+    /// even on an otherwise no-change tick.
+    fn check_spawn_watches(&mut self, sessions: &[SessionInfo], now: Instant) -> bool {
+        if self.spawn_watches.is_empty() {
+            return false;
+        }
+        self.spawn_watches.retain(|w| {
+            !sessions
+                .iter()
+                .any(|s| s.tmux_session.as_deref() == Some(w.tmux_name.as_str()))
+        });
+        let mut fired = false;
+        let mut i = 0;
+        while i < self.spawn_watches.len() {
+            if self.spawn_watches[i].deadline <= now {
+                let w = self.spawn_watches.remove(i);
+                let msg = crate::spawn::diagnose_stalled_spawn(&w.tmux_name, &w.agent);
+                log::warn!("spawn watch: {}", msg);
+                self.set_status(msg);
+                fired = true;
+            } else {
+                i += 1;
+            }
+        }
+        fired
+    }
+
     /// Apply a fresh scan snapshot. Returns true when anything the renderer
     /// shows actually changed, so the caller can skip the repaint — and, more
     /// importantly, so unchanged ticks never rewrite the selection.
@@ -2109,6 +2172,8 @@ impl App {
 
         self.last_refresh = Instant::now();
 
+        let spawn_watch_fired = self.check_spawn_watches(&sessions, Instant::now());
+
         // Resolve task-board agent bindings: a freshly-assigned task knows
         // only its tmux name until the scanner sees the session; learning the
         // session id here is what lets `f` resume after the tmux dies.
@@ -2135,7 +2200,7 @@ impl App {
             if changed && self.view == View::PromptInput {
                 self.dispatch_target = Self::compute_dispatch_target(&self.sessions.groups);
             }
-            return changed || task_bindings_changed;
+            return changed || task_bindings_changed || spawn_watch_fired;
         }
 
         self.sessions.last_sessions = sessions;
@@ -2506,6 +2571,46 @@ mod tests {
                 .insert(pid, tasks.into_iter().map(Arc::new).collect());
         }
         snap
+    }
+
+    // A watch clears as soon as any live session maps to its tmux name —
+    // even on the same tick its deadline passes (appearance wins over expiry).
+    #[test]
+    fn spawn_watch_clears_when_agent_appears() {
+        let mut app = App::new();
+        app.watch_spawn("cchub-w-1".into(), "claude".into());
+        let sessions = vec![fake_session("cchub-w-1", SessionState::Idle)];
+        let fired = app.check_spawn_watches(&sessions, Instant::now() + 2 * SPAWN_WATCH_TIMEOUT);
+        assert!(!fired);
+        assert!(app.spawn_watches.is_empty());
+        assert!(app.status_msg.is_none());
+    }
+
+    #[test]
+    fn spawn_watch_stays_quiet_before_deadline() {
+        let mut app = App::new();
+        app.watch_spawn("cchub-w-2".into(), "claude".into());
+        let fired = app.check_spawn_watches(&[], Instant::now());
+        assert!(!fired);
+        assert_eq!(app.spawn_watches.len(), 1);
+        assert!(app.status_msg.is_none());
+    }
+
+    // No session ever mapped to the watched tmux name: past the deadline the
+    // watch fires once, sets a diagnosis status, and is dropped.
+    #[test]
+    fn spawn_watch_fires_diagnosis_after_timeout() {
+        let mut app = App::new();
+        app.watch_spawn("cchub-watchtest-missing".into(), "claude".into());
+        let fired = app.check_spawn_watches(&[], Instant::now() + 2 * SPAWN_WATCH_TIMEOUT);
+        assert!(fired);
+        assert!(app.spawn_watches.is_empty());
+        let (msg, _) = app.status_msg.as_ref().expect("diagnosis status");
+        assert!(
+            msg.contains("cchub-watchtest-missing"),
+            "status should name the tmux session: {}",
+            msg
+        );
     }
 
     fn fake_session(tmux: &str, state: SessionState) -> SessionInfo {

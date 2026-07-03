@@ -922,7 +922,11 @@ pub(crate) async fn handle_key(
                     None,
                     false,
                 ) {
-                    Ok(name) => format!("started {} [{}]", sess.agent_badge(), name),
+                    Ok(name) => {
+                        let status = format!("started {} [{}]", sess.agent_badge(), name);
+                        app.watch_spawn(name, sess.agent_badge());
+                        status
+                    }
                     Err(e) => format!("spawn failed: {}", e),
                 };
                 app.set_status(status);
