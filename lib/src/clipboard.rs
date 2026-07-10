@@ -18,16 +18,27 @@ use std::process::{Command, Stdio};
 pub const COPY_SHELL: &str =
     "wl-copy 2>/dev/null || xclip -selection clipboard -i 2>/dev/null || pbcopy 2>/dev/null";
 
-/// Compose the copy command: stash stdin in a temp file, forward it to all
-/// attached tmux clients via OSC 52 (`load-buffer -w`), then run the host
-/// chain on it. `mux_bin` must be an absolute path when the string is handed
-/// to tmux's `copy-command` — tmux runs it with the server's environment,
-/// whose PATH may be the bare system default (e.g. a server started via ssh
+/// Compose the copy command: stash stdin in a temp file, forward it to
+/// every attached tmux client via OSC 52 (`load-buffer -w`), then run the
+/// host chain on it.
+///
+/// The forward must target each client explicitly: bare `-w` sends the
+/// escape only to tmux's notion of the current client — usually the
+/// most-recently-active one, which during an embedded-pane copy is the
+/// hub's own attach pty, where the vt100 parser silently eats it. Fanning
+/// out to all clients reaches the terminal the user is actually looking
+/// at; the embedded client swallowing its copy is harmless.
+///
+/// `mux_bin` must be an absolute path when the string is handed to tmux's
+/// `copy-command` — tmux runs it with the server's environment, whose PATH
+/// may be the bare system default (e.g. a server started via ssh
 /// RemoteCommand never saw the Homebrew prefix).
 pub fn copy_shell_with_osc52(mux_bin: &str) -> String {
     format!(
         "tmp=$(mktemp) || exit 1; cat >\"$tmp\"; \
-         \"{mux_bin}\" load-buffer -w \"$tmp\" 2>/dev/null; \
+         \"{mux_bin}\" load-buffer -b cchub-clip \"$tmp\" 2>/dev/null; \
+         for c in $(\"{mux_bin}\" list-clients -F \"#{{client_name}}\" 2>/dev/null); do \
+         \"{mux_bin}\" load-buffer -b cchub-clip -w -t \"$c\" \"$tmp\" 2>/dev/null; done; \
          ({COPY_SHELL}) <\"$tmp\"; rm -f \"$tmp\""
     )
 }
