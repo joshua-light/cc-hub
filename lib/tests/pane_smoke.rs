@@ -107,3 +107,89 @@ fn pane_attach_delivers_bytes() {
 
     assert!(!got.is_empty(), "PTY delivered zero bytes from tmux attach");
 }
+
+/// End-to-end check of the clipboard relay for remote viewers: tmux's
+/// `load-buffer -w -t <client>` (the same fan-out `copy-command` composes)
+/// must surface via [`TmuxPaneView::take_osc52`] so the main loop can
+/// replay it onto the hub's real terminal. This is the only route to the
+/// viewer's clipboard when the embedded client is the session's sole
+/// attachment — the exact shape of "ssh into a box, run cc-hub there".
+#[test]
+fn embedded_pane_captures_osc52_copy() {
+    use cc_hub_lib::tmux_pane::TmuxPaneView;
+
+    if !tmux_available() {
+        eprintln!("embedded_pane_captures_osc52_copy: tmux not on PATH, skipping");
+        return;
+    }
+    let name = format!("cchub-pane-osc52-{}", std::process::id());
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".into());
+
+    mux::spawn_detached(&name, &cwd, None).expect("spawn_detached");
+    let _guard = SessionGuard(name.clone());
+    thread::sleep(Duration::from_millis(1500));
+
+    let pane = TmuxPaneView::spawn(&name, 24, 80).expect("spawn pane");
+
+    // Wait until tmux reports the embedded attach as a client — the -w
+    // forward below is addressed per-client, so firing before the attach
+    // registers would reach nobody.
+    let client = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let out = std::process::Command::new("tmux")
+                .args(["list-clients", "-t", &name, "-F", "#{client_name}"])
+                .output()
+                .expect("list-clients");
+            let first = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .next()
+                .map(str::to_string);
+            if let Some(c) = first {
+                break c;
+            }
+            assert!(Instant::now() < deadline, "attach client never registered");
+            thread::sleep(Duration::from_millis(100));
+        }
+    };
+
+    // The fan-out step of `clipboard::copy_shell_with_osc52`, minus the
+    // host-chain tail so the test doesn't clobber the dev machine's real
+    // clipboard.
+    let payload = "osc52-relay-check";
+    let tmp = std::env::temp_dir().join(format!("{}.txt", name));
+    std::fs::write(&tmp, payload).expect("write payload");
+    let status = std::process::Command::new("tmux")
+        .args(["load-buffer", "-b", "cchub-clip", "-w", "-t", &client])
+        .arg(&tmp)
+        .status()
+        .expect("load-buffer -w");
+    let _ = std::fs::remove_file(&tmp);
+    assert!(status.success(), "load-buffer -w failed");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let seqs = loop {
+        let seqs = pane.take_osc52();
+        if !seqs.is_empty() {
+            break seqs;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no OSC 52 escape captured from the embedded client \
+             (is `tmux set-clipboard` off, or tmux < 3.2?)"
+        );
+        thread::sleep(Duration::from_millis(100));
+    };
+
+    // base64("osc52-relay-check") — the escape must carry the payload
+    // verbatim so the viewer's terminal decodes the same text.
+    let expected = "b3NjNTItcmVsYXktY2hlY2s=";
+    let joined = String::from_utf8_lossy(&seqs.concat()).into_owned();
+    assert!(
+        joined.contains(expected),
+        "captured escape(s) missing payload: {:?}",
+        joined
+    );
+}

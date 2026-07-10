@@ -35,6 +35,7 @@ use simplelog::WriteLogger;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -982,6 +983,22 @@ async fn run(
             }
             dirty = false;
             last_clock_redraw = Instant::now();
+        }
+
+        // Replay clipboard escapes (OSC 52) captured from the embedded pane
+        // onto the real terminal. tmux addresses the escape to its attach
+        // client — the pane's pty, where the vt100 parser would drop it —
+        // so this hop is what carries an in-pane copy to the viewer's
+        // terminal when cc-hub runs on a remote box over ssh. Done here,
+        // between frames on the render thread, so a replay can never tear
+        // a ratatui write.
+        if let Some(pane) = app.tmux_pane.as_ref() {
+            for seq in pane.take_osc52() {
+                let backend = terminal.backend_mut();
+                if let Err(e) = backend.write_all(&seq).and_then(|()| backend.flush()) {
+                    log::warn!("osc52 replay failed: {}", e);
+                }
+            }
         }
 
         let poll_ms = if app.view == View::TmuxPane { 16 } else { 5 };

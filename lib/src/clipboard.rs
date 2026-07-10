@@ -1,13 +1,18 @@
 //! Host clipboard integration.
 //!
 //! Wraps whichever of `wl-copy`/`wl-paste`, `xclip`, or `pbcopy`/`pbpaste` is
-//! installed via a small shell fallback chain. Copies additionally go through
-//! tmux `load-buffer -w`, which forwards the text to every attached client's
-//! terminal as an OSC 52 escape — that is what makes copies land on the
-//! *viewer's* clipboard when cc-hub itself runs on a remote box over ssh
-//! (the host chain alone would only reach the remote machine's clipboard).
-//! The composed command is also handed to tmux's `copy-command` server
-//! option so mouse-drag selections inside an embedded pane behave the same.
+//! installed via a small shell fallback chain. Copies additionally go out as
+//! OSC 52 escapes — that is what makes them land on the *viewer's* clipboard
+//! when cc-hub itself runs on a remote box over ssh (the host chain alone
+//! only reaches the remote machine's clipboard) — via two routes:
+//!
+//! - [`copy`] writes the escape straight to cc-hub's own /dev/tty, and
+//! - the composed shell command forwards through tmux `load-buffer -w` to
+//!   every attached client's terminal. That command is handed to tmux's
+//!   `copy-command` server option, so mouse-drag selections inside an
+//!   embedded pane take the same path; the escape tmux addresses to the
+//!   hub's own attach client is captured and replayed by the pane reader
+//!   (see [`crate::tmux_pane::TmuxPaneView::take_osc52`]).
 
 use std::io;
 use std::io::Write;
@@ -25,9 +30,12 @@ pub const COPY_SHELL: &str =
 /// The forward must target each client explicitly: bare `-w` sends the
 /// escape only to tmux's notion of the current client — usually the
 /// most-recently-active one, which during an embedded-pane copy is the
-/// hub's own attach pty, where the vt100 parser silently eats it. Fanning
-/// out to all clients reaches the terminal the user is actually looking
-/// at; the embedded client swallowing its copy is harmless.
+/// hub's own attach pty. Fanning out to all clients reaches directly
+/// attached terminals; the escape sent to the hub's own attach pty is
+/// captured by the pane reader and replayed onto the hub's real terminal
+/// (see [`crate::tmux_pane::TmuxPaneView::take_osc52`]) — the only route
+/// to the viewer's clipboard when the hub runs remotely and its embedded
+/// client is the sole attachment.
 ///
 /// `mux_bin` must be an absolute path when the string is handed to tmux's
 /// `copy-command` — tmux runs it with the server's environment, whose PATH
@@ -59,6 +67,13 @@ pub fn paste() -> io::Result<String> {
 /// success after each `2>/dev/null`). Plain "tmux" is fine here: this runs
 /// with cc-hub's own PATH, not the tmux server's.
 pub fn copy(text: &str) -> io::Result<()> {
+    // The tmux fan-out below only reaches *attached* clients — with no
+    // session open (e.g. copying a task id from the grid) there are none,
+    // and the host chain alone can't cross an ssh boundary. Emitting the
+    // escape on our own tty covers that case unconditionally.
+    if !text.is_empty() {
+        osc52_to_tty(text);
+    }
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(copy_shell_with_osc52("tmux"))
@@ -71,4 +86,71 @@ pub fn copy(text: &str) -> io::Result<()> {
     }
     let _ = child.wait()?;
     Ok(())
+}
+
+/// Emit `text` to the controlling terminal as an OSC 52 escape, so the
+/// *viewer's* clipboard is set even when cc-hub runs on a remote box over
+/// ssh — the host chain in [`COPY_SHELL`] only reaches the machine cc-hub
+/// runs on. Goes to /dev/tty rather than stdout so it bypasses whatever
+/// the TUI backend is doing with stdout. Best-effort: no controlling
+/// terminal means the host chain is the only path. If cc-hub itself runs
+/// inside a tmux, that tmux forwards the escape outward (`set-clipboard`
+/// defaults to `external`).
+#[cfg(unix)]
+fn osc52_to_tty(text: &str) {
+    let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") else {
+        return;
+    };
+    let _ = write!(tty, "\x1b]52;c;{}\x07", base64(text.as_bytes()));
+}
+
+/// No /dev/tty on Windows; the escape would also have to survive ConPTY.
+/// Copies there rely on the host chain and the tmux fan-out.
+#[cfg(not(unix))]
+fn osc52_to_tty(_text: &str) {}
+
+/// Standard-alphabet base64 with padding — hand-rolled so one escape
+/// sequence doesn't pull in a crate.
+#[cfg(unix)]
+fn base64(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let n = u32::from_be_bytes([
+            0,
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ]);
+        out.push(ALPHABET[(n >> 18 & 63) as usize] as char);
+        out.push(ALPHABET[(n >> 12 & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::base64;
+
+    #[test]
+    fn base64_matches_known_vectors() {
+        // RFC 4648 test vectors.
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foob"), "Zm9vYg==");
+        assert_eq!(base64(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
 }

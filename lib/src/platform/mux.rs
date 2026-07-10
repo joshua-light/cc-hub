@@ -242,6 +242,21 @@ pub fn paste_buffer(session: &str, text: &str) -> io::Result<()> {
 /// `copy-command`; users who want different behaviour can re-set it in
 /// their tmux.conf after cc-hub spawns a session.
 pub fn configure_clipboard() {
+    // `set-clipboard external` (the default) makes tmux DROP OSC 52 escapes
+    // emitted by applications inside it. When cc-hub itself runs in a tmux
+    // pane — the usual shape for a long-lived hub driven over ssh — its
+    // clipboard writes ARE such an application escape: both the /dev/tty
+    // emit in `clipboard::copy` and the embedded-pane relay replayed by the
+    // main loop must be accepted by that enclosing tmux and forwarded
+    // outward, or copies silently stop at the remote box. `on` does both
+    // (man tmux: accept the escape to create a buffer AND set the terminal
+    // clipboard). Same server-wide best-effort caveat as copy-command.
+    if let Err(e) = run(
+        &["set-option", "-s", "set-clipboard", "on"],
+        "set-option set-clipboard",
+    ) {
+        warn!("configure_clipboard: {}", e);
+    }
     let copy_shell = crate::clipboard::copy_shell_with_osc52(&resolve_mux_bin());
     if let Err(e) = run(
         &["set-option", "-s", "copy-command", &copy_shell],
