@@ -234,23 +234,36 @@ pub fn paste_buffer(session: &str, text: &str) -> io::Result<()> {
 }
 
 /// Wire tmux's `copy-command` (a server option, tmux 3.2+) to the same
-/// shell fallback chain cc-hub uses, so a mouse-drag selection in an
-/// embedded pane lands in the host clipboard via the default
-/// `copy-pipe-and-cancel` binding. Best-effort — server-wide, clobbers any
-/// pre-existing `copy-command`; users who want different behaviour can
-/// re-set it in their tmux.conf after cc-hub spawns a session.
+/// copy pipeline cc-hub uses — OSC 52 forward to attached clients plus the
+/// host-clipboard fallback chain — so a mouse-drag selection in an embedded
+/// pane lands on the viewer's clipboard via the default
+/// `copy-pipe-and-cancel` binding, even when cc-hub runs on a remote box
+/// over ssh. Best-effort — server-wide, clobbers any pre-existing
+/// `copy-command`; users who want different behaviour can re-set it in
+/// their tmux.conf after cc-hub spawns a session.
 pub fn configure_clipboard() {
+    let copy_shell = crate::clipboard::copy_shell_with_osc52(&resolve_mux_bin());
     if let Err(e) = run(
-        &[
-            "set-option",
-            "-s",
-            "copy-command",
-            crate::clipboard::COPY_SHELL,
-        ],
+        &["set-option", "-s", "copy-command", &copy_shell],
         "set-option copy-command",
     ) {
         warn!("configure_clipboard: {}", e);
     }
+}
+
+/// Absolute path of [`MUX_BIN`], for embedding in shell strings that the
+/// tmux server runs with *its own* environment — its PATH can be the bare
+/// system default (e.g. a server started via ssh RemoteCommand), where a
+/// plain `tmux` doesn't resolve. Falls back to the bare name.
+fn resolve_mux_bin() -> String {
+    let Some(paths) = std::env::var_os("PATH") else {
+        return MUX_BIN.to_string();
+    };
+    std::env::split_paths(&paths)
+        .map(|dir| dir.join(MUX_BIN))
+        .find(|candidate| candidate.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| MUX_BIN.to_string())
 }
 
 /// Capture the current visible content of `session`'s active pane.
