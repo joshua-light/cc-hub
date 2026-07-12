@@ -82,13 +82,17 @@ pub(crate) async fn handle_key(
             app.sessions.move_right()
         }
         (View::Grid, KeyCode::Left | KeyCode::Char('h')) if on_sessions => app.sessions.move_left(),
-        (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_sessions => app.sessions.move_down(),
-        (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_sessions => app.sessions.move_up(),
+        (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_sessions => {
+            app.sessions.move_down(app.render.grid_cols)
+        }
+        (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_sessions => {
+            app.sessions.move_up(app.render.grid_cols)
+        }
         (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_metrics => {
-            app.metrics.nav_down();
+            app.metrics_nav_down();
         }
         (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_metrics => {
-            app.metrics.nav_up();
+            app.metrics_nav_up();
         }
         // Kanban: j/k moves the row cursor within the focused
         // column; h/l switches column; H/L (or [/]) cycles project chips.
@@ -182,10 +186,10 @@ pub(crate) async fn handle_key(
             app.projects.result_artifact_prev();
         }
         (View::ProjectsResult, KeyCode::PageDown) => {
-            app.projects.result_scroll_by(10);
+            app.result_scroll_by(10);
         }
         (View::ProjectsResult, KeyCode::PageUp) => {
-            app.projects.result_scroll_by(-10);
+            app.result_scroll_by(-10);
         }
         (View::ProjectsResult, KeyCode::Char('c')) => {
             match app.selected_result_artifact().map(|a| a.path.clone()) {
@@ -197,7 +201,7 @@ pub(crate) async fn handle_key(
             }
         }
         (View::ProjectsResult, KeyCode::Char('e')) => {
-            app.projects.toggle_result_artifact_expanded();
+            app.toggle_result_artifact_expanded();
         }
         (View::ProjectsResult, KeyCode::Char('o')) => {
             match app.selected_result_artifact().map(|a| a.path.clone()) {

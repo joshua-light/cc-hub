@@ -54,7 +54,7 @@ pub(crate) fn render_metrics_body(frame: &mut Frame, area: Rect, app: &mut App) 
     let scroll = match app.metrics.selected.and_then(|i| row_lines.get(i).copied()) {
         Some(line_idx) => {
             let line = line_idx as u16;
-            let current = app.metrics.scroll;
+            let current = app.render.metrics_scroll;
             if line < current {
                 line
             } else if body_height > 0 && line >= current + body_height {
@@ -63,16 +63,16 @@ pub(crate) fn render_metrics_body(frame: &mut Frame, area: Rect, app: &mut App) 
                 current
             }
         }
-        None => app.metrics.scroll,
+        None => app.render.metrics_scroll,
     }
     .min(max_scroll);
 
     // Hand the row offsets and viewport height to the key handler so a downward
     // press can tell "engage the first on-screen session" from "scroll toward
     // the lists". Done after reading `row_lines` above (this moves it).
-    app.metrics.view_height = body_height;
-    app.metrics.row_lines = row_lines;
-    app.metrics.scroll = scroll;
+    app.render.metrics_view_height = body_height;
+    app.render.metrics_row_lines = row_lines;
+    app.render.metrics_scroll = scroll;
 
     let scroll_info = format!(
         " {}/{} ",

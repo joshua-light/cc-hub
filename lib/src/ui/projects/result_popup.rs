@@ -128,7 +128,7 @@ pub(crate) fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut Ap
     // When the user has hit `e`, the selected card swells to fill most of
     // the visible body area; non-selected cards keep their default heights so
     // the surrounding context stays in view.
-    let expanded_body_h: u16 = if app.projects.result_artifact_expanded {
+    let expanded_body_h: u16 = if app.render.result_artifact_expanded {
         body_h.saturating_sub(6).min(40)
     } else {
         0
@@ -141,13 +141,12 @@ pub(crate) fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut Ap
         } else {
             card_body_height(kind)
         };
-        let h = if app.projects.result_artifact_expanded
-            && art_idx == app.projects.result_artifact_sel
-        {
-            expanded_body_h.max(default_h)
-        } else {
-            default_h
-        };
+        let h =
+            if app.render.result_artifact_expanded && art_idx == app.projects.result_artifact_sel {
+                expanded_body_h.max(default_h)
+            } else {
+                default_h
+            };
         card_meta.push((art_idx, kind, h));
     }
 
@@ -189,7 +188,7 @@ pub(crate) fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut Ap
     next_y = next_y.saturating_add(summary_h);
     let total_canvas_h = next_y;
 
-    let expanded_scroll_budget = if app.projects.result_artifact_expanded {
+    let expanded_scroll_budget = if app.render.result_artifact_expanded {
         card_meta
             .iter()
             .find(|(art_idx, _, _)| *art_idx == app.projects.result_artifact_sel)
@@ -216,7 +215,7 @@ pub(crate) fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut Ap
     // frame-recurrent snap would pin `result_scroll ≤ sel_top`, making the
     // expanded overscroll budget below unreachable for any card that isn't
     // already at the canvas bottom.
-    if !t.artifacts.is_empty() && body_h > 0 && !app.projects.result_artifact_expanded {
+    if !t.artifacts.is_empty() && body_h > 0 && !app.render.result_artifact_expanded {
         let sel_art_idx = app.projects.result_artifact_sel.min(t.artifacts.len() - 1);
         let sel_render_pos = render_order
             .iter()
@@ -225,18 +224,18 @@ pub(crate) fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut Ap
         let sel_top = canvas_card_tops[sel_render_pos];
         let (_, _, sel_body) = card_meta[sel_render_pos];
         let sel_h = 1 + sel_body + 1;
-        if sel_top < app.projects.result_scroll {
-            app.projects.result_scroll = sel_top;
-        } else if sel_top + sel_h > app.projects.result_scroll + body_h {
-            app.projects.result_scroll = sel_top + sel_h - body_h;
+        if sel_top < app.render.result_scroll {
+            app.render.result_scroll = sel_top;
+        } else if sel_top + sel_h > app.render.result_scroll + body_h {
+            app.render.result_scroll = sel_top + sel_h - body_h;
         }
     }
     let base_max_scroll = total_canvas_h.saturating_sub(body_h);
     let max_scroll = base_max_scroll.saturating_add(expanded_scroll_budget);
-    if app.projects.result_scroll > max_scroll {
-        app.projects.result_scroll = max_scroll;
+    if app.render.result_scroll > max_scroll {
+        app.render.result_scroll = max_scroll;
     }
-    let scroll = app.projects.result_scroll;
+    let scroll = app.render.result_scroll;
     // The canvas itself pins at its own max; anything past that is the
     // expanded card's overscroll, consumed by the card body's internal scroll
     // (`body_scroll_lines` below). Feeding raw overscroll into the Paragraph
@@ -333,20 +332,20 @@ pub(crate) fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut Ap
                     );
                     continue;
                 }
-                if let Some(state) = app.artifact_images.get_mut(&path) {
+                if let Some(state) = app.render.artifact_images.get_mut(&path) {
                     let widget =
                         StatefulImage::<ratatui_image::protocol::StatefulProtocol>::default();
                     frame.render_stateful_widget(widget, body_rect, state);
                 }
             }
             CardKind::Text => {
-                let expanded = app.projects.result_artifact_expanded
+                let expanded = app.render.result_artifact_expanded
                     && art_idx == app.projects.result_artifact_sel;
                 let max_bytes = if expanded { 64 * 1024 } else { 8 * 1024 };
                 render_text_card_body(frame, body_rect, a, max_bytes, body_scroll_lines);
             }
             CardKind::Diff => {
-                let expanded = app.projects.result_artifact_expanded
+                let expanded = app.render.result_artifact_expanded
                     && art_idx == app.projects.result_artifact_sel;
                 let max_bytes = if expanded { 64 * 1024 } else { 8 * 1024 };
                 render_diff_card_body(frame, body_rect, a, max_bytes, body_scroll_lines);
@@ -455,7 +454,7 @@ mod result_popup_tests {
         };
         app.update_projects(snap);
         assert!(app.enter_projects_result(), "popup should open");
-        app.projects.result_artifact_expanded = true;
+        app.render.result_artifact_expanded = true;
 
         let backend = TestBackend::new(100, 28);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -469,7 +468,7 @@ mod result_popup_tests {
             first
         );
 
-        app.projects.result_scroll_by(30);
+        app.result_scroll_by(30);
         terminal
             .draw(|f| super::render_projects_result(f, f.area(), &mut app))
             .expect("render");
@@ -487,7 +486,7 @@ mod result_popup_tests {
 
         // The end of the excerpt must be reachable: a huge scroll clamps to
         // the expanded budget and lands on the last line, not short of it.
-        app.projects.result_scroll_by(1000);
+        app.result_scroll_by(1000);
         terminal
             .draw(|f| super::render_projects_result(f, f.area(), &mut app))
             .expect("render");

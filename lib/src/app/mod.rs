@@ -19,12 +19,14 @@ use std::time::{Duration, Instant};
 
 mod metrics_view;
 mod projects_view;
+mod render_state;
 mod sessions_view;
 mod tasks_view;
 mod todo_panel;
 
 pub use metrics_view::MetricsView;
 pub use projects_view::ProjectsView;
+pub use render_state::RenderState;
 pub use sessions_view::SessionsView;
 pub use tasks_view::{column_statuses, visible_task_columns, TasksView, TASK_COLUMNS};
 pub use todo_panel::TodoPanelState;
@@ -215,7 +217,10 @@ pub struct App {
     pub view: View,
     pub detail: Option<SessionDetail>,
     pub detail_loading: bool,
-    pub popup_scroll: u16,
+    /// Layout state written by `ui/` during draw (scroll clamps, grid geometry,
+    /// decoded-image cache). The renderer owns these; nav methods only read and
+    /// adjust via named methods. See [`RenderState`].
+    pub render: RenderState,
     pub should_quit: bool,
     pub last_refresh: Instant,
     pub live_view: Option<LiveView>,
@@ -226,7 +231,6 @@ pub struct App {
     pub pending_confirm: Option<PendingConfirm>,
     pub state_debug: Option<(SessionInfo, StateExplanation)>,
     pub state_debug_lines: Vec<Line<'static>>,
-    pub state_debug_scroll: u16,
     pub usage: Option<UsageInfo>,
     pub usage_line: Line<'static>,
     pub session_counts: SessionCounts,
@@ -259,14 +263,6 @@ pub struct App {
     /// screen. `None` when running headless / `--no-tui` / inside tests so
     /// the renderer can fall back to a placeholder rather than crash.
     pub image_picker: Option<ratatui_image::picker::Picker>,
-    /// Per-artifact decoded image cache, keyed by `Artifact::path`. Populated
-    /// lazily on first popup render so non-image work doesn't pay decode
-    /// cost; entries persist for the App lifetime since artifact paths are
-    /// content-addressed and don't mutate.
-    pub artifact_images: HashMap<String, ratatui_image::protocol::StatefulProtocol>,
-    /// Paths whose decode failed once — never retry, since decoding the same
-    /// bytes will keep failing and we'd burn CPU on every redraw.
-    pub artifact_image_failed: HashSet<String>,
     /// Watchdogs for user-initiated detached spawns ('n', folder picker).
     /// A spawn can succeed at the tmux level yet never start the agent —
     /// e.g. a shell-rc prompt blocking the detached pane — and without a
@@ -313,7 +309,7 @@ impl App {
             view: View::Grid,
             detail: None,
             detail_loading: false,
-            popup_scroll: 0,
+            render: RenderState::default(),
             should_quit: false,
             last_refresh: Instant::now(),
             live_view: None,
@@ -321,7 +317,6 @@ impl App {
             pending_confirm: None,
             state_debug: None,
             state_debug_lines: Vec::new(),
-            state_debug_scroll: 0,
             usage: None,
             usage_line: Line::default(),
             session_counts: SessionCounts::default(),
@@ -337,8 +332,6 @@ impl App {
             pending_dispatch: VecDeque::new(),
             last_dispatch_probe_at: None,
             image_picker: None,
-            artifact_images: HashMap::new(),
-            artifact_image_failed: HashSet::new(),
             spawn_watches: Vec::new(),
         }
     }
@@ -1428,6 +1421,58 @@ impl App {
         self.metrics.selected_session()
     }
 
+    fn metrics_scroll_down(&mut self) {
+        self.render.metrics_scroll = self.render.metrics_scroll.saturating_add(3);
+    }
+
+    fn metrics_scroll_up(&mut self) {
+        self.render.metrics_scroll = self.render.metrics_scroll.saturating_sub(3);
+    }
+
+    /// Down/`j` on the Metrics tab. With a row selected, advance the cursor
+    /// (the renderer keeps it on screen). With nothing selected, engage the
+    /// first session row already visible — so selection only kicks in once the
+    /// lists scroll into view — otherwise keep free-scrolling toward them.
+    /// Reads the viewport geometry the renderer synced into [`RenderState`].
+    pub fn metrics_nav_down(&mut self) {
+        match self.metrics.selected {
+            Some(i) if !self.metrics.rows.is_empty() => {
+                self.metrics.selected = Some((i + 1).min(self.metrics.rows.len() - 1));
+            }
+            _ => match self.first_visible_metrics_row() {
+                Some(idx) => self.metrics.selected = Some(idx),
+                None => self.metrics_scroll_down(),
+            },
+        }
+    }
+
+    /// Up/`k` on the Metrics tab. Walk the cursor back up; pressing up past the
+    /// first session row releases the selection so free-scrolling (and reaching
+    /// the Overview at the very top) resumes.
+    pub fn metrics_nav_up(&mut self) {
+        match self.metrics.selected {
+            Some(0) => self.metrics.selected = None,
+            Some(i) => self.metrics.selected = Some(i - 1),
+            None => self.metrics_scroll_up(),
+        }
+    }
+
+    /// Index (into `MetricsView::rows`) of the first selectable session row
+    /// currently inside the viewport, using the offsets/height the renderer
+    /// last synced into [`RenderState`]. `None` when no session row is on
+    /// screen.
+    fn first_visible_metrics_row(&self) -> Option<usize> {
+        let h = self.render.metrics_view_height;
+        if h == 0 {
+            return None;
+        }
+        let top = self.render.metrics_scroll;
+        self.render
+            .metrics_row_lines
+            .iter()
+            .position(|&l| (l as u16) >= top && (l as u16) < top.saturating_add(h))
+    }
+
     pub fn enter_folder_picker(&mut self) {
         let start = self
             .selected_session_info()
@@ -2115,24 +2160,24 @@ impl App {
     }
 
     pub fn scroll_down(&mut self) {
-        self.popup_scroll = self.popup_scroll.saturating_add(3);
+        self.render.popup_scroll = self.render.popup_scroll.saturating_add(3);
     }
 
     pub fn scroll_up(&mut self) {
-        self.popup_scroll = self.popup_scroll.saturating_sub(3);
+        self.render.popup_scroll = self.render.popup_scroll.saturating_sub(3);
     }
 
     pub fn enter_popup(&mut self) {
         self.view = View::Popup;
         self.detail_loading = true;
-        self.popup_scroll = 0;
+        self.render.popup_scroll = 0;
     }
 
     pub fn close_popup(&mut self) {
         self.view = View::Grid;
         self.detail = None;
         self.detail_loading = false;
-        self.popup_scroll = 0;
+        self.render.popup_scroll = 0;
     }
 
     pub fn enter_live_tail(&mut self, view: LiveView) {
@@ -2149,14 +2194,14 @@ impl App {
         self.view = View::StateDebug;
         self.state_debug = None;
         self.state_debug_lines.clear();
-        self.state_debug_scroll = 0;
+        self.render.state_debug_scroll = 0;
     }
 
     pub fn close_state_debug(&mut self) {
         self.view = View::Grid;
         self.state_debug = None;
         self.state_debug_lines.clear();
-        self.state_debug_scroll = 0;
+        self.render.state_debug_scroll = 0;
     }
 
     pub fn update_state_debug(
@@ -2170,11 +2215,11 @@ impl App {
     }
 
     pub fn debug_scroll_down(&mut self) {
-        self.state_debug_scroll = self.state_debug_scroll.saturating_add(3);
+        self.render.state_debug_scroll = self.render.state_debug_scroll.saturating_add(3);
     }
 
     pub fn debug_scroll_up(&mut self) {
-        self.state_debug_scroll = self.state_debug_scroll.saturating_sub(3);
+        self.render.state_debug_scroll = self.render.state_debug_scroll.saturating_sub(3);
     }
 
     pub fn selected_session_id(&self) -> Option<String> {
@@ -2492,7 +2537,7 @@ impl App {
 
     pub fn update_grid_cols(&mut self, width: u16) {
         let cell_width = config::get().ui.cell_width.max(1);
-        self.sessions.grid_cols = (width / cell_width).max(1);
+        self.render.grid_cols = (width / cell_width).max(1);
     }
 
     pub fn session_count(&self) -> usize {
@@ -2510,7 +2555,7 @@ impl App {
             self.view,
             self.sessions.sel_group,
             self.sessions.sel_in_group,
-            self.sessions.grid_cols,
+            self.render.grid_cols,
             self.sessions.groups.len(),
             self.session_count(),
             self.attention_count()
@@ -2583,8 +2628,8 @@ impl App {
             return false;
         }
         self.projects.result_artifact_sel = 0;
-        self.projects.result_scroll = 0;
-        self.projects.result_artifact_expanded = false;
+        self.render.result_scroll = 0;
+        self.render.result_artifact_expanded = false;
         self.view = View::ProjectsResult;
         true
     }
@@ -2592,14 +2637,30 @@ impl App {
     pub fn close_projects_result(&mut self) {
         self.view = View::Grid;
         self.projects.result_artifact_sel = 0;
-        self.projects.result_scroll = 0;
-        self.projects.result_artifact_expanded = false;
+        self.render.result_scroll = 0;
+        self.render.result_artifact_expanded = false;
     }
 
     /// The artifact under the popup cursor, if any. Used by the `c` and `o`
     /// keybinds to know what path to act on.
     pub fn selected_result_artifact(&self) -> Option<&crate::orchestrator::Artifact> {
         self.projects.selected_result_artifact()
+    }
+
+    /// PgUp/PgDn handler for the Result popup. Negative steps scroll up; the
+    /// renderer clamps the offset against content length so we never scroll
+    /// past the end. The scroll offset lives in [`RenderState`].
+    pub fn result_scroll_by(&mut self, delta: i32) {
+        let cur = self.render.result_scroll as i32;
+        let next = (cur + delta).max(0);
+        self.render.result_scroll = next.min(u16::MAX as i32) as u16;
+    }
+
+    pub fn toggle_result_artifact_expanded(&mut self) {
+        if self.projects.selected_result_artifact().is_none() {
+            return;
+        }
+        self.render.result_artifact_expanded = !self.render.result_artifact_expanded;
     }
 }
 

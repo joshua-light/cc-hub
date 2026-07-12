@@ -50,14 +50,6 @@ pub struct ProjectsView {
     /// Cursor inside the Projects "Result" popup, indexing into the
     /// selected task's `artifacts` vec. Reset on popup open.
     pub result_artifact_sel: usize,
-    /// Vertical scroll offset (in unwrapped lines) for the Projects "Result"
-    /// popup body. Adjusted by the renderer to keep the selected card
-    /// visible, and by `PgUp`/`PgDn` for free scrolling. Reset on open.
-    pub result_scroll: u16,
-    /// When true, the currently-selected evidence card renders with an
-    /// enlarged body so the user can see more of its content inline. The
-    /// flag follows the j/k cursor — it is not tied to a specific artifact.
-    pub result_artifact_expanded: bool,
 }
 
 impl ProjectsView {
@@ -75,8 +67,6 @@ impl ProjectsView {
             pending_focus_task_id: None,
             pending_focus_budget: 0,
             result_artifact_sel: 0,
-            result_scroll: 0,
-            result_artifact_expanded: false,
         }
     }
 
@@ -310,21 +300,6 @@ impl ProjectsView {
 
     pub fn result_artifact_prev(&mut self) {
         self.result_artifact_sel = self.result_artifact_sel.saturating_sub(1);
-    }
-
-    /// PgUp/PgDn handler. Negative steps scroll up; the renderer clamps the
-    /// offset against content length so we never scroll past the end.
-    pub fn result_scroll_by(&mut self, delta: i32) {
-        let cur = self.result_scroll as i32;
-        let next = (cur + delta).max(0);
-        self.result_scroll = next.min(u16::MAX as i32) as u16;
-    }
-
-    pub fn toggle_result_artifact_expanded(&mut self) {
-        if self.selected_result_artifact().is_none() {
-            return;
-        }
-        self.result_artifact_expanded = !self.result_artifact_expanded;
     }
 
     /// The artifact under the popup cursor, if any. Used by the `c` and `o`

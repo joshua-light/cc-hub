@@ -1079,13 +1079,13 @@ pub(crate) fn render_state_debug(frame: &mut Frame, area: Rect, app: &mut App) {
     // N/N indicator pins.
     let total_rows = wrapped_total_rows(&app.state_debug_lines, inner.width);
     let max_scroll = total_rows.saturating_sub(inner.height);
-    if app.state_debug_scroll > max_scroll {
-        app.state_debug_scroll = max_scroll;
+    if app.render.state_debug_scroll > max_scroll {
+        app.render.state_debug_scroll = max_scroll;
     }
 
     let scroll_info = format!(
         " {}/{} ",
-        (app.state_debug_scroll as usize).min(total_rows.saturating_sub(1) as usize) + 1,
+        (app.render.state_debug_scroll as usize).min(total_rows.saturating_sub(1) as usize) + 1,
         total_rows
     );
     let indicator_area = Rect::new(
@@ -1105,7 +1105,7 @@ pub(crate) fn render_state_debug(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let content = Paragraph::new(app.state_debug_lines.clone())
         .wrap(Wrap { trim: false })
-        .scroll((app.state_debug_scroll, 0));
+        .scroll((app.render.state_debug_scroll, 0));
     frame.render_widget(content, inner);
 }
 

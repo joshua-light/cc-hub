@@ -9,8 +9,6 @@ pub struct SessionsView {
     pub groups: Vec<ProjectGroup>,
     pub sel_group: usize,
     pub sel_in_group: usize,
-    pub grid_scroll: u16,
-    pub grid_cols: u16,
     pub show_inactive: bool,
     /// When false, the Sessions view hides any session whose tmux name is
     /// claimed by an orchestrator or worker in the current projects
@@ -31,8 +29,6 @@ impl SessionsView {
             groups: Vec::new(),
             sel_group: 0,
             sel_in_group: 0,
-            grid_scroll: 0,
-            grid_cols: 3,
             show_inactive: false,
             show_orch_workers: false,
             acks: Acks::new(),
@@ -63,11 +59,14 @@ impl SessionsView {
         }
     }
 
-    pub fn move_down(&mut self) {
+    /// `cols` is the current grid column count, owned by
+    /// [`crate::app::RenderState::grid_cols`] and passed in by the caller so
+    /// this cursor logic doesn't reach across into render state.
+    pub fn move_down(&mut self, cols: u16) {
         if self.groups.is_empty() {
             return;
         }
-        let cols = self.grid_cols as usize;
+        let cols = cols as usize;
         let group = &self.groups[self.sel_group];
         let len = group.sessions.len();
         let current_col = self.sel_in_group % cols;
@@ -88,11 +87,12 @@ impl SessionsView {
         }
     }
 
-    pub fn move_up(&mut self) {
+    /// `cols` is the current grid column count; see [`Self::move_down`].
+    pub fn move_up(&mut self, cols: u16) {
         if self.groups.is_empty() {
             return;
         }
-        let cols = self.grid_cols as usize;
+        let cols = cols as usize;
         let current_col = self.sel_in_group % cols;
         if self.sel_in_group >= cols {
             self.sel_in_group -= cols;
@@ -169,9 +169,12 @@ mod tests {
         }
     }
 
-    fn view(cols: u16, groups: Vec<ProjectGroup>) -> SessionsView {
+    /// The grid column count is now owned by `RenderState`; the nav helpers
+    /// take it as a parameter, so the tests thread it through directly.
+    const COLS: u16 = 3;
+
+    fn view(groups: Vec<ProjectGroup>) -> SessionsView {
         let mut v = SessionsView::new();
-        v.grid_cols = cols;
         v.groups = groups;
         v
     }
@@ -181,18 +184,18 @@ mod tests {
         // 3 cols, 5 cards: row0 = 0,1,2 ; row1 = 3,4 (partial). From the
         // rightmost card of row0 (idx 2) Down must clamp onto the last card of
         // the partial row (idx 4), not hop to the next group or dead-key.
-        let mut v = view(3, vec![group("a", 5), group("b", 3)]);
+        let mut v = view(vec![group("a", 5), group("b", 3)]);
         v.sel_in_group = 2;
-        v.move_down();
+        v.move_down(COLS);
         assert_eq!((v.sel_group, v.sel_in_group), (0, 4));
     }
 
     #[test]
     fn move_down_straight_below_when_cell_exists() {
         // 3 cols, 6 cards: the cell directly below idx 1 (idx 4) exists.
-        let mut v = view(3, vec![group("a", 6)]);
+        let mut v = view(vec![group("a", 6)]);
         v.sel_in_group = 1;
-        v.move_down();
+        v.move_down(COLS);
         assert_eq!((v.sel_group, v.sel_in_group), (0, 4));
     }
 
@@ -200,17 +203,17 @@ mod tests {
     fn move_down_from_last_row_hops_to_next_group() {
         // On the group's last row, Down moves to the next group at the same
         // (clamped) column.
-        let mut v = view(3, vec![group("a", 5), group("b", 3)]);
+        let mut v = view(vec![group("a", 5), group("b", 3)]);
         v.sel_in_group = 4; // row1, group a's last row
-        v.move_down();
+        v.move_down(COLS);
         assert_eq!((v.sel_group, v.sel_in_group), (1, 1));
     }
 
     #[test]
     fn move_down_last_group_last_row_is_dead_key() {
-        let mut v = view(3, vec![group("a", 5)]);
+        let mut v = view(vec![group("a", 5)]);
         v.sel_in_group = 4;
-        v.move_down();
+        v.move_down(COLS);
         assert_eq!((v.sel_group, v.sel_in_group), (0, 4));
     }
 
@@ -218,21 +221,21 @@ mod tests {
     fn move_up_clamps_into_partial_row_entering_group_from_below() {
         // Entering group a (partial last row) from col 2 of group b clamps to
         // a's last card — the symmetric partner of move_down's clamp.
-        let mut v = view(3, vec![group("a", 5), group("b", 3)]);
+        let mut v = view(vec![group("a", 5), group("b", 3)]);
         v.sel_group = 1;
         v.sel_in_group = 2;
-        v.move_up();
+        v.move_up(COLS);
         assert_eq!((v.sel_group, v.sel_in_group), (0, 4));
     }
 
     #[test]
     fn move_down_then_up_stays_in_column() {
         // Down into the partial row then Up returns to the starting column.
-        let mut v = view(3, vec![group("a", 5)]);
+        let mut v = view(vec![group("a", 5)]);
         v.sel_in_group = 2; // row0 col2
-        v.move_down(); // clamps to idx 4 (row1 col1)
+        v.move_down(COLS); // clamps to idx 4 (row1 col1)
         assert_eq!(v.sel_in_group, 4);
-        v.move_up(); // row1 col1 -> row0 col1
+        v.move_up(COLS); // row1 col1 -> row0 col1
         assert_eq!(v.sel_in_group, 1);
     }
 }

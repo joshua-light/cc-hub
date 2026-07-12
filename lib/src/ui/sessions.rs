@@ -27,8 +27,8 @@ pub(crate) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    let cols = app.sessions.grid_cols as usize;
-    let cell_width = area.width / app.sessions.grid_cols;
+    let cols = app.render.grid_cols as usize;
+    let cell_width = area.width / app.render.grid_cols;
 
     // Compute content-space y offset for each group
     let mut group_offsets: Vec<u16> = Vec::new();
@@ -48,22 +48,22 @@ pub(crate) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
 
         if card_bottom.saturating_sub(g_offset) <= area.height {
             // Both header and card fit — keep both visible
-            if g_offset < app.sessions.grid_scroll {
-                app.sessions.grid_scroll = g_offset;
-            } else if card_bottom > app.sessions.grid_scroll + area.height {
-                app.sessions.grid_scroll = card_bottom.saturating_sub(area.height);
+            if g_offset < app.render.grid_scroll {
+                app.render.grid_scroll = g_offset;
+            } else if card_bottom > app.render.grid_scroll + area.height {
+                app.render.grid_scroll = card_bottom.saturating_sub(area.height);
             }
         } else {
             // Just ensure the card itself is visible
-            if card_y < app.sessions.grid_scroll {
-                app.sessions.grid_scroll = card_y;
-            } else if card_bottom > app.sessions.grid_scroll + area.height {
-                app.sessions.grid_scroll = card_bottom.saturating_sub(area.height);
+            if card_y < app.render.grid_scroll {
+                app.render.grid_scroll = card_y;
+            } else if card_bottom > app.render.grid_scroll + area.height {
+                app.render.grid_scroll = card_bottom.saturating_sub(area.height);
             }
         }
     }
 
-    let scroll = app.sessions.grid_scroll;
+    let scroll = app.render.grid_scroll;
     let now = now_ms();
     // Build the tmux→role index once per frame; per-card lookup was
     // O(projects × tasks × workers) and dominated re-render cost on hosts
@@ -127,7 +127,7 @@ pub(crate) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
 
             let x = area.x + col * cell_width;
             let cy = area.y + card_sy as u16;
-            let w = if col == app.sessions.grid_cols - 1 {
+            let w = if col == app.render.grid_cols - 1 {
                 area.x + area.width - x
             } else {
                 cell_width
@@ -591,14 +591,14 @@ pub(crate) fn render_popup(frame: &mut Frame, area: Rect, app: &mut App) {
     let total_rows = wrapped_total_rows(&lines, inner.width);
     if inner.height > 0 {
         let max_scroll = total_rows.saturating_sub(inner.height);
-        if app.popup_scroll > max_scroll {
-            app.popup_scroll = max_scroll;
+        if app.render.popup_scroll > max_scroll {
+            app.render.popup_scroll = max_scroll;
         }
     }
 
     let scroll_info = format!(
         " {}/{} ",
-        (app.popup_scroll as usize).min(total_rows.saturating_sub(1) as usize) + 1,
+        (app.render.popup_scroll as usize).min(total_rows.saturating_sub(1) as usize) + 1,
         total_rows
     );
 
@@ -621,7 +621,7 @@ pub(crate) fn render_popup(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let content = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .scroll((app.popup_scroll, 0));
+        .scroll((app.render.popup_scroll, 0));
 
     frame.render_widget(content, inner);
 }

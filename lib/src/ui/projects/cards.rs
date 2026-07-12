@@ -131,14 +131,14 @@ pub(crate) fn render_image_placeholder(frame: &mut Frame, area: Rect, msg: &str)
 /// decoded or already cached); `false` on decode failure (recorded so we
 /// don't retry on every frame).
 pub(crate) fn ensure_image_decoded(app: &mut App, path: &str) -> bool {
-    if app.artifact_images.contains_key(path) {
+    if app.render.artifact_images.contains_key(path) {
         return true;
     }
-    if app.artifact_image_failed.contains(path) {
+    if app.render.artifact_image_failed.contains(path) {
         return false;
     }
     let Some(picker) = app.image_picker.as_ref() else {
-        app.artifact_image_failed.insert(path.to_string());
+        app.render.artifact_image_failed.insert(path.to_string());
         return false;
     };
     let img = match image::ImageReader::open(path)
@@ -148,11 +148,11 @@ pub(crate) fn ensure_image_decoded(app: &mut App, path: &str) -> bool {
     {
         Some(i) => i,
         None => {
-            app.artifact_image_failed.insert(path.to_string());
+            app.render.artifact_image_failed.insert(path.to_string());
             return false;
         }
     };
     let proto = picker.new_resize_protocol(img);
-    app.artifact_images.insert(path.to_string(), proto);
+    app.render.artifact_images.insert(path.to_string(), proto);
     true
 }
