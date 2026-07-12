@@ -650,9 +650,12 @@ pub(crate) fn lock_task_state(
 /// | Backlog → Running   | both         | `task start`, triage promotion; board manual move   |
 /// | Running → Backlog   | both         | spawn-failure claim rollback; board manual move     |
 /// | Backlog ↔ Planning  | personal     | board assign (`s`/`S`) / manual move back           |
+/// | Running → Planning  | personal     | re-assign a stalled In-Progress card                |
+/// | Done → Planning     | personal     | re-assign a finished card (reopen with agent)       |
 /// | Planning → Running  | personal     | plan approved (Space), manual move                  |
 /// | Running → Done      | both         | `pr close` while iterating; board finish            |
 /// | Backlog → Done      | personal     | Space checks off a To-Do card directly              |
+/// | Planning → Done     | personal     | finish an assigned card without approving the plan  |
 /// | Done → Backlog      | personal     | board reopen (Space on a Done card)                 |
 /// | Done → Running      | personal     | board manual move off Done                          |
 /// | Running → Review    | orchestrated | `pr create`, `pr reopen`, `task report`             |
@@ -684,9 +687,15 @@ pub fn validate_status_transition(
                 (Backlog, Planning)
                     | (Planning, Backlog)
                     | (Planning, Running)
-                    // Space on a To-Do card checks it off without it ever
-                    // being started.
+                    // Re-assigning a stalled or finished card spawns a fresh
+                    // planning agent: any column can (re-)enter Planning.
+                    | (Running, Planning)
+                    | (Done, Planning)
+                    // Space checks off a card regardless of phase: a To-Do
+                    // that never started, or a Planning card whose agent the
+                    // user abandoned.
                     | (Backlog, Done)
+                    | (Planning, Done)
                     | (Done, Backlog)
                     | (Done, Running)
             ),
@@ -852,8 +861,12 @@ mod status_transition_tests {
             (Backlog, Planning),
             (Planning, Backlog),
             (Planning, Running),
-            // Space checks off a To-Do card that never started.
+            // Re-assign flows re-enter Planning from anywhere.
+            (Running, Planning),
+            (Done, Planning),
+            // Space checks off a card regardless of phase.
             (Backlog, Done),
+            (Planning, Done),
             // Done reopens on the board.
             (Done, Backlog),
             (Done, Running),
@@ -878,9 +891,7 @@ mod status_transition_tests {
             (Merging, Done),
             (Backlog, Review),
             (Backlog, Merging),
-            // No skipping the plan gate backwards.
-            (Done, Planning),
-            (Running, Planning),
+            (Planning, Review),
         ] {
             assert!(
                 validate_status_transition(&from, &to, TaskKind::Personal).is_err(),
@@ -889,6 +900,50 @@ mod status_transition_tests {
                 to
             );
         }
+    }
+
+    /// CLI-contract snapshot: an orchestrated `state.json` written BEFORE the
+    /// task-model unification must round-trip through the unified struct with
+    /// the exact same JSON key set — `task show --json` dumps this
+    /// serialization verbatim, and live orchestrator agents parse it.
+    #[test]
+    fn pre_unification_state_roundtrips_with_identical_key_set() {
+        let fixture = serde_json::json!({
+            "task_id": "t-1750000000000000000",
+            "project_id": "p-fixture",
+            "project_root": "/tmp/p-fixture",
+            "orchestrator_session_id": "sid-1",
+            "orchestrator_agent_id": "claude",
+            "orchestrator_agent_kind": "claude",
+            "orchestrator_tmux": "cchub-orch-1",
+            "status": "review",
+            "prompt": "do the fixture thing",
+            "created_at": 1750000000,
+            "updated_at": 1750000100,
+            "note": "PR #1: fixture",
+            "summary": "did the thing",
+            "title": "Fixture Thing",
+            "workers": [],
+            "merges": [],
+            "artifacts": [],
+            "todos": [],
+            "lead_artifact": null,
+            "triaged_at": null,
+            "last_auto_reviewed_at": null,
+            "shipped_version": "0.62.0"
+        });
+        let state: TaskState = serde_json::from_value(fixture.clone()).expect("parse fixture");
+        let out = serde_json::to_value(&state).expect("serialize");
+
+        let keys = |v: &serde_json::Value| -> std::collections::BTreeSet<String> {
+            v.as_object().unwrap().keys().cloned().collect()
+        };
+        // Identical key set: the pre-unification optionals still serialize
+        // (as null), and no personal-board key leaks into an orchestrated
+        // file — the new fields are all skipped at their defaults.
+        assert_eq!(keys(&out), keys(&fixture));
+        assert_eq!(out["status"], "review");
+        assert_eq!(out["project_id"], "p-fixture");
     }
 
     #[cfg(unix)]

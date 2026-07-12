@@ -6,56 +6,31 @@
 //! Planning until the user approves the plan (Space), which tells the agent
 //! to proceed and moves the card to In Progress. The binding is recorded so
 //! `f` on the card attaches to that session exactly like the Sessions tab.
-//! Stored at `~/.cc-hub/tasks.json` as an ordered array so the file is
-//! trivially editable by hand if needed.
+//!
+//! Since the task-model unification a board task IS an
+//! [`orchestrator::TaskState`] with `project_id: None`, stored one file per
+//! task at `~/.cc-hub/tasks/<task-id>/state.json` — the same per-task
+//! lock + tempfile-rename machinery as the Projects store, with the legal
+//! status edges enforced by the shared transition table. [`PersonalBoard`]
+//! is the in-memory snapshot the TUI mutates through; every mutation is a
+//! locked read-mutate-write of the task's own file, so concurrent cc-hub
+//! instances conflict per task, not per board. Board-level metadata
+//! (`last_assign_cwd`) lives in `~/.cc-hub/board.json`.
+//!
+//! The pre-unification single-file board (`~/.cc-hub/tasks.json`) is
+//! migrated automatically on first load — see [`migrate_legacy_board`].
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::orchestrator::{
+    self, personal_task_dir, personal_tasks_dir, read_task_state_for, update_personal_task,
+    write_task_state, TaskPriority, TaskState, TaskStatus,
+};
 use crate::platform::paths::cc_hub_home;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskItemStatus {
-    Todo,
-    /// An agent is investigating the task and drafting a plan; it was told
-    /// not to implement until the user approves (Space on the card).
-    Planning,
-    InProgress,
-    Done,
-}
-
-/// Task priority, P1 (most urgent) through P4 (lowest). Drives the board's
-/// within-column ordering: cards sort by priority first, so P1 floats to the
-/// top of its column. Derived `Ord` follows declaration order
-/// (`P1 < P2 < P3 < P4`), so a plain ascending sort puts the most urgent
-/// first. New tasks (and any loaded from a pre-priority `tasks.json`) default
-/// to `P3` — explicitly raising a task is what lifts it above the pack.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskPriority {
-    P1,
-    P2,
-    #[default]
-    P3,
-    P4,
-}
-
-impl TaskPriority {
-    /// Short badge label shown on the card (`P1`–`P4`).
-    pub fn label(self) -> &'static str {
-        match self {
-            TaskPriority::P1 => "P1",
-            TaskPriority::P2 => "P2",
-            TaskPriority::P3 => "P3",
-            TaskPriority::P4 => "P4",
-        }
-    }
-}
 
 /// Longest a single tag may be after normalization; longer ones are truncated.
 const MAX_TAG_LEN: usize = 16;
@@ -128,87 +103,78 @@ pub fn parse_quick_add(input: &str) -> QuickAdd {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskItem {
-    pub id: String,
-    pub text: String,
-    pub status: TaskItemStatus,
-    /// Sort priority within the column. Absent in pre-priority boards, so
-    /// `serde(default)` fills it with [`TaskPriority::default`] (`P3`).
-    #[serde(default)]
-    pub priority: TaskPriority,
-    /// Short free-form labels shown as `#tag` badges on the card. Normalized
-    /// by [`parse_tags`] (lowercased, deduped, capped). Omitted from the JSON
-    /// when empty, and absent in pre-tags boards, so `serde(default)` fills it
-    /// with an empty vec.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub created_at: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub done_at: Option<u64>,
-    /// Working directory the agent was assigned in. Doubles as the picker's
-    /// starting point on re-assign.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<String>,
-    /// Mux session name returned by spawn — known synchronously at assign
-    /// time, used to attach (`f`) and to resolve `session_id` from scans.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tmux: Option<String>,
-    /// Agent session id, resolved from the first scan that sees the spawned
-    /// tmux. Outlives the tmux session, so `f` can resume after it dies.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-}
-
+/// Board-level metadata that isn't per-task: currently just the cwd of the
+/// most recent assignment, kept across restarts so the assign picker promotes
+/// it to the top of the places list — firing several tasks at one project is
+/// a plain Enter each time.
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
-pub struct TaskBoard {
-    #[serde(default)]
-    tasks: Vec<TaskItem>,
-    /// cwd of the most recent assignment, kept across restarts. The assign
-    /// picker promotes it to the top of the places list so firing several
-    /// tasks at one project is a plain Enter each time.
+struct BoardMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_assign_cwd: Option<String>,
-    /// Monotonic compare-and-swap token. Older files deserialize as revision
-    /// zero; every successful mutation increments it while holding the board
-    /// lock, preventing two cc-hub instances from silently overwriting each
-    /// other's changes.
-    #[serde(default)]
-    revision: u64,
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+fn board_meta_path() -> Option<PathBuf> {
+    cc_hub_home().map(|h| h.join("board.json"))
 }
 
-fn new_task_item_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("tk-{}", nanos)
+fn load_board_meta() -> BoardMeta {
+    let Some(path) = board_meta_path() else {
+        return BoardMeta::default();
+    };
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
 }
 
-impl TaskBoard {
-    /// Load the board from disk. Missing state is an empty board; malformed or
-    /// unreadable state is an error so callers never mistake data loss for an
-    /// intentionally empty board.
+fn save_board_meta(meta: &BoardMeta) -> io::Result<()> {
+    let Some(path) = board_meta_path() else {
+        return Ok(());
+    };
+    crate::persist::save_json(&path, meta)
+}
+
+/// In-memory snapshot of the personal board: every `~/.cc-hub/tasks/<id>/`
+/// task, ordered by `created_at` (ties broken by id, which embeds nanos).
+/// Mutations write through the per-task locked store and update the snapshot
+/// from the state the write returned, so what the TUI shows is what landed.
+#[derive(Default, Debug)]
+pub struct PersonalBoard {
+    tasks: Vec<TaskState>,
+    last_assign_cwd: Option<String>,
+}
+
+impl PersonalBoard {
+    /// Load the board from disk. A missing store is an empty board; an
+    /// unreadable or malformed task file is an error so callers never
+    /// mistake data loss for an intentionally empty board.
     pub fn load_result() -> io::Result<Self> {
-        let Some(path) = tasks_path() else {
-            return Ok(Self::default());
-        };
-        let raw = match fs::read_to_string(&path) {
-            Ok(raw) => raw,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(e) => return Err(e),
-        };
-        serde_json::from_str(&raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        let mut tasks = Vec::new();
+        if let Some(dir) = personal_tasks_dir() {
+            match fs::read_dir(&dir) {
+                Ok(entries) => {
+                    for entry in entries {
+                        let entry = entry?;
+                        if !entry.file_type()?.is_dir() {
+                            continue;
+                        }
+                        let task_id = entry.file_name().to_string_lossy().into_owned();
+                        tasks.push(read_task_state_for(None, &task_id)?);
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        tasks.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.task_id.cmp(&b.task_id))
+        });
+        Ok(Self {
+            tasks,
+            last_assign_cwd: load_board_meta().last_assign_cwd,
+        })
     }
 
     /// Convenience for non-interactive callers and tests. Runtime UI code uses
@@ -217,20 +183,20 @@ impl TaskBoard {
         Self::load_result().unwrap_or_default()
     }
 
-    pub fn tasks(&self) -> &[TaskItem] {
+    pub fn tasks(&self) -> &[TaskState] {
         &self.tasks
     }
 
-    pub fn get(&self, id: &str) -> Option<&TaskItem> {
-        self.tasks.iter().find(|t| t.id == id)
+    pub fn get(&self, id: &str) -> Option<&TaskState> {
+        self.tasks.iter().find(|t| t.task_id == id)
     }
 
     pub fn last_assign_cwd(&self) -> Option<&str> {
         self.last_assign_cwd.as_deref()
     }
 
-    /// Tasks in `status`, in insertion order.
-    pub fn column(&self, status: TaskItemStatus) -> Vec<&TaskItem> {
+    /// Tasks in `status`, in board order.
+    pub fn column(&self, status: TaskStatus) -> Vec<&TaskState> {
         self.tasks.iter().filter(|t| t.status == status).collect()
     }
 
@@ -240,8 +206,8 @@ impl TaskBoard {
         self.add_configured(text, Vec::new(), TaskPriority::default())
     }
 
-    /// Add a task and its quick-capture metadata in one repository commit, so
-    /// a write failure cannot leave behind a card missing its tags/priority.
+    /// Add a task and its quick-capture metadata in one write, so a failure
+    /// cannot leave behind a card missing its tags/priority.
     pub fn add_configured(
         &mut self,
         text: &str,
@@ -252,22 +218,12 @@ impl TaskBoard {
         if text.is_empty() {
             return Ok(None);
         }
-        let id = new_task_item_id();
-        self.commit(|board| {
-            board.tasks.push(TaskItem {
-                id: id.clone(),
-                text: text.to_string(),
-                status: TaskItemStatus::Todo,
-                priority,
-                tags,
-                created_at: now_secs(),
-                done_at: None,
-                cwd: None,
-                agent_id: None,
-                tmux: None,
-                session_id: None,
-            });
-        })?;
+        let mut state = TaskState::new_personal(text.to_string());
+        state.tags = tags;
+        state.priority = priority;
+        write_task_state(&state)?;
+        let id = state.task_id.clone();
+        self.tasks.push(state);
         Ok(Some(id))
     }
 
@@ -276,18 +232,11 @@ impl TaskBoard {
     /// ignored (returns false). Persists.
     pub fn rename(&mut self, id: &str, text: &str) -> io::Result<bool> {
         let text = text.trim();
-        if text.is_empty() {
+        if text.is_empty() || self.get(id).is_none_or(|t| t.prompt == text) {
             return Ok(false);
         }
-        let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) else {
-            return Ok(false);
-        };
-        if t.text == text {
-            return Ok(false);
-        }
-        self.commit(|board| {
-            board.tasks.iter_mut().find(|t| t.id == id).unwrap().text = text.into()
-        })?;
+        let updated = update_personal_task(id, |s| s.prompt = text.to_string())?;
+        self.apply(updated);
         Ok(true)
     }
 
@@ -298,14 +247,8 @@ impl TaskBoard {
         if self.get(id).is_none_or(|t| t.priority == priority) {
             return Ok(false);
         }
-        self.commit(|board| {
-            board
-                .tasks
-                .iter_mut()
-                .find(|t| t.id == id)
-                .unwrap()
-                .priority = priority
-        })?;
+        let updated = update_personal_task(id, |s| s.priority = priority)?;
+        self.apply(updated);
         Ok(true)
     }
 
@@ -316,21 +259,24 @@ impl TaskBoard {
         if self.get(id).is_none_or(|t| t.tags == tags) {
             return Ok(false);
         }
-        self.commit(|board| board.tasks.iter_mut().find(|t| t.id == id).unwrap().tags = tags)?;
+        let updated = update_personal_task(id, |s| s.tags = tags)?;
+        self.apply(updated);
         Ok(true)
     }
 
     /// Move a task between columns, stamping/clearing `done_at` so the Done
-    /// column can show when it landed. No-op on unknown id. Persists.
-    pub fn set_status(&mut self, id: &str, status: TaskItemStatus) -> io::Result<bool> {
+    /// column can show when it landed. No-op on unknown id. Persists. The
+    /// shared transition table validates the edge, so an illegal move (e.g.
+    /// from a hand-edited state file) errors instead of silently landing.
+    pub fn set_status(&mut self, id: &str, status: TaskStatus) -> io::Result<bool> {
         if self.get(id).is_none_or(|t| t.status == status) {
             return Ok(false);
         }
-        self.commit(|board| {
-            let t = board.tasks.iter_mut().find(|t| t.id == id).unwrap();
-            t.status = status;
-            t.done_at = (status == TaskItemStatus::Done).then(now_secs);
+        let updated = update_personal_task(id, |s| {
+            s.status = status;
+            s.done_at = (status == TaskStatus::Done).then(orchestrator::now_unix_secs);
         })?;
+        self.apply(updated);
         Ok(true)
     }
 
@@ -342,18 +288,21 @@ impl TaskBoard {
         if self.get(id).is_none() {
             return Ok(false);
         }
-        self.commit(|board| {
-            let t = board.tasks.iter_mut().find(|t| t.id == id).unwrap();
-            t.cwd = Some(cwd.to_string());
-            t.agent_id = Some(agent_id.to_string());
-            t.tmux = Some(tmux.to_string());
+        let updated = update_personal_task(id, |s| {
+            s.cwd = Some(cwd.to_string());
+            s.agent_id = Some(agent_id.to_string());
+            s.tmux = Some(tmux.to_string());
             // A re-assign spawns a fresh session; the old session id no
             // longer matches the new tmux, so drop it until the next scan
             // re-resolves.
-            t.session_id = None;
-            t.status = TaskItemStatus::Planning;
-            t.done_at = None;
-            board.last_assign_cwd = Some(cwd.to_string());
+            s.session_id = None;
+            s.status = TaskStatus::Planning;
+            s.done_at = None;
+        })?;
+        self.apply(updated);
+        self.last_assign_cwd = Some(cwd.to_string());
+        save_board_meta(&BoardMeta {
+            last_assign_cwd: self.last_assign_cwd.clone(),
         })?;
         Ok(true)
     }
@@ -364,9 +313,8 @@ impl TaskBoard {
         if self.get(id).is_none_or(|t| t.tmux.as_deref() == Some(tmux)) {
             return Ok(false);
         }
-        self.commit(|board| {
-            board.tasks.iter_mut().find(|t| t.id == id).unwrap().tmux = Some(tmux.into())
-        })?;
+        let updated = update_personal_task(id, |s| s.tmux = Some(tmux.to_string()))?;
+        self.apply(updated);
         Ok(true)
     }
 
@@ -385,127 +333,101 @@ impl TaskBoard {
                 sessions
                     .iter()
                     .find(|s| s.tmux_session.as_deref() == Some(tmux))
-                    .map(|s| (t.id.clone(), s.session_id.clone()))
+                    .map(|s| (t.task_id.clone(), s.session_id.clone()))
             })
             .collect();
         if bindings.is_empty() {
             return Ok(false);
         }
-        self.commit(|board| {
-            for (id, sid) in &bindings {
-                board
-                    .tasks
-                    .iter_mut()
-                    .find(|t| t.id == *id)
-                    .unwrap()
-                    .session_id = Some(sid.clone());
-            }
-        })?;
+        for (id, sid) in bindings {
+            let updated = update_personal_task(&id, |s| s.session_id = Some(sid.clone()))?;
+            self.apply(updated);
+        }
         Ok(true)
     }
 
     /// Remove the task with `id`, returning it so the caller can describe
     /// what was deleted (and whether an agent session survives it). The
     /// removed task is appended to the on-disk archive. Persists.
-    pub fn remove(&mut self, id: &str) -> io::Result<Option<TaskItem>> {
-        let Some(idx) = self.tasks.iter().position(|t| t.id == id) else {
+    pub fn remove(&mut self, id: &str) -> io::Result<Option<TaskState>> {
+        let Some(idx) = self.tasks.iter().position(|t| t.task_id == id) else {
             return Ok(None);
         };
         let removed = self.tasks[idx].clone();
-        // Archive first: an extra archive entry is harmless, while committing
-        // the removal before a failed archive write would report failure after
-        // the card had already disappeared.
+        // Archive first: an extra archive entry is harmless, while removing
+        // the task dir before a failed archive write would report failure
+        // after the card had already disappeared.
         archive_tasks(std::slice::from_ref(&removed))?;
-        self.commit(|board| {
-            board.tasks.remove(idx);
-        })?;
+        if let Some(dir) = personal_task_dir(id) {
+            match fs::remove_dir_all(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        self.tasks.remove(idx);
         Ok(Some(removed))
     }
 
     /// Re-insert a previously removed task (undo of `x`/`c`). Skips ids
     /// already on the board (double-undo, hand edits); returns whether it
     /// landed. Persists.
-    pub fn restore(&mut self, item: TaskItem) -> io::Result<bool> {
-        if self.get(&item.id).is_some() {
+    pub fn restore(&mut self, item: TaskState) -> io::Result<bool> {
+        if self.get(&item.task_id).is_some() {
             return Ok(false);
         }
-        self.commit(|board| board.tasks.push(item))?;
+        write_task_state(&item)?;
+        self.tasks.push(item);
         Ok(true)
     }
 
     /// Drop every Done task, preserving the order of the rest. The removed
     /// tasks are appended to the on-disk archive and returned so the caller
     /// can offer undo. Only persists when something actually changed.
-    pub fn clear_done(&mut self) -> io::Result<Vec<TaskItem>> {
-        let (done, keep): (Vec<_>, Vec<_>) = self
+    pub fn clear_done(&mut self) -> io::Result<Vec<TaskState>> {
+        let done: Vec<TaskState> = self
             .tasks
-            .clone()
-            .into_iter()
-            .partition(|t| t.status == TaskItemStatus::Done);
-        if !done.is_empty() {
-            archive_tasks(&done)?;
-            self.commit(|board| board.tasks = keep)?;
+            .iter()
+            .filter(|t| t.status == TaskStatus::Done)
+            .cloned()
+            .collect();
+        if done.is_empty() {
+            return Ok(done);
         }
+        archive_tasks(&done)?;
+        for t in &done {
+            if let Some(dir) = personal_task_dir(&t.task_id) {
+                match fs::remove_dir_all(&dir) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        self.tasks.retain(|t| t.status != TaskStatus::Done);
         Ok(done)
     }
 
-    fn commit(&mut self, mutate: impl FnOnce(&mut Self)) -> io::Result<()> {
-        let before = self.clone();
-        mutate(self);
-        self.revision = before.revision.saturating_add(1);
-        if let Err(e) = self.save_expected(before.revision) {
-            *self = before;
-            return Err(e);
+    /// Replace the in-memory copy of a task with the state a locked write
+    /// returned, so the snapshot always shows what actually landed on disk.
+    fn apply(&mut self, updated: TaskState) {
+        if let Some(t) = self.tasks.iter_mut().find(|t| t.task_id == updated.task_id) {
+            *t = updated;
         }
-        Ok(())
     }
-
-    fn save_expected(&self, expected_revision: u64) -> io::Result<()> {
-        let Some(path) = tasks_path() else {
-            return Ok(());
-        };
-        let parent = path
-            .parent()
-            .ok_or_else(|| io::Error::other("tasks path has no parent"))?;
-        fs::create_dir_all(parent)?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(parent.join("tasks.lock"))?;
-        lock.lock_exclusive()?;
-        let disk_revision = match fs::read_to_string(&path) {
-            Ok(raw) => {
-                serde_json::from_str::<Self>(&raw)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-                    .revision
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => 0,
-            Err(e) => return Err(e),
-        };
-        if disk_revision != expected_revision {
-            return Err(io::Error::other(
-                format!("task board changed on disk (expected revision {expected_revision}, found {disk_revision}); reload and retry"),
-            ));
-        }
-        crate::persist::save_json(&path, self)
-    }
-}
-
-fn tasks_path() -> Option<PathBuf> {
-    cc_hub_home().map(|h| h.join("tasks.json"))
 }
 
 fn archive_path() -> Option<PathBuf> {
-    cc_hub_home().map(|h| h.join("tasks-archive.json"))
+    cc_hub_home().map(|h| h.join("tasks-archive-v2.json"))
 }
 
-/// Append removed tasks to `~/.cc-hub/tasks-archive.json` (a bare JSON
-/// array), so `x` and `c` are recoverable beyond the in-session undo slot.
-/// The archive is a log, not a ledger: an undone delete leaves its copy
-/// behind, and a corrupt file starts fresh — same policy as the board.
-fn archive_tasks(items: &[TaskItem]) -> io::Result<()> {
+/// Append removed tasks to `~/.cc-hub/tasks-archive-v2.json` (a bare JSON
+/// array of unified [`TaskState`]s), so `x` and `c` are recoverable beyond
+/// the in-session undo slot. The archive is a log, not a ledger: an undone
+/// delete leaves its copy behind, and a corrupt file starts fresh — same
+/// policy as the board. The pre-unification `tasks-archive.json` (legacy
+/// `TaskItem` shape) is left untouched.
+fn archive_tasks(items: &[TaskState]) -> io::Result<()> {
     if items.is_empty() {
         return Ok(());
     }
@@ -523,7 +445,7 @@ fn archive_tasks(items: &[TaskItem]) -> io::Result<()> {
         .write(true)
         .open(parent.join("tasks-archive.lock"))?;
     lock.lock_exclusive()?;
-    let mut archived: Vec<TaskItem> = match fs::read_to_string(&path) {
+    let mut archived: Vec<TaskState> = match fs::read_to_string(&path) {
         Ok(raw) => {
             serde_json::from_str(&raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
         }
@@ -532,6 +454,221 @@ fn archive_tasks(items: &[TaskItem]) -> io::Result<()> {
     };
     archived.extend(items.iter().cloned());
     crate::persist::save_json(&path, &archived)
+}
+
+/// Frozen serde shapes of the pre-unification board, kept only so
+/// [`migrate_legacy_board`] can parse an existing `~/.cc-hub/tasks.json`
+/// byte-for-byte the way the old code did. Never construct these outside
+/// migration.
+pub mod legacy {
+    use serde::Deserialize;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum TaskItemStatus {
+        Todo,
+        Planning,
+        InProgress,
+        Done,
+    }
+
+    #[derive(Clone, Debug, Deserialize)]
+    pub struct TaskItem {
+        pub id: String,
+        pub text: String,
+        pub status: TaskItemStatus,
+        #[serde(default)]
+        pub priority: super::TaskPriority,
+        #[serde(default)]
+        pub tags: Vec<String>,
+        #[serde(default)]
+        pub created_at: u64,
+        #[serde(default)]
+        pub done_at: Option<u64>,
+        #[serde(default)]
+        pub cwd: Option<String>,
+        #[serde(default)]
+        pub agent_id: Option<String>,
+        #[serde(default)]
+        pub tmux: Option<String>,
+        #[serde(default)]
+        pub session_id: Option<String>,
+    }
+
+    #[derive(Default, Debug, Deserialize)]
+    pub struct TaskBoard {
+        #[serde(default)]
+        pub tasks: Vec<TaskItem>,
+        #[serde(default)]
+        pub last_assign_cwd: Option<String>,
+        #[serde(default)]
+        pub revision: u64,
+    }
+}
+
+fn legacy_tasks_path() -> Option<PathBuf> {
+    cc_hub_home().map(|h| h.join("tasks.json"))
+}
+
+fn legacy_item_to_state(item: legacy::TaskItem) -> TaskState {
+    let mut state = TaskState::new_personal(item.text);
+    state.task_id = item.id;
+    state.status = match item.status {
+        legacy::TaskItemStatus::Todo => TaskStatus::Backlog,
+        legacy::TaskItemStatus::Planning => TaskStatus::Planning,
+        legacy::TaskItemStatus::InProgress => TaskStatus::Running,
+        legacy::TaskItemStatus::Done => TaskStatus::Done,
+    };
+    state.priority = item.priority;
+    state.tags = item.tags;
+    state.created_at = item.created_at as i64;
+    state.done_at = item.done_at.map(|t| t as i64);
+    state.updated_at = (item.created_at.max(item.done_at.unwrap_or(0))) as i64;
+    state.cwd = item.cwd;
+    state.agent_id = item.agent_id;
+    state.tmux = item.tmux;
+    state.session_id = item.session_id;
+    state
+}
+
+/// Migrate a pre-unification `~/.cc-hub/tasks.json` into the per-task store.
+/// Lossless, idempotent, and abort-on-error:
+///
+/// 1. No `tasks.json` → nothing to do (the disarmed trigger).
+/// 2. The old board lock (`tasks.lock`) is held throughout, serializing
+///    against a concurrently running pre-unification binary.
+/// 3. A parse failure aborts touching nothing — the caller surfaces the
+///    error and the file stays exactly as it was.
+/// 4. Tasks whose directory already exists are skipped (re-run safety after
+///    a partial migration).
+/// 5. Only after every task is written: `last_assign_cwd` lands in
+///    `board.json` and `tasks.json` is renamed to `tasks.json.migrated-v1` —
+///    the backup doubles as the rollback story.
+///
+/// Returns the number of migrated tasks, or `None` when there was nothing
+/// to migrate.
+pub fn migrate_legacy_board() -> io::Result<Option<usize>> {
+    let Some(path) = legacy_tasks_path() else {
+        return Ok(None);
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("tasks path has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(parent.join("tasks.lock"))?;
+    lock.lock_exclusive()?;
+
+    // Re-check under the lock: a concurrent instance may have finished the
+    // migration while we waited.
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let board: legacy::TaskBoard = serde_json::from_str(&raw).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("migrate {}: {}", path.display(), e),
+        )
+    })?;
+
+    let mut migrated = 0usize;
+    let mut all_ids: Vec<String> = Vec::with_capacity(board.tasks.len());
+    for item in board.tasks {
+        all_ids.push(item.id.clone());
+        let exists = personal_task_dir(&item.id).is_some_and(|d| d.exists());
+        if exists {
+            continue;
+        }
+        write_task_state(&legacy_item_to_state(item))?;
+        migrated += 1;
+    }
+
+    // Paranoia gate before the destructive rename: re-verify every task is
+    // actually present in the store. Guards against anything that redirects
+    // path resolution mid-migration (observed: a parallel test flipping
+    // $HOME, sending the writes into a doomed tempdir) — better to leave the
+    // trigger armed and error than to disarm it with the data elsewhere.
+    for id in &all_ids {
+        let landed = personal_task_dir(id).is_some_and(|d| d.join("state.json").exists());
+        if !landed {
+            return Err(io::Error::other(format!(
+                "migration verify failed: task {} missing from the store; \
+                 leaving tasks.json in place",
+                id
+            )));
+        }
+    }
+
+    if let Some(cwd) = board.last_assign_cwd {
+        let mut meta = load_board_meta();
+        if meta.last_assign_cwd.is_none() {
+            meta.last_assign_cwd = Some(cwd);
+            save_board_meta(&meta)?;
+        }
+    }
+
+    // All writes landed; disarm the trigger, keeping the original as backup.
+    fs::rename(&path, parent.join("tasks.json.migrated-v1"))?;
+    Ok(Some(migrated))
+}
+
+/// Promote a personal-board task into a registered project's Backlog: the
+/// same record continues under `~/.cc-hub/projects/<pid>/tasks/<tid>/`, where
+/// triage, `task start`, and the Backlog popup pick it up like any
+/// orchestrated task. Prompt, tags, priority, created_at, cwd, and
+/// session_id travel along (history); `tmux` is cleared so a live board
+/// agent stays visible on the Sessions tab rather than being mistaken for an
+/// orchestrator. Write-then-delete: a crash between the two leaves a
+/// duplicate, never a loss.
+pub fn promote_task(task_id: &str, project_id: &str) -> io::Result<TaskState> {
+    let projects = orchestrator::load_projects();
+    let project = projects
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("project {} is not registered", project_id),
+            )
+        })?;
+
+    let mut state = read_task_state_for(None, task_id)?;
+    if state.project_id.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("task {} already belongs to a project", task_id),
+        ));
+    }
+    state.project_id = Some(project.id.clone());
+    state.project_root = Some(project.root.clone());
+    // The orchestrated flow starts at Backlog regardless of which board
+    // column the card sat in; done_at would contradict Backlog.
+    state.status = TaskStatus::Backlog;
+    state.done_at = None;
+    state.tmux = None;
+    state.touch();
+    write_task_state(&state)?;
+
+    if let Some(dir) = personal_task_dir(task_id) {
+        match fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            // The project copy already landed; a leftover personal dir is a
+            // duplicate the user can delete, not data loss.
+            Err(e) => log::warn!("promote {}: personal dir cleanup failed: {}", task_id, e),
+        }
+    }
+    Ok(state)
 }
 
 // Unix-only for the same reason as todo.rs: isolation works by redirecting
@@ -544,48 +681,68 @@ mod tests {
     #[test]
     fn add_persists_round_trip() {
         with_temp_home(|| {
-            let mut b = TaskBoard::load();
+            let mut b = PersonalBoard::load();
             assert!(b.tasks().is_empty());
             let id = b.add("  fix the flaky test  ").unwrap().unwrap();
             assert_eq!(b.add("   ").unwrap(), None);
-            let reloaded = TaskBoard::load();
+            let reloaded = PersonalBoard::load();
             assert_eq!(reloaded.tasks().len(), 1);
             let t = reloaded.get(&id).unwrap();
-            assert_eq!(t.text, "fix the flaky test");
-            assert_eq!(t.status, TaskItemStatus::Todo);
+            assert_eq!(t.prompt, "fix the flaky test");
+            assert_eq!(t.status, TaskStatus::Backlog);
+            assert_eq!(t.kind(), orchestrator::TaskKind::Personal);
+            assert!(t.task_id.starts_with("tk-"));
         });
     }
 
     #[test]
     fn status_transitions_stamp_done_at() {
         with_temp_home(|| {
-            let mut b = TaskBoard::load();
+            let mut b = PersonalBoard::load();
             let id = b.add("ship it").unwrap().unwrap();
-            b.set_status(&id, TaskItemStatus::Done).unwrap();
-            let t = TaskBoard::load();
+            b.set_status(&id, TaskStatus::Done).unwrap();
+            let t = PersonalBoard::load();
             let done = t.get(&id).unwrap();
-            assert_eq!(done.status, TaskItemStatus::Done);
+            assert_eq!(done.status, TaskStatus::Done);
             assert!(done.done_at.is_some());
-            b.set_status(&id, TaskItemStatus::Todo).unwrap();
-            assert!(TaskBoard::load().get(&id).unwrap().done_at.is_none());
+            b.set_status(&id, TaskStatus::Backlog).unwrap();
+            assert!(PersonalBoard::load().get(&id).unwrap().done_at.is_none());
+        });
+    }
+
+    #[test]
+    fn illegal_edge_is_rejected_and_not_persisted() {
+        with_temp_home(|| {
+            let mut b = PersonalBoard::load();
+            let id = b.add("no PR flow here").unwrap().unwrap();
+            // Backlog → Review is orchestrated-only; the shared table must
+            // refuse it for a personal task.
+            let err = b.set_status(&id, TaskStatus::Review).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(
+                PersonalBoard::load().get(&id).unwrap().status,
+                TaskStatus::Backlog
+            );
+            // The rejected write must not poison the in-memory snapshot.
+            assert_eq!(b.get(&id).unwrap().status, TaskStatus::Backlog);
         });
     }
 
     #[test]
     fn assign_moves_to_planning_and_rebind_keeps_session() {
         with_temp_home(|| {
-            let mut b = TaskBoard::load();
+            let mut b = PersonalBoard::load();
             let id = b.add("write the parser").unwrap().unwrap();
             b.assign(&id, "/tmp/proj", "claude", "cchub-1-42").unwrap();
-            let t = TaskBoard::load();
+            let t = PersonalBoard::load();
             let task = t.get(&id).unwrap();
-            assert_eq!(task.status, TaskItemStatus::Planning);
+            assert_eq!(task.status, TaskStatus::Planning);
             assert_eq!(task.cwd.as_deref(), Some("/tmp/proj"));
             assert_eq!(task.tmux.as_deref(), Some("cchub-1-42"));
             assert_eq!(task.session_id, None);
             b.rebind_tmux(&id, "cchub-1-43").unwrap();
             assert_eq!(
-                TaskBoard::load().get(&id).unwrap().tmux.as_deref(),
+                PersonalBoard::load().get(&id).unwrap().tmux.as_deref(),
                 Some("cchub-1-43")
             );
         });
@@ -594,27 +751,27 @@ mod tests {
     #[test]
     fn assign_records_last_assign_cwd_across_reloads() {
         with_temp_home(|| {
-            let mut b = TaskBoard::load();
+            let mut b = PersonalBoard::load();
             assert_eq!(b.last_assign_cwd(), None);
             let id = b.add("t").unwrap().unwrap();
             b.assign(&id, "/tmp/proj", "claude", "cchub-1-42").unwrap();
-            assert_eq!(TaskBoard::load().last_assign_cwd(), Some("/tmp/proj"));
+            assert_eq!(PersonalBoard::load().last_assign_cwd(), Some("/tmp/proj"));
             // Deleting the task must not forget where it ran.
             b.remove(&id).unwrap();
-            assert_eq!(TaskBoard::load().last_assign_cwd(), Some("/tmp/proj"));
+            assert_eq!(PersonalBoard::load().last_assign_cwd(), Some("/tmp/proj"));
         });
     }
 
     #[test]
     fn new_tasks_default_priority_and_set_priority_round_trips() {
         with_temp_home(|| {
-            let mut b = TaskBoard::load();
+            let mut b = PersonalBoard::load();
             let id = b.add("triage the backlog").unwrap().unwrap();
             // New tasks start at the default priority (P3).
             assert_eq!(b.get(&id).unwrap().priority, TaskPriority::default());
             b.set_priority(&id, TaskPriority::P1).unwrap();
             assert_eq!(
-                TaskBoard::load().get(&id).unwrap().priority,
+                PersonalBoard::load().get(&id).unwrap().priority,
                 TaskPriority::P1
             );
             // Re-setting the same level is a no-op (and still persisted state
@@ -622,23 +779,6 @@ mod tests {
             b.set_priority(&id, TaskPriority::P1).unwrap();
             assert_eq!(b.get(&id).unwrap().priority, TaskPriority::P1);
         });
-    }
-
-    #[test]
-    fn missing_priority_field_deserializes_to_default() {
-        // A task written by a pre-priority build has no `priority` key; it
-        // must load as the default rather than failing the whole board parse.
-        let json = r#"{"id":"tk-1","text":"old","status":"todo","created_at":1}"#;
-        let t: TaskItem = serde_json::from_str(json).unwrap();
-        assert_eq!(t.priority, TaskPriority::P3);
-    }
-
-    #[test]
-    fn missing_tags_field_deserializes_to_empty() {
-        // A pre-tags board has no `tags` key; it must load as an empty vec.
-        let json = r#"{"id":"tk-1","text":"old","status":"todo","created_at":1}"#;
-        let t: TaskItem = serde_json::from_str(json).unwrap();
-        assert!(t.tags.is_empty());
     }
 
     #[test]
@@ -660,16 +800,19 @@ mod tests {
     #[test]
     fn set_tags_round_trips_and_skips_unchanged() {
         with_temp_home(|| {
-            let mut b = TaskBoard::load();
+            let mut b = PersonalBoard::load();
             let id = b.add("label me").unwrap().unwrap();
             assert!(b.get(&id).unwrap().tags.is_empty());
             b.set_tags(&id, parse_tags("bug api")).unwrap();
-            assert_eq!(TaskBoard::load().get(&id).unwrap().tags, vec!["bug", "api"]);
+            assert_eq!(
+                PersonalBoard::load().get(&id).unwrap().tags,
+                vec!["bug", "api"]
+            );
             // Re-setting the same set is a no-op; clearing removes them.
             b.set_tags(&id, parse_tags("bug api")).unwrap();
             assert_eq!(b.get(&id).unwrap().tags, vec!["bug", "api"]);
             b.set_tags(&id, Vec::new()).unwrap();
-            assert!(TaskBoard::load().get(&id).unwrap().tags.is_empty());
+            assert!(PersonalBoard::load().get(&id).unwrap().tags.is_empty());
         });
     }
 
@@ -683,88 +826,90 @@ mod tests {
     #[test]
     fn column_filters_by_status() {
         with_temp_home(|| {
-            let mut b = TaskBoard::load();
+            let mut b = PersonalBoard::load();
             let a = b.add("a").unwrap().unwrap();
             b.add("b").unwrap().unwrap();
-            b.set_status(&a, TaskItemStatus::Done).unwrap();
-            assert_eq!(b.column(TaskItemStatus::Todo).len(), 1);
-            assert_eq!(b.column(TaskItemStatus::Done).len(), 1);
-            assert_eq!(b.column(TaskItemStatus::Planning).len(), 0);
-            assert_eq!(b.column(TaskItemStatus::InProgress).len(), 0);
+            b.set_status(&a, TaskStatus::Done).unwrap();
+            assert_eq!(b.column(TaskStatus::Backlog).len(), 1);
+            assert_eq!(b.column(TaskStatus::Done).len(), 1);
+            assert_eq!(b.column(TaskStatus::Planning).len(), 0);
+            assert_eq!(b.column(TaskStatus::Running).len(), 0);
         });
     }
 
     #[test]
     fn clear_done_and_remove() {
         with_temp_home(|| {
-            let mut b = TaskBoard::load();
+            let mut b = PersonalBoard::load();
             let a = b.add("a").unwrap().unwrap();
             let c = b.add("c").unwrap().unwrap();
-            b.set_status(&a, TaskItemStatus::Done).unwrap();
+            b.set_status(&a, TaskStatus::Done).unwrap();
             let cleared = b.clear_done().unwrap();
             assert_eq!(cleared.len(), 1);
-            assert_eq!(cleared[0].id, a);
+            assert_eq!(cleared[0].task_id, a);
             assert!(b.clear_done().unwrap().is_empty());
             assert!(b.remove(&c).unwrap().is_some());
             assert!(b.remove(&c).unwrap().is_none());
-            assert!(TaskBoard::load().tasks().is_empty());
+            assert!(PersonalBoard::load().tasks().is_empty());
         });
     }
 
     #[test]
     fn removals_land_in_archive_and_restore_reinserts() {
         with_temp_home(|| {
-            let mut b = TaskBoard::load();
+            let mut b = PersonalBoard::load();
             let a = b.add("deleted one").unwrap().unwrap();
             let d = b.add("done one").unwrap().unwrap();
-            b.set_status(&d, TaskItemStatus::Done).unwrap();
+            b.set_status(&d, TaskStatus::Done).unwrap();
             let removed = b.remove(&a).unwrap().unwrap();
             b.clear_done().unwrap();
             // Both removal paths append to the archive file.
             let raw = fs::read_to_string(archive_path().unwrap()).unwrap();
-            let archived: Vec<TaskItem> = serde_json::from_str(&raw).unwrap();
+            let archived: Vec<TaskState> = serde_json::from_str(&raw).unwrap();
             assert_eq!(
-                archived.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+                archived
+                    .iter()
+                    .map(|t| t.task_id.as_str())
+                    .collect::<Vec<_>>(),
                 vec![a.as_str(), d.as_str()]
             );
             // Undo restores the task (with its id); a second restore of the
             // same id is refused.
             assert!(b.restore(removed.clone()).unwrap());
             assert!(!b.restore(removed).unwrap());
-            assert_eq!(TaskBoard::load().get(&a).unwrap().text, "deleted one");
+            assert_eq!(PersonalBoard::load().get(&a).unwrap().prompt, "deleted one");
         });
     }
 
     #[test]
-    fn stale_writer_is_rejected_and_rolled_back() {
+    fn concurrent_instances_merge_at_task_granularity() {
         with_temp_home(|| {
-            let mut first = TaskBoard::load_result().unwrap();
-            let mut stale = TaskBoard::load_result().unwrap();
+            // Two boards loaded from the same (empty) store: each adds a
+            // task; both must land on disk. The old single-file board's CAS
+            // would have rejected the second writer entirely.
+            let mut first = PersonalBoard::load_result().unwrap();
+            let mut second = PersonalBoard::load_result().unwrap();
             first.add("first writer").unwrap().unwrap();
+            second.add("second writer").unwrap().unwrap();
 
-            let error = stale.add("stale writer").unwrap_err();
-            assert!(error.to_string().contains("changed on disk"));
-            assert!(
-                stale.tasks().is_empty(),
-                "failed commit must roll memory back"
-            );
-
-            let current = TaskBoard::load_result().unwrap();
-            assert_eq!(current.tasks().len(), 1);
-            assert_eq!(current.tasks()[0].text, "first writer");
+            let merged = PersonalBoard::load_result().unwrap();
+            assert_eq!(merged.tasks().len(), 2);
         });
     }
 
     #[test]
-    fn malformed_board_is_reported_without_replacing_the_file() {
+    fn malformed_task_file_is_reported_without_replacing_it() {
         with_temp_home(|| {
-            let path = tasks_path().unwrap();
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(&path, "{not-json").unwrap();
+            let dir = personal_task_dir("tk-broken").unwrap();
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("state.json"), "{not-json").unwrap();
 
-            let error = TaskBoard::load_result().unwrap_err();
+            let error = PersonalBoard::load_result().unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-            assert_eq!(fs::read_to_string(path).unwrap(), "{not-json");
+            assert_eq!(
+                fs::read_to_string(dir.join("state.json")).unwrap(),
+                "{not-json"
+            );
         });
     }
 
@@ -785,5 +930,146 @@ mod tests {
         assert_eq!(q.text, "just words");
         assert!(q.tags.is_empty());
         assert_eq!(q.priority, None);
+    }
+
+    // ── migration ─────────────────────────────────────────────────────────
+
+    fn write_legacy_board(json: &str) {
+        let path = legacy_tasks_path().unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, json).unwrap();
+    }
+
+    const LEGACY_BOARD: &str = r#"{
+        "tasks": [
+            {"id":"tk-1","text":"old todo","status":"todo","created_at":100},
+            {"id":"tk-2","text":"planned","status":"planning","priority":"p1",
+             "tags":["bug"],"created_at":200,"cwd":"/tmp/p","agent_id":"claude",
+             "tmux":"cchub-1-1","session_id":"sid-1"},
+            {"id":"tk-3","text":"working","status":"in_progress","created_at":300},
+            {"id":"tk-4","text":"shipped","status":"done","created_at":400,"done_at":450}
+        ],
+        "last_assign_cwd": "/tmp/p",
+        "revision": 9
+    }"#;
+
+    #[test]
+    fn migration_maps_every_field_and_disarms() {
+        with_temp_home(|| {
+            write_legacy_board(LEGACY_BOARD);
+            assert_eq!(migrate_legacy_board().unwrap(), Some(4));
+
+            let b = PersonalBoard::load_result().unwrap();
+            assert_eq!(b.tasks().len(), 4);
+            assert_eq!(b.last_assign_cwd(), Some("/tmp/p"));
+
+            let t1 = b.get("tk-1").unwrap();
+            assert_eq!(t1.status, TaskStatus::Backlog);
+            assert_eq!(t1.prompt, "old todo");
+            assert_eq!(t1.created_at, 100);
+            assert_eq!(t1.priority, TaskPriority::P3);
+            assert!(t1.project_id.is_none());
+
+            let t2 = b.get("tk-2").unwrap();
+            assert_eq!(t2.status, TaskStatus::Planning);
+            assert_eq!(t2.priority, TaskPriority::P1);
+            assert_eq!(t2.tags, vec!["bug"]);
+            assert_eq!(t2.cwd.as_deref(), Some("/tmp/p"));
+            assert_eq!(t2.session_id.as_deref(), Some("sid-1"));
+
+            assert_eq!(b.get("tk-3").unwrap().status, TaskStatus::Running);
+
+            let t4 = b.get("tk-4").unwrap();
+            assert_eq!(t4.status, TaskStatus::Done);
+            assert_eq!(t4.done_at, Some(450));
+            assert_eq!(t4.updated_at, 450);
+
+            // The trigger is disarmed and the backup preserved.
+            assert!(!legacy_tasks_path().unwrap().exists());
+            let backup = legacy_tasks_path()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("tasks.json.migrated-v1");
+            assert!(backup.exists());
+
+            // Re-running is a no-op.
+            assert_eq!(migrate_legacy_board().unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn migration_skips_existing_dirs_on_rerun() {
+        with_temp_home(|| {
+            write_legacy_board(LEGACY_BOARD);
+            // Simulate a partial earlier run: tk-1 already migrated (with an
+            // edit the re-run must not clobber).
+            let mut pre = TaskState::new_personal("edited after partial run".into());
+            pre.task_id = "tk-1".into();
+            write_task_state(&pre).unwrap();
+
+            assert_eq!(migrate_legacy_board().unwrap(), Some(3));
+            let b = PersonalBoard::load_result().unwrap();
+            assert_eq!(b.tasks().len(), 4);
+            assert_eq!(b.get("tk-1").unwrap().prompt, "edited after partial run");
+        });
+    }
+
+    #[test]
+    fn corrupt_legacy_board_aborts_untouched() {
+        with_temp_home(|| {
+            write_legacy_board("{not-json");
+            let error = migrate_legacy_board().unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            // Nothing migrated, file untouched, trigger still armed.
+            assert!(PersonalBoard::load_result().unwrap().tasks().is_empty());
+            assert_eq!(
+                fs::read_to_string(legacy_tasks_path().unwrap()).unwrap(),
+                "{not-json"
+            );
+        });
+    }
+
+    #[test]
+    fn promote_moves_task_into_project_backlog() {
+        with_temp_home(|| {
+            let root = std::env::temp_dir().join("promote-fixture");
+            fs::create_dir_all(&root).unwrap();
+            let project_id =
+                orchestrator::ensure_project_registered(&root, "promote-fixture").unwrap();
+
+            let mut b = PersonalBoard::load();
+            let id = b.add("grow into a project task").unwrap().unwrap();
+            b.assign(&id, "/tmp/p", "claude", "cchub-1-9").unwrap();
+
+            let promoted = promote_task(&id, &project_id).unwrap();
+            assert_eq!(promoted.project_id.as_deref(), Some(project_id.as_str()));
+            assert_eq!(promoted.status, TaskStatus::Backlog);
+            assert_eq!(promoted.tmux, None, "board tmux must not travel");
+            assert_eq!(promoted.cwd.as_deref(), Some("/tmp/p"), "history travels");
+
+            // Off the board, present in the project store.
+            assert!(PersonalBoard::load().get(&id).is_none());
+            let in_project = orchestrator::read_task_state(&project_id, &id).unwrap();
+            assert_eq!(in_project.prompt, "grow into a project task");
+
+            // Unknown project and double-promotion are refused.
+            assert!(promote_task(&id, "nope").is_err());
+        });
+    }
+
+    #[test]
+    fn migrated_task_round_trips_through_the_store() {
+        with_temp_home(|| {
+            write_legacy_board(LEGACY_BOARD);
+            migrate_legacy_board().unwrap();
+            // A migrated Planning card approves to Running like a native one.
+            let mut b = PersonalBoard::load_result().unwrap();
+            b.set_status("tk-2", TaskStatus::Running).unwrap();
+            assert_eq!(
+                PersonalBoard::load().get("tk-2").unwrap().status,
+                TaskStatus::Running
+            );
+        });
     }
 }

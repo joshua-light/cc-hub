@@ -409,7 +409,11 @@ impl App {
     }
 }
 
-#[cfg(test)]
+// Unix-only: every test constructs an App, which touches the on-disk task
+// store — with_temp_home isolation redirects $HOME, which only works on
+// unix. Constructing an App in a test WITHOUT with_temp_home is how the
+// board migration once ran against a developer's real ~/.cc-hub.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::agent_runtime::testing::RecordingRuntime;
@@ -462,94 +466,106 @@ mod tests {
 
     #[test]
     fn focus_inactive_claude_resumes_by_session_id() {
-        let (mut app, runtime) = app_with(vec![session("sid-abc", SessionState::Inactive, None)]);
-        let effects = app.execute(Command::Sessions(SessionsCommand::FocusSelected));
-        assert!(effects.is_empty());
-        let spawns = runtime.spawns.lock().unwrap();
-        assert_eq!(spawns.len(), 1);
-        assert_eq!(spawns[0].agent_id, "claude");
-        assert_eq!(spawns[0].cwd, "/tmp/proj");
-        assert_eq!(spawns[0].resume.as_deref(), Some("SessionId(\"sid-abc\")"));
-        assert!(status(&app).starts_with("resumed"), "got: {}", status(&app));
+        crate::test_util::with_temp_home(|| {
+            let (mut app, runtime) =
+                app_with(vec![session("sid-abc", SessionState::Inactive, None)]);
+            let effects = app.execute(Command::Sessions(SessionsCommand::FocusSelected));
+            assert!(effects.is_empty());
+            let spawns = runtime.spawns.lock().unwrap();
+            assert_eq!(spawns.len(), 1);
+            assert_eq!(spawns[0].agent_id, "claude");
+            assert_eq!(spawns[0].cwd, "/tmp/proj");
+            assert_eq!(spawns[0].resume.as_deref(), Some("SessionId(\"sid-abc\")"));
+            assert!(status(&app).starts_with("resumed"), "got: {}", status(&app));
+        });
     }
 
     #[test]
     fn focus_inactive_pi_without_transcript_fails_without_spawn() {
-        let mut sess = session("sid-pi", SessionState::Inactive, None);
-        sess.agent_kind = AgentKind::Pi;
-        sess.jsonl_path = None;
-        let (mut app, runtime) = app_with(vec![sess]);
-        let effects = app.execute(Command::Sessions(SessionsCommand::FocusSelected));
-        assert!(effects.is_empty());
-        assert!(runtime.spawns.lock().unwrap().is_empty());
-        assert_eq!(status(&app), "resume failed: missing session transcript");
+        crate::test_util::with_temp_home(|| {
+            let mut sess = session("sid-pi", SessionState::Inactive, None);
+            sess.agent_kind = AgentKind::Pi;
+            sess.jsonl_path = None;
+            let (mut app, runtime) = app_with(vec![sess]);
+            let effects = app.execute(Command::Sessions(SessionsCommand::FocusSelected));
+            assert!(effects.is_empty());
+            assert!(runtime.spawns.lock().unwrap().is_empty());
+            assert_eq!(status(&app), "resume failed: missing session transcript");
+        });
     }
 
     #[test]
     fn focus_live_tmux_session_opens_pane() {
-        let (mut app, _rt) = app_with(vec![session(
-            "sid-1",
-            SessionState::Processing,
-            Some("cc-agent-1"),
-        )]);
-        let effects = app.execute(Command::Sessions(SessionsCommand::FocusSelected));
-        assert_eq!(
-            effects,
-            vec![Effect::OpenTmuxPane {
-                tmux: "cc-agent-1".into(),
-                owned: false
-            }]
-        );
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt) = app_with(vec![session(
+                "sid-1",
+                SessionState::Processing,
+                Some("cc-agent-1"),
+            )]);
+            let effects = app.execute(Command::Sessions(SessionsCommand::FocusSelected));
+            assert_eq!(
+                effects,
+                vec![Effect::OpenTmuxPane {
+                    tmux: "cc-agent-1".into(),
+                    owned: false
+                }]
+            );
+        });
     }
 
     #[test]
     fn focus_detached_session_focuses_window() {
-        let (mut app, _rt) = app_with(vec![session("sid-1", SessionState::Idle, None)]);
-        let effects = app.execute(Command::Sessions(SessionsCommand::FocusSelected));
-        assert_eq!(
-            effects,
-            vec![Effect::FocusWindow {
-                pid: 4242,
-                cwd: "/tmp/proj".into()
-            }]
-        );
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt) = app_with(vec![session("sid-1", SessionState::Idle, None)]);
+            let effects = app.execute(Command::Sessions(SessionsCommand::FocusSelected));
+            assert_eq!(
+                effects,
+                vec![Effect::FocusWindow {
+                    pid: 4242,
+                    cwd: "/tmp/proj".into()
+                }]
+            );
+        });
     }
 
     #[test]
     fn submit_prompt_empty_cancels() {
-        let (mut app, runtime) = app_with(vec![]);
-        app.enter_prompt_input();
-        app.prompt_buffer = "   ".into();
-        let effects = app.execute(Command::Sessions(SessionsCommand::SubmitPrompt));
-        assert!(effects.is_empty());
-        assert!(runtime.spawns.lock().unwrap().is_empty());
-        assert_eq!(status(&app), "empty prompt — dispatch cancelled");
+        crate::test_util::with_temp_home(|| {
+            let (mut app, runtime) = app_with(vec![]);
+            app.enter_prompt_input();
+            app.prompt_buffer = "   ".into();
+            let effects = app.execute(Command::Sessions(SessionsCommand::SubmitPrompt));
+            assert!(effects.is_empty());
+            assert!(runtime.spawns.lock().unwrap().is_empty());
+            assert_eq!(status(&app), "empty prompt — dispatch cancelled");
+        });
     }
 
     #[test]
     fn submit_prompt_with_idle_target_dispatches() {
-        let (mut app, _rt) = app_with(vec![session(
-            "sid-1",
-            SessionState::Idle,
-            Some("cc-idle-1"),
-        )]);
-        app.enter_prompt_input();
-        app.dispatch_target = Some((4242, "proj".into(), "cc-idle-1".into()));
-        app.prompt_buffer = "do the thing".into();
-        let effects = app.execute(Command::Sessions(SessionsCommand::SubmitPrompt));
-        assert_eq!(
-            effects,
-            vec![Effect::DispatchPrompt {
-                tmux: "cc-idle-1".into(),
-                prompt: "do the thing".into(),
-                ok_msg: "dispatched to proj (PID 4242) [cc-idle-1]".into(),
-                err_prefix: "dispatch failed".into(),
-            }]
-        );
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt) = app_with(vec![session(
+                "sid-1",
+                SessionState::Idle,
+                Some("cc-idle-1"),
+            )]);
+            app.enter_prompt_input();
+            app.dispatch_target = Some((4242, "proj".into(), "cc-idle-1".into()));
+            app.prompt_buffer = "do the thing".into();
+            let effects = app.execute(Command::Sessions(SessionsCommand::SubmitPrompt));
+            assert_eq!(
+                effects,
+                vec![Effect::DispatchPrompt {
+                    tmux: "cc-idle-1".into(),
+                    prompt: "do the thing".into(),
+                    ok_msg: "dispatched to proj (PID 4242) [cc-idle-1]".into(),
+                    err_prefix: "dispatch failed".into(),
+                }]
+            );
+        });
     }
 
     #[test]
-    #[cfg(unix)]
     fn submit_prompt_without_target_spawns_and_queues() {
         crate::test_util::with_temp_home(|| {
             // Default agent is claude, which doesn't take an inline initial
@@ -578,94 +594,106 @@ mod tests {
 
     #[test]
     fn submit_prompt_without_sessions_spawns_in_home() {
-        // With no selection, default_spawn_cwd falls back to the home dir —
-        // the "no cwd" refusal only fires when even that is unavailable.
-        let (mut app, runtime) = app_with(vec![]);
-        app.enter_prompt_input();
-        app.prompt_buffer = "do the thing".into();
-        let effects = app.execute(Command::Sessions(SessionsCommand::SubmitPrompt));
-        assert!(effects.is_empty());
-        let spawns = runtime.spawns.lock().unwrap();
-        assert_eq!(spawns.len(), 1);
-        assert_eq!(
-            spawns[0].cwd,
-            dirs::home_dir().unwrap().display().to_string()
-        );
-        assert!(app.has_pending_dispatch());
+        crate::test_util::with_temp_home(|| {
+            // With no selection, default_spawn_cwd falls back to the home dir —
+            // the "no cwd" refusal only fires when even that is unavailable.
+            let (mut app, runtime) = app_with(vec![]);
+            app.enter_prompt_input();
+            app.prompt_buffer = "do the thing".into();
+            let effects = app.execute(Command::Sessions(SessionsCommand::SubmitPrompt));
+            assert!(effects.is_empty());
+            let spawns = runtime.spawns.lock().unwrap();
+            assert_eq!(spawns.len(), 1);
+            assert_eq!(
+                spawns[0].cwd,
+                dirs::home_dir().unwrap().display().to_string()
+            );
+            assert!(app.has_pending_dispatch());
+        });
     }
 
     #[test]
     fn spawn_agent_here_records_and_watches() {
-        let (mut app, runtime) = app_with(vec![session(
-            "sid-1",
-            SessionState::Processing,
-            Some("cc-agent-1"),
-        )]);
-        let effects = app.execute(Command::Sessions(SessionsCommand::SpawnAgentHere));
-        assert!(effects.is_empty());
-        let spawns = runtime.spawns.lock().unwrap();
-        assert_eq!(spawns.len(), 1);
-        assert_eq!(spawns[0].resume, None);
-        assert_eq!(spawns[0].initial_prompt, None);
-        assert!(status(&app).starts_with("started"), "got: {}", status(&app));
+        crate::test_util::with_temp_home(|| {
+            let (mut app, runtime) = app_with(vec![session(
+                "sid-1",
+                SessionState::Processing,
+                Some("cc-agent-1"),
+            )]);
+            let effects = app.execute(Command::Sessions(SessionsCommand::SpawnAgentHere));
+            assert!(effects.is_empty());
+            let spawns = runtime.spawns.lock().unwrap();
+            assert_eq!(spawns.len(), 1);
+            assert_eq!(spawns[0].resume, None);
+            assert_eq!(spawns[0].initial_prompt, None);
+            assert!(status(&app).starts_with("started"), "got: {}", status(&app));
+        });
     }
 
     #[test]
     fn cycle_tab_into_metrics_requests_scan_once() {
-        let (mut app, _rt) = app_with(vec![]);
-        // Cycle until we land on Metrics; expect the scan effect there.
-        let mut saw_scan = false;
-        for _ in 0..4 {
-            let effects = app.execute(Command::Global(GlobalCommand::CycleTab { back: false }));
-            if app.current_tab == Tab::Metrics {
-                assert_eq!(effects, vec![Effect::SpawnMetricsScan]);
-                saw_scan = true;
-                break;
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt) = app_with(vec![]);
+            // Cycle until we land on Metrics; expect the scan effect there.
+            let mut saw_scan = false;
+            for _ in 0..4 {
+                let effects = app.execute(Command::Global(GlobalCommand::CycleTab { back: false }));
+                if app.current_tab == Tab::Metrics {
+                    assert_eq!(effects, vec![Effect::SpawnMetricsScan]);
+                    saw_scan = true;
+                    break;
+                }
+                assert!(effects.is_empty());
             }
-            assert!(effects.is_empty());
-        }
-        assert!(saw_scan, "never landed on Metrics tab");
+            assert!(saw_scan, "never landed on Metrics tab");
+        });
     }
 
     #[test]
     fn toggles_flip_and_report() {
-        let (mut app, _rt) = app_with(vec![]);
-        let before = app.sessions.show_inactive;
-        app.execute(Command::Sessions(SessionsCommand::ToggleShowInactive));
-        assert_eq!(app.sessions.show_inactive, !before);
-        assert!(status(&app).starts_with("inactive sessions"));
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt) = app_with(vec![]);
+            let before = app.sessions.show_inactive;
+            app.execute(Command::Sessions(SessionsCommand::ToggleShowInactive));
+            assert_eq!(app.sessions.show_inactive, !before);
+            assert!(status(&app).starts_with("inactive sessions"));
 
-        let before = app.sessions.show_orch_workers;
-        app.execute(Command::Sessions(SessionsCommand::ToggleShowOrchWorkers));
-        assert_eq!(app.sessions.show_orch_workers, !before);
-        assert!(status(&app).starts_with("orchestrator/worker sessions"));
+            let before = app.sessions.show_orch_workers;
+            app.execute(Command::Sessions(SessionsCommand::ToggleShowOrchWorkers));
+            assert_eq!(app.sessions.show_orch_workers, !before);
+            assert!(status(&app).starts_with("orchestrator/worker sessions"));
+        });
     }
 
     #[test]
     fn open_detail_popup_requests_detail_for_selection() {
-        let (mut app, _rt) = app_with(vec![session(
-            "sid-1",
-            SessionState::Processing,
-            Some("cc-agent-1"),
-        )]);
-        let effects = app.execute(Command::Sessions(SessionsCommand::OpenDetailPopup));
-        assert_eq!(
-            effects,
-            vec![Effect::RequestSessionDetail {
-                session_id: "sid-1".into()
-            }]
-        );
-        assert_eq!(app.view, super::super::View::Popup);
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt) = app_with(vec![session(
+                "sid-1",
+                SessionState::Processing,
+                Some("cc-agent-1"),
+            )]);
+            let effects = app.execute(Command::Sessions(SessionsCommand::OpenDetailPopup));
+            assert_eq!(
+                effects,
+                vec![Effect::RequestSessionDetail {
+                    session_id: "sid-1".into()
+                }]
+            );
+            assert_eq!(app.view, super::super::View::Popup);
 
-        let (mut app, _rt) = app_with(vec![]);
-        let effects = app.execute(Command::Sessions(SessionsCommand::OpenDetailPopup));
-        assert!(effects.is_empty());
+            let (mut app, _rt) = app_with(vec![]);
+            let effects = app.execute(Command::Sessions(SessionsCommand::OpenDetailPopup));
+            assert!(effects.is_empty());
+        });
     }
 
     #[test]
     fn quit_sets_flag() {
-        let (mut app, _rt) = app_with(vec![]);
-        app.execute(Command::Global(GlobalCommand::Quit));
-        assert!(app.should_quit);
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt) = app_with(vec![]);
+            app.execute(Command::Global(GlobalCommand::Quit));
+            assert!(app.should_quit);
+        });
     }
 }

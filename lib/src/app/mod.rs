@@ -8,7 +8,7 @@ use crate::metrics::{MetricsAnalysis, SelectableSession};
 use crate::models::{ProjectGroup, SessionDetail, SessionInfo, SessionState};
 use crate::projects_scan::ProjectsSnapshot;
 use crate::session_count::SessionCounts;
-use crate::tasks::{TaskItem, TaskItemStatus, TaskPriority};
+use crate::orchestrator::{TaskPriority, TaskState, TaskStatus};
 use crate::tmux_pane::TmuxPaneView;
 use crate::usage::UsageInfo;
 use ratatui::text::Line;
@@ -383,7 +383,7 @@ impl App {
         let Some(t) = self.selected_board_task() else {
             return false;
         };
-        let (id, text) = (t.id.clone(), t.text.clone());
+        let (id, text) = (t.task_id.clone(), t.prompt.clone());
         self.tasks.renaming = Some(id);
         self.tasks.input = text;
         self.view = View::TaskInput;
@@ -440,7 +440,7 @@ impl App {
         let Some(t) = self.selected_board_task() else {
             return false;
         };
-        let (id, prefill) = (t.id.clone(), t.tags.join(" "));
+        let (id, prefill) = (t.task_id.clone(), t.tags.join(" "));
         self.tasks.tagging = Some(id);
         self.tasks.input = prefill;
         self.view = View::TaskTags;
@@ -480,17 +480,17 @@ impl App {
     /// at the top). Selection ([`Self::selected_board_task`]) and focus
     /// ([`Self::focus_task`]) resolve against this same ordering, so cursor
     /// row N is always the Nth rendered card.
-    pub fn task_column(&self, status: TaskItemStatus) -> Vec<&TaskItem> {
+    pub fn task_column(&self, status: TaskStatus) -> Vec<&TaskState> {
         let mut tasks = self.tasks.board.column(status);
         tasks.retain(|t| self.tasks.matches_filter(t));
         if matches!(
             status,
-            TaskItemStatus::Planning | TaskItemStatus::InProgress
+            TaskStatus::Planning | TaskStatus::Running
         ) {
             let frozen = |id: &str| self.tasks.in_progress_order.iter().position(|x| x == id);
             // Stable sort: ids missing from the frozen order all key to MAX
             // and keep their relative insertion order at the tail.
-            tasks.sort_by_key(|t| frozen(&t.id).unwrap_or(usize::MAX));
+            tasks.sort_by_key(|t| frozen(&t.task_id).unwrap_or(usize::MAX));
         }
         // Priority is the primary order in every column (P1 at the top). The
         // sort is stable, so equal-priority tasks keep the order established
@@ -512,14 +512,14 @@ impl App {
         let order: Vec<String> = {
             let by_tmux = self.sessions_by_tmux();
             let mut order = Vec::new();
-            for status in [TaskItemStatus::Planning, TaskItemStatus::InProgress] {
+            for status in [TaskStatus::Planning, TaskStatus::Running] {
                 let mut tasks = self.tasks.board.column(status);
                 tasks.sort_by_key(|t| match t.tmux.as_deref().and_then(|n| by_tmux.get(n)) {
                     Some(s) if s.needs_attention() => 0u8,
                     Some(s) if s.state == SessionState::Idle => 1,
                     _ => 2,
                 });
-                order.extend(tasks.iter().map(|t| t.id.clone()));
+                order.extend(tasks.iter().map(|t| t.task_id.clone()));
             }
             order
         };
@@ -531,7 +531,7 @@ impl App {
     /// is hidden, the In Progress column also carries Planning cards (folded
     /// in via [`column_statuses`]) so plan-ready work stays visible. The
     /// merged set keeps the live columns' needs-input float and priority sort.
-    pub fn task_display_column(&self, col: TaskItemStatus) -> Vec<&TaskItem> {
+    pub fn task_display_column(&self, col: TaskStatus) -> Vec<&TaskState> {
         let statuses = column_statuses(col);
         if statuses.len() == 1 {
             return self.task_column(statuses[0]);
@@ -539,20 +539,20 @@ impl App {
         // Merged In Progress (absorbing Planning): both are live columns, so
         // apply the same frozen needs-input float then priority sort as
         // `task_column` does for a single live column.
-        let mut tasks: Vec<&TaskItem> = statuses
+        let mut tasks: Vec<&TaskState> = statuses
             .iter()
             .flat_map(|s| self.tasks.board.column(*s))
             .filter(|t| self.tasks.matches_filter(t))
             .collect();
         let frozen = |id: &str| self.tasks.in_progress_order.iter().position(|x| x == id);
-        tasks.sort_by_key(|t| frozen(&t.id).unwrap_or(usize::MAX));
+        tasks.sort_by_key(|t| frozen(&t.task_id).unwrap_or(usize::MAX));
         tasks.sort_by_key(|t| t.priority);
         tasks
     }
 
     /// The task under the kanban cursor, resolved against the display
     /// ordering of [`Self::task_display_column`].
-    pub fn selected_board_task(&self) -> Option<&TaskItem> {
+    pub fn selected_board_task(&self) -> Option<&TaskState> {
         self.task_display_column(self.tasks.col_status())
             .get(self.tasks.row)
             .copied()
@@ -567,7 +567,7 @@ impl App {
             let row = self
                 .task_display_column(*col)
                 .iter()
-                .position(|t| t.id == id);
+                .position(|t| t.task_id == id);
             if let Some(ri) = row {
                 self.tasks.col = ci;
                 self.tasks.row = ri;
@@ -581,7 +581,7 @@ impl App {
     /// `None` when no task is focused.
     pub fn task_space_action(&mut self) -> Option<String> {
         match self.selected_board_task()?.status {
-            TaskItemStatus::Planning => Some(self.proceed_selected_task()),
+            TaskStatus::Planning => Some(self.proceed_selected_task()),
             _ => self.toggle_task_done(),
         }
     }
@@ -598,8 +598,8 @@ impl App {
         let Some(t) = self.selected_board_task() else {
             return "no task focused".into();
         };
-        let id = t.id.clone();
-        let preview = crate::models::first_line_truncated(&t.text, 32);
+        let id = t.task_id.clone();
+        let preview = crate::models::first_line_truncated(&t.prompt, 32);
         let live_tmux = t
             .tmux
             .clone()
@@ -607,7 +607,7 @@ impl App {
         if let Some(tmux) = live_tmux {
             return match self.runtime.send_prompt(&tmux, PROCEED_PROMPT) {
                 Ok(()) => {
-                    if let Err(e) = self.tasks.board.set_status(&id, TaskItemStatus::InProgress) {
+                    if let Err(e) = self.tasks.board.set_status(&id, TaskStatus::Running) {
                         return format!("proceed sent but task state write failed: {e}");
                     }
                     self.focus_task(&id);
@@ -648,7 +648,7 @@ impl App {
                     let _ = self.runtime.kill_session(&tmux);
                     return format!("proceed cancelled: task binding write failed: {e}");
                 }
-                if let Err(e) = self.tasks.board.set_status(&id, TaskItemStatus::InProgress) {
+                if let Err(e) = self.tasks.board.set_status(&id, TaskStatus::Running) {
                     return format!("agent resumed but task state write failed: {e}");
                 }
                 self.focus_task(&id);
@@ -666,11 +666,11 @@ impl App {
     /// or `None` when no task is focused.
     pub fn toggle_task_done(&mut self) -> Option<String> {
         let t = self.selected_board_task()?;
-        let id = t.id.clone();
-        let preview = crate::models::first_line_truncated(&t.text, 32);
+        let id = t.task_id.clone();
+        let preview = crate::models::first_line_truncated(&t.prompt, 32);
         let tmux = t.tmux.clone();
-        if t.status == TaskItemStatus::Done {
-            if let Err(e) = self.tasks.board.set_status(&id, TaskItemStatus::Todo) {
+        if t.status == TaskStatus::Done {
+            if let Err(e) = self.tasks.board.set_status(&id, TaskStatus::Backlog) {
                 return Some(format!("reopen failed: {e}"));
             }
             self.tasks.clamp_row();
@@ -683,7 +683,7 @@ impl App {
     /// so `f` on the Done card can still resume the transcript. Shared by
     /// Space (toggle) and the manual column move (`L` into Done).
     fn finish_task(&mut self, id: &str, preview: &str, tmux: Option<&str>) -> String {
-        if let Err(e) = self.tasks.board.set_status(id, TaskItemStatus::Done) {
+        if let Err(e) = self.tasks.board.set_status(id, TaskStatus::Done) {
             return format!("finish failed: {e}");
         }
         self.tasks.clamp_row();
@@ -711,35 +711,37 @@ impl App {
     /// when no task is focused or the move runs off the board's edge.
     pub fn move_selected_task(&mut self, dir: i8) -> Option<String> {
         let t = self.selected_board_task()?;
-        let id = t.id.clone();
-        let preview = crate::models::first_line_truncated(&t.text, 32);
+        let id = t.task_id.clone();
+        let preview = crate::models::first_line_truncated(&t.prompt, 32);
         let tmux = t.tmux.clone();
         let to = match (t.status, dir < 0) {
-            (TaskItemStatus::Todo, false) => TaskItemStatus::InProgress,
-            (TaskItemStatus::Planning, false) => TaskItemStatus::InProgress,
-            (TaskItemStatus::InProgress, false) => TaskItemStatus::Done,
-            (TaskItemStatus::Planning, true) => TaskItemStatus::Todo,
-            (TaskItemStatus::InProgress, true) => TaskItemStatus::Todo,
-            (TaskItemStatus::Done, true) => TaskItemStatus::InProgress,
-            (TaskItemStatus::Todo, true) | (TaskItemStatus::Done, false) => return None,
+            (TaskStatus::Backlog, false) => TaskStatus::Running,
+            (TaskStatus::Planning, false) => TaskStatus::Running,
+            (TaskStatus::Running, false) => TaskStatus::Done,
+            (TaskStatus::Planning, true) => TaskStatus::Backlog,
+            (TaskStatus::Running, true) => TaskStatus::Backlog,
+            (TaskStatus::Done, true) => TaskStatus::Running,
+            (TaskStatus::Backlog, true) | (TaskStatus::Done, false) => return None,
+            // Orchestrated-only states never appear on the personal board.
+            (TaskStatus::Review | TaskStatus::Merging, _) => return None,
         };
-        if to == TaskItemStatus::Done {
+        if to == TaskStatus::Done {
             let msg = self.finish_task(&id, &preview, tmux.as_deref());
             self.focus_task(&id);
             return Some(msg);
         }
-        let from_planning = t.status == TaskItemStatus::Planning;
+        let from_planning = t.status == TaskStatus::Planning;
         if let Err(e) = self.tasks.board.set_status(&id, to) {
             return Some(format!("move failed: {e}"));
         }
         self.focus_task(&id);
         self.tasks.clamp_row();
         let label = match to {
-            TaskItemStatus::Todo => "To-Do",
-            TaskItemStatus::InProgress => "In Progress",
+            TaskStatus::Backlog => "To-Do",
+            TaskStatus::Running => "In Progress",
             _ => unreachable!("manual moves only land in To-Do/In Progress here"),
         };
-        Some(if from_planning && to == TaskItemStatus::InProgress {
+        Some(if from_planning && to == TaskStatus::Running {
             format!(
                 "moved: {} → {} — agent not told to proceed (Space does that)",
                 preview, label
@@ -755,8 +757,8 @@ impl App {
     /// line, or `None` when no task is focused.
     pub fn set_selected_task_priority(&mut self, priority: TaskPriority) -> Option<String> {
         let t = self.selected_board_task()?;
-        let id = t.id.clone();
-        let preview = crate::models::first_line_truncated(&t.text, 32);
+        let id = t.task_id.clone();
+        let preview = crate::models::first_line_truncated(&t.prompt, 32);
         if let Err(e) = self.tasks.board.set_priority(&id, priority) {
             return Some(format!("priority update failed: {e}"));
         }
@@ -792,7 +794,10 @@ impl App {
         let mut recents: Vec<(u64, PathBuf)> = Vec::new();
         for t in self.tasks.board.tasks() {
             if let Some(cwd) = t.cwd.as_deref() {
-                recents.push((t.created_at.max(t.done_at.unwrap_or(0)), PathBuf::from(cwd)));
+                recents.push((
+                    t.created_at.max(t.done_at.unwrap_or(0)).max(0) as u64,
+                    PathBuf::from(cwd),
+                ));
             }
         }
         for s in &self.sessions.last_sessions {
@@ -850,10 +855,10 @@ impl App {
         let Some(t) = self.selected_board_task() else {
             return false;
         };
-        if t.status == TaskItemStatus::Done {
+        if t.status == TaskStatus::Done {
             return false;
         }
-        let id = t.id.clone();
+        let id = t.task_id.clone();
         let prev_cwd = t.cwd.clone();
         let places = self.assign_places();
         self.tasks.pending_assign = Some(id);
@@ -878,10 +883,10 @@ impl App {
     /// Returns None when no task is focused or the task is already Done.
     pub fn assign_selected_task_at_home(&mut self) -> Option<String> {
         let t = self.selected_board_task()?;
-        if t.status == TaskItemStatus::Done {
+        if t.status == TaskStatus::Done {
             return None;
         }
-        let id = t.id.clone();
+        let id = t.task_id.clone();
         self.tasks.pending_assign = Some(id);
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         Some(self.assign_task_agent(&home.display().to_string()))
@@ -948,7 +953,7 @@ impl App {
         let Some(task) = self.tasks.board.get(&id) else {
             return "task vanished before assignment".into();
         };
-        let prompt = planning_prompt(&task.text);
+        let prompt = planning_prompt(&task.prompt);
         let agent_id = config::get().default_session_agent_id();
         let supports_initial_prompt = config::get()
             .agent(&agent_id)
@@ -986,7 +991,7 @@ impl App {
         self.runtime.session_exists(tmux)
     }
 
-    pub fn resume_board_task(&mut self, task: &TaskItem) -> Result<String, String> {
+    pub fn resume_board_task(&mut self, task: &TaskState) -> Result<String, String> {
         let sid = task
             .session_id
             .clone()
@@ -1006,7 +1011,7 @@ impl App {
                 false,
             )
             .map_err(|e| format!("resume failed: {e}"))?;
-        if let Err(e) = self.tasks.board.rebind_tmux(&task.id, &tmux) {
+        if let Err(e) = self.tasks.board.rebind_tmux(&task.task_id, &tmux) {
             let _ = self.runtime.kill_session(&tmux);
             return Err(format!("resume rolled back: task write failed: {e}"));
         }
@@ -1017,13 +1022,13 @@ impl App {
     /// running — it still shows on the Sessions tab. The task lands in the
     /// undo slot (`u`) and the on-disk archive. Returns the status line.
     pub fn delete_selected_task(&mut self) -> Option<String> {
-        let id = self.selected_board_task()?.id.clone();
+        let id = self.selected_board_task()?.task_id.clone();
         let removed = match self.tasks.board.remove(&id) {
             Ok(removed) => removed?,
             Err(e) => return Some(format!("delete failed: {e}")),
         };
         self.tasks.clamp_row();
-        let preview = crate::models::first_line_truncated(&removed.text, 32);
+        let preview = crate::models::first_line_truncated(&removed.prompt, 32);
         let tmux = removed.tmux.clone();
         self.tasks.undo = Some(vec![removed]);
         Some(match tmux {
@@ -1065,7 +1070,7 @@ impl App {
         let mut first: Option<String> = None;
         let mut restored = 0usize;
         for item in batch {
-            let id = item.id.clone();
+            let id = item.task_id.clone();
             match self.tasks.board.restore(item) {
                 Ok(true) => {
                     restored += 1;
@@ -1141,7 +1146,7 @@ impl App {
         // re-anchored to the task it was on (by id) rather than left at a
         // stale (col, row) pointing at whatever card landed there.
         if tab == Tab::Tasks && self.current_tab != Tab::Tasks {
-            let keep = self.selected_board_task().map(|t| t.id.clone());
+            let keep = self.selected_board_task().map(|t| t.task_id.clone());
             self.tasks.reload();
             self.refresh_in_progress_order();
             if let Some(id) = keep {
@@ -2705,7 +2710,7 @@ mod tests {
             assert!(message.contains("agent told to implement"));
             assert_eq!(
                 app.tasks.board.get(&id).unwrap().status,
-                TaskItemStatus::InProgress
+                TaskStatus::Running
             );
             assert_eq!(
                 runtime.prompts.lock().unwrap().as_slice(),
@@ -3349,7 +3354,7 @@ mod tests {
         );
     }
 
-    // `$HOME`-redirected (TaskBoard/Bookmarks persist on mutation), so
+    // `$HOME`-redirected (PersonalBoard/Bookmarks persist on mutation), so
     // unix-only like the other with_temp_home suites.
     #[cfg(unix)]
     mod assign_picker {
@@ -3543,7 +3548,7 @@ mod tests {
                 // No task focused: refuse rather than spawn.
                 assert!(app.assign_selected_task_at_home().is_none());
                 let id = app.tasks.board.add("t").unwrap().unwrap();
-                app.tasks.board.set_status(&id, TaskItemStatus::Done).unwrap();
+                app.tasks.board.set_status(&id, TaskStatus::Done).unwrap();
                 app.focus_task(&id);
                 assert!(app.assign_selected_task_at_home().is_none());
                 assert!(app.tasks.pending_assign.is_none());
@@ -3573,7 +3578,7 @@ mod tests {
 
                 app.tasks.input = "new text".into();
                 assert!(app.submit_task_input());
-                assert_eq!(app.tasks.board.get(&id).unwrap().text, "new text");
+                assert_eq!(app.tasks.board.get(&id).unwrap().prompt, "new text");
                 assert_eq!(app.view, View::Grid);
                 assert!(app.tasks.renaming.is_none());
 
@@ -3581,7 +3586,7 @@ mod tests {
                 assert!(app.enter_task_rename());
                 app.tasks.input = "   ".into();
                 assert!(!app.submit_task_input());
-                assert_eq!(app.tasks.board.get(&id).unwrap().text, "new text");
+                assert_eq!(app.tasks.board.get(&id).unwrap().prompt, "new text");
             });
         }
 
@@ -3596,8 +3601,8 @@ mod tests {
                 app.tasks.input = "sharper wording".into();
                 assert!(app.submit_task_input());
                 let t = app.tasks.board.get(&id).unwrap();
-                assert_eq!(t.text, "sharper wording");
-                assert_eq!(t.status, TaskItemStatus::Planning);
+                assert_eq!(t.prompt, "sharper wording");
+                assert_eq!(t.status, TaskStatus::Planning);
                 assert_eq!(t.tmux.as_deref(), Some("mux-1"));
             });
         }
@@ -3611,9 +3616,9 @@ mod tests {
         // Assignment lands cards in Planning, so the float tests inspect that
         // column; Planning sorts exactly like In Progress.
         fn column_order(app: &App) -> Vec<String> {
-            app.task_column(TaskItemStatus::Planning)
+            app.task_column(TaskStatus::Planning)
                 .iter()
-                .map(|t| t.id.clone())
+                .map(|t| t.task_id.clone())
                 .collect()
         }
 
@@ -3638,20 +3643,20 @@ mod tests {
                 // agent, keeping their relative insertion order. Assignment
                 // lands the cards in Planning, which sorts like In Progress.
                 let order: Vec<&str> = app
-                    .task_column(TaskItemStatus::Planning)
+                    .task_column(TaskStatus::Planning)
                     .iter()
-                    .map(|t| t.id.as_str())
+                    .map(|t| t.task_id.as_str())
                     .collect();
                 assert_eq!(order, vec![b.as_str(), c.as_str(), a.as_str()]);
 
                 // The same ordering applies once the cards are promoted.
                 for id in [&a, &b, &c] {
-                    app.tasks.board.set_status(id, TaskItemStatus::InProgress).unwrap();
+                    app.tasks.board.set_status(id, TaskStatus::Running).unwrap();
                 }
                 let order: Vec<&str> = app
-                    .task_column(TaskItemStatus::InProgress)
+                    .task_column(TaskStatus::Running)
                     .iter()
-                    .map(|t| t.id.as_str())
+                    .map(|t| t.task_id.as_str())
                     .collect();
                 assert_eq!(order, vec![b.as_str(), c.as_str(), a.as_str()]);
 
@@ -3661,11 +3666,11 @@ mod tests {
                 // Planning column is configured in.
                 let ip_col = visible_task_columns()
                     .iter()
-                    .position(|s| *s == TaskItemStatus::InProgress)
+                    .position(|s| *s == TaskStatus::Running)
                     .unwrap();
                 app.focus_task(&a);
                 assert_eq!((app.tasks.col, app.tasks.row), (ip_col, 2));
-                assert_eq!(app.selected_board_task().unwrap().id, a);
+                assert_eq!(app.selected_board_task().unwrap().task_id, a);
             });
         }
 
@@ -3683,7 +3688,7 @@ mod tests {
                 assert!(msg.contains("press s to re-assign"), "msg: {msg}");
                 assert_eq!(
                     app.tasks.board.get(&id).unwrap().status,
-                    TaskItemStatus::Planning
+                    TaskStatus::Planning
                 );
             });
         }
@@ -3713,7 +3718,7 @@ mod tests {
                     fake_session("mux-b", SessionState::Idle),
                 ];
                 assert_eq!(column_order(&app), vec![b.clone(), a.clone()]);
-                assert_eq!(app.selected_board_task().unwrap().id, a);
+                assert_eq!(app.selected_board_task().unwrap().task_id, a);
 
                 // A task assigned mid-tab joins below the frozen order
                 // instead of re-shuffling it.
@@ -3744,7 +3749,7 @@ mod tests {
                 app.set_tab(Tab::Tasks);
                 assert_eq!(column_order(&app), vec![b.clone(), a]);
                 assert_eq!((app.tasks.col, app.tasks.row), (1, 0));
-                assert_eq!(app.selected_board_task().unwrap().id, b);
+                assert_eq!(app.selected_board_task().unwrap().task_id, b);
             });
         }
 
@@ -3762,9 +3767,9 @@ mod tests {
 
                 // P1, then P2, then the untouched P3s in their original order.
                 let order: Vec<String> = app
-                    .task_column(TaskItemStatus::Todo)
+                    .task_column(TaskStatus::Backlog)
                     .iter()
-                    .map(|t| t.id.clone())
+                    .map(|t| t.task_id.clone())
                     .collect();
                 assert_eq!(order, vec![c, d, a, b]);
             });
@@ -3783,7 +3788,7 @@ mod tests {
                 // Bumping c to P1 floats it to the top; the cursor rides along.
                 app.set_selected_task_priority(TaskPriority::P1);
                 assert_eq!((app.tasks.col, app.tasks.row), (0, 0));
-                assert_eq!(app.selected_board_task().unwrap().id, c);
+                assert_eq!(app.selected_board_task().unwrap().task_id, c);
             });
         }
 
@@ -3822,7 +3827,7 @@ mod tests {
                 // and the status stays the plain "done" line.
                 assert_eq!(app.toggle_task_done().unwrap(), "done: ship it");
                 let t = app.tasks.board.get(&id).unwrap();
-                assert_eq!(t.status, TaskItemStatus::Done);
+                assert_eq!(t.status, TaskStatus::Done);
                 // The binding survives completion so `f` can still resume.
                 assert_eq!(t.tmux.as_deref(), Some("mux-dead"));
             });
@@ -3869,15 +3874,15 @@ mod tests {
                 assert!(msg.contains("In Progress"), "msg: {msg}");
                 assert_eq!(
                     app.tasks.board.get(&id).unwrap().status,
-                    TaskItemStatus::InProgress
+                    TaskStatus::Running
                 );
                 // The cursor rides with the card.
-                assert_eq!(app.selected_board_task().unwrap().id, id);
+                assert_eq!(app.selected_board_task().unwrap().task_id, id);
                 // Right again: → Done, stamping done_at exactly like Space.
                 let msg = app.move_selected_task(1).unwrap();
                 assert!(msg.starts_with("done:"), "msg: {msg}");
                 let t = app.tasks.board.get(&id).unwrap();
-                assert_eq!(t.status, TaskItemStatus::Done);
+                assert_eq!(t.status, TaskStatus::Done);
                 assert!(t.done_at.is_some());
                 // Off the right edge: refused.
                 app.focus_task(&id);
@@ -3885,13 +3890,13 @@ mod tests {
                 // Left: Done → In Progress reopens (done_at cleared).
                 app.move_selected_task(-1).unwrap();
                 let t = app.tasks.board.get(&id).unwrap();
-                assert_eq!(t.status, TaskItemStatus::InProgress);
+                assert_eq!(t.status, TaskStatus::Running);
                 assert!(t.done_at.is_none());
                 // Left again: → To-Do; then off the left edge.
                 app.move_selected_task(-1).unwrap();
                 assert_eq!(
                     app.tasks.board.get(&id).unwrap().status,
-                    TaskItemStatus::Todo
+                    TaskStatus::Backlog
                 );
                 assert!(app.move_selected_task(-1).is_none());
             });
@@ -3909,15 +3914,15 @@ mod tests {
                 let msg = app.move_selected_task(1).unwrap();
                 assert!(msg.contains("not told to proceed"), "msg: {msg}");
                 let t = app.tasks.board.get(&id).unwrap();
-                assert_eq!(t.status, TaskItemStatus::InProgress);
+                assert_eq!(t.status, TaskStatus::Running);
                 assert_eq!(t.tmux.as_deref(), Some("mux-x"));
                 // A Planning card can also be parked back in To-Do.
-                app.tasks.board.set_status(&id, TaskItemStatus::Planning).unwrap();
+                app.tasks.board.set_status(&id, TaskStatus::Planning).unwrap();
                 app.focus_task(&id);
                 app.move_selected_task(-1).unwrap();
                 assert_eq!(
                     app.tasks.board.get(&id).unwrap().status,
-                    TaskItemStatus::Todo
+                    TaskStatus::Backlog
                 );
             });
         }
@@ -3947,14 +3952,14 @@ mod tests {
                 type_filter(&mut app, "parser");
                 assert_eq!(app.view, View::TaskFilter);
                 let col: Vec<&str> = app
-                    .task_column(TaskItemStatus::Todo)
+                    .task_column(TaskStatus::Backlog)
                     .iter()
-                    .map(|t| t.id.as_str())
+                    .map(|t| t.task_id.as_str())
                     .collect();
                 assert_eq!(col, vec![a.as_str()]);
                 // The cursor bound counts exactly what renders.
                 assert_eq!(app.tasks.column_len(0), 1);
-                assert_eq!(app.selected_board_task().unwrap().id, a);
+                assert_eq!(app.selected_board_task().unwrap().task_id, a);
 
                 // Tags match as `#tag`, so a `#` query reaches only tagged
                 // cards — "docs" also appears in b's text, but "#docs" only
@@ -3962,9 +3967,9 @@ mod tests {
                 app.clear_task_filter();
                 type_filter(&mut app, "#docs");
                 let col: Vec<&str> = app
-                    .task_column(TaskItemStatus::Todo)
+                    .task_column(TaskStatus::Backlog)
                     .iter()
-                    .map(|t| t.id.as_str())
+                    .map(|t| t.task_id.as_str())
                     .collect();
                 assert_eq!(col, vec![b.as_str()]);
 
@@ -4011,7 +4016,7 @@ mod tests {
                 assert!(msg.contains("u undoes"), "msg: {msg}");
                 assert!(app.tasks.board.get(&id).is_none());
                 assert_eq!(app.undo_task_delete().unwrap(), "restored 1 task");
-                assert_eq!(app.tasks.board.get(&id).unwrap().text, "precious");
+                assert_eq!(app.tasks.board.get(&id).unwrap().prompt, "precious");
                 // The slot is one batch deep: a second undo finds nothing.
                 assert!(app.undo_task_delete().is_none());
             });
@@ -4023,19 +4028,19 @@ mod tests {
                 let mut app = App::new();
                 let a = app.tasks.board.add("a").unwrap().unwrap();
                 let b = app.tasks.board.add("b").unwrap().unwrap();
-                app.tasks.board.set_status(&a, TaskItemStatus::Done).unwrap();
-                app.tasks.board.set_status(&b, TaskItemStatus::Done).unwrap();
+                app.tasks.board.set_status(&a, TaskStatus::Done).unwrap();
+                app.tasks.board.set_status(&b, TaskStatus::Done).unwrap();
                 app.clear_done_tasks();
                 assert!(app.tasks.board.tasks().is_empty());
                 assert_eq!(app.undo_task_delete().unwrap(), "restored 2 tasks");
                 // They come back Done, not To-Do — undo is not a reopen.
                 assert_eq!(
                     app.tasks.board.get(&a).unwrap().status,
-                    TaskItemStatus::Done
+                    TaskStatus::Done
                 );
                 assert_eq!(
                     app.tasks.board.get(&b).unwrap().status,
-                    TaskItemStatus::Done
+                    TaskStatus::Done
                 );
             });
         }
@@ -4054,7 +4059,7 @@ mod tests {
                 app.tasks.input = "fix the parser #bug #api !1".into();
                 assert!(app.submit_task_input());
                 let t = app.selected_board_task().unwrap();
-                assert_eq!(t.text, "fix the parser");
+                assert_eq!(t.prompt, "fix the parser");
                 assert_eq!(t.tags, vec!["bug", "api"]);
                 assert_eq!(t.priority, TaskPriority::P1);
             });
@@ -4077,7 +4082,7 @@ mod tests {
                 app.tasks.input = "now with #hash !1".into();
                 assert!(app.submit_task_input());
                 let t = app.tasks.board.get(&id).unwrap();
-                assert_eq!(t.text, "now with #hash !1");
+                assert_eq!(t.prompt, "now with #hash !1");
                 assert!(t.tags.is_empty());
             });
         }

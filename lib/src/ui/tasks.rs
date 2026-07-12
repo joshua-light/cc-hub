@@ -8,7 +8,7 @@
 
 use crate::app::{visible_task_columns, App, View};
 use crate::models::{self, SessionInfo, SessionState};
-use crate::tasks::{TaskItem, TaskItemStatus, TaskPriority};
+use crate::orchestrator::{TaskPriority, TaskState, TaskStatus};
 use crate::ui::now_ms;
 use crate::ui::palette::{
     ACCENT_BLUE, BACKLOG_BLUE, DIM_TEXT, DOT_IDLE, LABEL_GRAY, META_GRAY, PURPLE, TAG_SLATE,
@@ -109,14 +109,16 @@ fn render_filter_bar(frame: &mut Frame, area: Rect, app: &App, editing: bool) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn column_meta(status: TaskItemStatus) -> (&'static str, &'static str, Color) {
+fn column_meta(status: TaskStatus) -> (&'static str, &'static str, Color) {
     // Planning borrows the Projects kanban's planning icon/accent so the
     // same phase reads the same across both boards.
     match status {
-        TaskItemStatus::Todo => ("To-Do", "󰄱", BACKLOG_BLUE),
-        TaskItemStatus::Planning => ("Planning", "󰟶", PURPLE),
-        TaskItemStatus::InProgress => ("In Progress", "󰒓", Color::LightYellow),
-        TaskItemStatus::Done => ("Done", "󰸞", Color::LightGreen),
+        TaskStatus::Backlog => ("To-Do", "󰄱", BACKLOG_BLUE),
+        TaskStatus::Planning => ("Planning", "󰟶", PURPLE),
+        TaskStatus::Running => ("In Progress", "󰒓", Color::LightYellow),
+        TaskStatus::Done => ("Done", "󰸞", Color::LightGreen),
+        // Orchestrated-only states never render as board columns.
+        TaskStatus::Review | TaskStatus::Merging => ("", "", Color::DarkGray),
     }
 }
 
@@ -125,7 +127,7 @@ fn render_task_column(
     area: Rect,
     app: &App,
     col_idx: usize,
-    status: TaskItemStatus,
+    status: TaskStatus,
     sessions_by_tmux: &HashMap<&str, &SessionInfo>,
     now_secs: u64,
 ) {
@@ -139,7 +141,7 @@ fn render_task_column(
     let col_focused = app.tasks.col == col_idx;
     // Live columns carry a meta row under two text rows; Done cards are
     // compact (the column already says everything but the when).
-    let card_height: u16 = if status == TaskItemStatus::Done { 4 } else { 5 };
+    let card_height: u16 = if status == TaskStatus::Done { 4 } else { 5 };
     let gap: u16 = 0;
     let inner = Block::default().borders(Borders::ALL).inner(area);
     let max_cards =
@@ -197,10 +199,12 @@ fn render_task_column(
 
     if tasks.is_empty() {
         let empty_hint = match status {
-            TaskItemStatus::Todo => "No tasks — press a to add one",
-            TaskItemStatus::Planning => "Nothing planning — s hands a task to an agent",
-            TaskItemStatus::InProgress => "Nothing running — Space approves a plan",
-            TaskItemStatus::Done => "Nothing done yet",
+            TaskStatus::Backlog => "No tasks — press a to add one",
+            TaskStatus::Planning => "Nothing planning — s hands a task to an agent",
+            TaskStatus::Running => "Nothing running — Space approves a plan",
+            TaskStatus::Done => "Nothing done yet",
+            // Orchestrated-only states never render as board columns.
+            TaskStatus::Review | TaskStatus::Merging => "",
         };
         let hint = Paragraph::new(Line::from(Span::styled(
             empty_hint,
@@ -242,9 +246,9 @@ fn render_task_column(
 fn render_task_card(
     frame: &mut Frame,
     area: Rect,
-    t: &TaskItem,
+    t: &TaskState,
     selected: bool,
-    status: TaskItemStatus,
+    status: TaskStatus,
     accent: Color,
     sessions_by_tmux: &HashMap<&str, &SessionInfo>,
     now_secs: u64,
@@ -291,7 +295,7 @@ fn render_task_card(
         return;
     }
 
-    let done = status == TaskItemStatus::Done;
+    let done = status == TaskStatus::Done;
     let text_style = if done {
         Style::default().fg(DIM_TEXT).add_modifier(Modifier::ITALIC)
     } else if selected {
@@ -303,7 +307,7 @@ fn render_task_card(
     };
 
     let text_rows = (inner.height as usize).saturating_sub(1).max(1);
-    let mut lines: Vec<Line> = wrap_text(&t.text, inner.width as usize)
+    let mut lines: Vec<Line> = wrap_text(&t.prompt, inner.width as usize)
         .into_iter()
         .take(text_rows)
         .map(|seg| Line::from(Span::styled(seg, text_style)))
@@ -322,16 +326,19 @@ fn render_task_card(
 /// is, and — once an agent is bound — who runs it, where, and what state the
 /// session is in right now.
 fn meta_line(
-    t: &TaskItem,
-    status: TaskItemStatus,
+    t: &TaskState,
+    status: TaskStatus,
     sessions_by_tmux: &HashMap<&str, &SessionInfo>,
     now_secs: u64,
 ) -> Line<'static> {
     let age_style = Style::default().fg(META_GRAY);
-    if status == TaskItemStatus::Done {
+    if status == TaskStatus::Done {
         let when = t.done_at.unwrap_or(t.created_at);
         let mut spans = vec![Span::styled(
-            format!("✓ {}", models::relative_age(now_secs.saturating_sub(when))),
+            format!(
+                "✓ {}",
+                models::relative_age(now_secs.saturating_sub(when.max(0) as u64))
+            ),
             age_style,
         )];
         // A done task that ran through an agent keeps its transcript — `f`
@@ -370,14 +377,14 @@ fn meta_line(
                 // the card's own status so it still reads "plan ready" when a
                 // Planning card is folded into a hidden-Planning In Progress
                 // column.
-                SessionState::Idle if t.status == TaskItemStatus::Planning => {
+                SessionState::Idle if t.status == TaskStatus::Planning => {
                     ("●", "plan ready", Color::LightGreen)
                 }
                 // The implementation counterpart of "plan ready": an
                 // approved agent that went idle has finished (or stalled) —
                 // either way the work waits for the user's review. LightCyan
                 // matches the Projects board's Review accent.
-                SessionState::Idle if t.status == TaskItemStatus::InProgress => {
+                SessionState::Idle if t.status == TaskStatus::Running => {
                     ("●", "review ready", Color::LightCyan)
                 }
                 SessionState::Idle => ("●", "idle", Color::LightGreen),
@@ -399,7 +406,7 @@ fn meta_line(
         spans.push(Span::styled("  ", age_style));
     }
     spans.push(Span::styled(
-        models::relative_age(now_secs.saturating_sub(t.created_at)),
+        models::relative_age(now_secs.saturating_sub(t.created_at.max(0) as u64)),
         age_style,
     ));
     Line::from(spans)
@@ -496,25 +503,17 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tasks::TaskItemStatus;
+    use crate::orchestrator::TaskStatus;
     use crate::ui::common::buffer_to_string;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    fn card(priority: TaskPriority) -> TaskItem {
-        TaskItem {
-            id: "tk-1".into(),
-            text: "fix the parser".into(),
-            status: TaskItemStatus::Todo,
-            priority,
-            tags: Vec::new(),
-            created_at: 1,
-            done_at: None,
-            cwd: None,
-            agent_id: None,
-            tmux: None,
-            session_id: None,
-        }
+    fn card(priority: TaskPriority) -> TaskState {
+        let mut t = TaskState::new_personal("fix the parser".into());
+        t.task_id = "tk-1".into();
+        t.priority = priority;
+        t.created_at = 1;
+        t
     }
 
     /// Render a To-Do card and return its painted buffer.
@@ -523,7 +522,7 @@ mod tests {
     }
 
     /// Render an arbitrary card (wide enough for badges) and return its buffer.
-    fn render_card(t: &TaskItem) -> ratatui::buffer::Buffer {
+    fn render_card(t: &TaskState) -> ratatui::buffer::Buffer {
         let sessions = HashMap::new();
         let backend = TestBackend::new(28, 5);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -534,7 +533,7 @@ mod tests {
                     f.area(),
                     t,
                     false,
-                    TaskItemStatus::Todo,
+                    TaskStatus::Backlog,
                     BACKLOG_BLUE,
                     &sessions,
                     1_000,
@@ -619,11 +618,11 @@ mod tests {
         let mut t = card(TaskPriority::P3);
         t.tmux = Some("mux-1".into());
 
-        t.status = TaskItemStatus::Planning;
+        t.status = TaskStatus::Planning;
         let line = meta_line(&t, t.status, &sessions, 1_000).to_string();
         assert!(line.contains("plan ready"), "line: {line}");
 
-        t.status = TaskItemStatus::InProgress;
+        t.status = TaskStatus::Running;
         let line = meta_line(&t, t.status, &sessions, 1_000).to_string();
         assert!(line.contains("review ready"), "line: {line}");
     }

@@ -711,8 +711,27 @@ async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     image_picker: cc_hub_lib::ratatui_image::picker::Picker,
 ) -> io::Result<()> {
+    // Migrate a pre-unification ~/.cc-hub/tasks.json into the per-task store
+    // BEFORE the board's first load. Deliberately here, not in App::new():
+    // this is the one destructive startup step, and App::new() also runs in
+    // tests and hot-reload paths that must never touch the real home.
+    let migration_error = match cc_hub_lib::tasks::migrate_legacy_board() {
+        Ok(Some(n)) => {
+            log::info!("task board: migrated {} task(s) from tasks.json", n);
+            None
+        }
+        Ok(None) => None,
+        Err(e) => {
+            log::error!("task board migration failed: {}", e);
+            Some(format!("task board migration failed: {e}"))
+        }
+    };
+
     let mut app = App::new();
     app.image_picker = Some(image_picker);
+    if let Some(msg) = migration_error {
+        app.tasks.persistence_error = Some(msg);
+    }
 
     let inflight_titles: Arc<Mutex<HashMap<String, Instant>>> =
         Arc::new(Mutex::new(HashMap::new()));

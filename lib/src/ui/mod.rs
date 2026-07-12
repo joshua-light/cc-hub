@@ -303,7 +303,7 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             // Space is status-aware on the Tasks board: it approves a
             // focused Planning card's plan, and toggles Done elsewhere.
             (View::Grid, Tab::Tasks) => Some(match app.selected_board_task().map(|t| t.status) {
-                Some(crate::tasks::TaskItemStatus::Planning) => "proceed ",
+                Some(crate::orchestrator::TaskStatus::Planning) => "proceed ",
                 _ => "done ",
             }),
             (View::Grid, Tab::Projects) => Some("approve "),

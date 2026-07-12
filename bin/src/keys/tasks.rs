@@ -59,7 +59,7 @@ pub(super) fn handle(
             }
         }
         (View::Grid, KeyCode::Char(c @ ('1' | '2' | '3' | '4'))) if on_tasks => {
-            use cc_hub_lib::tasks::TaskPriority;
+            use cc_hub_lib::orchestrator::TaskPriority;
             let priority = match c {
                 '1' => TaskPriority::P1,
                 '2' => TaskPriority::P2,

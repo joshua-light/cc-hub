@@ -4,23 +4,24 @@
 
 use crate::config;
 use crate::fuzzy::fuzzy_match;
-use crate::tasks::{TaskBoard, TaskItem, TaskItemStatus};
+use crate::orchestrator::{TaskState, TaskStatus};
+use crate::tasks::PersonalBoard;
 
 /// Full board column order. Planning is optional at render time (see
 /// [`visible_task_columns`]); this stays the canonical set the board logic
 /// and on-disk statuses are defined against.
-pub const TASK_COLUMNS: [TaskItemStatus; 4] = [
-    TaskItemStatus::Todo,
-    TaskItemStatus::Planning,
-    TaskItemStatus::InProgress,
-    TaskItemStatus::Done,
+pub const TASK_COLUMNS: [TaskStatus; 4] = [
+    TaskStatus::Backlog,
+    TaskStatus::Planning,
+    TaskStatus::Running,
+    TaskStatus::Done,
 ];
 
 /// Columns shown on the Tasks board, in cursor (`col`) order. The Planning
 /// column is optional (`ui.show_planning_column`); when off it's dropped here
 /// and its cards fold into In Progress (see [`column_statuses`]), so the
 /// status stays reachable — only the dedicated column disappears.
-pub fn visible_task_columns() -> Vec<TaskItemStatus> {
+pub fn visible_task_columns() -> Vec<TaskStatus> {
     visible_columns(config::get().ui.show_planning_column)
 }
 
@@ -28,30 +29,30 @@ pub fn visible_task_columns() -> Vec<TaskItemStatus> {
 /// except In Progress absorbs Planning when the Planning column is hidden so
 /// plan-ready cards still appear (and Space still approves them — the action
 /// keys off the card's own status).
-pub fn column_statuses(col: TaskItemStatus) -> Vec<TaskItemStatus> {
+pub fn column_statuses(col: TaskStatus) -> Vec<TaskStatus> {
     statuses_for(col, config::get().ui.show_planning_column)
 }
 
 /// Pure core of [`visible_task_columns`], split out so the column logic is
 /// testable without the global config singleton.
-fn visible_columns(show_planning: bool) -> Vec<TaskItemStatus> {
+fn visible_columns(show_planning: bool) -> Vec<TaskStatus> {
     TASK_COLUMNS
         .into_iter()
-        .filter(|s| show_planning || *s != TaskItemStatus::Planning)
+        .filter(|s| show_planning || *s != TaskStatus::Planning)
         .collect()
 }
 
 /// Pure core of [`column_statuses`].
-fn statuses_for(col: TaskItemStatus, show_planning: bool) -> Vec<TaskItemStatus> {
-    if col == TaskItemStatus::InProgress && !show_planning {
-        vec![TaskItemStatus::Planning, TaskItemStatus::InProgress]
+fn statuses_for(col: TaskStatus, show_planning: bool) -> Vec<TaskStatus> {
+    if col == TaskStatus::Running && !show_planning {
+        vec![TaskStatus::Planning, TaskStatus::Running]
     } else {
         vec![col]
     }
 }
 
 pub struct TasksView {
-    pub board: TaskBoard,
+    pub board: PersonalBoard,
     /// Most recent repository failure, consumed by `App` and shown in the
     /// status bar rather than allowing a failed write/load to look successful.
     pub persistence_error: Option<String>,
@@ -91,15 +92,19 @@ pub struct TasksView {
     /// Last `x`/`c` removal, one batch deep, for `u` to restore. Held in
     /// memory only — restarts forget it, but the on-disk archive
     /// (`tasks-archive.json`) still has every removed task.
-    pub undo: Option<Vec<TaskItem>>,
+    pub undo: Option<Vec<TaskState>>,
 }
 
 impl TasksView {
     pub(crate) fn new() -> Self {
-        let (board, persistence_error) = match TaskBoard::load_result() {
+        // NOTE: no migration here. `App::new()` runs in dozens of tests (and
+        // hot-reload paths); the destructive tasks.json migration is invoked
+        // exactly once, explicitly, from the binary entry point — see
+        // `run()` in bin/src/main.rs.
+        let (board, persistence_error) = match PersonalBoard::load_result() {
             Ok(board) => (board, None),
             Err(e) => (
-                TaskBoard::default(),
+                PersonalBoard::default(),
                 Some(format!("task board load failed: {e}")),
             ),
         };
@@ -122,11 +127,11 @@ impl TasksView {
     /// everything. The query fuzzy-matches the card text, or any tag as
     /// `#tag` — so a `#bug` query narrows to tagged cards without also
     /// matching arbitrary text.
-    pub fn matches_filter(&self, t: &TaskItem) -> bool {
+    pub fn matches_filter(&self, t: &TaskState) -> bool {
         if self.filter.is_empty() {
             return true;
         }
-        fuzzy_match(&self.filter, &t.text).is_some()
+        fuzzy_match(&self.filter, &t.prompt).is_some()
             || t.tags
                 .iter()
                 .any(|tag| fuzzy_match(&self.filter, &format!("#{}", tag)).is_some())
@@ -135,7 +140,7 @@ impl TasksView {
     /// Reload the board from disk (picks up hand edits / other instances),
     /// keeping the cursor in range if the columns shrank.
     pub fn reload(&mut self) {
-        match TaskBoard::load_result() {
+        match PersonalBoard::load_result() {
             Ok(board) => {
                 self.board = board;
                 self.persistence_error = None;
@@ -153,7 +158,7 @@ impl TasksView {
         self.persistence_error.take()
     }
 
-    pub fn col_status(&self) -> TaskItemStatus {
+    pub fn col_status(&self) -> TaskStatus {
         let cols = visible_task_columns();
         cols[self.col.min(cols.len() - 1)]
     }
@@ -221,10 +226,10 @@ mod tests {
         assert_eq!(
             visible_columns(true),
             vec![
-                TaskItemStatus::Todo,
-                TaskItemStatus::Planning,
-                TaskItemStatus::InProgress,
-                TaskItemStatus::Done,
+                TaskStatus::Backlog,
+                TaskStatus::Planning,
+                TaskStatus::Running,
+                TaskStatus::Done,
             ]
         );
         // Each visible column maps to exactly its own status.
@@ -237,25 +242,21 @@ mod tests {
     fn planning_hidden_drops_column_and_folds_into_in_progress() {
         assert_eq!(
             visible_columns(false),
-            vec![
-                TaskItemStatus::Todo,
-                TaskItemStatus::InProgress,
-                TaskItemStatus::Done,
-            ]
+            vec![TaskStatus::Backlog, TaskStatus::Running, TaskStatus::Done,]
         );
         // In Progress now also renders Planning cards; the other columns are
         // unchanged.
         assert_eq!(
-            statuses_for(TaskItemStatus::InProgress, false),
-            vec![TaskItemStatus::Planning, TaskItemStatus::InProgress]
+            statuses_for(TaskStatus::Running, false),
+            vec![TaskStatus::Planning, TaskStatus::Running]
         );
         assert_eq!(
-            statuses_for(TaskItemStatus::Todo, false),
-            vec![TaskItemStatus::Todo]
+            statuses_for(TaskStatus::Backlog, false),
+            vec![TaskStatus::Backlog]
         );
         assert_eq!(
-            statuses_for(TaskItemStatus::Done, false),
-            vec![TaskItemStatus::Done]
+            statuses_for(TaskStatus::Done, false),
+            vec![TaskStatus::Done]
         );
     }
 }

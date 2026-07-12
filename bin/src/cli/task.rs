@@ -199,7 +199,7 @@ fn parse_status_flag(raw: Option<&str>) -> Result<Option<TaskStatus>, CliError> 
         None => Ok(None),
         Some(s) => s.parse::<TaskStatus>().map(Some).map_err(|_| {
             CliError::Usage(format!(
-                "--status must be backlog|running|review|merging|done (got {})",
+                "--status must be backlog|planning|running|review|merging|done (got {})",
                 s
             ))
         }),
@@ -228,7 +228,9 @@ fn task_list(args: &[String]) -> Result<(), CliError> {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let task_id = name.to_string_lossy().into_owned();
-                if !task_id.starts_with("t-") {
+                // `t-` = project-born, `tk-` = promoted from the
+                // personal board; both are valid task dirs here.
+                if !task_id.starts_with("t-") && !task_id.starts_with("tk-") {
                     continue;
                 }
                 match orchestrator::read_task_state(&project_id, &task_id) {
