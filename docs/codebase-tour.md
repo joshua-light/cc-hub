@@ -37,9 +37,11 @@ the TUI. `bin/src/main.rs` calls `hot::render(...)` which routes to
    tasks for:
    - `usage::fetch_usage` on `[scan].usage_refresh_interval_secs`
    - `triage::tick` on `[backlog].interval_secs` (gated by config)
-   - `watcher::spawn_fs_watcher` (notify-debouncer on `~/.claude`,
-     `~/.pi`, `~/.cc-hub/pi-heartbeats`) plus an interval fallback that
-     fires `scanner::scan_sessions` + `projects_scan::scan` per tick
+   - `watcher::spawn_fs_watcher` (notify-debouncer on agent and project state),
+     which classifies invalidations into independent Sessions and Projects
+     workers. Sessions use cheap process-liveness fallback ticks plus a slower
+     full recovery scan; Projects scan only on project changes or their own
+     recovery interval
    - on-demand `metrics::analyze_with_progress` when the user opens the
      Metrics tab
    - per-session/per-task `title::generate_title_blocking` workers, gated
@@ -48,7 +50,8 @@ the TUI. `bin/src/main.rs` calls `hot::render(...)` which routes to
    reap exited tmux panes, toggle mouse capture if the embedded pane is
    visible, draw via `hot::render`, then `event::poll(50ms)` (16 ms when a
    tmux pane is foregrounded). Keys are matched against `(View, KeyCode)`
-   tuples — most of the file is this match.
+   tuples. Dominant feature handlers such as Tasks live under `bin/src/keys/`
+   instead of adding workflow logic to the root dispatcher.
 4. **State updates**. Channel messages (`ScanMsg::SessionList`,
    `Detail`, `Projects`, `Usage`, `Metrics`, `BacklogTriage`, …) are
    drained and applied to `App` via methods like `update_sessions`,
@@ -76,6 +79,12 @@ Sessions tab shows raw agent processes; the Projects tab is the
 higher-level kanban over tasks.
 A session can be cross-referenced as an "orchestrator" or "worker" by
 matching its tmux name against `ProjectsSnapshot::roles_by_tmux`.
+
+The personal **Tasks** board is a third, intentionally smaller state source:
+`TaskBoard` in `lib/src/tasks.rs` owns `~/.cc-hub/tasks.json`. Mutations are
+revision-checked transactions under `tasks.lock`; stale writers and malformed
+files are surfaced to the Tasks status bar instead of silently overwriting or
+resetting state.
 
 ### Sessions layer
 
@@ -146,6 +155,9 @@ matching its tmux name against `ProjectsSnapshot::roles_by_tmux`.
 - **`agent.rs`** — `AgentKind` (`Claude | Pi`) and `AgentConfig` (resolved
   from `[agents.*]` in config). Determines whether `--resume`, initial
   prompts, and the Pi heartbeat bridge apply.
+- **`agent_runtime.rs`** — application-facing process-control interface.
+  Sessions/Tasks controllers depend on `AgentRuntime`; production delegates to
+  `spawn.rs`/`send.rs`, while tests inject a recording runtime.
 - **`spawn.rs`** — `spawn_agent_session(agent_id, cwd, resume,
   initial_prompt, readonly)` builds the agent command and hands it to
   `platform::mux::spawn_detached`. Returns the new tmux session name.

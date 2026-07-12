@@ -9,8 +9,10 @@
 //! Stored at `~/.cc-hub/tasks.json` as an ordered array so the file is
 //! trivially editable by hand if needed.
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -170,6 +172,12 @@ pub struct TaskBoard {
     /// tasks at one project is a plain Enter each time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_assign_cwd: Option<String>,
+    /// Monotonic compare-and-swap token. Older files deserialize as revision
+    /// zero; every successful mutation increments it while holding the board
+    /// lock, preventing two cc-hub instances from silently overwriting each
+    /// other's changes.
+    #[serde(default)]
+    revision: u64,
 }
 
 fn now_secs() -> u64 {
@@ -188,17 +196,25 @@ fn new_task_item_id() -> String {
 }
 
 impl TaskBoard {
-    /// Load the board from disk. A missing or unparseable file yields an
-    /// empty board — same recover-by-starting-fresh policy as the to-do
-    /// scratchpad, since the board is a convenience, not a ledger.
-    pub fn load() -> Self {
+    /// Load the board from disk. Missing state is an empty board; malformed or
+    /// unreadable state is an error so callers never mistake data loss for an
+    /// intentionally empty board.
+    pub fn load_result() -> io::Result<Self> {
         let Some(path) = tasks_path() else {
-            return Self::default();
+            return Ok(Self::default());
         };
-        let Ok(raw) = fs::read_to_string(&path) else {
-            return Self::default();
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(e),
         };
-        serde_json::from_str(&raw).unwrap_or_default()
+        serde_json::from_str(&raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
+    /// Convenience for non-interactive callers and tests. Runtime UI code uses
+    /// [`Self::load_result`] so it can surface failures.
+    pub fn load() -> Self {
+        Self::load_result().unwrap_or_default()
     }
 
     pub fn tasks(&self) -> &[TaskItem] {
@@ -220,85 +236,114 @@ impl TaskBoard {
 
     /// Append a task (trimmed) to To-Do. Empty/whitespace-only input is
     /// ignored. Returns the new task's id. Persists immediately.
-    pub fn add(&mut self, text: &str) -> Option<String> {
+    pub fn add(&mut self, text: &str) -> io::Result<Option<String>> {
+        self.add_configured(text, Vec::new(), TaskPriority::default())
+    }
+
+    /// Add a task and its quick-capture metadata in one repository commit, so
+    /// a write failure cannot leave behind a card missing its tags/priority.
+    pub fn add_configured(
+        &mut self,
+        text: &str,
+        tags: Vec<String>,
+        priority: TaskPriority,
+    ) -> io::Result<Option<String>> {
         let text = text.trim();
         if text.is_empty() {
-            return None;
+            return Ok(None);
         }
         let id = new_task_item_id();
-        self.tasks.push(TaskItem {
-            id: id.clone(),
-            text: text.to_string(),
-            status: TaskItemStatus::Todo,
-            priority: TaskPriority::default(),
-            tags: Vec::new(),
-            created_at: now_secs(),
-            done_at: None,
-            cwd: None,
-            agent_id: None,
-            tmux: None,
-            session_id: None,
-        });
-        let _ = self.save();
-        Some(id)
+        self.commit(|board| {
+            board.tasks.push(TaskItem {
+                id: id.clone(),
+                text: text.to_string(),
+                status: TaskItemStatus::Todo,
+                priority,
+                tags,
+                created_at: now_secs(),
+                done_at: None,
+                cwd: None,
+                agent_id: None,
+                tmux: None,
+                session_id: None,
+            });
+        })?;
+        Ok(Some(id))
     }
 
     /// Replace a task's text (trimmed), leaving status and any agent
     /// binding untouched. Empty/whitespace-only input and unknown ids are
     /// ignored (returns false). Persists.
-    pub fn rename(&mut self, id: &str, text: &str) -> bool {
+    pub fn rename(&mut self, id: &str, text: &str) -> io::Result<bool> {
         let text = text.trim();
         if text.is_empty() {
-            return false;
+            return Ok(false);
         }
         let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) else {
-            return false;
+            return Ok(false);
         };
-        t.text = text.to_string();
-        let _ = self.save();
-        true
+        if t.text == text {
+            return Ok(false);
+        }
+        self.commit(|board| {
+            board.tasks.iter_mut().find(|t| t.id == id).unwrap().text = text.into()
+        })?;
+        Ok(true)
     }
 
     /// Set a task's priority. Skips the disk write when the priority is
     /// unchanged (re-pressing the same level is a no-op). No-op on unknown
     /// id. Persists when it changes.
-    pub fn set_priority(&mut self, id: &str, priority: TaskPriority) {
-        if let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) {
-            if t.priority != priority {
-                t.priority = priority;
-                let _ = self.save();
-            }
+    pub fn set_priority(&mut self, id: &str, priority: TaskPriority) -> io::Result<bool> {
+        if self.get(id).is_none_or(|t| t.priority == priority) {
+            return Ok(false);
         }
+        self.commit(|board| {
+            board
+                .tasks
+                .iter_mut()
+                .find(|t| t.id == id)
+                .unwrap()
+                .priority = priority
+        })?;
+        Ok(true)
     }
 
     /// Replace a task's tags with `tags` (already normalized by
     /// [`parse_tags`]). Skips the disk write when unchanged. No-op on unknown
     /// id. Persists when it changes.
-    pub fn set_tags(&mut self, id: &str, tags: Vec<String>) {
-        if let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) {
-            if t.tags != tags {
-                t.tags = tags;
-                let _ = self.save();
-            }
+    pub fn set_tags(&mut self, id: &str, tags: Vec<String>) -> io::Result<bool> {
+        if self.get(id).is_none_or(|t| t.tags == tags) {
+            return Ok(false);
         }
+        self.commit(|board| board.tasks.iter_mut().find(|t| t.id == id).unwrap().tags = tags)?;
+        Ok(true)
     }
 
     /// Move a task between columns, stamping/clearing `done_at` so the Done
     /// column can show when it landed. No-op on unknown id. Persists.
-    pub fn set_status(&mut self, id: &str, status: TaskItemStatus) {
-        if let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) {
+    pub fn set_status(&mut self, id: &str, status: TaskItemStatus) -> io::Result<bool> {
+        if self.get(id).is_none_or(|t| t.status == status) {
+            return Ok(false);
+        }
+        self.commit(|board| {
+            let t = board.tasks.iter_mut().find(|t| t.id == id).unwrap();
             t.status = status;
             t.done_at = (status == TaskItemStatus::Done).then(now_secs);
-            let _ = self.save();
-        }
+        })?;
+        Ok(true)
     }
 
     /// Record an agent assignment: where it runs, which agent, and the mux
     /// session it lives in. Moves the task to Planning — the agent is
     /// prompted to plan first and the user promotes the card to In Progress
     /// by approving the plan. Persists.
-    pub fn assign(&mut self, id: &str, cwd: &str, agent_id: &str, tmux: &str) {
-        if let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) {
+    pub fn assign(&mut self, id: &str, cwd: &str, agent_id: &str, tmux: &str) -> io::Result<bool> {
+        if self.get(id).is_none() {
+            return Ok(false);
+        }
+        self.commit(|board| {
+            let t = board.tasks.iter_mut().find(|t| t.id == id).unwrap();
             t.cwd = Some(cwd.to_string());
             t.agent_id = Some(agent_id.to_string());
             t.tmux = Some(tmux.to_string());
@@ -308,88 +353,142 @@ impl TaskBoard {
             t.session_id = None;
             t.status = TaskItemStatus::Planning;
             t.done_at = None;
-            self.last_assign_cwd = Some(cwd.to_string());
-            let _ = self.save();
-        }
+            board.last_assign_cwd = Some(cwd.to_string());
+        })?;
+        Ok(true)
     }
 
     /// Point an existing assignment at a new mux session (resume after the
     /// old tmux died). Keeps `session_id` — resume continues that session.
-    pub fn rebind_tmux(&mut self, id: &str, tmux: &str) {
-        if let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) {
-            t.tmux = Some(tmux.to_string());
-            let _ = self.save();
+    pub fn rebind_tmux(&mut self, id: &str, tmux: &str) -> io::Result<bool> {
+        if self.get(id).is_none_or(|t| t.tmux.as_deref() == Some(tmux)) {
+            return Ok(false);
         }
+        self.commit(|board| {
+            board.tasks.iter_mut().find(|t| t.id == id).unwrap().tmux = Some(tmux.into())
+        })?;
+        Ok(true)
     }
 
     /// Fill in `session_id` for any assigned task whose tmux name matches a
     /// scanned session. Returns true when something new was learned (and
     /// persisted) so callers can repaint.
-    pub fn bind_sessions(&mut self, sessions: &[crate::models::SessionInfo]) -> bool {
-        let mut changed = false;
-        for t in &mut self.tasks {
-            if t.session_id.is_some() {
-                continue;
-            }
-            let Some(tmux) = t.tmux.as_deref() else {
-                continue;
-            };
-            if let Some(s) = sessions
-                .iter()
-                .find(|s| s.tmux_session.as_deref() == Some(tmux))
-            {
-                t.session_id = Some(s.session_id.clone());
-                changed = true;
-            }
+    pub fn bind_sessions(&mut self, sessions: &[crate::models::SessionInfo]) -> io::Result<bool> {
+        let bindings: Vec<(String, String)> = self
+            .tasks
+            .iter()
+            .filter_map(|t| {
+                if t.session_id.is_some() {
+                    return None;
+                }
+                let tmux = t.tmux.as_deref()?;
+                sessions
+                    .iter()
+                    .find(|s| s.tmux_session.as_deref() == Some(tmux))
+                    .map(|s| (t.id.clone(), s.session_id.clone()))
+            })
+            .collect();
+        if bindings.is_empty() {
+            return Ok(false);
         }
-        if changed {
-            let _ = self.save();
-        }
-        changed
+        self.commit(|board| {
+            for (id, sid) in &bindings {
+                board
+                    .tasks
+                    .iter_mut()
+                    .find(|t| t.id == *id)
+                    .unwrap()
+                    .session_id = Some(sid.clone());
+            }
+        })?;
+        Ok(true)
     }
 
     /// Remove the task with `id`, returning it so the caller can describe
     /// what was deleted (and whether an agent session survives it). The
     /// removed task is appended to the on-disk archive. Persists.
-    pub fn remove(&mut self, id: &str) -> Option<TaskItem> {
-        let idx = self.tasks.iter().position(|t| t.id == id)?;
-        let removed = self.tasks.remove(idx);
-        let _ = self.save();
-        archive_tasks(std::slice::from_ref(&removed));
-        Some(removed)
+    pub fn remove(&mut self, id: &str) -> io::Result<Option<TaskItem>> {
+        let Some(idx) = self.tasks.iter().position(|t| t.id == id) else {
+            return Ok(None);
+        };
+        let removed = self.tasks[idx].clone();
+        // Archive first: an extra archive entry is harmless, while committing
+        // the removal before a failed archive write would report failure after
+        // the card had already disappeared.
+        archive_tasks(std::slice::from_ref(&removed))?;
+        self.commit(|board| {
+            board.tasks.remove(idx);
+        })?;
+        Ok(Some(removed))
     }
 
     /// Re-insert a previously removed task (undo of `x`/`c`). Skips ids
     /// already on the board (double-undo, hand edits); returns whether it
     /// landed. Persists.
-    pub fn restore(&mut self, item: TaskItem) -> bool {
+    pub fn restore(&mut self, item: TaskItem) -> io::Result<bool> {
         if self.get(&item.id).is_some() {
-            return false;
+            return Ok(false);
         }
-        self.tasks.push(item);
-        let _ = self.save();
-        true
+        self.commit(|board| board.tasks.push(item))?;
+        Ok(true)
     }
 
     /// Drop every Done task, preserving the order of the rest. The removed
     /// tasks are appended to the on-disk archive and returned so the caller
     /// can offer undo. Only persists when something actually changed.
-    pub fn clear_done(&mut self) -> Vec<TaskItem> {
-        let (done, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut self.tasks)
+    pub fn clear_done(&mut self) -> io::Result<Vec<TaskItem>> {
+        let (done, keep): (Vec<_>, Vec<_>) = self
+            .tasks
+            .clone()
             .into_iter()
             .partition(|t| t.status == TaskItemStatus::Done);
-        self.tasks = keep;
         if !done.is_empty() {
-            let _ = self.save();
-            archive_tasks(&done);
+            archive_tasks(&done)?;
+            self.commit(|board| board.tasks = keep)?;
         }
-        done
+        Ok(done)
     }
 
-    fn save(&self) -> std::io::Result<()> {
+    fn commit(&mut self, mutate: impl FnOnce(&mut Self)) -> io::Result<()> {
+        let before = self.clone();
+        mutate(self);
+        self.revision = before.revision.saturating_add(1);
+        if let Err(e) = self.save_expected(before.revision) {
+            *self = before;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    fn save_expected(&self, expected_revision: u64) -> io::Result<()> {
         let Some(path) = tasks_path() else {
             return Ok(());
         };
+        let parent = path
+            .parent()
+            .ok_or_else(|| io::Error::other("tasks path has no parent"))?;
+        fs::create_dir_all(parent)?;
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(parent.join("tasks.lock"))?;
+        lock.lock_exclusive()?;
+        let disk_revision = match fs::read_to_string(&path) {
+            Ok(raw) => {
+                serde_json::from_str::<Self>(&raw)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                    .revision
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => 0,
+            Err(e) => return Err(e),
+        };
+        if disk_revision != expected_revision {
+            return Err(io::Error::other(
+                format!("task board changed on disk (expected revision {expected_revision}, found {disk_revision}); reload and retry"),
+            ));
+        }
         crate::persist::save_json(&path, self)
     }
 }
@@ -406,19 +505,33 @@ fn archive_path() -> Option<PathBuf> {
 /// array), so `x` and `c` are recoverable beyond the in-session undo slot.
 /// The archive is a log, not a ledger: an undone delete leaves its copy
 /// behind, and a corrupt file starts fresh — same policy as the board.
-fn archive_tasks(items: &[TaskItem]) {
+fn archive_tasks(items: &[TaskItem]) -> io::Result<()> {
     if items.is_empty() {
-        return;
+        return Ok(());
     }
     let Some(path) = archive_path() else {
-        return;
+        return Ok(());
     };
-    let mut archived: Vec<TaskItem> = fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("task archive path has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(parent.join("tasks-archive.lock"))?;
+    lock.lock_exclusive()?;
+    let mut archived: Vec<TaskItem> = match fs::read_to_string(&path) {
+        Ok(raw) => {
+            serde_json::from_str(&raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e),
+    };
     archived.extend(items.iter().cloned());
-    let _ = crate::persist::save_json(&path, &archived);
+    crate::persist::save_json(&path, &archived)
 }
 
 // Unix-only for the same reason as todo.rs: isolation works by redirecting
@@ -433,8 +546,8 @@ mod tests {
         with_temp_home(|| {
             let mut b = TaskBoard::load();
             assert!(b.tasks().is_empty());
-            let id = b.add("  fix the flaky test  ").unwrap();
-            assert_eq!(b.add("   "), None);
+            let id = b.add("  fix the flaky test  ").unwrap().unwrap();
+            assert_eq!(b.add("   ").unwrap(), None);
             let reloaded = TaskBoard::load();
             assert_eq!(reloaded.tasks().len(), 1);
             let t = reloaded.get(&id).unwrap();
@@ -447,13 +560,13 @@ mod tests {
     fn status_transitions_stamp_done_at() {
         with_temp_home(|| {
             let mut b = TaskBoard::load();
-            let id = b.add("ship it").unwrap();
-            b.set_status(&id, TaskItemStatus::Done);
+            let id = b.add("ship it").unwrap().unwrap();
+            b.set_status(&id, TaskItemStatus::Done).unwrap();
             let t = TaskBoard::load();
             let done = t.get(&id).unwrap();
             assert_eq!(done.status, TaskItemStatus::Done);
             assert!(done.done_at.is_some());
-            b.set_status(&id, TaskItemStatus::Todo);
+            b.set_status(&id, TaskItemStatus::Todo).unwrap();
             assert!(TaskBoard::load().get(&id).unwrap().done_at.is_none());
         });
     }
@@ -462,15 +575,15 @@ mod tests {
     fn assign_moves_to_planning_and_rebind_keeps_session() {
         with_temp_home(|| {
             let mut b = TaskBoard::load();
-            let id = b.add("write the parser").unwrap();
-            b.assign(&id, "/tmp/proj", "claude", "cchub-1-42");
+            let id = b.add("write the parser").unwrap().unwrap();
+            b.assign(&id, "/tmp/proj", "claude", "cchub-1-42").unwrap();
             let t = TaskBoard::load();
             let task = t.get(&id).unwrap();
             assert_eq!(task.status, TaskItemStatus::Planning);
             assert_eq!(task.cwd.as_deref(), Some("/tmp/proj"));
             assert_eq!(task.tmux.as_deref(), Some("cchub-1-42"));
             assert_eq!(task.session_id, None);
-            b.rebind_tmux(&id, "cchub-1-43");
+            b.rebind_tmux(&id, "cchub-1-43").unwrap();
             assert_eq!(
                 TaskBoard::load().get(&id).unwrap().tmux.as_deref(),
                 Some("cchub-1-43")
@@ -483,11 +596,11 @@ mod tests {
         with_temp_home(|| {
             let mut b = TaskBoard::load();
             assert_eq!(b.last_assign_cwd(), None);
-            let id = b.add("t").unwrap();
-            b.assign(&id, "/tmp/proj", "claude", "cchub-1-42");
+            let id = b.add("t").unwrap().unwrap();
+            b.assign(&id, "/tmp/proj", "claude", "cchub-1-42").unwrap();
             assert_eq!(TaskBoard::load().last_assign_cwd(), Some("/tmp/proj"));
             // Deleting the task must not forget where it ran.
-            b.remove(&id);
+            b.remove(&id).unwrap();
             assert_eq!(TaskBoard::load().last_assign_cwd(), Some("/tmp/proj"));
         });
     }
@@ -496,17 +609,17 @@ mod tests {
     fn new_tasks_default_priority_and_set_priority_round_trips() {
         with_temp_home(|| {
             let mut b = TaskBoard::load();
-            let id = b.add("triage the backlog").unwrap();
+            let id = b.add("triage the backlog").unwrap().unwrap();
             // New tasks start at the default priority (P3).
             assert_eq!(b.get(&id).unwrap().priority, TaskPriority::default());
-            b.set_priority(&id, TaskPriority::P1);
+            b.set_priority(&id, TaskPriority::P1).unwrap();
             assert_eq!(
                 TaskBoard::load().get(&id).unwrap().priority,
                 TaskPriority::P1
             );
             // Re-setting the same level is a no-op (and still persisted state
             // is unchanged).
-            b.set_priority(&id, TaskPriority::P1);
+            b.set_priority(&id, TaskPriority::P1).unwrap();
             assert_eq!(b.get(&id).unwrap().priority, TaskPriority::P1);
         });
     }
@@ -548,14 +661,14 @@ mod tests {
     fn set_tags_round_trips_and_skips_unchanged() {
         with_temp_home(|| {
             let mut b = TaskBoard::load();
-            let id = b.add("label me").unwrap();
+            let id = b.add("label me").unwrap().unwrap();
             assert!(b.get(&id).unwrap().tags.is_empty());
-            b.set_tags(&id, parse_tags("bug api"));
+            b.set_tags(&id, parse_tags("bug api")).unwrap();
             assert_eq!(TaskBoard::load().get(&id).unwrap().tags, vec!["bug", "api"]);
             // Re-setting the same set is a no-op; clearing removes them.
-            b.set_tags(&id, parse_tags("bug api"));
+            b.set_tags(&id, parse_tags("bug api")).unwrap();
             assert_eq!(b.get(&id).unwrap().tags, vec!["bug", "api"]);
-            b.set_tags(&id, Vec::new());
+            b.set_tags(&id, Vec::new()).unwrap();
             assert!(TaskBoard::load().get(&id).unwrap().tags.is_empty());
         });
     }
@@ -571,9 +684,9 @@ mod tests {
     fn column_filters_by_status() {
         with_temp_home(|| {
             let mut b = TaskBoard::load();
-            let a = b.add("a").unwrap();
-            b.add("b").unwrap();
-            b.set_status(&a, TaskItemStatus::Done);
+            let a = b.add("a").unwrap().unwrap();
+            b.add("b").unwrap().unwrap();
+            b.set_status(&a, TaskItemStatus::Done).unwrap();
             assert_eq!(b.column(TaskItemStatus::Todo).len(), 1);
             assert_eq!(b.column(TaskItemStatus::Done).len(), 1);
             assert_eq!(b.column(TaskItemStatus::Planning).len(), 0);
@@ -585,15 +698,15 @@ mod tests {
     fn clear_done_and_remove() {
         with_temp_home(|| {
             let mut b = TaskBoard::load();
-            let a = b.add("a").unwrap();
-            let c = b.add("c").unwrap();
-            b.set_status(&a, TaskItemStatus::Done);
-            let cleared = b.clear_done();
+            let a = b.add("a").unwrap().unwrap();
+            let c = b.add("c").unwrap().unwrap();
+            b.set_status(&a, TaskItemStatus::Done).unwrap();
+            let cleared = b.clear_done().unwrap();
             assert_eq!(cleared.len(), 1);
             assert_eq!(cleared[0].id, a);
-            assert!(b.clear_done().is_empty());
-            assert!(b.remove(&c).is_some());
-            assert!(b.remove(&c).is_none());
+            assert!(b.clear_done().unwrap().is_empty());
+            assert!(b.remove(&c).unwrap().is_some());
+            assert!(b.remove(&c).unwrap().is_none());
             assert!(TaskBoard::load().tasks().is_empty());
         });
     }
@@ -602,11 +715,11 @@ mod tests {
     fn removals_land_in_archive_and_restore_reinserts() {
         with_temp_home(|| {
             let mut b = TaskBoard::load();
-            let a = b.add("deleted one").unwrap();
-            let d = b.add("done one").unwrap();
-            b.set_status(&d, TaskItemStatus::Done);
-            let removed = b.remove(&a).unwrap();
-            b.clear_done();
+            let a = b.add("deleted one").unwrap().unwrap();
+            let d = b.add("done one").unwrap().unwrap();
+            b.set_status(&d, TaskItemStatus::Done).unwrap();
+            let removed = b.remove(&a).unwrap().unwrap();
+            b.clear_done().unwrap();
             // Both removal paths append to the archive file.
             let raw = fs::read_to_string(archive_path().unwrap()).unwrap();
             let archived: Vec<TaskItem> = serde_json::from_str(&raw).unwrap();
@@ -616,9 +729,42 @@ mod tests {
             );
             // Undo restores the task (with its id); a second restore of the
             // same id is refused.
-            assert!(b.restore(removed.clone()));
-            assert!(!b.restore(removed));
+            assert!(b.restore(removed.clone()).unwrap());
+            assert!(!b.restore(removed).unwrap());
             assert_eq!(TaskBoard::load().get(&a).unwrap().text, "deleted one");
+        });
+    }
+
+    #[test]
+    fn stale_writer_is_rejected_and_rolled_back() {
+        with_temp_home(|| {
+            let mut first = TaskBoard::load_result().unwrap();
+            let mut stale = TaskBoard::load_result().unwrap();
+            first.add("first writer").unwrap().unwrap();
+
+            let error = stale.add("stale writer").unwrap_err();
+            assert!(error.to_string().contains("changed on disk"));
+            assert!(
+                stale.tasks().is_empty(),
+                "failed commit must roll memory back"
+            );
+
+            let current = TaskBoard::load_result().unwrap();
+            assert_eq!(current.tasks().len(), 1);
+            assert_eq!(current.tasks()[0].text, "first writer");
+        });
+    }
+
+    #[test]
+    fn malformed_board_is_reported_without_replacing_the_file() {
+        with_temp_home(|| {
+            let path = tasks_path().unwrap();
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "{not-json").unwrap();
+
+            let error = TaskBoard::load_result().unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(fs::read_to_string(path).unwrap(), "{not-json");
         });
     }
 

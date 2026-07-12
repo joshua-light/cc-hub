@@ -18,6 +18,8 @@ use ratatui::Terminal;
 use std::io;
 use tokio::sync::mpsc;
 
+mod tasks;
+
 /// Historically: whether `run()` should skip the rest of its loop iteration
 /// (the scan drain + pending-dispatch poll). `Continue` mirrors the
 /// `continue` statements the match arms used when they lived inline. `run()`
@@ -46,6 +48,9 @@ pub(crate) async fn handle_key(
     on_projects: bool,
     on_tasks: bool,
 ) -> KeyOutcome {
+    if tasks::handle(app, key, terminal, on_tasks) {
+        return KeyOutcome::Continue;
+    }
     match (&app.view, key.code) {
         // Quit
         (View::Grid, KeyCode::Char('q')) => {
@@ -84,198 +89,6 @@ pub(crate) async fn handle_key(
         }
         (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_metrics => {
             app.metrics.nav_up();
-        }
-        // Tasks board: j/k moves within the focused column; h/l switches
-        // column. Same muscle memory as the Projects kanban.
-        (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_tasks => {
-            app.tasks.row_down();
-        }
-        (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_tasks => {
-            app.tasks.row_up();
-        }
-        (View::Grid, KeyCode::Right | KeyCode::Char('l')) if on_tasks => {
-            app.tasks.col_right();
-        }
-        (View::Grid, KeyCode::Left | KeyCode::Char('h')) if on_tasks => {
-            app.tasks.col_left();
-        }
-        // `H`/`L` move the focused card one column left/right by hand
-        // (Planning is agent-owned, so manual moves hop over it).
-        (View::Grid, KeyCode::Char('L')) if on_tasks => match app.move_selected_task(1) {
-            Some(msg) => app.set_status(msg),
-            None => app.set_status("nothing to move right".into()),
-        },
-        (View::Grid, KeyCode::Char('H')) if on_tasks => match app.move_selected_task(-1) {
-            Some(msg) => app.set_status(msg),
-            None => app.set_status("nothing to move left".into()),
-        },
-        (View::Grid, KeyCode::Char('a') | KeyCode::Char('n')) if on_tasks => {
-            app.enter_task_input();
-        }
-        // `/` edits the board filter; on an already-filtered board Esc
-        // clears it without entering the edit mode.
-        (View::Grid, KeyCode::Char('/')) if on_tasks => {
-            app.enter_task_filter();
-        }
-        (View::Grid, KeyCode::Esc) if on_tasks && !app.tasks.filter.is_empty() => {
-            app.clear_task_filter();
-        }
-        // `u` restores the last `x`/`c` removal.
-        (View::Grid, KeyCode::Char('u')) if on_tasks => match app.undo_task_delete() {
-            Some(msg) => app.set_status(msg),
-            None => app.set_status("nothing to undo".into()),
-        },
-        // Space is status-aware: approves a Planning card's plan (tells the
-        // agent to proceed, card → In Progress), toggles Done elsewhere.
-        (View::Grid, KeyCode::Char(' ')) if on_tasks => match app.task_space_action() {
-            Some(msg) => app.set_status(msg),
-            None => app.set_status("no task focused".into()),
-        },
-        (View::Grid, KeyCode::Char('s')) if on_tasks => {
-            if !app.enter_task_assign_picker() {
-                app.set_status("focus an unfinished task to assign an agent".into());
-            }
-        }
-        // `S`: skip the picker — spawn the agent in $HOME for broad,
-        // not-yet-project-shaped questions.
-        (View::Grid, KeyCode::Char('S')) if on_tasks => match app.assign_selected_task_at_home() {
-            Some(msg) => app.set_status(msg),
-            None => app.set_status("focus a To-Do/In Progress task to start an agent".into()),
-        },
-        (View::Grid, KeyCode::Char('r')) if on_tasks => {
-            if !app.enter_task_rename() {
-                app.set_status("no task focused".into());
-            }
-        }
-        // `t` opens the inline tag editor for the focused task.
-        (View::Grid, KeyCode::Char('t')) if on_tasks => {
-            if !app.enter_task_tags() {
-                app.set_status("no task focused".into());
-            }
-        }
-        // `1`–`4` set the focused task's priority; the column re-sorts P1-first
-        // and the cursor follows the card.
-        (View::Grid, KeyCode::Char(c @ ('1' | '2' | '3' | '4'))) if on_tasks => {
-            use cc_hub_lib::tasks::TaskPriority;
-            let priority = match c {
-                '1' => TaskPriority::P1,
-                '2' => TaskPriority::P2,
-                '3' => TaskPriority::P3,
-                _ => TaskPriority::P4,
-            };
-            match app.set_selected_task_priority(priority) {
-                Some(msg) => app.set_status(msg),
-                None => app.set_status("no task focused".into()),
-            }
-        }
-        (View::Grid, KeyCode::Char('x')) if on_tasks => match app.delete_selected_task() {
-            Some(msg) => app.set_status(msg),
-            None => app.set_status("no task focused".into()),
-        },
-        (View::Grid, KeyCode::Char('c')) if on_tasks => {
-            app.clear_done_tasks();
-        }
-        // `f`/Enter on a task mirrors the Sessions tab: attach the bound
-        // agent's live tmux in the embedded pane; if the tmux died but the
-        // session id is known, respawn with resume and rebind; otherwise
-        // hint at `s`.
-        (View::Grid, KeyCode::Char('f') | KeyCode::Enter) if on_tasks => {
-            let Some(task) = app.selected_board_task().cloned() else {
-                app.set_status("no task focused".into());
-                return KeyOutcome::Continue;
-            };
-            let live_tmux = task
-                .tmux
-                .as_deref()
-                .filter(|n| send::tmux_session_exists(n));
-            if let Some(tmux_name) = live_tmux {
-                let (cols, rows) = crate::popup_pane_size(terminal);
-                match tmux_pane::TmuxPaneView::spawn(tmux_name, rows, cols) {
-                    Ok(pane) => app.enter_tmux_pane(pane),
-                    Err(e) => app.set_status(format!("tmux attach failed: {}", e)),
-                }
-            } else if let (Some(sid), Some(cwd)) = (task.session_id.clone(), task.cwd.clone()) {
-                let agent_id = task.agent_id.clone().unwrap_or_else(|| "claude".into());
-                match spawn::spawn_agent_session(
-                    &agent_id,
-                    &cwd,
-                    Some(spawn::ResumeTarget::SessionId(sid.clone())),
-                    None,
-                    false,
-                ) {
-                    Ok(new_tmux) => {
-                        app.rebind_task_tmux(&task.id, &new_tmux);
-                        let (cols, rows) = crate::popup_pane_size(terminal);
-                        match tmux_pane::TmuxPaneView::spawn(&new_tmux, rows, cols) {
-                            Ok(pane) => {
-                                app.set_status(format!(
-                                    "resumed {} [{}]",
-                                    models::short_sid(&sid),
-                                    new_tmux
-                                ));
-                                app.enter_tmux_pane(pane);
-                            }
-                            Err(e) => app.set_status(format!(
-                                "resumed [{}] but attach failed: {}",
-                                new_tmux, e
-                            )),
-                        }
-                    }
-                    Err(e) => app.set_status(format!("resume failed: {}", e)),
-                }
-            } else if task.tmux.is_some() {
-                app.set_status(
-                    "agent session is gone and its session id was never seen — press s to re-assign"
-                        .into(),
-                );
-            } else {
-                app.set_status("no agent assigned — press s to assign one".into());
-            }
-        }
-        (View::TaskInput, KeyCode::Esc) => {
-            app.close_task_input();
-        }
-        (View::TaskInput, KeyCode::Backspace) => {
-            app.tasks.input.pop();
-        }
-        (View::TaskInput, KeyCode::Enter) => {
-            let renaming = app.tasks.renaming.is_some();
-            if !app.submit_task_input() {
-                app.set_status(if renaming {
-                    "empty task — rename cancelled".into()
-                } else {
-                    "empty task — nothing added".into()
-                });
-            }
-        }
-        (View::TaskInput, KeyCode::Char(c)) => {
-            app.tasks.input.push(c);
-        }
-        (View::TaskTags, KeyCode::Esc) => {
-            app.close_task_tags();
-        }
-        (View::TaskTags, KeyCode::Backspace) => {
-            app.tasks.input.pop();
-        }
-        (View::TaskTags, KeyCode::Enter) => {
-            app.submit_task_tags();
-        }
-        (View::TaskTags, KeyCode::Char(c)) => {
-            app.tasks.input.push(c);
-        }
-        // Board filter: typing narrows the columns live; Enter keeps the
-        // query applied, Esc drops it.
-        (View::TaskFilter, KeyCode::Esc) => {
-            app.clear_task_filter();
-        }
-        (View::TaskFilter, KeyCode::Enter) => {
-            app.apply_task_filter();
-        }
-        (View::TaskFilter, KeyCode::Backspace) => {
-            app.task_filter_pop();
-        }
-        (View::TaskFilter, KeyCode::Char(c)) => {
-            app.task_filter_push(c);
         }
         // Kanban: j/k moves the row cursor within the focused
         // column; h/l switches column; H/L (or [/]) cycles project chips.

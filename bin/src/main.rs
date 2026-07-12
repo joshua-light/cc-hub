@@ -814,39 +814,64 @@ async fn run(
     // Fallback timer catches PID deaths (not a filesystem event) and events
     // missed when a watched dir is rotated or recreated. Its initial tick
     // fires immediately, serving as the startup scan.
-    let (fs_tx, mut fs_rx) = mpsc::channel::<()>(8);
-    watcher::spawn_fs_watcher(fs_tx);
+    let (watch_tx, mut watch_rx) = mpsc::channel::<watcher::WatchBatch>(8);
+    watcher::spawn_fs_watcher(watch_tx);
+    let (session_invalidate_tx, mut session_invalidate_rx) = mpsc::channel::<()>(1);
+    let (project_invalidate_tx, mut project_invalidate_rx) = mpsc::channel::<()>(1);
+    tokio::spawn(async move {
+        while let Some(mut batch) = watch_rx.recv().await {
+            while let Ok(next) = watch_rx.try_recv() {
+                batch.sessions |= next.sessions;
+                batch.projects |= next.projects;
+            }
+            if batch.sessions {
+                let _ = session_invalidate_tx.try_send(());
+            }
+            if batch.projects {
+                let _ = project_invalidate_tx.try_send(());
+            }
+        }
+    });
 
+    let session_scan_tx = scan_tx.clone();
     tokio::spawn(async move {
         let mut fallback = tokio::time::interval(config::get().scan.fs_fallback_interval());
         fallback.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut full_reconcile = tokio::time::interval(Duration::from_secs(10));
+        full_reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Consume the full interval's immediate tick; the fallback branch owns
+        // the startup scan, then full missed-event recovery runs every 10s.
+        full_reconcile.tick().await;
         let mut latest_sessions: Vec<models::SessionInfo> = Vec::new();
 
         loop {
             tokio::select! {
                 _ = fallback.tick() => {
-                    let sessions = tokio::task::spawn_blocking(scanner::scan_sessions)
-                        .await
-                        .unwrap_or_default();
-                    latest_sessions = sessions.clone();
-                    let _ = scan_tx.send(ScanMsg::SessionList(sessions)).await;
-                    let snap = tokio::task::spawn_blocking(projects_scan::scan)
-                        .await
-                        .unwrap_or_else(|_| projects_scan::ProjectsSnapshot::empty());
-                    let _ = scan_tx.send(ScanMsg::Projects(snap)).await;
+                    if latest_sessions.is_empty() {
+                        let sessions = tokio::task::spawn_blocking(scanner::scan_sessions)
+                            .await
+                            .unwrap_or_default();
+                        latest_sessions = sessions.clone();
+                        let _ = session_scan_tx.send(ScanMsg::SessionList(sessions)).await;
+                    } else if scanner::refresh_process_liveness(&mut latest_sessions) {
+                        let _ = session_scan_tx
+                            .send(ScanMsg::SessionList(latest_sessions.clone()))
+                            .await;
+                    }
                 }
-                Some(()) = fs_rx.recv() => {
-                    // Drain coalesced signals — one scan per burst is enough.
-                    while fs_rx.try_recv().is_ok() {}
+                _ = full_reconcile.tick() => {
                     let sessions = tokio::task::spawn_blocking(scanner::scan_sessions)
                         .await
                         .unwrap_or_default();
                     latest_sessions = sessions.clone();
-                    let _ = scan_tx.send(ScanMsg::SessionList(sessions)).await;
-                    let snap = tokio::task::spawn_blocking(projects_scan::scan)
+                    let _ = session_scan_tx.send(ScanMsg::SessionList(sessions)).await;
+                }
+                Some(()) = session_invalidate_rx.recv() => {
+                    let sessions = tokio::task::spawn_blocking(scanner::scan_sessions)
                         .await
-                        .unwrap_or_else(|_| projects_scan::ProjectsSnapshot::empty());
-                    let _ = scan_tx.send(ScanMsg::Projects(snap)).await;
+                        .unwrap_or_default();
+                    latest_sessions = sessions.clone();
+                    let _ = session_scan_tx.send(ScanMsg::SessionList(sessions)).await;
                 }
                 Some(session_id) = detail_rx.recv() => {
                     let sessions = latest_sessions.clone();
@@ -857,7 +882,7 @@ async fn run(
                     .ok()
                     .flatten();
                     if let Some(d) = detail {
-                        let _ = scan_tx.send(ScanMsg::Detail(d)).await;
+                        let _ = session_scan_tx.send(ScanMsg::Detail(d)).await;
                     }
                 }
                 Some(session_id) = state_debug_rx.recv() => {
@@ -869,10 +894,32 @@ async fn run(
                     .ok()
                     .flatten();
                     if let Some((info, e)) = exp {
-                        let _ = scan_tx.send(ScanMsg::StateDebug(info, e)).await;
+                        let _ = session_scan_tx.send(ScanMsg::StateDebug(info, e)).await;
                     }
                 }
             }
+        }
+    });
+
+    // Project state has its own invalidation and blocking worker. A large
+    // project scan can no longer delay Sessions refreshes or detail requests.
+    let project_scan_tx = scan_tx.clone();
+    tokio::spawn(async move {
+        let project_fallback = config::get()
+            .scan
+            .fs_fallback_interval()
+            .max(Duration::from_secs(10));
+        let mut fallback = tokio::time::interval(project_fallback);
+        fallback.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = fallback.tick() => {}
+                Some(()) = project_invalidate_rx.recv() => {}
+            }
+            let snap = tokio::task::spawn_blocking(projects_scan::scan)
+                .await
+                .unwrap_or_else(|_| projects_scan::ProjectsSnapshot::empty());
+            let _ = project_scan_tx.send(ScanMsg::Projects(snap)).await;
         }
     });
 

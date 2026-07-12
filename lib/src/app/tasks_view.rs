@@ -52,6 +52,9 @@ fn statuses_for(col: TaskItemStatus, show_planning: bool) -> Vec<TaskItemStatus>
 
 pub struct TasksView {
     pub board: TaskBoard,
+    /// Most recent repository failure, consumed by `App` and shown in the
+    /// status bar rather than allowing a failed write/load to look successful.
+    pub persistence_error: Option<String>,
     /// Focused column (index into [`TASK_COLUMNS`]).
     pub col: usize,
     /// Row cursor within the focused column.
@@ -93,8 +96,16 @@ pub struct TasksView {
 
 impl TasksView {
     pub(crate) fn new() -> Self {
+        let (board, persistence_error) = match TaskBoard::load_result() {
+            Ok(board) => (board, None),
+            Err(e) => (
+                TaskBoard::default(),
+                Some(format!("task board load failed: {e}")),
+            ),
+        };
         Self {
-            board: TaskBoard::load(),
+            board,
+            persistence_error,
             col: 0,
             row: 0,
             input: String::new(),
@@ -124,8 +135,22 @@ impl TasksView {
     /// Reload the board from disk (picks up hand edits / other instances),
     /// keeping the cursor in range if the columns shrank.
     pub fn reload(&mut self) {
-        self.board = TaskBoard::load();
+        match TaskBoard::load_result() {
+            Ok(board) => {
+                self.board = board;
+                self.persistence_error = None;
+            }
+            Err(e) => self.persistence_error = Some(format!("task board reload failed: {e}")),
+        }
         self.clamp_row();
+    }
+
+    pub fn record_persistence_error(&mut self, operation: &str, error: impl std::fmt::Display) {
+        self.persistence_error = Some(format!("task {operation} failed: {error}"));
+    }
+
+    pub fn take_persistence_error(&mut self) -> Option<String> {
+        self.persistence_error.take()
     }
 
     pub fn col_status(&self) -> TaskItemStatus {

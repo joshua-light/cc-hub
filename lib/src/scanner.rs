@@ -1033,6 +1033,22 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
     sessions
 }
 
+/// Cheap fallback between full filesystem reconciliations. File watchers drive
+/// transcript/state updates; this pass only catches processes that exited
+/// without writing another event, avoiding directory walks and tmux snapshots
+/// on every short fallback tick.
+pub fn refresh_process_liveness(sessions: &mut [SessionInfo]) -> bool {
+    let mut changed = false;
+    for session in sessions {
+        if session.state != SessionState::Inactive && !is_pid_alive(session.pid) {
+            session.state = SessionState::Inactive;
+            session.tmux_session = None;
+            changed = true;
+        }
+    }
+    changed
+}
+
 pub fn load_detail(session_id: &str, sessions: &[SessionInfo]) -> Option<SessionDetail> {
     let info = sessions.iter().find(|s| s.session_id == session_id)?;
     match info.agent_kind {
