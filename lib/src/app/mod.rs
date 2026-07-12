@@ -25,7 +25,7 @@ mod sessions_view;
 mod tasks_view;
 mod todo_panel;
 
-pub use command::{Command, Effect, GlobalCommand, SessionsCommand};
+pub use command::{Command, Effect, GlobalCommand, SessionsCommand, TasksCommand};
 pub use metrics_view::MetricsView;
 pub use projects_view::ProjectsView;
 pub use render_state::RenderState;

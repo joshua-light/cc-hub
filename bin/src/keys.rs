@@ -37,7 +37,16 @@ pub(crate) enum KeyOutcome {
 /// non-empty PromptInput submission in the Projects flow stays legacy (the
 /// orchestrator-spawn path is out of the Sessions command scope), while an
 /// empty submission is always the command (it cancels regardless of flow).
-fn map_command(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<Command> {
+fn map_command(app: &App, key: &KeyEvent, on_sessions: bool, on_tasks: bool) -> Option<Command> {
+    if let Some(cmd) = tasks::map_tasks_command(app, key, on_tasks) {
+        return Some(cmd);
+    }
+    map_sessions_command(app, key, on_sessions)
+}
+
+/// Sessions- and Global-tab command mapping (Tasks lives in
+/// [`tasks::map_tasks_command`]).
+fn map_sessions_command(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<Command> {
     use cc_hub_lib::app::{GlobalCommand as G, SessionsCommand as S};
     let cmd = match (&app.view, key.code) {
         (View::Grid, KeyCode::Char('q')) => Command::Global(G::Quit),
@@ -110,10 +119,7 @@ pub(crate) async fn handle_key(
     on_projects: bool,
     on_tasks: bool,
 ) -> KeyOutcome {
-    if tasks::handle(app, key, terminal, on_tasks) {
-        return KeyOutcome::Continue;
-    }
-    if let Some(cmd) = map_command(app, &key, on_sessions) {
+    if let Some(cmd) = map_command(app, &key, on_sessions, on_tasks) {
         for effect in app.execute(cmd) {
             crate::effects::apply_effect(
                 app,
@@ -126,6 +132,9 @@ pub(crate) async fn handle_key(
             )
             .await;
         }
+        return KeyOutcome::Continue;
+    }
+    if tasks::handle(app, key) {
         return KeyOutcome::Continue;
     }
     match (&app.view, key.code) {
