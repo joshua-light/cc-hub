@@ -2,9 +2,13 @@
 
 use log::debug;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 /// Read the tail of a JSONL session log, expanding the window until it
 /// contains enough context to classify session state — i.e. at least one
@@ -53,8 +57,17 @@ pub fn read_jsonl_tail_for_state(path: &Path) -> Vec<Value> {
     }
 }
 
-fn parse_jsonl_values<R: BufRead>(reader: R) -> Vec<Value> {
+/// Parse newline-delimited JSON from `reader`, dropping blank and unparseable
+/// lines. `source` is the file the reader came from, used only to warn (once
+/// per path per process) when a non-empty interior line fails to parse — so a
+/// corrupt transcript degrades visibly instead of silently losing entries.
+///
+/// Callers that trim a partial line before parsing (`read_jsonl_tail` at the
+/// seek boundary) must strip it *before* it reaches this function; a partial
+/// line that never enters the reader is not counted as malformed.
+fn parse_jsonl_values<R: BufRead>(reader: R, source: Option<&Path>) -> Vec<Value> {
     let mut out = Vec::new();
+    let mut first_error: Option<(usize, serde_json::Error)> = None;
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
@@ -63,11 +76,59 @@ fn parse_jsonl_values<R: BufRead>(reader: R) -> Vec<Value> {
         if line.trim().is_empty() {
             continue;
         }
-        if let Ok(val) = serde_json::from_str::<Value>(&line) {
-            out.push(val);
+        match serde_json::from_str::<Value>(&line) {
+            Ok(val) => out.push(val),
+            Err(e) => {
+                if first_error.is_none() {
+                    first_error = Some((line.len(), e));
+                }
+            }
         }
     }
+    if let Some((byte_len, err)) = first_error {
+        note_malformed_lines(source, byte_len, &err);
+    }
     out
+}
+
+/// Warn once per path per process when a transcript contained at least one
+/// malformed interior JSONL line. Mirrors the once-per-key `note_unknown_stop`
+/// pattern in [`super::classify`]: the first sighting of a path logs and
+/// returns; repeat scan ticks stay quiet. `byte_len` and `err` describe the
+/// first failing line so the warn points at concrete corruption.
+fn note_malformed_lines(source: Option<&Path>, byte_len: usize, err: &serde_json::Error) {
+    static SEEN: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    let key = source.map(Path::to_path_buf).unwrap_or_default();
+    let first = SEEN
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key);
+    if !first {
+        return;
+    }
+    #[cfg(test)]
+    MALFORMED_FILES.fetch_add(1, Ordering::Relaxed);
+    log::warn!(
+        "malformed JSONL line in {} (first bad line {} bytes: {}) — skipped",
+        source
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<unknown>".into()),
+        byte_len,
+        err,
+    );
+}
+
+/// Counts distinct files for which at least one malformed interior line was
+/// found (first sighting only). Mirrors `cache::STATE_DERIVE_PARSES`; tests
+/// assert it advances exactly once per corrupt file across repeated reads.
+#[cfg(test)]
+static MALFORMED_FILES: AtomicU64 = AtomicU64::new(0);
+
+/// Test hook: total distinct files with malformed lines seen so far.
+#[cfg(test)]
+pub fn malformed_files_count() -> u64 {
+    MALFORMED_FILES.load(Ordering::Relaxed)
 }
 
 /// Read every JSONL entry in `path`, start to end. Intended for one-shot
@@ -78,7 +139,7 @@ pub fn read_jsonl_all(path: &Path) -> Vec<Value> {
         Ok(f) => f,
         Err(_) => return Vec::new(),
     };
-    parse_jsonl_values(BufReader::new(file))
+    parse_jsonl_values(BufReader::new(file), Some(path))
 }
 
 /// Count assistant `tool_use` blocks across an entire JSONL transcript.
@@ -163,11 +224,12 @@ pub fn read_jsonl_tail(path: &Path, max_bytes: u64) -> Vec<Value> {
 
     let mut reader = BufReader::new(&mut file);
     if seek_pos > 0 {
-        // Partial line at the seek boundary — consume and discard.
+        // Partial line at the seek boundary — consume and discard. It never
+        // reaches parse_jsonl_values, so it is not counted as malformed.
         let mut discard = String::new();
         let _ = reader.read_line(&mut discard);
     }
-    parse_jsonl_values(reader)
+    parse_jsonl_values(reader, Some(path))
 }
 
 pub fn read_jsonl_head(path: &Path, max_bytes: u64) -> Vec<Value> {
@@ -191,20 +253,30 @@ pub fn read_jsonl_head(path: &Path, max_bytes: u64) -> Vec<Value> {
     let mut lines = Vec::new();
     let line_iter: Vec<&str> = text.lines().collect();
     let last_idx = if len > max_bytes {
-        // File was truncated — discard last (potentially partial) line
+        // File was truncated — discard last (potentially partial) line so it is
+        // never parsed and can't be miscounted as a malformed interior line.
         line_iter.len().saturating_sub(1)
     } else {
         line_iter.len()
     };
 
+    let mut first_error: Option<(usize, serde_json::Error)> = None;
     for line in &line_iter[..last_idx] {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        if let Ok(val) = serde_json::from_str::<Value>(line) {
-            lines.push(val);
+        match serde_json::from_str::<Value>(line) {
+            Ok(val) => lines.push(val),
+            Err(e) => {
+                if first_error.is_none() {
+                    first_error = Some((line.len(), e));
+                }
+            }
         }
+    }
+    if let Some((byte_len, err)) = first_error {
+        note_malformed_lines(Some(path), byte_len, &err);
     }
 
     lines
@@ -215,10 +287,97 @@ mod tests {
     use super::*;
     use crate::conversation::extract_state;
     use crate::models::SessionState;
+    use std::io::Write;
+    use std::sync::Mutex as StdMutex;
+
+    /// Serializes the malformed-counter tests: the counter is process-global,
+    /// so two running concurrently would race the "advances once" assertion.
+    static MALFORMED_COUNTER_LOCK: StdMutex<()> = StdMutex::new(());
+
+    // A corrupt *interior* line must warn+count exactly once per path across
+    // repeated reads, and a clean file must never advance the counter.
+    #[test]
+    fn malformed_interior_line_counts_once_across_two_reads() {
+        let _guard = MALFORMED_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let corrupt = std::env::temp_dir().join(format!(
+            "cc_hub_malformed_test_{}_{}.jsonl",
+            std::process::id(),
+            "corrupt"
+        ));
+        let clean = std::env::temp_dir().join(format!(
+            "cc_hub_malformed_test_{}_{}.jsonl",
+            std::process::id(),
+            "clean"
+        ));
+        let _ = std::fs::remove_file(&corrupt);
+        let _ = std::fs::remove_file(&clean);
+
+        // Corrupt file: a well-formed line, a broken interior line, then a
+        // trailing well-formed line so the bad line is unambiguously interior.
+        {
+            let mut f = std::fs::File::create(&corrupt).expect("create corrupt");
+            writeln!(
+                f,
+                r#"{{"type":"user","message":{{"role":"user","content":"hi"}}}}"#
+            )
+            .unwrap();
+            writeln!(f, r#"{{"type":"user","message":{{"role":"#).unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"assistant","message":{{"role":"assistant","stop_reason":"end_turn","content":[]}}}}"#
+            )
+            .unwrap();
+        }
+        {
+            let mut f = std::fs::File::create(&clean).expect("create clean");
+            writeln!(
+                f,
+                r#"{{"type":"user","message":{{"role":"user","content":"hi"}}}}"#
+            )
+            .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"assistant","message":{{"role":"assistant","stop_reason":"end_turn","content":[]}}}}"#
+            )
+            .unwrap();
+        }
+
+        let before = malformed_files_count();
+
+        // Two reads of the corrupt file: the two valid lines survive, and the
+        // counter advances exactly once (once per path, not once per read).
+        let first = read_jsonl_all(&corrupt);
+        assert_eq!(first.len(), 2, "valid lines survive the corrupt interior");
+        assert_eq!(
+            malformed_files_count(),
+            before + 1,
+            "first read of a corrupt file counts once"
+        );
+        let _ = read_jsonl_all(&corrupt);
+        assert_eq!(
+            malformed_files_count(),
+            before + 1,
+            "second read of the same path must NOT re-count"
+        );
+
+        // A clean file never advances the counter.
+        let clean_entries = read_jsonl_all(&clean);
+        assert_eq!(clean_entries.len(), 2);
+        assert_eq!(
+            malformed_files_count(),
+            before + 1,
+            "a clean file must not be counted as malformed"
+        );
+
+        let _ = std::fs::remove_file(&corrupt);
+        let _ = std::fs::remove_file(&clean);
+    }
 
     #[test]
     fn read_jsonl_tail_for_state_expands_past_64k_of_tool_results() {
-        use std::io::Write;
         let tmp =
             std::env::temp_dir().join(format!("cc_hub_expand_test_{}.jsonl", std::process::id()));
         let _ = std::fs::remove_file(&tmp);

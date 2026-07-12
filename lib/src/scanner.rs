@@ -9,6 +9,7 @@ use crate::spawn::ResumeTarget;
 use log::{debug, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 /// Seconds since `path` was last modified, or `None` if stat fails.
@@ -182,14 +183,81 @@ fn has_real_parent(pid: u32) -> bool {
     Process::parent_pid(pid).is_some_and(|ppid| ppid > 1)
 }
 
+/// session_id → latest `/clear` timestamp (ms), parsed from the tail of
+/// `history.jsonl`.
+type ClearMap = HashMap<String, u64>;
+
+/// The history file's cache key: its `(mtime, len)`. A change in either forces
+/// a re-read.
+type ClearsKey = (SystemTime, u64);
+
+/// Cache slot: the key the map was parsed at, plus the shared map itself.
+type ClearsSlot = Option<(ClearsKey, Arc<ClearMap>)>;
+
+/// Process-global cache of the parsed `/clear` map, keyed on the history
+/// file's `(mtime, len)`. `None` means "not yet computed / file absent last
+/// tick"; the stat itself runs every tick (cheap), but the 128 KiB tail read +
+/// parse only re-runs when the stat key changes.
+fn clears_cache() -> &'static Mutex<ClearsSlot> {
+    static CACHE: OnceLock<Mutex<ClearsSlot>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Counts how many times the history tail was actually read+parsed (a cache
+/// miss). Tests assert this does not advance across a second call with an
+/// unchanged `(mtime, len)`.
+#[cfg(test)]
+static CLEARS_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Test hook: total history reads (cache misses) so far.
+#[cfg(test)]
+pub fn clears_read_count() -> u64 {
+    CLEARS_READS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Read /clear events from the tail of ~/.claude/history.jsonl.
 /// Returns session_id → latest clear timestamp (ms).
-fn read_clears_from_history() -> HashMap<String, u64> {
+///
+/// Memoized on the history file's `(mtime, len)`: the scan calls this every
+/// tick, but the 128 KiB tail read only re-runs when the file changes. A
+/// missing/unstattable file resolves to an empty map without any read — but the
+/// stat still runs each tick so a freshly-created history is picked up promptly.
+fn read_clears_from_history() -> Arc<ClearMap> {
     let path = match claude_dir() {
         Some(d) => d.join("history.jsonl"),
-        None => return Default::default(),
+        None => return Arc::new(ClearMap::new()),
     };
-    let file = match std::fs::File::open(&path) {
+
+    // Stat every tick (cheap); only the read+parse below is gated on the key.
+    let key = std::fs::metadata(&path)
+        .ok()
+        .and_then(|m| Some((m.modified().ok()?, m.len())));
+
+    let Some(key) = key else {
+        // Missing/unstattable file: empty map. Cheap to rebuild if it appears.
+        return Arc::new(ClearMap::new());
+    };
+
+    {
+        let cache = clears_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((cached_key, clears)) = cache.as_ref() {
+            if *cached_key == key {
+                return Arc::clone(clears);
+            }
+        }
+    }
+
+    let clears = Arc::new(read_clears_uncached(&path));
+    #[cfg(test)]
+    CLEARS_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut cache = clears_cache().lock().unwrap_or_else(|e| e.into_inner());
+    *cache = Some((key, Arc::clone(&clears)));
+    clears
+}
+
+/// The uncached 128 KiB tail read + parse of `history.jsonl`.
+fn read_clears_uncached(path: &Path) -> ClearMap {
+    let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return Default::default(),
     };
@@ -671,6 +739,7 @@ fn scan_orphan_jsonls(
     titles: &HashMap<String, String>,
 ) -> (Vec<SessionInfo>, usize) {
     let cfg = &config::get().inactive;
+    let relist_ttl = std::time::Duration::from_secs(cfg.orphan_relist_secs);
     let Some(projects) = projects_dir() else {
         return (Vec::new(), 0);
     };
@@ -686,36 +755,33 @@ fn scan_orphan_jsonls(
 
     let mut out = Vec::new();
     let mut total_in_window = 0usize;
+    let mut visited_dirs: HashSet<PathBuf> = HashSet::new();
     for proj in project_dirs.flatten() {
         if let Some(skip) = scratch_proj_dir.as_deref() {
             if proj.file_name().to_str() == Some(skip) {
                 continue;
             }
         }
-        let Ok(files) = std::fs::read_dir(proj.path()) else {
-            continue;
-        };
+        let proj_path = proj.path();
+        // Cached per-dir listing: re-`read_dir`s only when the project dir's
+        // mtime changes (a new/removed transcript) or the entry ages past the
+        // relist TTL. Per-file mtimes come from the cached listing, so the age
+        // filter below may be up to `orphan_relist_secs` stale — within the
+        // TTL budget, and identical in every other respect to the old walk.
+        let files = crate::dir_cache::list_jsonl_dir(&proj_path, relist_ttl);
+        visited_dirs.insert(proj_path);
         let mut candidates: Vec<(PathBuf, SystemTime)> = Vec::new();
-        for file in files.flatten() {
-            let path = file.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+        for (path, mtime) in files.iter() {
+            if claimed_paths.contains(path) {
                 continue;
             }
-            if claimed_paths.contains(&path) {
-                continue;
-            }
-            let Some((mtime, age)) = path
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.elapsed().ok().map(|d| (t, d.as_secs())))
-            else {
+            let Some(age) = mtime.elapsed().ok().map(|d| d.as_secs()) else {
                 continue;
             };
             if age > cfg.window_secs {
                 continue;
             }
-            candidates.push((path, mtime));
+            candidates.push((path.clone(), *mtime));
         }
         total_in_window += candidates.len();
         candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
@@ -725,12 +791,17 @@ fn scan_orphan_jsonls(
             }
         }
     }
+    // Drop cache entries for project dirs that disappeared since last tick,
+    // scoped to the projects root so the shared cache keeps Pi's entries.
+    crate::dir_cache::retain_under(&projects, &visited_dirs);
     (out, total_in_window)
 }
 
 fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
     let raw_sessions = read_raw_sessions();
     let clears = read_clears_from_history();
+    // `clears` is a cached Arc; borrow the map for the rest of this scan.
+    let clears: &ClearMap = &clears;
     // Derive claimed session IDs from the sessions we already read,
     // avoiding a redundant second pass over the session metadata files.
     let claimed: HashSet<String> = raw_sessions.iter().map(|r| r.session_id.clone()).collect();
@@ -755,7 +826,7 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
         raw_sessions.len() - alive_count
     );
 
-    let jsonl_map = resolve_jsonl_paths(&raw_sessions, &clears, &claimed);
+    let jsonl_map = resolve_jsonl_paths(&raw_sessions, clears, &claimed);
 
     // Snapshot tmux once per scan so we can tag each session with its hosting
     // tmux session name (if any) without reshelling per pid.
@@ -1226,5 +1297,64 @@ mod tests {
             "C--Users-MykytaTaushanov--local-bin"
         );
         assert_eq!(encode_path("C:\\Projects\\TPS"), "C--Projects-TPS");
+    }
+
+    // The history read is memoized on the file's (mtime, len): a second scan
+    // tick with an unchanged file is served from cache (no re-read), while
+    // appending a /clear line (which bumps both mtime and len) forces a
+    // re-read that surfaces the new event.
+    #[test]
+    fn clears_cache_reads_once_until_history_changes() {
+        with_temp_home(|home| {
+            let dir = home.join(".claude");
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("history.jsonl");
+            fs::write(
+                &path,
+                "{\"display\":\"/clear\",\"sessionId\":\"s1\",\"timestamp\":1000}\n",
+            )
+            .unwrap();
+
+            let before = clears_read_count();
+            let first = read_clears_from_history();
+            assert_eq!(
+                clears_read_count(),
+                before + 1,
+                "first call is a cache miss → one read"
+            );
+            assert_eq!(first.get("s1"), Some(&1000));
+
+            let second = read_clears_from_history();
+            assert_eq!(
+                clears_read_count(),
+                before + 1,
+                "unchanged file → second call served from cache, no re-read"
+            );
+            assert_eq!(second.get("s1"), Some(&1000));
+
+            // Append a newer /clear for a second session. Appending grows the
+            // file (len changes) and rewrites mtime, invalidating the key.
+            let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            std::io::Write::write_all(
+                &mut f,
+                b"{\"display\":\"/clear\",\"sessionId\":\"s2\",\"timestamp\":2000}\n",
+            )
+            .unwrap();
+            drop(f);
+            // Guard against same-second mtime granularity: force a distinct
+            // modified time so the (mtime, len) key definitely differs.
+            let bumped = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+            fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(bumped)
+                .unwrap();
+
+            let third = read_clears_from_history();
+            assert_eq!(clears_read_count(), before + 2, "changed file → re-read");
+            assert_eq!(third.get("s1"), Some(&1000));
+            assert_eq!(third.get("s2"), Some(&2000));
+        });
     }
 }

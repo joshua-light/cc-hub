@@ -7,6 +7,7 @@ pub mod bookmarks;
 pub mod clipboard;
 pub mod config;
 pub mod conversation;
+pub mod dir_cache;
 pub mod focus;
 pub mod folder_picker;
 pub mod fuzzy;

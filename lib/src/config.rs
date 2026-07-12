@@ -168,6 +168,12 @@ impl Default for TitleConfig {
 pub struct InactiveConfig {
     pub window_secs: u64,
     pub max_per_project: usize,
+    /// TTL (seconds) for the per-directory listing cache used by the orphan /
+    /// inactive-session walks. A project dir whose mtime is unchanged is
+    /// re-listed at most once per this many seconds instead of every scan
+    /// tick. A new file bumps the dir mtime and invalidates immediately, so
+    /// this only bounds how stale an *otherwise-unchanged* listing may get.
+    pub orphan_relist_secs: u64,
 }
 
 impl Default for InactiveConfig {
@@ -175,6 +181,7 @@ impl Default for InactiveConfig {
         Self {
             window_secs: 3 * 86_400,
             max_per_project: 5,
+            orphan_relist_secs: 30,
         }
     }
 }
@@ -409,7 +416,20 @@ mod tests {
         assert_eq!(cfg.spawn.command, def.spawn.command);
         assert_eq!(cfg.title.model, def.title.model);
         assert_eq!(cfg.inactive.window_secs, def.inactive.window_secs);
+        assert_eq!(cfg.inactive.orphan_relist_secs, 30);
         assert_eq!(cfg.default_orchestrator_agent_id(), "claude");
+    }
+
+    #[test]
+    fn inactive_orphan_relist_secs_overrides() {
+        let src = r#"
+            [inactive]
+            orphan_relist_secs = 5
+        "#;
+        let cfg: Config = toml::from_str(src).unwrap();
+        assert_eq!(cfg.inactive.orphan_relist_secs, 5);
+        // Sibling fields keep their defaults.
+        assert_eq!(cfg.inactive.max_per_project, 5);
     }
 
     #[test]

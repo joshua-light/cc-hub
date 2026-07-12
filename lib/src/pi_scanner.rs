@@ -265,6 +265,7 @@ fn scan_inactive_sessions(
         return Vec::new();
     };
     let cfg = &config::get().inactive;
+    let relist_ttl = std::time::Duration::from_secs(cfg.orphan_relist_secs);
     let Some(root) = session_dirs() else {
         return Vec::new();
     };
@@ -272,30 +273,26 @@ fn scan_inactive_sessions(
         return Vec::new();
     };
     let mut out = Vec::new();
+    let mut visited_dirs: HashSet<PathBuf> = HashSet::new();
     for proj in project_dirs.flatten() {
-        let Ok(files) = std::fs::read_dir(proj.path()) else {
-            continue;
-        };
+        let proj_path = proj.path();
+        // Cached per-dir listing shared with the Claude orphan walk: re-lists
+        // only on a dir mtime change or TTL expiry. Per-file mtimes come from
+        // the cache, so the age filter is at most `orphan_relist_secs` stale.
+        let files = crate::dir_cache::list_jsonl_dir(&proj_path, relist_ttl);
+        visited_dirs.insert(proj_path);
         let mut candidates: Vec<(PathBuf, SystemTime)> = Vec::new();
-        for file in files.flatten() {
-            let path = file.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl")
-                || claimed_paths.contains(&path)
-            {
+        for (path, mtime) in files.iter() {
+            if claimed_paths.contains(path) {
                 continue;
             }
-            let Some((mtime, age)) = path
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.elapsed().ok().map(|d| (t, d.as_secs())))
-            else {
+            let Some(age) = mtime.elapsed().ok().map(|d| d.as_secs()) else {
                 continue;
             };
             if age > cfg.window_secs {
                 continue;
             }
-            candidates.push((path, mtime));
+            candidates.push((path.clone(), *mtime));
         }
         candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
         for (path, _) in candidates.into_iter().take(cfg.max_per_project) {
@@ -311,6 +308,9 @@ fn scan_inactive_sessions(
             }
         }
     }
+    // Evict entries for Pi session dirs gone this tick, scoped to the Pi root
+    // so the Claude scanner's entries in the shared cache survive.
+    crate::dir_cache::retain_under(&root, &visited_dirs);
     out
 }
 
