@@ -18,8 +18,11 @@ From the grid you can:
 ## Tasks board
 
 The personal layer: a four-column board — **To-Do · Planning · In Progress ·
-Done** — stored at `~/.cc-hub/tasks.json`. Jot tasks and check them off by
-hand, or hand one to an agent:
+Done** — stored one file per task under `~/.cc-hub/tasks/` (a pre-existing
+`tasks.json` migrates automatically on first launch; the original is kept as
+`tasks.json.migrated-v1` — don't run pre-migration builds against the same
+home afterwards, or you'll get a second, empty board). Jot tasks and check
+them off by hand, or hand one to an agent:
 
 1. `s` picks a folder and spawns a detached agent session there, prompted to
    investigate the task and present a plan first. The card moves to
@@ -308,8 +311,10 @@ cc-hub behaves the same everywhere it can, but a few things genuinely differ:
 
 ### Tasks tab
 
-A personal task board: **To-Do · Planning · In Progress · Done**. Cards live
-at `~/.cc-hub/tasks.json` and are hand-editable.
+A personal task board: **To-Do · Planning · In Progress · Done**. Each card
+is a `state.json` under `~/.cc-hub/tasks/<task-id>/` — the same per-task
+format the Projects layer uses, hand-editable — with board-level metadata in
+`~/.cc-hub/board.json`.
 
 Assigning a task to an agent spawns a detached session and delivers the task
 text once the agent is idle, wrapped in plan-first framing: investigate,
@@ -337,7 +342,7 @@ filters the board — the query fuzzy-matches card text and `#tag`s across all
 columns; Enter keeps it applied, Esc clears it.
 
 Deletions are recoverable: `u` restores the last `x`/`c` removal, and every
-removed task is also appended to `~/.cc-hub/tasks-archive.json`.
+removed task is also appended to `~/.cc-hub/tasks-archive-v2.json`.
 
 The **Planning** column is optional — set
 `[ui] show_planning_column = false` to drop it. Its cards fold into
@@ -355,7 +360,7 @@ the plan, so the plan-first workflow works with one fewer column.
 | `s` | Assign an agent: project picker (registered projects · bookmarks · recent dirs, fuzzy-filtered by typing — `Tab` flips to a plain folder browser; the last-assigned folder is preselected) → spawn session there prompted to plan first → card moves to Planning |
 | `Enter` / `f` | Attach the bound agent's pane (embedded); resumes the session if its tmux died; hints `s` when unassigned |
 | `Space` | On a Planning card: approve the plan — the agent is told to proceed and the card moves to In Progress (resumes the session first if its tmux died). Elsewhere: toggle Done / reopen (completing closes the live agent session; the transcript binding is kept) |
-| `x` | Delete the task (a bound agent session is left running — close it from Sessions); archived to `tasks-archive.json` |
+| `x` | Delete the task (a bound agent session is left running — close it from Sessions); archived to `tasks-archive-v2.json` |
 | `u` | Undo the last `x`/`c` removal (one batch deep, this session only) |
 | `c` | Clear all Done tasks (archived; `u` restores) |
 

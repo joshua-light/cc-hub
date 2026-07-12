@@ -80,11 +80,18 @@ higher-level kanban over tasks.
 A session can be cross-referenced as an "orchestrator" or "worker" by
 matching its tmux name against `ProjectsSnapshot::roles_by_tmux`.
 
-The personal **Tasks** board is a third, intentionally smaller state source:
-`TaskBoard` in `lib/src/tasks.rs` owns `~/.cc-hub/tasks.json`. Mutations are
-revision-checked transactions under `tasks.lock`; stale writers and malformed
-files are surfaced to the Tasks status bar instead of silently overwriting or
-resetting state.
+The personal **Tasks** board shares the unified task model: a board card IS
+an `orchestrator::TaskState` with `project_id: None`, stored per task at
+`~/.cc-hub/tasks/<tid>/state.json` with the same lock + atomic-write
+machinery and the same legal-transition table as orchestrated tasks (the
+table's kind axis gives the board its plan/reopen edges).
+`PersonalBoard` in `lib/src/tasks.rs` is the in-memory snapshot the TUI
+mutates through; board-level metadata lives in `~/.cc-hub/board.json`, and
+`tasks::promote_task` moves a card into a registered project's Backlog.
+A pre-unification `tasks.json` migrates at startup (`migrate_legacy_board`,
+called once from `run()` in `bin/src/main.rs` — deliberately not from
+`App::new()`, which tests construct freely). Malformed files are surfaced to
+the Tasks status bar instead of silently overwriting or resetting state.
 
 ### Sessions layer
 
@@ -99,11 +106,16 @@ resetting state.
   can detect a live Pi session whose PID it doesn't own.
 - **`conversation/`** — JSONL parsing + state classification. Reads a
   growing tail until at least one assistant entry is in window
-  (`read_jsonl_tail_for_state` at `lib/src/conversation/io.rs:27`), then
+  (`read_jsonl_tail_for_state` in `lib/src/conversation/io.rs`), then
   extracts the current state (`Processing | WaitingForInput | Question |
   Idle | Inactive`) and
   decorates `SessionInfo` with last user message, current tool, model,
-  context tokens.
+  context tokens. The state *semantics* live once in
+  `conversation/classify.rs`: both backends implement the
+  `TranscriptDialect` format adapter and run the same shared `classify`
+  decision procedure, pinned by a cross-backend parity test matrix.
+  Unknown stop reasons and malformed JSONL lines warn once per file
+  instead of silently misclassifying.
 - **`models.rs`** — `SessionInfo`, `SessionState`, `SessionDetail`,
   `ProjectGroup`, plus `short_sid` truncation.
 - **`title.rs`** — background `claude -p` (Haiku) titler. Concurrency-gated
@@ -228,7 +240,8 @@ session running under bash) can drive the same state from its tools.
 |---|---|---|
 | Compiled config | `~/.cc-hub/config.toml` | `lib/src/config.rs` (loads once, deny-unknown) |
 | Registered projects | `~/.cc-hub/projects.toml` | `orchestrator::ensure_project_registered` |
-| Per-task state | `~/.cc-hub/projects/<pid>/tasks/<tid>/state.json` | `orchestrator::write_task_state` |
+| Per-task state (orchestrated) | `~/.cc-hub/projects/<pid>/tasks/<tid>/state.json` | `orchestrator::write_task_state` |
+| Per-task state (personal board) | `~/.cc-hub/tasks/<tid>/state.json` (+ `board.json`, `tasks-archive-v2.json`) | `tasks::PersonalBoard` over the same store |
 | Per-task PR | `~/.cc-hub/projects/<pid>/tasks/<tid>/pr.json` | `lib/src/pr.rs` |
 | Per-project PR counter | `~/.cc-hub/projects/<pid>/pr-counter` | `lib/src/pr.rs` |
 | Per-project merge lock | `~/.cc-hub/projects/<pid>/merge.lock` (+ `.json`) | `lib/src/merge_lock.rs` |
@@ -263,6 +276,16 @@ committed to feature branches.
   `lib/src/app/`, render it in the matching `lib/src/ui/` module, and
   add the keybind branches in the `(View, KeyCode)` match in
   `bin/src/keys.rs`.
+- **Adding a new key action (Sessions/Tasks).** Add a variant to the
+  matching enum in `lib/src/app/command.rs`, implement it in
+  `App::execute` (state mutation + status there; anything needing the
+  terminal, run()'s channels, or the window manager is returned as an
+  `Effect`, interpreted in `bin/src/effects.rs`), map the key in
+  `map_command` in `bin/src/keys.rs`, and pin the behavior with a command
+  test (always inside `with_temp_home` — constructing an `App` touches the
+  on-disk task store). Renderer-computed layout state lives on
+  `App::render` (`lib/src/app/render_state.rs`): `ui/` is its only
+  render-time writer.
 - **Adding a new background tick.** Spawn a tokio task in
   `bin/src/main.rs:run`; emit a `ScanMsg` variant for results; drain it in
   the same big `select!`. The fs-watcher fallback timer is the reference
