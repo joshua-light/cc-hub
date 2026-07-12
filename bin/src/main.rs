@@ -8,6 +8,7 @@ use cc_hub_lib::{
 use app::{App, Tab, View};
 
 mod cli;
+mod effects;
 mod keys;
 
 #[cfg(feature = "hot-reload")]

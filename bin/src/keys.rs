@@ -9,9 +9,9 @@
 //! the variants survive as documentation of each arm's original intent.
 
 use crate::ScanMsg;
-use cc_hub_lib::app::{App, Tab, View};
+use cc_hub_lib::app::{App, Command, View};
 use cc_hub_lib::folder_picker::PickerMode;
-use cc_hub_lib::{config, focus, live_view, models, platform, send, spawn, title, tmux_pane};
+use cc_hub_lib::{focus, live_view, models, platform, send, spawn, tmux_pane};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -28,6 +28,68 @@ mod tasks;
 pub(crate) enum KeyOutcome {
     Continue,
     Proceed,
+}
+
+/// Map a key press onto a [`Command`] when a converted arm covers it.
+///
+/// Guards mirror the original match arms exactly; anything returning `None`
+/// falls through to the legacy match below. The one stateful check: a
+/// non-empty PromptInput submission in the Projects flow stays legacy (the
+/// orchestrator-spawn path is out of the Sessions command scope), while an
+/// empty submission is always the command (it cancels regardless of flow).
+fn map_command(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<Command> {
+    use cc_hub_lib::app::{GlobalCommand as G, SessionsCommand as S};
+    let cmd = match (&app.view, key.code) {
+        (View::Grid, KeyCode::Char('q')) => Command::Global(G::Quit),
+        (View::Grid, KeyCode::Tab | KeyCode::Char('K')) => {
+            Command::Global(G::CycleTab { back: false })
+        }
+        (View::Grid, KeyCode::BackTab | KeyCode::Char('J')) => {
+            Command::Global(G::CycleTab { back: true })
+        }
+        (View::Grid, KeyCode::Char('m')) if on_sessions => Command::Global(G::SetTabMetrics),
+        (View::Grid, KeyCode::Right | KeyCode::Char('l')) if on_sessions => {
+            Command::Sessions(S::NavRight)
+        }
+        (View::Grid, KeyCode::Left | KeyCode::Char('h')) if on_sessions => {
+            Command::Sessions(S::NavLeft)
+        }
+        (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_sessions => {
+            Command::Sessions(S::NavDown)
+        }
+        (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_sessions => {
+            Command::Sessions(S::NavUp)
+        }
+        (View::Grid, KeyCode::Char('i')) if on_sessions => Command::Sessions(S::OpenDetailPopup),
+        (View::Grid, KeyCode::Char('D')) if on_sessions => Command::Sessions(S::OpenStateDebug),
+        (View::Grid, KeyCode::Char('H')) if on_sessions => Command::Sessions(S::ToggleShowInactive),
+        (View::Grid, KeyCode::Char('W')) if on_sessions => {
+            Command::Sessions(S::ToggleShowOrchWorkers)
+        }
+        (View::Grid, KeyCode::Char('f') | KeyCode::Enter) if on_sessions => {
+            Command::Sessions(S::FocusSelected)
+        }
+        (View::Grid, KeyCode::Char('o')) if on_sessions => Command::Sessions(S::OpenShellHere),
+        (View::Grid, KeyCode::Char('x')) if on_sessions => Command::Sessions(S::StageConfirmClose),
+        (View::Grid, KeyCode::Char(' ')) if on_sessions => Command::Sessions(S::AckSelected),
+        (View::Grid, KeyCode::Char('n')) if on_sessions => Command::Sessions(S::SpawnAgentHere),
+        (View::Grid, KeyCode::Char('N')) if on_sessions => Command::Sessions(S::OpenPlacesPicker),
+        (View::Grid, KeyCode::Char('M')) if on_sessions => {
+            Command::Sessions(S::OpenBookmarksPicker)
+        }
+        (View::Grid, KeyCode::Char('p')) if on_sessions => Command::Sessions(S::OpenPromptInput),
+        (View::Grid, KeyCode::Char('t')) if on_sessions => Command::Sessions(S::OpenTodoPanel),
+        (View::Grid, KeyCode::Char('r')) if on_sessions => Command::Sessions(S::OpenRenameSession),
+        (View::PromptInput, KeyCode::Enter) => {
+            if !app.prompt_buffer.trim().is_empty() && app.prompt_input_for_project() {
+                return None;
+            }
+            Command::Sessions(S::SubmitPrompt)
+        }
+        (View::RenameSession, KeyCode::Enter) => Command::Sessions(S::SubmitRename),
+        _ => return None,
+    };
+    Some(cmd)
 }
 
 /// Dispatch a single key press. `spawn_metrics` is the run()-local closure
@@ -51,43 +113,22 @@ pub(crate) async fn handle_key(
     if tasks::handle(app, key, terminal, on_tasks) {
         return KeyOutcome::Continue;
     }
+    if let Some(cmd) = map_command(app, &key, on_sessions) {
+        for effect in app.execute(cmd) {
+            crate::effects::apply_effect(
+                app,
+                effect,
+                terminal,
+                scan_tx_main,
+                detail_tx,
+                state_debug_tx,
+                spawn_metrics,
+            )
+            .await;
+        }
+        return KeyOutcome::Continue;
+    }
     match (&app.view, key.code) {
-        // Quit
-        (View::Grid, KeyCode::Char('q')) => {
-            app.should_quit = true;
-        }
-        // Shift+K / Tab cycles forward, Shift+J / BackTab cycles backward.
-        (View::Grid, KeyCode::Tab | KeyCode::Char('K')) => {
-            let was_metrics = app.current_tab == Tab::Metrics;
-            app.cycle_tab();
-            if !was_metrics && app.current_tab == Tab::Metrics && app.metrics.analysis.is_none() {
-                spawn_metrics();
-            }
-        }
-        (View::Grid, KeyCode::BackTab | KeyCode::Char('J')) => {
-            let was_metrics = app.current_tab == Tab::Metrics;
-            app.cycle_tab_back();
-            if !was_metrics && app.current_tab == Tab::Metrics && app.metrics.analysis.is_none() {
-                spawn_metrics();
-            }
-        }
-        (View::Grid, KeyCode::Char('m')) if on_sessions => {
-            let needs_compute = app.metrics.analysis.is_none();
-            app.set_tab(Tab::Metrics);
-            if needs_compute {
-                spawn_metrics();
-            }
-        }
-        (View::Grid, KeyCode::Right | KeyCode::Char('l')) if on_sessions => {
-            app.sessions.move_right()
-        }
-        (View::Grid, KeyCode::Left | KeyCode::Char('h')) if on_sessions => app.sessions.move_left(),
-        (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_sessions => {
-            app.sessions.move_down(app.render.grid_cols)
-        }
-        (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_sessions => {
-            app.sessions.move_up(app.render.grid_cols)
-        }
         (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_metrics => {
             app.metrics_nav_down();
         }
@@ -485,19 +526,6 @@ pub(crate) async fn handle_key(
             app.metrics.analysis = None;
             spawn_metrics();
         }
-        // 'i' for info popup (old Enter behavior)
-        (View::Grid, KeyCode::Char('i')) if on_sessions => {
-            if let Some(id) = app.selected_session_id() {
-                let _ = detail_tx.send(id).await;
-                app.enter_popup();
-            }
-        }
-        (View::Grid, KeyCode::Char('D')) if on_sessions => {
-            if let Some(id) = app.selected_session_id() {
-                let _ = state_debug_tx.send(id).await;
-                app.enter_state_debug();
-            }
-        }
         (View::StateDebug, KeyCode::Esc | KeyCode::Char('q')) => {
             app.close_state_debug();
         }
@@ -506,97 +534,6 @@ pub(crate) async fn handle_key(
         }
         (View::StateDebug, KeyCode::Up | KeyCode::Char('k')) => {
             app.debug_scroll_up();
-        }
-        (View::Grid, KeyCode::Char('H')) if on_sessions => {
-            app.toggle_show_inactive();
-            let state = if app.sessions.show_inactive {
-                "shown"
-            } else {
-                "hidden"
-            };
-            app.set_status(format!("inactive sessions {}", state));
-        }
-        (View::Grid, KeyCode::Char('W')) if on_sessions => {
-            app.toggle_show_orch_workers();
-            let state = if app.sessions.show_orch_workers {
-                "shown"
-            } else {
-                "hidden"
-            };
-            app.set_status(format!("orchestrator/worker sessions {}", state));
-        }
-        (View::Grid, KeyCode::Char('f') | KeyCode::Enter) if on_sessions => {
-            if let Some(session) = app.selected_session_info().cloned() {
-                if session.state == models::SessionState::Inactive {
-                    let resume = match session.agent_kind {
-                        cc_hub_lib::agent::AgentKind::Claude => {
-                            Some(spawn::ResumeTarget::SessionId(session.session_id.clone()))
-                        }
-                        cc_hub_lib::agent::AgentKind::Pi => session
-                            .jsonl_path
-                            .clone()
-                            .map(spawn::ResumeTarget::SessionFile),
-                    };
-                    let status = match resume {
-                        Some(target) => match spawn::spawn_agent_session(
-                            &session.agent_id,
-                            &session.cwd,
-                            Some(target),
-                            None,
-                            false,
-                        ) {
-                            Ok(name) => format!(
-                                "resumed {} [{}]",
-                                models::short_sid(&session.session_id),
-                                name
-                            ),
-                            Err(e) => format!("resume failed: {}", e),
-                        },
-                        None => "resume failed: missing session transcript".to_string(),
-                    };
-                    app.set_status(status);
-                } else if let Some(tmux_name) = session.tmux_session.clone() {
-                    let (cols, rows) = crate::popup_pane_size(terminal);
-                    match tmux_pane::TmuxPaneView::spawn(&tmux_name, rows, cols) {
-                        Ok(pane) => {
-                            app.enter_tmux_pane(pane);
-                        }
-                        Err(e) => {
-                            app.set_status(format!("tmux attach failed: {}", e));
-                        }
-                    }
-                } else {
-                    match focus::focus_window(session.pid) {
-                        focus::FocusOutcome::Focused => {}
-                        focus::FocusOutcome::NeedsReattach(name) => {
-                            let msg = match spawn::attach_tmux_session(&name, &session.cwd) {
-                                Ok(_) => format!("reattached terminal to {}", name),
-                                Err(e) => format!("reattach failed: {}", e),
-                            };
-                            app.set_status(msg);
-                        }
-                        focus::FocusOutcome::Failed(msg) => {
-                            app.set_status(msg);
-                        }
-                    }
-                }
-            }
-        }
-        (View::Grid, KeyCode::Char('o')) if on_sessions => {
-            if let Some(session) = app.selected_session_info().cloned() {
-                let (cols, rows) = crate::popup_pane_size(terminal);
-                match spawn::spawn_shell_tmux_session(&session.cwd) {
-                    Ok(tmux_name) => {
-                        match tmux_pane::TmuxPaneView::spawn_owned(&tmux_name, rows, cols) {
-                            Ok(pane) => app.enter_tmux_pane(pane),
-                            Err(e) => app.set_status(format!("shell attach failed: {}", e)),
-                        }
-                    }
-                    Err(e) => {
-                        app.set_status(format!("shell spawn failed: {}", e));
-                    }
-                }
-            }
         }
         (View::TmuxPane, KeyCode::F(1)) => {
             app.close_tmux_pane();
@@ -625,9 +562,6 @@ pub(crate) async fn handle_key(
             if let Some(pane) = app.tmux_pane.as_mut() {
                 pane.send_key(key);
             }
-        }
-        (View::Grid, KeyCode::Char('x')) if on_sessions => {
-            app.enter_confirm_close();
         }
         (View::ConfirmClose, KeyCode::Char('y') | KeyCode::Char('Y')) => {
             if let Some(pending) = app.take_pending_project_delete() {
@@ -724,38 +658,6 @@ pub(crate) async fn handle_key(
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q'),
         ) => {
             app.cancel_confirm_close();
-        }
-        // Space: force selected session to display as Idle until new
-        // activity advances its watermark.
-        (View::Grid, KeyCode::Char(' ')) if on_sessions => {
-            app.ack_selected();
-        }
-        (View::Grid, KeyCode::Char('n')) if on_sessions => {
-            if let Some(sess) = app.selected_session_info().cloned() {
-                let status = match spawn::spawn_agent_session(
-                    &sess.agent_id,
-                    &sess.cwd,
-                    None,
-                    None,
-                    false,
-                ) {
-                    Ok(name) => {
-                        let status = format!("started {} [{}]", sess.agent_badge(), name);
-                        app.watch_spawn(name, sess.agent_badge());
-                        status
-                    }
-                    Err(e) => format!("spawn failed: {}", e),
-                };
-                app.set_status(status);
-            }
-        }
-        (View::Grid, KeyCode::Char('N')) if on_sessions => {
-            app.enter_session_places_picker();
-        }
-        (View::Grid, KeyCode::Char('M')) if on_sessions => {
-            if !app.enter_bookmarks_picker() {
-                app.set_status("no bookmarks — press N then m on a folder to add one".into());
-            }
         }
         // Places mode (task assign): printable keys type into the fuzzy
         // filter, so the generic picker bindings below (j/k/q/m/. etc.)
@@ -944,17 +846,6 @@ pub(crate) async fn handle_key(
                 ));
             }
         }
-        (View::Grid, KeyCode::Char('p')) if on_sessions => {
-            app.enter_prompt_input();
-        }
-        (View::Grid, KeyCode::Char('t')) if on_sessions => {
-            app.enter_todo_panel();
-        }
-        (View::Grid, KeyCode::Char('r')) if on_sessions => {
-            if !app.enter_rename_session() {
-                app.set_status("no session selected to rename".into());
-            }
-        }
         (View::RenameSession, KeyCode::Esc) => {
             app.close_rename_session();
         }
@@ -964,16 +855,6 @@ pub(crate) async fn handle_key(
         (View::RenameSession, KeyCode::Char(c)) => {
             app.rename_buffer.push(c);
         }
-        (View::RenameSession, KeyCode::Enter) => match app.submit_session_rename() {
-            Some((sid, title)) => match title::persist_title(&sid, &title) {
-                Ok(()) => app.set_status(format!("renamed to “{}”", title)),
-                Err(e) => {
-                    log::warn!("rename: persist failed for {}: {}", sid, e);
-                    app.set_status(format!("rename failed: {}", e));
-                }
-            },
-            None => app.set_status("rename cancelled — empty title".into()),
-        },
         (View::PromptInput, KeyCode::Esc) => {
             app.close_prompt_input();
         }
@@ -986,121 +867,47 @@ pub(crate) async fn handle_key(
         (View::PromptInput, KeyCode::Char(c)) => {
             app.prompt_buffer.push(c);
         }
+        // Projects-tab flow only: create task, spawn orchestrator, queue the
+        // orchestrator prompt for dispatch when Idle. The Sessions flow and
+        // the empty-prompt cancel are Command::Sessions(SubmitPrompt) via
+        // map_command above.
         (View::PromptInput, KeyCode::Enter) => {
-            if app.prompt_buffer.trim().is_empty() {
-                app.close_prompt_input();
-                app.set_status("empty prompt — dispatch cancelled".into());
-                return KeyOutcome::Continue;
-            }
-
-            // Projects-tab flow: create task, spawn orchestrator,
-            // queue the orchestrator prompt for dispatch when Idle.
-            if app.prompt_input_for_project() {
-                let Some((cwd, prompt, agent_id)) = app.submit_project_task() else {
-                    app.set_status("project task: missing cwd".into());
-                    return KeyOutcome::Continue;
-                };
-                let project_root = std::path::Path::new(&cwd);
-                let project_name = project_root
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| cwd.clone());
-                match cc_hub_lib::orchestrator::spawn_orchestrator_for_new_task(
-                    project_root,
-                    &project_name,
-                    prompt,
-                    agent_id.as_deref(),
-                ) {
-                    Ok((state, tmux_name, orch_prompt)) => {
-                        if let Some(prompt) = orch_prompt {
-                            app.queue_pending_dispatch(tmux_name.clone(), prompt);
-                        }
-                        log::info!(
-                            "project task: created {} in {}, orchestrator [{}]",
-                            state.task_id,
-                            cwd,
-                            tmux_name
-                        );
-                        app.set_status(format!(
-                            "task created [{}], orchestrator [{}] starting…",
-                            state.task_id, tmux_name
-                        ));
-                    }
-                    Err(e) => {
-                        log::warn!("project task: spawn failed: {}", e);
-                        app.set_status(format!("project task failed: {}", e));
-                    }
-                }
-                return KeyOutcome::Continue;
-            }
-
-            let target = app.dispatch_target().cloned();
-            let prompt = app.submit_prompt_input();
-
-            if let Some((pid, name, tmux)) = target {
-                log::info!(
-                    "dispatch: idle target {} (PID {}) [{}] prompt_len={}",
-                    name,
-                    pid,
-                    tmux,
-                    prompt.len()
-                );
-                crate::spawn_dispatch(
-                    scan_tx_main.clone(),
-                    tmux.clone(),
-                    prompt,
-                    format!("dispatched to {} (PID {}) [{}]", name, pid, tmux),
-                    "dispatch failed".to_string(),
-                );
-                return KeyOutcome::Continue;
-            }
-
-            let Some(cwd) = app.default_spawn_cwd() else {
-                app.set_status("no idle agent and no cwd to spawn in".into());
+            let Some((cwd, prompt, agent_id)) = app.submit_project_task() else {
+                app.set_status("project task: missing cwd".into());
                 return KeyOutcome::Continue;
             };
-            let agent_id = config::get().default_session_agent_id();
-            let agent = config::get().agent(&agent_id);
-            let supports_initial_prompt =
-                agent.as_ref().is_some_and(|a| a.supports_initial_prompt());
-            match spawn::spawn_agent_session(
-                &agent_id,
-                &cwd,
-                None,
-                if supports_initial_prompt {
-                    Some(prompt.as_str())
-                } else {
-                    None
-                },
-                false,
+            let project_root = std::path::Path::new(&cwd);
+            let project_name = project_root
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| cwd.clone());
+            match cc_hub_lib::orchestrator::spawn_orchestrator_for_new_task(
+                project_root,
+                &project_name,
+                prompt,
+                agent_id.as_deref(),
             ) {
-                Ok(tmux_name) => {
-                    if supports_initial_prompt {
-                        log::info!(
-                            "dispatch: no idle agent, spawned [{}] in {} with inline prompt (len={})",
-                            tmux_name, cwd, prompt.len()
-                        );
-                        app.set_status(format!(
-                            "no idle agent — spawned {} [{}]",
-                            agent_id, tmux_name
-                        ));
-                    } else {
-                        log::info!(
-                            "dispatch: no idle agent, spawned [{}] in {} — queueing prompt (len={})",
-                            tmux_name, cwd, prompt.len()
-                        );
+                Ok((state, tmux_name, orch_prompt)) => {
+                    if let Some(prompt) = orch_prompt {
                         app.queue_pending_dispatch(tmux_name.clone(), prompt);
-                        app.set_status(format!(
-                            "no idle agent — spawned {} [{}], prompt queued",
-                            agent_id, tmux_name
-                        ));
                     }
+                    log::info!(
+                        "project task: created {} in {}, orchestrator [{}]",
+                        state.task_id,
+                        cwd,
+                        tmux_name
+                    );
+                    app.set_status(format!(
+                        "task created [{}], orchestrator [{}] starting…",
+                        state.task_id, tmux_name
+                    ));
                 }
                 Err(e) => {
-                    log::warn!("dispatch: auto-spawn failed: {}", e);
-                    app.set_status(format!("auto-spawn failed: {}", e));
+                    log::warn!("project task: spawn failed: {}", e);
+                    app.set_status(format!("project task failed: {}", e));
                 }
             }
+            return KeyOutcome::Continue;
         }
         // To-do side panel — add-task input mode (these guarded arms come
         // first so typed characters edit the buffer instead of triggering

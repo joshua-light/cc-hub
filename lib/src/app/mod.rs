@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod command;
 mod metrics_view;
 mod projects_view;
 mod render_state;
@@ -24,6 +25,7 @@ mod sessions_view;
 mod tasks_view;
 mod todo_panel;
 
+pub use command::{Command, Effect, GlobalCommand, SessionsCommand};
 pub use metrics_view::MetricsView;
 pub use projects_view::ProjectsView;
 pub use render_state::RenderState;
@@ -2677,46 +2679,10 @@ pub fn kanban_col_name(col: usize) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_runtime::AgentRuntime;
+    use crate::agent_runtime::testing::RecordingRuntime;
     use crate::orchestrator::{Project, TaskState, TaskStatus, Worker};
-    use crate::spawn::ResumeTarget;
-    use std::io;
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
-
-    #[derive(Default)]
-    struct RecordingRuntime {
-        prompts: Mutex<Vec<(String, String)>>,
-    }
-
-    impl AgentRuntime for RecordingRuntime {
-        fn session_exists(&self, _tmux: &str) -> bool {
-            true
-        }
-        fn ready_for_input(&self, _tmux: &str) -> bool {
-            true
-        }
-        fn send_prompt(&self, tmux: &str, prompt: &str) -> io::Result<()> {
-            self.prompts
-                .lock()
-                .unwrap()
-                .push((tmux.to_string(), prompt.to_string()));
-            Ok(())
-        }
-        fn kill_session(&self, _tmux: &str) -> io::Result<()> {
-            Ok(())
-        }
-        fn spawn_session(
-            &self,
-            _agent_id: &str,
-            _cwd: &str,
-            _resume: Option<ResumeTarget>,
-            _initial_prompt: Option<&str>,
-            _readonly_tools: bool,
-        ) -> io::Result<String> {
-            Ok("mock-spawn".into())
-        }
-    }
+    use std::sync::Arc;
 
     #[test]
     #[cfg(unix)]
