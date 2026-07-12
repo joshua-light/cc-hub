@@ -6,7 +6,8 @@ use super::messages::{
     extract_first_user_message, extract_last_activity, extract_last_user_message, extract_metadata,
 };
 use super::state::{
-    extract_context_tokens, extract_current_tool, extract_state, is_currently_thinking, CurrentTool,
+    extract_context_tokens, extract_current_tool, extract_state_at, is_currently_thinking,
+    CurrentTool,
 };
 use crate::models::SessionState;
 use serde_json::Value;
@@ -36,11 +37,12 @@ pub struct StateDerivation {
 }
 
 impl StateDerivation {
-    /// Run the full extract pipeline over a tail window. Pure: no IO, no cache.
-    fn derive(entries: &[Value]) -> Self {
+    /// Run the full extract pipeline over a tail window. Pure: no IO, no
+    /// cache. `source` labels unknown-stop-reason warnings with the file.
+    fn derive(entries: &[Value], source: &Path) -> Self {
         let (git_branch, model, version) = extract_metadata(entries);
         StateDerivation {
-            state: extract_state(entries),
+            state: extract_state_at(entries, Some(source)),
             last_user_message: extract_last_user_message(entries),
             last_activity: extract_last_activity(entries),
             git_branch,
@@ -117,7 +119,7 @@ pub fn derive_state_cached(path: &Path) -> Option<Arc<StateDerivation>> {
     // of *other* paths aren't serialized behind this file's IO.
     let entries = read_jsonl_tail_for_state(path);
     STATE_DERIVE_PARSES.fetch_add(1, Ordering::Relaxed);
-    let derived = Arc::new(StateDerivation::derive(&entries));
+    let derived = Arc::new(StateDerivation::derive(&entries, path));
 
     let mut cache = state_cache().lock().unwrap_or_else(|e| e.into_inner());
     cache.insert(path.to_path_buf(), (mtime, Arc::clone(&derived)));

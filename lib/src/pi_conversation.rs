@@ -1,3 +1,4 @@
+use crate::conversation::classify;
 use crate::conversation::{
     parse_timestamp_ms, CurrentTool, EntrySummary, ExplanationStep, StateExplanation, Verdict,
     NO_CONTENT, NO_TEXT_CONTENT, THINKING_MARKER, TOOL_MARKER_PREFIX,
@@ -103,23 +104,49 @@ fn content_text(content: &Value, max_len: usize) -> Option<String> {
     None
 }
 
-pub fn extract_state(entries: &[Value]) -> SessionState {
-    let last = entries
-        .iter()
-        .rev()
-        .find(|e| matches!(message_role(e), Some("user") | Some("assistant")));
-    let Some(last) = last else {
-        return SessionState::Idle;
-    };
-    match message_role(last) {
-        Some("user") => SessionState::Processing,
-        Some("assistant") => match assistant_stop_reason(last).unwrap_or("") {
-            "toolUse" => SessionState::Processing,
-            "stop" | "error" | "aborted" | "length" => SessionState::WaitingForInput,
-            _ => SessionState::Processing,
-        },
-        _ => SessionState::Idle,
+/// The Pi JSONL dialect: format adapters over this module's entry helpers.
+/// The state *semantics* live in [`classify::classify`], shared with the
+/// Claude backend. Pi has no interrupt marker and no blocking tools today,
+/// so those adapters are constant — if Pi grows either, this is the one
+/// place to teach cc-hub about it.
+pub(crate) struct PiDialect;
+
+impl classify::TranscriptDialect for PiDialect {
+    const NAME: &'static str = "pi";
+
+    fn role(&self, entry: &Value) -> Option<classify::Role> {
+        match message_role(entry) {
+            Some("user") => Some(classify::Role::User),
+            Some("assistant") => Some(classify::Role::Assistant),
+            _ => None,
+        }
     }
+
+    fn stop_reason<'a>(&self, entry: &'a Value) -> Option<&'a str> {
+        assistant_stop_reason(entry)
+    }
+
+    fn map_stop(&self, stop: &str) -> classify::StopMapping {
+        match stop {
+            "toolUse" => classify::StopMapping::ToolUse,
+            // Pi ends a turn on error/abort/length too — the agent stopped
+            // and waits for the user either way.
+            "stop" | "error" | "aborted" | "length" => classify::StopMapping::EndOfTurn,
+            _ => classify::StopMapping::Unknown,
+        }
+    }
+
+    fn is_interrupt_marker(&self, _entry: &Value) -> bool {
+        false
+    }
+
+    fn blocking_tool(&self, _entry: &Value) -> classify::BlockingTool {
+        classify::BlockingTool::None
+    }
+}
+
+pub fn extract_state(entries: &[Value]) -> SessionState {
+    classify::classify(&PiDialect, entries, None)
 }
 
 pub fn is_currently_thinking(entries: &[Value]) -> bool {

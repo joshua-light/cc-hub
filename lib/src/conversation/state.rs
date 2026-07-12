@@ -1,7 +1,7 @@
 //! Entry classification and the session-state machine.
 
+use super::classify;
 use crate::models::SessionState;
-use log::debug;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::Path;
@@ -136,86 +136,73 @@ pub(super) fn is_interrupt_marker(entry: &Value) -> bool {
     })
 }
 
+/// The Claude JSONL dialect: format adapters over this module's entry
+/// helpers. The state *semantics* live in [`classify::classify`], shared
+/// with every other backend.
+pub(crate) struct ClaudeDialect;
+
+impl classify::TranscriptDialect for ClaudeDialect {
+    const NAME: &'static str = "claude";
+
+    /// System entries (turn_duration, stop_hook_summary, etc.) are metadata
+    /// that appear between turns. They must be skipped for state detection:
+    /// during an active tool-use loop a `turn_duration` entry sits between
+    /// the assistant's tool_use request and the tool result, and would read
+    /// as a false WaitingForInput while the agent is executing a tool.
+    fn role(&self, entry: &Value) -> Option<classify::Role> {
+        if !is_meaningful_entry(entry) {
+            return None;
+        }
+        match entry.get("type").and_then(|t| t.as_str()) {
+            Some("user") => Some(classify::Role::User),
+            Some("assistant") => Some(classify::Role::Assistant),
+            _ => None,
+        }
+    }
+
+    fn stop_reason<'a>(&self, entry: &'a Value) -> Option<&'a str> {
+        entry.get("message")?.get("stop_reason")?.as_str()
+    }
+
+    fn map_stop(&self, stop: &str) -> classify::StopMapping {
+        match stop {
+            "end_turn" => classify::StopMapping::EndOfTurn,
+            "tool_use" => classify::StopMapping::ToolUse,
+            _ => classify::StopMapping::Unknown,
+        }
+    }
+
+    fn is_interrupt_marker(&self, entry: &Value) -> bool {
+        is_interrupt_marker(entry)
+    }
+
+    /// QUESTION_TOOLS ⊂ USER_INPUT_TOOLS, so `awaits` is the single source
+    /// of truth for "blocked on user"; the asks_question check just routes
+    /// the variant.
+    fn blocking_tool(&self, entry: &Value) -> classify::BlockingTool {
+        if assistant_asks_question(entry) {
+            classify::BlockingTool::Question
+        } else if assistant_awaits_user_input(entry) {
+            classify::BlockingTool::WaitsForInput
+        } else {
+            classify::BlockingTool::None
+        }
+    }
+}
+
 /// Determine session state from the last meaningful user/assistant entry.
 ///   Processing      — last entry indicates the agent is working
 ///   WaitingForInput — last entry indicates a completed turn
 ///   Idle            — no meaningful entries (fresh session)
-///
-/// System entries (turn_duration, stop_hook_summary, etc.) are metadata that
-/// appear between turns.  They must be skipped for state detection because
-/// during an active tool-use loop a `turn_duration` entry sits between the
-/// assistant's tool_use request and the tool result, causing a false
-/// WaitingForInput while the agent is actually executing a tool.
 pub fn extract_state(entries: &[Value]) -> SessionState {
-    let last = match entries
-        .iter()
-        .rev()
-        .filter(|e| is_meaningful_entry(e))
-        .find(|e| {
-            matches!(
-                e.get("type").and_then(|t| t.as_str()),
-                Some("user") | Some("assistant")
-            )
-        }) {
-        Some(e) => e,
-        None => {
-            debug!("extract_state: no meaningful user/assistant entry → Idle");
-            return SessionState::Idle;
-        }
-    };
+    extract_state_at(entries, None)
+}
 
-    let entry_type = last.get("type").and_then(|t| t.as_str()).unwrap_or("");
-    let state = match entry_type {
-        // A trailing interrupt marker means the user hit Esc and hasn't
-        // submitted a new prompt yet — the agent stopped, nothing runs.
-        "user" if is_interrupt_marker(last) => {
-            debug!("extract_state: trailing interrupt marker → WaitingForInput");
-            SessionState::WaitingForInput
-        }
-        "user" => SessionState::Processing,
-        "assistant" => {
-            let stop = last
-                .get("message")
-                .and_then(|m| m.get("stop_reason"))
-                .and_then(|s| s.as_str())
-                .unwrap_or("");
-            match stop {
-                "end_turn" => SessionState::WaitingForInput,
-                // tool_use means the agent requested a tool call.
-                // Some tools block on user interaction — treat those as
-                // WaitingForInput so the UI shows them correctly.
-                "tool_use" => {
-                    // QUESTION_TOOLS ⊂ USER_INPUT_TOOLS, so awaits is the
-                    // single source of truth for "blocked on user"; the extra
-                    // asks_question check just routes the variant.
-                    let awaits = assistant_awaits_user_input(last);
-                    let asks_question = awaits && assistant_asks_question(last);
-                    debug!(
-                        "extract_state: last=assistant stop=tool_use asks_question={} awaits_input={}",
-                        asks_question, awaits
-                    );
-                    if asks_question {
-                        SessionState::Question
-                    } else if awaits {
-                        SessionState::WaitingForInput
-                    } else {
-                        SessionState::Processing
-                    }
-                }
-                _ => {
-                    debug!(
-                        "extract_state: last=assistant stop_reason={:?} → Processing",
-                        stop
-                    );
-                    SessionState::Processing
-                }
-            }
-        }
-        _ => SessionState::Processing,
-    };
-
-    debug!("extract_state: last_type={} → {}", entry_type, state);
-    state
+/// [`extract_state`] with the transcript path attached, so an unknown stop
+/// reason can be warned about with its source file. Callers that have the
+/// path (the scan cache) use this; the plain form passes `None`.
+pub fn extract_state_at(entries: &[Value], source: Option<&Path>) -> SessionState {
+    classify::classify(&ClaudeDialect, entries, source)
 }
 
 /// Whether the session's most recent assistant entry ends with a `thinking`

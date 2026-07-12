@@ -10,11 +10,12 @@
 //! - [`render`] — content-preview and tool-display rendering.
 
 mod cache;
+pub(crate) mod classify;
 mod explain;
 mod io;
 mod messages;
 mod render;
-mod state;
+pub(crate) mod state;
 
 #[cfg(test)]
 mod test_util;
