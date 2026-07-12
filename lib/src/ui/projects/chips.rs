@@ -67,6 +67,9 @@ pub(crate) fn render_project_chip_strip(frame: &mut Frame, area: Rect, app: &App
                             running += 1;
                         }
                     }
+                    // Personal-board state; never present in a project scan,
+                    // but bucket it with the workerless-Running chip anyway.
+                    crate::orchestrator::TaskStatus::Planning => planning += 1,
                     crate::orchestrator::TaskStatus::Review => review += 1,
                     crate::orchestrator::TaskStatus::Merging => merging += 1,
                     crate::orchestrator::TaskStatus::Done => done += 1,

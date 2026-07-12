@@ -68,12 +68,14 @@ If `pr merge` reports conflicts or a dirty-tree refusal, follow that recipe inst
 pub fn build_orchestrator_prompt(state: &TaskState, cc_hub_bin: &Path) -> String {
     let TaskState {
         task_id,
-        project_id,
-        project_root,
         prompt,
         orchestrator_agent_id,
         ..
     } = state;
+    // Orchestrator prompts only exist for orchestrated tasks; empty
+    // placeholders keep a corrupted state readable instead of panicking.
+    let project_id = state.project_id.as_deref().unwrap_or("");
+    let project_root = state.project_root.as_deref().unwrap_or(Path::new(""));
     let bin = cc_hub_bin.display();
     let prefix = orchestrator_prompt_prefix(task_id);
     format!(
@@ -275,7 +277,7 @@ fn launch_orchestrator_session(
     state.orchestrator_agent_kind = agent.kind;
     let orchestrator_prompt = build_orchestrator_prompt(state, &cc_hub_bin);
 
-    let cwd = state.project_root.to_string_lossy().into_owned();
+    let cwd = state.require_project()?.1.to_string_lossy().into_owned();
     let supports_initial = agent.supports_initial_prompt();
     let prompt_to_dispatch = if supports_initial {
         None
@@ -425,6 +427,11 @@ pub fn restart_task(
                 "task is Merging — restart would interrupt the merge flow",
             ));
         }
+        TaskStatus::Planning => {
+            return Err(io::Error::other(
+                "task is Planning — a personal-board state; orchestrated restart doesn't apply",
+            ));
+        }
         TaskStatus::Backlog | TaskStatus::Running => {}
     }
     let old_tmux = pre.orchestrator_tmux.clone();
@@ -445,7 +452,7 @@ pub fn restart_task(
                 return;
             }
         }
-        claimed_from = Some(s.status.clone());
+        claimed_from = Some(s.status);
         s.status = TaskStatus::Running;
         s.orchestrator_session_id = None;
         s.orchestrator_tmux = None;

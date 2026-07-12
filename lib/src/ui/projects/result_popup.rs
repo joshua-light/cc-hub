@@ -36,6 +36,8 @@ pub(crate) fn render_projects_result(frame: &mut Frame, area: Rect, app: &mut Ap
     let status_label = t.status.as_str();
     let status_color = match t.status {
         crate::orchestrator::TaskStatus::Running => Color::LightYellow,
+        // Personal-board state; never present in a project scan.
+        crate::orchestrator::TaskStatus::Planning => Color::LightYellow,
         crate::orchestrator::TaskStatus::Review => Color::LightCyan,
         crate::orchestrator::TaskStatus::Merging => Color::LightMagenta,
         crate::orchestrator::TaskStatus::Done => Color::LightGreen,

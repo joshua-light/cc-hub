@@ -142,7 +142,8 @@ impl ProjectsSnapshot {
                     out.entry(name.to_string())
                         .or_insert(SessionRole::Orchestrator {
                             task_id: t.task_id.clone(),
-                            project_id: t.project_id.clone(),
+                            // Scanned from the project tree, so always Some.
+                            project_id: t.project_id.clone().unwrap_or_default(),
                             agent_id: t.orchestrator_agent_id.clone(),
                             agent_kind: t.orchestrator_agent_kind,
                         });
@@ -151,7 +152,7 @@ impl ProjectsSnapshot {
                     out.entry(w.tmux_name.clone())
                         .or_insert(SessionRole::Worker {
                             task_id: t.task_id.clone(),
-                            project_id: t.project_id.clone(),
+                            project_id: t.project_id.clone().unwrap_or_default(),
                             agent_id: w.agent_id.clone(),
                             agent_kind: w.agent_kind,
                             worktree: w.worktree.clone(),

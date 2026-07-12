@@ -145,7 +145,16 @@ pub fn tick() -> TickOutcome {
 
     let prompt = build_review_prompt(&stamped, &pr_record, &cc_hub_bin);
 
-    let cwd = stamped.project_root.to_string_lossy().into_owned();
+    // Review tasks are orchestrated by construction (they entered Review via
+    // the PR flow), so a missing project is state corruption — skip loudly.
+    let Ok((_, stamped_root)) = stamped.require_project() else {
+        warn!(
+            "auto_review: task {} has no project; skipping",
+            stamped.task_id
+        );
+        return TickOutcome::default();
+    };
+    let cwd = stamped_root.to_string_lossy().into_owned();
     // Claude ignores `initial_prompt` (see spawn::build_agent_command); for
     // those backends the prompt has to be dispatched after the session
     // reaches Idle, same pattern start_backlog_task uses. Pi consumes
@@ -242,10 +251,10 @@ You are running in **read-only** mode — your tool layer cannot edit files. Tha
 
 Begin by inspecting the diff, then run any build/test you need, then issue your verdict.
 ",
-        root = state.project_root.display(),
-        root_q = state.project_root.display(),
+        root = state.project_root.as_deref().unwrap_or(std::path::Path::new("")).display(),
+        root_q = state.project_root.as_deref().unwrap_or(std::path::Path::new("")).display(),
         task_id = state.task_id,
-        project_id = state.project_id,
+        project_id = state.project_id.as_deref().unwrap_or(""),
         pr_id = pr.id,
         pr_title = pr.title,
         branch = pr.branch,

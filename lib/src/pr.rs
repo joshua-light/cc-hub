@@ -141,7 +141,7 @@ pub fn update_pr<F>(project_id: &str, task_id: &str, f: F) -> io::Result<PullReq
 where
     F: FnOnce(&mut PullRequest),
 {
-    let _lock = orchestrator::lock_task_state(project_id, task_id)?;
+    let _lock = orchestrator::lock_task_state(Some(project_id), task_id)?;
     let mut pr = read_pr(project_id, task_id)?
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no PR for this task"))?;
     f(&mut pr);
@@ -196,12 +196,13 @@ pub fn create_pr(
     title: String,
     description: String,
 ) -> io::Result<PullRequest> {
-    let id = allocate_pr_id(&state.project_id)?;
+    let (project_id, _) = state.require_project()?;
+    let id = allocate_pr_id(project_id)?;
     let now = orchestrator::now_unix_secs();
     let pr = PullRequest {
         id,
         task_id: state.task_id.clone(),
-        project_id: state.project_id.clone(),
+        project_id: project_id.to_string(),
         branch,
         base,
         title,

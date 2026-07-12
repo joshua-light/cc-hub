@@ -242,7 +242,7 @@ fn queue_missing_task_titles(
                 let title_for_persist = t.clone();
                 let persist = tokio::task::spawn_blocking(move || {
                     cc_hub_lib::orchestrator::set_task_title(
-                        &project_id_for_persist,
+                        project_id_for_persist.as_deref(),
                         &task_id_for_persist,
                         &title_for_persist,
                     )

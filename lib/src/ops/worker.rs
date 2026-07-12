@@ -135,7 +135,11 @@ pub fn spawn_worker(
             project_id, task_id, e
         ))
     })?;
-    let project_root = state.project_root.clone();
+    let project_root = state
+        .require_project()
+        .map_err(|e| OpError::Usage(e.to_string()))?
+        .1
+        .to_path_buf();
 
     let (cwd, worktree_name) = if let Some(name) = opts.worktree.clone() {
         let main = orchestrator::detect_main_branch(&project_root);
@@ -230,7 +234,11 @@ pub fn merge_worktree(
 ) -> Result<MergeWorktreeOutcome, OpError> {
     let state = orchestrator::read_task_state(project_id, task_id)
         .map_err(|e| OpError::Other(format!("load state: {}", e)))?;
-    let project_root = state.project_root.clone();
+    let project_root = state
+        .require_project()
+        .map_err(|e| OpError::Usage(e.to_string()))?
+        .1
+        .to_path_buf();
     let branch = orchestrator::worktree_branch(task_id, worktree_name);
     let main = orchestrator::detect_main_branch(&project_root);
 

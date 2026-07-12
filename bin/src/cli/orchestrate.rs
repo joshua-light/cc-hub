@@ -53,7 +53,7 @@ fn orchestrate_start(args: &[String]) -> Result<(), CliError> {
         "agent_id": spawn.state.orchestrator_agent_id,
         "agent_kind": spawn.state.orchestrator_agent_kind,
         "tmux": spawn.tmux,
-        "cwd": spawn.state.project_root.to_string_lossy(),
+        "cwd": spawn.state.project_root.as_deref().unwrap_or(std::path::Path::new("")).to_string_lossy(),
         "prompt_status": prompt_status,
         "task_id": task_id,
         "project_id": project_id,

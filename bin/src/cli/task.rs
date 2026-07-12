@@ -178,7 +178,7 @@ fn task_start(args: &[String]) -> Result<(), CliError> {
         "ok": true,
         "agent_id": spawn.state.orchestrator_agent_id,
         "agent_kind": spawn.state.orchestrator_agent_kind,
-        "cwd": spawn.state.project_root.to_string_lossy(),
+        "cwd": spawn.state.project_root.as_deref().unwrap_or(std::path::Path::new("")).to_string_lossy(),
         "tmux": spawn.tmux,
         "prompt_status": prompt_status,
         "task_id": task_id,
@@ -758,8 +758,8 @@ mod tests {
             let task_id = entries[0].file_name().to_string_lossy().into_owned();
 
             let state = orchestrator::read_task_state("p1", &task_id).expect("read state");
-            assert_eq!(state.project_root, PathBuf::from("/tmp/p1"));
-            assert_eq!(state.project_id, "p1");
+            assert_eq!(state.project_root, Some(PathBuf::from("/tmp/p1")));
+            assert_eq!(state.project_id.as_deref(), Some("p1"));
             assert_eq!(state.status, TaskStatus::Backlog);
 
             let projects = orchestrator::load_projects();

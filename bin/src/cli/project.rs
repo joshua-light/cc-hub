@@ -45,6 +45,8 @@ fn project_list(args: &[String]) -> Result<(), CliError> {
                 for t in tasks {
                     match t.status {
                         TaskStatus::Backlog => backlog += 1,
+                        // Personal-board state; never in a project scan.
+                        TaskStatus::Planning => running += 1,
                         TaskStatus::Running => running += 1,
                         TaskStatus::Review => review += 1,
                         TaskStatus::Merging => merging += 1,

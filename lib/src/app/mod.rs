@@ -1297,7 +1297,10 @@ impl App {
         if t.status != TaskStatus::Review {
             return ApproveOutcome::NotReviewTask;
         }
-        let project_id = t.project_id.clone();
+        // Review tasks are orchestrated by construction.
+        let Some(project_id) = t.project_id.clone() else {
+            return ApproveOutcome::NotReviewTask;
+        };
         let task_id = t.task_id.clone();
 
         // The read distinguishes the PR-less Done path from a real PR;
@@ -2978,8 +2981,8 @@ mod tests {
 
         let p = project("p-app");
         let mut t = task("p-app", "t-app", TaskStatus::Review, false);
-        t.project_root = home.path().join("repo");
-        std::fs::create_dir_all(&t.project_root).unwrap();
+        t.project_root = Some(home.path().join("repo"));
+        std::fs::create_dir_all(t.project_root.as_deref().unwrap()).unwrap();
         crate::orchestrator::write_task_state(&t).expect("write task");
 
         // Hand-write a PR record so approve_review_task() can read it.
@@ -3032,8 +3035,8 @@ mod tests {
 
         let p = project("p-noPR");
         let mut t = task("p-noPR", "t-noPR", TaskStatus::Review, false);
-        t.project_root = home.path().join("repo");
-        std::fs::create_dir_all(&t.project_root).unwrap();
+        t.project_root = Some(home.path().join("repo"));
+        std::fs::create_dir_all(t.project_root.as_deref().unwrap()).unwrap();
         crate::orchestrator::write_task_state(&t).expect("write task");
         // Deliberately do NOT write a pr.json — this is the PR-less case.
 
@@ -3107,8 +3110,8 @@ mod tests {
         // A task stranded in Merging (e.g. approve wrote Merging but the
         // orchestrator turned out to be dead).
         let mut t = task("p-rb", "t-rb", TaskStatus::Merging, false);
-        t.project_root = home.path().join("repo");
-        std::fs::create_dir_all(&t.project_root).unwrap();
+        t.project_root = Some(home.path().join("repo"));
+        std::fs::create_dir_all(t.project_root.as_deref().unwrap()).unwrap();
         crate::orchestrator::write_task_state(&t).expect("write task");
 
         let mut app = App::new();

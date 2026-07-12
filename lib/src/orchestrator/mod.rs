@@ -70,8 +70,32 @@ pub fn task_state_dir(project_id: &str, task_id: &str) -> Option<PathBuf> {
     project_state_dir(project_id).map(|d| d.join("tasks").join(task_id))
 }
 
+/// Root of the personal-board task store: `~/.cc-hub/tasks/<task-id>/`.
+/// Same per-task layout (`state.json` + `state.lock`) as the orchestrated
+/// store, so both flavors share the lock + atomic-write machinery.
+pub fn personal_tasks_dir() -> Option<PathBuf> {
+    cc_hub_home().map(|h| h.join("tasks"))
+}
+
+pub fn personal_task_dir(task_id: &str) -> Option<PathBuf> {
+    personal_tasks_dir().map(|d| d.join(task_id))
+}
+
+/// Task directory for either flavor: `Some(pid)` routes to the project
+/// store, `None` to the personal store.
+pub fn task_dir_for(project_id: Option<&str>, task_id: &str) -> Option<PathBuf> {
+    match project_id {
+        Some(pid) => task_state_dir(pid, task_id),
+        None => personal_task_dir(task_id),
+    }
+}
+
 pub fn task_state_file(project_id: &str, task_id: &str) -> Option<PathBuf> {
     task_state_dir(project_id, task_id).map(|d| d.join("state.json"))
+}
+
+pub fn task_state_file_for(project_id: Option<&str>, task_id: &str) -> Option<PathBuf> {
+    task_dir_for(project_id, task_id).map(|d| d.join("state.json"))
 }
 
 pub fn task_orchestrator_log_path(project_id: &str, task_id: &str) -> Option<PathBuf> {
@@ -111,6 +135,17 @@ pub fn new_task_id() -> String {
     format!("t-{}", nanos)
 }
 
+/// Personal-board task id: same nanos scheme, `tk-` prefix (the prefix the
+/// board used before unification, kept so board-born tasks stay recognizable
+/// and migrated ids remain valid).
+pub fn new_personal_task_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("tk-{}", nanos)
+}
+
 /// Compact rendering of a `t-<unix-nanos>` id for in-card display. Last 6
 /// digits are unique within the active set without dominating the badge.
 pub fn short_task_id(task_id: &str) -> String {
@@ -134,10 +169,20 @@ fn default_claude_agent_kind() -> AgentKind {
     AgentKind::Claude
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The one status enum for both task flavors. Orchestrated tasks flow
+/// Backlog → Running → Review → Merging → Done; personal-board tasks flow
+/// Backlog ("To-Do") → Planning → Running ("In Progress") → Done and never
+/// touch Review/Merging. Wire names of the orchestrated states are unchanged
+/// from before unification, so existing `state.json` files and the CLI
+/// `--status` flag are unaffected; `planning` is a new accepted value that
+/// orchestrated flows never produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
     Backlog,
+    /// Personal-board only: an agent was assigned and told to present a plan
+    /// first; the card waits for the user to approve it (Space → Running).
+    Planning,
     Running,
     /// Orchestrator finished its work and the PR is open, waiting on a human
     /// (or future agentic reviewer) to approve or request changes via the
@@ -159,6 +204,7 @@ impl TaskStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             TaskStatus::Backlog => "backlog",
+            TaskStatus::Planning => "planning",
             TaskStatus::Running => "running",
             TaskStatus::Review => "review",
             TaskStatus::Merging => "merging",
@@ -173,11 +219,56 @@ impl std::str::FromStr for TaskStatus {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "backlog" => Ok(TaskStatus::Backlog),
+            "planning" => Ok(TaskStatus::Planning),
             "running" => Ok(TaskStatus::Running),
             "review" => Ok(TaskStatus::Review),
             "merging" => Ok(TaskStatus::Merging),
             "done" => Ok(TaskStatus::Done),
             _ => Err(()),
+        }
+    }
+}
+
+/// Which flow a task belongs to, derived from `TaskState::project_id`:
+/// `Personal` board tasks (`None`) admit the plan/reopen edges; `Orchestrated`
+/// tasks (`Some`) keep the strict PR-pipeline edges (Done terminal, Merging
+/// discipline).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskKind {
+    Personal,
+    Orchestrated,
+}
+
+/// Task priority, personal-board flavored (P1 highest … P4 lowest). Variants
+/// are declared in ascending order (`P1 < P2 < P3 < P4`) so a plain ascending
+/// sort puts the most urgent first. Lives on the unified [`TaskState`];
+/// orchestrated flows ignore it, and `P3` (the default) is skipped during
+/// serialization so orchestrated `state.json` files gain no key. The
+/// `snake_case` wire form ("p1".."p4") is unchanged from the pre-unification
+/// personal board, so migrated `tasks.json` values parse as-is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskPriority {
+    P1,
+    P2,
+    #[default]
+    P3,
+    P4,
+}
+
+impl TaskPriority {
+    /// True for the priority new tasks get; used by `skip_serializing_if`.
+    pub fn is_default(&self) -> bool {
+        *self == TaskPriority::default()
+    }
+
+    /// Short badge label shown on the card (`P1`–`P4`).
+    pub fn label(self) -> &'static str {
+        match self {
+            TaskPriority::P1 => "P1",
+            TaskPriority::P2 => "P2",
+            TaskPriority::P3 => "P3",
+            TaskPriority::P4 => "P4",
         }
     }
 }
@@ -251,8 +342,37 @@ pub struct TodoItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskState {
     pub task_id: String,
-    pub project_id: String,
-    pub project_root: PathBuf,
+    /// `None` marks a personal-board task (stored under `~/.cc-hub/tasks/`);
+    /// `Some` an orchestrated one (under `~/.cc-hub/projects/<pid>/tasks/`).
+    /// Existing orchestrated `state.json` files carry both fields, so `Some`
+    /// deserializes and re-serializes identically to the pre-Option schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<PathBuf>,
+    // ── personal-board fields; all defaulted + skipped-when-default so
+    //    orchestrated state.json files and `task show --json` gain no keys.
+    /// When the task landed in Done, for the board's Done column stamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "TaskPriority::is_default")]
+    pub priority: TaskPriority,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Where the board-assigned agent runs (personal flow only; the
+    /// orchestrated flow derives cwd from `project_root`/worktrees).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Agent id of the board assignment (e.g. "claude").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Mux session of the board-assigned agent, from spawn time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux: Option<String>,
+    /// Agent session id, resolved from the first scan that sees the spawned
+    /// tmux. Outlives the tmux session, so `f` can resume after it dies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     /// Filled in by the orchestrator the first time it reports — cc-hub
     /// can't know its session id at spawn time.
     #[serde(default)]
@@ -336,8 +456,15 @@ impl TaskState {
         let now = now_unix_secs();
         Self {
             task_id: new_task_id(),
-            project_id,
-            project_root,
+            project_id: Some(project_id),
+            project_root: Some(project_root),
+            done_at: None,
+            priority: TaskPriority::default(),
+            tags: Vec::new(),
+            cwd: None,
+            agent_id: None,
+            tmux: None,
+            session_id: None,
             orchestrator_session_id: None,
             orchestrator_agent_id: default_claude_agent_id(),
             orchestrator_agent_kind: default_claude_agent_kind(),
@@ -364,8 +491,15 @@ impl TaskState {
         let now = now_unix_secs();
         Self {
             task_id: new_task_id(),
-            project_id,
-            project_root,
+            project_id: Some(project_id),
+            project_root: Some(project_root),
+            done_at: None,
+            priority: TaskPriority::default(),
+            tags: Vec::new(),
+            cwd: None,
+            agent_id: None,
+            tmux: None,
+            session_id: None,
             orchestrator_session_id: None,
             orchestrator_agent_id: default_claude_agent_id(),
             orchestrator_agent_kind: default_claude_agent_kind(),
@@ -388,8 +522,47 @@ impl TaskState {
         }
     }
 
+    /// A personal-board task: no project, Backlog ("To-Do") start, board id
+    /// prefix (`tk-`) so board-born and project-born tasks stay tellable
+    /// apart in logs and on disk.
+    pub fn new_personal(prompt: String) -> Self {
+        let mut state = Self::new(String::new(), PathBuf::new(), prompt);
+        state.task_id = new_personal_task_id();
+        state.project_id = None;
+        state.project_root = None;
+        state.status = TaskStatus::Backlog;
+        state
+    }
+
     pub fn touch(&mut self) {
         self.updated_at = now_unix_secs();
+    }
+
+    /// Which legal-edge set this task follows; see [`TaskKind`].
+    pub fn kind(&self) -> TaskKind {
+        if self.project_id.is_some() {
+            TaskKind::Orchestrated
+        } else {
+            TaskKind::Personal
+        }
+    }
+
+    /// Project id + root, or `InvalidInput` when called on a personal task.
+    /// Orchestrated entry points (ops, PR flow, triage, prompts) use this
+    /// instead of unwrapping so a personal task routed into an
+    /// orchestrated-only path fails with a message, not a panic.
+    pub fn require_project(&self) -> io::Result<(&str, &Path)> {
+        match (self.project_id.as_deref(), self.project_root.as_deref()) {
+            (Some(id), Some(root)) => Ok((id, root)),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "task {} is a personal-board task (no project); this operation needs an \
+                     orchestrated task",
+                    self.task_id
+                ),
+            )),
+        }
     }
 }
 
@@ -397,8 +570,13 @@ impl TaskState {
 /// surface as InvalidData so callers can distinguish "no such task" from
 /// "schema drift".
 pub fn read_task_state(project_id: &str, task_id: &str) -> io::Result<TaskState> {
+    read_task_state_for(Some(project_id), task_id)
+}
+
+/// [`read_task_state`] for either flavor: `None` reads the personal store.
+pub fn read_task_state_for(project_id: Option<&str>, task_id: &str) -> io::Result<TaskState> {
     let path =
-        task_state_file(project_id, task_id).ok_or_else(|| io::Error::other("no home dir"))?;
+        task_state_file_for(project_id, task_id).ok_or_else(|| io::Error::other("no home dir"))?;
     let raw = fs::read_to_string(&path)?;
     serde_json::from_str(&raw).map_err(|e| {
         io::Error::new(
@@ -408,10 +586,11 @@ pub fn read_task_state(project_id: &str, task_id: &str) -> io::Result<TaskState>
     })
 }
 
-/// Atomically write a task state file via tempfile + rename. Creates parent
-/// dirs on demand.
+/// Atomically write a task state file via tempfile + rename, routed by the
+/// state's own flavor (`project_id` set → project store, unset → personal
+/// store). Creates parent dirs on demand.
 pub fn write_task_state(state: &TaskState) -> io::Result<()> {
-    let path = task_state_file(&state.project_id, &state.task_id)
+    let path = task_state_file_for(state.project_id.as_deref(), &state.task_id)
         .ok_or_else(|| io::Error::other("no home dir"))?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -437,9 +616,12 @@ pub fn write_task_state(state: &TaskState) -> io::Result<()> {
 /// locked directly. Returns `None` when the task directory doesn't exist
 /// yet: there's nothing to protect, and the caller's read will surface
 /// `NotFound` with its usual error.
-pub(crate) fn lock_task_state(project_id: &str, task_id: &str) -> io::Result<Option<fs::File>> {
+pub(crate) fn lock_task_state(
+    project_id: Option<&str>,
+    task_id: &str,
+) -> io::Result<Option<fs::File>> {
     use fs2::FileExt;
-    let Some(dir) = task_state_dir(project_id, task_id) else {
+    let Some(dir) = task_dir_for(project_id, task_id) else {
         return Ok(None);
     };
     if !dir.exists() {
@@ -454,60 +636,92 @@ pub(crate) fn lock_task_state(project_id: &str, task_id: &str) -> io::Result<Opt
     Ok(Some(f))
 }
 
-/// Single source of truth for legal task-status transitions. Enforced
-/// centrally by [`update_task_state`] / [`update_task_state_no_touch`], so
-/// no CLI verb, TUI keybind, or daemon can invent an edge the kanban flow
-/// doesn't have. Per-verb guards (e.g. "leaving Backlog requires an
-/// orchestrator spawn") add context-specific rules on top.
+/// Single source of truth for legal task-status transitions, for BOTH task
+/// flavors. Enforced centrally by [`update_task_state`] /
+/// [`update_task_state_no_touch`], so no CLI verb, TUI keybind, or daemon can
+/// invent an edge the kanban flow doesn't have. Per-verb guards (e.g.
+/// "leaving Backlog requires an orchestrator spawn") add context-specific
+/// rules on top.
 ///
 /// Legal edges and the flows that produce them:
 ///
-/// | from → to          | produced by                                          |
-/// |--------------------|------------------------------------------------------|
-/// | Backlog → Running  | `task start`, triage promotion                       |
-/// | Running → Backlog  | spawn-failure claim rollback (`start`/`restart`)     |
-/// | Running → Review   | `pr create`, `pr reopen`, `task report`              |
-/// | Running → Done     | `pr close` while iterating                           |
-/// | Review  → Running  | `pr request-changes`                                 |
-/// | Review  → Merging  | approve (TUI `Space`, `pr merge`)                    |
-/// | Review  → Done     | PR-less approve, `pr close`, explicit done           |
-/// | Merging → Review   | merge-conflict demotion, dead-orchestrator rollback  |
-/// | Merging → Done     | `pr finalize`, `pr close`                            |
+/// | from → to           | kind         | produced by                                         |
+/// |---------------------|--------------|-----------------------------------------------------|
+/// | Backlog → Running   | both         | `task start`, triage promotion; board manual move   |
+/// | Running → Backlog   | both         | spawn-failure claim rollback; board manual move     |
+/// | Backlog ↔ Planning  | personal     | board assign (`s`/`S`) / manual move back           |
+/// | Planning → Running  | personal     | plan approved (Space), manual move                  |
+/// | Running → Done      | both         | `pr close` while iterating; board finish            |
+/// | Backlog → Done      | personal     | Space checks off a To-Do card directly              |
+/// | Done → Backlog      | personal     | board reopen (Space on a Done card)                 |
+/// | Done → Running      | personal     | board manual move off Done                          |
+/// | Running → Review    | orchestrated | `pr create`, `pr reopen`, `task report`             |
+/// | Review  → Running   | orchestrated | `pr request-changes`                                |
+/// | Review  → Merging   | orchestrated | approve (TUI `Space`, `pr merge`)                   |
+/// | Review  → Done      | orchestrated | PR-less approve, `pr close`, explicit done          |
+/// | Merging → Review    | orchestrated | merge-conflict demotion, dead-orchestrator rollback |
+/// | Merging → Done      | orchestrated | `pr finalize`, `pr close`                           |
 ///
-/// Self-transitions are always allowed (idempotent re-reports). Done is
-/// terminal. Backlog is left via an orchestrator spawn and re-entered only
-/// when that spawn fails after the task was claimed to Running — the
-/// claim-first start/restart flow rolls the status back so the task stays
-/// retryable rather than stranded in Running with no orchestrator.
-pub fn validate_status_transition(from: &TaskStatus, to: &TaskStatus) -> Result<(), String> {
+/// Self-transitions are always allowed (idempotent re-reports). For
+/// orchestrated tasks Done stays terminal and Backlog is re-entered only by
+/// the claim-first spawn rollback; the personal board additionally admits
+/// the plan gate (Planning) and reopening finished cards.
+pub fn validate_status_transition(
+    from: &TaskStatus,
+    to: &TaskStatus,
+    kind: TaskKind,
+) -> Result<(), String> {
     use TaskStatus::*;
-    let legal = from == to
+    let both = from == to
         || matches!(
             (from, to),
-            (Backlog, Running)
-                | (Running, Backlog)
-                | (Running, Review)
-                | (Running, Done)
-                | (Review, Running)
-                | (Review, Merging)
-                | (Review, Done)
-                | (Merging, Review)
-                | (Merging, Done)
+            (Backlog, Running) | (Running, Backlog) | (Running, Done)
         );
+    let legal = both
+        || match kind {
+            TaskKind::Personal => matches!(
+                (from, to),
+                (Backlog, Planning)
+                    | (Planning, Backlog)
+                    | (Planning, Running)
+                    // Space on a To-Do card checks it off without it ever
+                    // being started.
+                    | (Backlog, Done)
+                    | (Done, Backlog)
+                    | (Done, Running)
+            ),
+            TaskKind::Orchestrated => matches!(
+                (from, to),
+                (Running, Review)
+                    | (Review, Running)
+                    | (Review, Merging)
+                    | (Review, Done)
+                    | (Merging, Review)
+                    | (Merging, Done)
+            ),
+        };
     if legal {
         Ok(())
     } else {
+        let flow = match kind {
+            TaskKind::Personal => {
+                "personal flow is Backlog → Planning → Running → Done; Done can reopen to \
+                 Backlog/Running"
+            }
+            TaskKind::Orchestrated => {
+                "orchestrated flow is Backlog → Running → Review → Merging → Done; Review can \
+                 bounce to Running/Merging, Merging back to Review; Done is terminal"
+            }
+        };
         Err(format!(
-            "illegal task status transition {:?} → {:?} (flow is Backlog → Running → Review \
-             → Merging → Done; Review can bounce to Running/Merging, Merging back to Review; \
-             Done is terminal)",
-            from, to
+            "illegal task status transition {:?} → {:?} ({})",
+            from, to, flow
         ))
     }
 }
 
 fn update_task_state_inner<F>(
-    project_id: &str,
+    project_id: Option<&str>,
     task_id: &str,
     touch: bool,
     f: F,
@@ -535,11 +749,11 @@ pub fn try_update_task_state<F>(
 where
     F: FnOnce(&mut TaskState) -> bool,
 {
-    try_update_task_state_inner(project_id, task_id, true, f)
+    try_update_task_state_inner(Some(project_id), task_id, true, f)
 }
 
 fn try_update_task_state_inner<F>(
-    project_id: &str,
+    project_id: Option<&str>,
     task_id: &str,
     touch: bool,
     f: F,
@@ -548,13 +762,15 @@ where
     F: FnOnce(&mut TaskState) -> bool,
 {
     let _lock = lock_task_state(project_id, task_id)?;
-    let mut state = read_task_state(project_id, task_id)?;
-    let prev_status = state.status.clone();
+    let mut state = read_task_state_for(project_id, task_id)?;
+    let prev_status = state.status;
     if !f(&mut state) {
         return Ok((state, false));
     }
     if state.status != prev_status {
-        validate_status_transition(&prev_status, &state.status)
+        // The kind axis comes from the state itself: a personal task can't
+        // gain orchestrated edges by being routed through this path.
+        validate_status_transition(&prev_status, &state.status, state.kind())
             .map_err(|msg| io::Error::new(io::ErrorKind::InvalidInput, msg))?;
     }
     if touch {
@@ -569,7 +785,7 @@ mod status_transition_tests {
     use super::*;
 
     #[test]
-    fn legal_edges_pass() {
+    fn orchestrated_legal_edges_pass() {
         use TaskStatus::*;
         for (from, to) in [
             (Backlog, Running),
@@ -587,8 +803,8 @@ mod status_transition_tests {
             (Done, Done),
         ] {
             assert!(
-                validate_status_transition(&from, &to).is_ok(),
-                "{:?} → {:?} should be legal",
+                validate_status_transition(&from, &to, TaskKind::Orchestrated).is_ok(),
+                "orchestrated {:?} → {:?} should be legal",
                 from,
                 to
             );
@@ -596,7 +812,7 @@ mod status_transition_tests {
     }
 
     #[test]
-    fn illegal_edges_fail() {
+    fn orchestrated_illegal_edges_fail() {
         use TaskStatus::*;
         for (from, to) in [
             (Backlog, Review),
@@ -610,10 +826,65 @@ mod status_transition_tests {
             (Done, Review),
             (Done, Merging),
             (Done, Backlog),
+            // The personal plan gate never applies to orchestrated tasks.
+            (Backlog, Planning),
+            (Planning, Running),
         ] {
             assert!(
-                validate_status_transition(&from, &to).is_err(),
-                "{:?} → {:?} should be illegal",
+                validate_status_transition(&from, &to, TaskKind::Orchestrated).is_err(),
+                "orchestrated {:?} → {:?} should be illegal",
+                from,
+                to
+            );
+        }
+    }
+
+    #[test]
+    fn personal_legal_edges_pass() {
+        use TaskStatus::*;
+        for (from, to) in [
+            // Shared edges.
+            (Backlog, Running),
+            (Running, Backlog),
+            (Running, Done),
+            (Backlog, Backlog),
+            // The plan gate: assign → approve.
+            (Backlog, Planning),
+            (Planning, Backlog),
+            (Planning, Running),
+            // Space checks off a To-Do card that never started.
+            (Backlog, Done),
+            // Done reopens on the board.
+            (Done, Backlog),
+            (Done, Running),
+        ] {
+            assert!(
+                validate_status_transition(&from, &to, TaskKind::Personal).is_ok(),
+                "personal {:?} → {:?} should be legal",
+                from,
+                to
+            );
+        }
+    }
+
+    #[test]
+    fn personal_illegal_edges_fail() {
+        use TaskStatus::*;
+        for (from, to) in [
+            // The PR pipeline is orchestrated-only.
+            (Running, Review),
+            (Review, Merging),
+            (Review, Done),
+            (Merging, Done),
+            (Backlog, Review),
+            (Backlog, Merging),
+            // No skipping the plan gate backwards.
+            (Done, Planning),
+            (Running, Planning),
+        ] {
+            assert!(
+                validate_status_transition(&from, &to, TaskKind::Personal).is_err(),
+                "personal {:?} → {:?} should be illegal",
                 from,
                 to
             );
@@ -630,20 +901,21 @@ mod status_transition_tests {
                 "do the thing".into(),
             );
             write_task_state(&state).unwrap();
+            let pid = state.project_id.as_deref().unwrap();
 
             // Running → Merging is illegal and must not be persisted.
             // (Running → Backlog is now legal — it's the spawn-failure
             // claim rollback — so pick an edge that's still forbidden.)
-            let err = update_task_state(&state.project_id, &state.task_id, |s| {
+            let err = update_task_state(pid, &state.task_id, |s| {
                 s.status = TaskStatus::Merging;
             })
             .unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-            let on_disk = read_task_state(&state.project_id, &state.task_id).unwrap();
+            let on_disk = read_task_state(pid, &state.task_id).unwrap();
             assert_eq!(on_disk.status, TaskStatus::Running);
 
             // Running → Review is legal.
-            let updated = update_task_state(&state.project_id, &state.task_id, |s| {
+            let updated = update_task_state(pid, &state.task_id, |s| {
                 s.status = TaskStatus::Review;
             })
             .unwrap();
@@ -661,7 +933,18 @@ pub fn update_task_state<F>(project_id: &str, task_id: &str, f: F) -> io::Result
 where
     F: FnOnce(&mut TaskState),
 {
-    update_task_state_inner(project_id, task_id, true, f)
+    update_task_state_inner(Some(project_id), task_id, true, f)
+}
+
+/// Locked read-mutate-write against a personal-board task
+/// (`~/.cc-hub/tasks/<tid>/state.json`). Same lock + transition enforcement
+/// as the orchestrated wrapper; the kind axis (from the state itself)
+/// selects the personal edge set.
+pub fn update_personal_task<F>(task_id: &str, f: F) -> io::Result<TaskState>
+where
+    F: FnOnce(&mut TaskState),
+{
+    update_task_state_inner(None, task_id, true, f)
 }
 
 /// [`update_task_state`] without the trailing `touch()`. For background
@@ -671,14 +954,18 @@ pub fn update_task_state_no_touch<F>(project_id: &str, task_id: &str, f: F) -> i
 where
     F: FnOnce(&mut TaskState),
 {
-    update_task_state_inner(project_id, task_id, false, f)
+    update_task_state_inner(Some(project_id), task_id, false, f)
 }
 
-/// Persist a Haiku-generated short title onto a task's state file. Reuses
-/// the per-task atomic-write store rather than a side cache file so the
-/// title travels with the rest of the task state.
-pub fn set_task_title(project_id: &str, task_id: &str, title: &str) -> io::Result<TaskState> {
-    update_task_state(project_id, task_id, |s| {
+/// Persist a Haiku-generated short title onto a task's state file (either
+/// flavor). Reuses the per-task atomic-write store rather than a side cache
+/// file so the title travels with the rest of the task state.
+pub fn set_task_title(
+    project_id: Option<&str>,
+    task_id: &str,
+    title: &str,
+) -> io::Result<TaskState> {
+    update_task_state_inner(project_id, task_id, true, |s| {
         s.title = Some(title.to_string());
     })
 }
@@ -690,13 +977,18 @@ pub fn set_task_title(project_id: &str, task_id: &str, title: &str) -> io::Resul
 /// branch -D` this function deliberately skips). Best-effort: failures are
 /// logged and the loop continues.
 pub fn remove_task_worktrees(state: &TaskState) {
+    // Worktrees only exist for orchestrated tasks; a personal task has no
+    // project root to run git in.
+    let Some(project_root) = state.project_root.as_deref() else {
+        return;
+    };
     for w in &state.workers {
         let Some(name) = w.worktree.as_deref() else {
             continue;
         };
-        let path = worktree_path(&state.project_root, &state.task_id, name);
+        let path = worktree_path(project_root, &state.task_id, name);
         match run_git(
-            &state.project_root,
+            project_root,
             &["worktree", "remove", "--force", &path.to_string_lossy()],
         ) {
             Err(e) => log::warn!(
@@ -783,7 +1075,10 @@ pub fn cleanup_task_sessions(state: &TaskState) {
 }
 
 fn capture_orchestrator_log(state: &TaskState, orch: &str) {
-    let Some(path) = task_orchestrator_log_path(&state.project_id, &state.task_id) else {
+    let Some(pid) = state.project_id.as_deref() else {
+        return;
+    };
+    let Some(path) = task_orchestrator_log_path(pid, &state.task_id) else {
         return;
     };
     let Some(dir) = path.parent() else { return };
@@ -1067,7 +1362,7 @@ pub fn delete_task(project_id: &str, task_id: &str) -> io::Result<DeletedTask> {
         }
     }
 
-    let lock_released = match crate::merge_lock::release(&state.project_id, &state.task_id) {
+    let lock_released = match crate::merge_lock::release(project_id, &state.task_id) {
         Ok(released) => released,
         Err(e) => {
             log::warn!("delete_task {}: merge_lock release failed: {}", task_id, e);
@@ -1078,20 +1373,20 @@ pub fn delete_task(project_id: &str, task_id: &str) -> io::Result<DeletedTask> {
     let mut seen = std::collections::HashSet::new();
     let mut worktrees_removed = Vec::new();
     let mut worktree_errors: Vec<(String, String)> = Vec::new();
+    // Callers pass a project id, so an orchestrated state always has a root;
+    // guard anyway so a hand-edited state file degrades to "no worktrees".
+    let project_root = state.project_root.clone().unwrap_or_default();
     for w in &state.workers {
         let Some(wt_name) = w.worktree.as_ref() else {
             continue;
         };
-        let path = worktree_path(&state.project_root, &state.task_id, wt_name);
+        let path = worktree_path(&project_root, &state.task_id, wt_name);
         let path_str = path.to_string_lossy().into_owned();
         if !seen.insert(path_str.clone()) {
             continue;
         }
         let path_arg = path.to_string_lossy().into_owned();
-        let git_result = run_git(
-            &state.project_root,
-            &["worktree", "remove", "--force", &path_arg],
-        );
+        let git_result = run_git(&project_root, &["worktree", "remove", "--force", &path_arg]);
         let counted = match &git_result {
             Ok(out) => {
                 let stderr_lower = out.stderr.to_lowercase();
@@ -1367,7 +1662,7 @@ mod tests {
         }
 
         let result =
-            set_task_title(&project_id, &task_id_set, "build thing").expect("set_task_title");
+            set_task_title(Some(&project_id), &task_id_set, "build thing").expect("set_task_title");
         assert_eq!(result.title.as_deref(), Some("build thing"));
 
         let loaded = read_task_state(&project_id, &task_id_set).expect("read state back from disk");

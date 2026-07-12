@@ -32,11 +32,14 @@ pub fn pr_create(
     // writing pr.json. A `pr create` against a Backlog/Done task otherwise
     // burns a PR id and strands an orphan pr.json that permanently blocks every
     // future `pr create` for the task ("a PR already exists").
-    orchestrator::validate_status_transition(&state.status, &TaskStatus::Review)
+    orchestrator::validate_status_transition(&state.status, &TaskStatus::Review, state.kind())
         .map_err(|e| OpError::Usage(format!("cannot open PR: {}", e)))?;
 
     let branch = orchestrator::worktree_branch(task_id, worktree_name);
-    let base = orchestrator::detect_main_branch(&state.project_root);
+    let (_, create_root) = state
+        .require_project()
+        .map_err(|e| OpError::Usage(e.to_string()))?;
+    let base = orchestrator::detect_main_branch(create_root);
 
     // Serialize the whole exists-check → create → transition under the per-task
     // advisory lock (the same lock `update_task_state` / `update_pr` take) so
@@ -44,7 +47,7 @@ pub fn pr_create(
     // write pr.json. We write state.json by hand rather than via
     // `update_task_state`: that helper re-takes this same flock, which would
     // deadlock while we hold it.
-    let _lock = orchestrator::lock_task_state(project_id, task_id)
+    let _lock = orchestrator::lock_task_state(Some(project_id), task_id)
         .map_err(|e| OpError::Other(format!("lock task: {}", e)))?;
 
     if pr::read_pr(project_id, task_id)
@@ -60,7 +63,7 @@ pub fn pr_create(
     // up-front read and here is still caught before we create the PR.
     let mut fresh = orchestrator::read_task_state(project_id, task_id)
         .map_err(|e| OpError::Other(format!("load state: {}", e)))?;
-    orchestrator::validate_status_transition(&fresh.status, &TaskStatus::Review)
+    orchestrator::validate_status_transition(&fresh.status, &TaskStatus::Review, fresh.kind())
         .map_err(|e| OpError::Usage(format!("cannot open PR: {}", e)))?;
 
     let pr = pr::create_pr(&fresh, branch, base, title, description)
@@ -101,7 +104,11 @@ fn guard_pr_mutable(verb: &str, state: ReviewState) -> Result<(), OpError> {
 pub fn pr_approve(project_id: &str, task_id: &str) -> Result<PullRequest, OpError> {
     let state = orchestrator::read_task_state(project_id, task_id)
         .map_err(|e| OpError::Other(format!("load state: {}", e)))?;
-    let project_root = state.project_root.clone();
+    let project_root = state
+        .require_project()
+        .map_err(|e| OpError::Usage(e.to_string()))?
+        .1
+        .to_path_buf();
 
     let pr = pr::read_pr(project_id, task_id)
         .map_err(|e| OpError::Other(format!("read pr: {}", e)))?
@@ -358,7 +365,11 @@ pub fn pr_merge(
 ) -> Result<MergeOutcomeOp, OpError> {
     let state = orchestrator::read_task_state(project_id, task_id)
         .map_err(|e| OpError::Other(format!("load state: {}", e)))?;
-    let project_root = state.project_root.clone();
+    let project_root = state
+        .require_project()
+        .map_err(|e| OpError::Usage(e.to_string()))?
+        .1
+        .to_path_buf();
     let pr = pr::read_pr(project_id, task_id)
         .map_err(|e| OpError::Other(format!("read pr: {}", e)))?
         .ok_or_else(|| OpError::NotFound("no PR for this task".into()))?;
@@ -378,7 +389,7 @@ pub fn pr_merge(
     // `pr request-changes`). Without this the merge lands, then the final
     // transition fails, stranding main mutated with no MergeRecord and a wedged
     // task that retries re-merge on every run.
-    orchestrator::validate_status_transition(&state.status, &TaskStatus::Merging)
+    orchestrator::validate_status_transition(&state.status, &TaskStatus::Merging, state.kind())
         .map_err(|e| {
             OpError::Usage(format!(
                 "cannot merge: {} — merge only applies to an approved task in Review",
@@ -461,7 +472,9 @@ pub fn pr_merge(
             pr.review_state.as_str()
         )));
     }
-    if let Err(e) = orchestrator::validate_status_transition(&state.status, &TaskStatus::Merging) {
+    if let Err(e) =
+        orchestrator::validate_status_transition(&state.status, &TaskStatus::Merging, state.kind())
+    {
         let _ = merge_lock::release(project_id, task_id);
         return Err(OpError::Usage(format!(
             "cannot merge: {} — the task status changed while waiting for the merge lock",
@@ -833,6 +846,11 @@ pub fn pr_finalize(
     // inherit a red main.
     let state = orchestrator::read_task_state(project_id, task_id)
         .map_err(|e| OpError::Other(format!("load state: {}", e)))?;
+    let finalize_root = state
+        .require_project()
+        .map_err(|e| OpError::Usage(e.to_string()))?
+        .1
+        .to_path_buf();
 
     // State guards — check PR + status BEFORE any mutation. The Merged check
     // must come before the status check: after a successful finalize, the
@@ -857,8 +875,7 @@ pub fn pr_finalize(
     }
 
     if !opts.skip_build {
-        let project_root = state.project_root.clone();
-        let (ok, _stdout, stderr) = run_build_command(&project_root, &build_cmd)?;
+        let (ok, _stdout, stderr) = run_build_command(&finalize_root, &build_cmd)?;
         if !ok {
             let tail = tail_lines(&stderr, 80);
             let comment_body = format!(
@@ -899,7 +916,7 @@ pub fn pr_finalize(
     // Best-effort: a failure is a warning, not fatal (the merge already landed
     // and main is a sane place to be left).
     if let Some(r) = &prior_ref {
-        match orchestrator::run_git(&state.project_root, &["checkout", r]) {
+        match orchestrator::run_git(&finalize_root, &["checkout", r]) {
             Ok(o) if o.status_ok => {}
             Ok(o) => log::warn!(
                 "pr finalize: restore HEAD to {} failed: {}",

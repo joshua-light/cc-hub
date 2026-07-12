@@ -172,7 +172,10 @@ pub(crate) async fn handle_key(
                         // No orchestrator to drive the merge — roll
                         // the card back to Review so it stays
                         // actionable (re-approve / resurrect).
-                        app.rollback_merging_to_review(&task.project_id, &task.task_id);
+                        app.rollback_merging_to_review(
+                            task.project_id.as_deref().unwrap_or_default(),
+                            &task.task_id,
+                        );
                         app.set_status(format!(
                             "approved {} but no live orchestrator — back to Review (press f to resurrect)",
                             short
@@ -180,7 +183,10 @@ pub(crate) async fn handle_key(
                         return KeyOutcome::Continue;
                     };
                     if !send::tmux_session_exists(&tmux_name) {
-                        app.rollback_merging_to_review(&task.project_id, &task.task_id);
+                        app.rollback_merging_to_review(
+                            task.project_id.as_deref().unwrap_or_default(),
+                            &task.task_id,
+                        );
                         app.set_status(format!(
                             "approved {} but orchestrator [{}] is not live — back to Review (press f to resurrect)",
                             short, tmux_name
@@ -314,7 +320,9 @@ pub(crate) async fn handle_key(
                             | cc_hub_lib::orchestrator::TaskStatus::Merging
                     ) {
                     cc_hub_lib::scanner::find_orchestrator_session(
-                        &task.project_root,
+                        task.project_root
+                            .as_deref()
+                            .unwrap_or(std::path::Path::new("")),
                         &task.task_id,
                         task.orchestrator_agent_kind,
                         task.orchestrator_session_id.as_deref(),
@@ -329,7 +337,12 @@ pub(crate) async fn handle_key(
                         Err(e) => app.set_status(format!("open orchestrator failed: {}", e)),
                     }
                 } else if let Some(resume) = resurrectable {
-                    let cwd = task.project_root.to_string_lossy().into_owned();
+                    let cwd = task
+                        .project_root
+                        .as_deref()
+                        .unwrap_or(std::path::Path::new(""))
+                        .to_string_lossy()
+                        .into_owned();
                     match spawn::spawn_agent_session(
                         &task.orchestrator_agent_id,
                         &cwd,
@@ -339,7 +352,7 @@ pub(crate) async fn handle_key(
                     ) {
                         Ok(new_tmux) => {
                             if let Err(e) = cc_hub_lib::orchestrator::update_task_state(
-                                &task.project_id,
+                                task.project_id.as_deref().unwrap_or_default(),
                                 &task.task_id,
                                 |s| {
                                     s.orchestrator_tmux = Some(new_tmux.clone());
@@ -382,7 +395,7 @@ pub(crate) async fn handle_key(
                         Err(e) => app.set_status(format!("resurrect failed: {}", e)),
                     }
                 } else if let Some(log_path) = cc_hub_lib::orchestrator::task_orchestrator_log_path(
-                    &task.project_id,
+                    task.project_id.as_deref().unwrap_or_default(),
                     &task.task_id,
                 )
                 .filter(|p| p.exists())
@@ -409,14 +422,14 @@ pub(crate) async fn handle_key(
                             "orchestrator dead — sid {} not found under {} (cwd {}); no JSONL contains orchestrator prompt for task {}",
                             models::short_sid(sid),
                             session_store,
-                            task.project_root.display(),
+                            task.project_root.as_deref().unwrap_or(std::path::Path::new("")).display(),
                             &task.task_id,
                         ),
                         None => format!(
                             "orchestrator dead — no JSONL under {} contains orchestrator prompt for task {} (cwd {})",
                             session_store,
                             &task.task_id,
-                            task.project_root.display(),
+                            task.project_root.as_deref().unwrap_or(std::path::Path::new("")).display(),
                         ),
                     };
                     app.set_status(detail);

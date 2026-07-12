@@ -141,7 +141,12 @@ pub fn orchestrate_start(
         .agent(&agent_id)
         .ok_or_else(|| OpError::Other(format!("unknown orchestrator agent: {}", agent_id)))?;
 
-    let cwd = state.project_root.to_string_lossy().into_owned();
+    let cwd = state
+        .require_project()
+        .map_err(|e| OpError::Usage(e.to_string()))?
+        .1
+        .to_string_lossy()
+        .into_owned();
     let prompt = orchestrator::build_orchestrator_prompt(&state, &cc_hub_bin);
     let initial_prompt = if agent.supports_initial_prompt() {
         Some(prompt.as_str())
@@ -219,8 +224,8 @@ pub fn task_report(
     let mut locked_prev: Option<TaskStatus> = None;
 
     let (state, _written) = orchestrator::try_update_task_state(project_id, task_id, |s| {
-        let prev = s.status.clone();
-        locked_prev = Some(prev.clone());
+        let prev = s.status;
+        locked_prev = Some(prev);
 
         // Backlog is only a valid target from a Backlog state. Flipping a
         // running task to Backlog would hide it from the kanban while leaving
@@ -298,7 +303,7 @@ pub fn task_report(
         // future agentic reviewer) signs off via the TUI's `Space` keybind.
         // The exception: if the task is already in Review, an explicit `done`
         // is the approval path — let it through.
-        let effective_status = match (raw_status.clone(), prev.clone()) {
+        let effective_status = match (raw_status, prev) {
             (Some(TaskStatus::Done), p) if p != TaskStatus::Review => Some(TaskStatus::Review),
             (other, _) => other,
         };
@@ -318,7 +323,7 @@ pub fn task_report(
         let leaving_running =
             prev == TaskStatus::Running && matches!(s.status, TaskStatus::Review | TaskStatus::Done);
         if leaving_running && s.shipped_version.is_none() {
-            s.shipped_version = crate::version::detect(&s.project_root);
+            s.shipped_version = s.project_root.as_deref().and_then(crate::version::detect);
         }
         // Each transition *into* Review starts a fresh review round, so
         // the auto-reviewer gets one pass per round.
@@ -607,7 +612,7 @@ pub(crate) fn resolve_worktree_path(state: &TaskState, branch: &str) -> Option<P
     let prefix = format!("{}-", state.task_id);
     let name = stripped.strip_prefix(&prefix)?;
     Some(orchestrator::worktree_path(
-        &state.project_root,
+        state.project_root.as_deref()?,
         &state.task_id,
         name,
     ))
