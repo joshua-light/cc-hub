@@ -226,10 +226,10 @@ pub struct UiConfig {
     /// The Projects tab (orchestrator kanban) is WIP and hidden from the
     /// tab strip + ⇥ cycle by default. Set true to bring it back.
     pub show_projects_tab: bool,
-    /// The Planning column on the Tasks board. On by default. When off the
-    /// column disappears and its cards fold into In Progress, so plan-ready
-    /// work stays visible and Space still approves it (the action keys off
-    /// the card's status, not the column it renders in).
+    /// The Planning column on the Tasks board. Off by default; set true to
+    /// show it. When off, its cards fold into In Progress, so plan-ready work
+    /// stays visible and Space still approves it (the action keys off the
+    /// card's status, not the column it renders in).
     pub show_planning_column: bool,
 }
 
@@ -254,7 +254,7 @@ impl Default for UiConfig {
             cell_height: 6,
             cell_width: 42,
             show_projects_tab: false,
-            show_planning_column: true,
+            show_planning_column: false,
         }
     }
 }
@@ -418,6 +418,17 @@ mod tests {
         assert_eq!(cfg.inactive.window_secs, def.inactive.window_secs);
         assert_eq!(cfg.inactive.orphan_relist_secs, 30);
         assert_eq!(cfg.default_orchestrator_agent_id(), "claude");
+        assert!(!cfg.ui.show_planning_column);
+    }
+
+    #[test]
+    fn planning_column_can_be_enabled_explicitly() {
+        let src = r#"
+            [ui]
+            show_planning_column = true
+        "#;
+        let cfg: Config = toml::from_str(src).unwrap();
+        assert!(cfg.ui.show_planning_column);
     }
 
     #[test]

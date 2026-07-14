@@ -17,8 +17,8 @@ From the grid you can:
 
 ## Tasks board
 
-The personal layer: a four-column board — **To-Do · Planning · In Progress ·
-Done** — stored one file per task under `~/.cc-hub/tasks/` (a pre-existing
+The personal layer: a three-column board — **To-Do · In Progress · Done** —
+stored one file per task under `~/.cc-hub/tasks/` (a pre-existing
 `tasks.json` migrates automatically on first launch; the original is kept as
 `tasks.json.migrated-v1` — don't run pre-migration builds against the same
 home afterwards, or you'll get a second, empty board). Jot tasks and check
@@ -222,10 +222,10 @@ cell_width = 42
 # The Projects tab (orchestrator kanban) is WIP and hidden from the tab
 # strip + Tab cycle by default. Set true to bring it back.
 show_projects_tab = false
-# The Planning column on the Tasks board. On by default. Set false to drop
-# it; its cards fold into In Progress (Space still approves a plan-ready
-# card — the action keys off the card's status, not the column).
-show_planning_column = true
+# The Planning column on the Tasks board. Off by default. Set true to show
+# it; otherwise its cards fold into In Progress (Space still approves a
+# plan-ready card — the action keys off the card's status, not the column).
+show_planning_column = false
 
 [metrics]
 # Minimum assistant turns before a session is eligible for context-growth
@@ -311,7 +311,7 @@ cc-hub behaves the same everywhere it can, but a few things genuinely differ:
 
 ### Tasks tab
 
-A personal task board: **To-Do · Planning · In Progress · Done**. Each card
+A personal task board: **To-Do · In Progress · Done** by default. Each card
 is a `state.json` under `~/.cc-hub/tasks/<task-id>/` — the same per-task
 format the Projects layer uses, hand-editable — with board-level metadata in
 `~/.cc-hub/board.json`.
@@ -344,8 +344,8 @@ columns; Enter keeps it applied, Esc clears it.
 Deletions are recoverable: `u` restores the last `x`/`c` removal, and every
 removed task is also appended to `~/.cc-hub/tasks-archive-v2.json`.
 
-The **Planning** column is optional — set
-`[ui] show_planning_column = false` to drop it. Its cards fold into
+The **Planning** column is opt-in — set
+`[ui] show_planning_column = true` to show it. By default its cards fold into
 **In Progress** (still showing `● plan ready`), and `Space` still approves
 the plan, so the plan-first workflow works with one fewer column.
 
