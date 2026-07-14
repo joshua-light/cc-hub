@@ -16,7 +16,7 @@
 use super::{App, Tab};
 use crate::agent::AgentKind;
 use crate::orchestrator::TaskPriority;
-use crate::{config, models, spawn, title};
+use crate::{models, spawn, title};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -62,18 +62,16 @@ pub enum SessionsCommand {
     AckSelected,
     /// `n` — new agent session in the selected session's cwd.
     SpawnAgentHere,
-    /// `N` — places picker.
+    /// `N` — model picker for a new session in the selected session's cwd.
+    OpenModelPicker,
+    /// `p` — places picker.
     OpenPlacesPicker,
     /// `M` — bookmarks picker.
     OpenBookmarksPicker,
-    /// `p` — prompt input.
-    OpenPromptInput,
     /// `t` — todo side panel.
     OpenTodoPanel,
     /// `r` — rename input.
     OpenRenameSession,
-    /// PromptInput Enter (sessions flow; the Projects flow stays in bin).
-    SubmitPrompt,
     /// RenameSession Enter.
     SubmitRename,
 }
@@ -144,14 +142,6 @@ pub enum Effect {
     OpenTmuxPane { tmux: String, owned: bool },
     /// Spawn a shell tmux session in `cwd`, then attach it as an owned pane.
     OpenShell { cwd: String },
-    /// Send a prompt to a running agent off-thread; the outcome comes back
-    /// as a DispatchResult scan message with these status strings.
-    DispatchPrompt {
-        tmux: String,
-        prompt: String,
-        ok_msg: String,
-        err_prefix: String,
-    },
     /// Focus the OS window hosting `pid`, falling back to a tmux reattach
     /// in `cwd` when the window manager reports the session is detached.
     FocusWindow { pid: u32, cwd: String },
@@ -276,6 +266,10 @@ impl App {
                 self.spawn_agent_here();
                 Vec::new()
             }
+            OpenModelPicker => {
+                self.enter_model_picker();
+                Vec::new()
+            }
             OpenPlacesPicker => {
                 self.enter_session_places_picker();
                 Vec::new()
@@ -284,10 +278,6 @@ impl App {
                 if !self.enter_bookmarks_picker() {
                     self.set_status("no bookmarks — press N then m on a folder to add one".into());
                 }
-                Vec::new()
-            }
-            OpenPromptInput => {
-                self.enter_prompt_input();
                 Vec::new()
             }
             OpenTodoPanel => {
@@ -300,7 +290,6 @@ impl App {
                 }
                 Vec::new()
             }
-            SubmitPrompt => self.submit_prompt_command(),
             SubmitRename => {
                 match self.submit_session_rename() {
                     Some((sid, title_text)) => match title::persist_title(&sid, &title_text) {
@@ -339,6 +328,7 @@ impl App {
                     &session.cwd,
                     Some(target),
                     None,
+                    None,
                     false,
                 ) {
                     Ok(name) => format!(
@@ -370,7 +360,7 @@ impl App {
         };
         let status = match self
             .runtime
-            .spawn_session(&sess.agent_id, &sess.cwd, None, None, false)
+            .spawn_session(&sess.agent_id, &sess.cwd, None, None, None, false)
         {
             Ok(name) => {
                 let status = format!("started {} [{}]", sess.agent_badge(), name);
@@ -380,87 +370,6 @@ impl App {
             Err(e) => format!("spawn failed: {}", e),
         };
         self.set_status(status);
-    }
-
-    /// PromptInput Enter, sessions flow: dispatch to the idle target when
-    /// one was captured at input time, else auto-spawn — inline prompt when
-    /// the agent supports it, queued dispatch otherwise.
-    fn submit_prompt_command(&mut self) -> Vec<Effect> {
-        if self.prompt_buffer.trim().is_empty() {
-            self.close_prompt_input();
-            self.set_status("empty prompt — dispatch cancelled".into());
-            return Vec::new();
-        }
-
-        let target = self.dispatch_target().cloned();
-        let prompt = self.submit_prompt_input();
-
-        if let Some((pid, name, tmux)) = target {
-            log::info!(
-                "dispatch: idle target {} (PID {}) [{}] prompt_len={}",
-                name,
-                pid,
-                tmux,
-                prompt.len()
-            );
-            return vec![Effect::DispatchPrompt {
-                ok_msg: format!("dispatched to {} (PID {}) [{}]", name, pid, tmux),
-                err_prefix: "dispatch failed".to_string(),
-                tmux,
-                prompt,
-            }];
-        }
-
-        let Some(cwd) = self.default_spawn_cwd() else {
-            self.set_status("no idle agent and no cwd to spawn in".into());
-            return Vec::new();
-        };
-        let agent_id = config::get().default_session_agent_id();
-        let agent = config::get().agent(&agent_id);
-        let supports_initial_prompt = agent.as_ref().is_some_and(|a| a.supports_initial_prompt());
-        match self.runtime.spawn_session(
-            &agent_id,
-            &cwd,
-            None,
-            if supports_initial_prompt {
-                Some(prompt.as_str())
-            } else {
-                None
-            },
-            false,
-        ) {
-            Ok(tmux_name) => {
-                if supports_initial_prompt {
-                    log::info!(
-                        "dispatch: no idle agent, spawned [{}] in {} with inline prompt (len={})",
-                        tmux_name,
-                        cwd,
-                        prompt.len()
-                    );
-                    self.set_status(format!(
-                        "no idle agent — spawned {} [{}]",
-                        agent_id, tmux_name
-                    ));
-                } else {
-                    log::info!(
-                        "dispatch: no idle agent, spawned [{}] in {} — queueing prompt (len={})",
-                        tmux_name,
-                        cwd,
-                        prompt.len()
-                    );
-                    self.queue_pending_dispatch(tmux_name.clone(), prompt);
-                    self.set_status(format!(
-                        "no idle agent — spawned {} [{}], prompt queued",
-                        agent_id, tmux_name
-                    ));
-                }
-            }
-            Err(e) => {
-                log::warn!("dispatch: auto-spawn failed: {}", e);
-                self.set_status(format!("auto-spawn failed: {}", e));
-            }
-        }
-        Vec::new()
     }
 
     fn execute_tasks(&mut self, cmd: TasksCommand) -> Vec<Effect> {
@@ -817,86 +726,47 @@ mod tests {
     }
 
     #[test]
-    fn submit_prompt_empty_cancels() {
+    fn open_model_picker_captures_cwd_and_spawn_uses_selected_model() {
         crate::test_util::with_temp_home(|| {
-            let (mut app, runtime) = app_with(vec![]);
-            app.enter_prompt_input();
-            app.prompt_buffer = "   ".into();
-            let effects = app.execute(Command::Sessions(SessionsCommand::SubmitPrompt));
-            assert!(effects.is_empty());
-            assert!(runtime.spawns.lock().unwrap().is_empty());
-            assert_eq!(status(&app), "empty prompt — dispatch cancelled");
-        });
-    }
-
-    #[test]
-    fn submit_prompt_with_idle_target_dispatches() {
-        crate::test_util::with_temp_home(|| {
-            let (mut app, _rt) = app_with(vec![session(
-                "sid-1",
-                SessionState::Idle,
-                Some("cc-idle-1"),
-            )]);
-            app.enter_prompt_input();
-            app.dispatch_target = Some((4242, "proj".into(), "cc-idle-1".into()));
-            app.prompt_buffer = "do the thing".into();
-            let effects = app.execute(Command::Sessions(SessionsCommand::SubmitPrompt));
-            assert_eq!(
-                effects,
-                vec![Effect::DispatchPrompt {
-                    tmux: "cc-idle-1".into(),
-                    prompt: "do the thing".into(),
-                    ok_msg: "dispatched to proj (PID 4242) [cc-idle-1]".into(),
-                    err_prefix: "dispatch failed".into(),
-                }]
-            );
-        });
-    }
-
-    #[test]
-    fn submit_prompt_without_target_spawns_and_queues() {
-        crate::test_util::with_temp_home(|| {
-            // Default agent is claude, which doesn't take an inline initial
-            // prompt: the spawn must queue the prompt for post-idle dispatch.
             let (mut app, runtime) = app_with(vec![session(
                 "sid-1",
                 SessionState::Processing,
-                Some("cc-busy-1"),
+                Some("cc-agent-1"),
             )]);
-            app.enter_prompt_input();
-            app.dispatch_target = None;
-            app.prompt_buffer = "do the thing".into();
-            let effects = app.execute(Command::Sessions(SessionsCommand::SubmitPrompt));
+            let effects = app.execute(Command::Sessions(SessionsCommand::OpenModelPicker));
             assert!(effects.is_empty());
+            assert_eq!(app.view, crate::app::View::ModelPicker);
+            let picker = app.model_picker.as_ref().expect("picker state");
+            assert_eq!(picker.cwd, "/tmp/proj");
+            assert_eq!(picker.selected, 0);
+
+            app.model_picker_move(1);
+            app.spawn_from_model_picker();
+            assert_eq!(app.view, crate::app::View::Grid);
+            assert!(app.model_picker.is_none());
             let spawns = runtime.spawns.lock().unwrap();
             assert_eq!(spawns.len(), 1);
-            assert_eq!(spawns[0].initial_prompt, None);
-            assert!(app.has_pending_dispatch(), "prompt must be queued");
-            assert!(
-                status(&app).ends_with("prompt queued"),
-                "got: {}",
-                status(&app)
+            assert_eq!(
+                spawns[0].model.as_deref(),
+                Some(crate::app::SPAWN_MODELS[1].1)
             );
+            assert_eq!(spawns[0].cwd, "/tmp/proj");
+            assert!(status(&app).starts_with("started"), "got: {}", status(&app));
         });
     }
 
     #[test]
-    fn submit_prompt_without_sessions_spawns_in_home() {
+    fn model_picker_move_clamps_to_list() {
         crate::test_util::with_temp_home(|| {
-            // With no selection, default_spawn_cwd falls back to the home dir —
-            // the "no cwd" refusal only fires when even that is unavailable.
-            let (mut app, runtime) = app_with(vec![]);
-            app.enter_prompt_input();
-            app.prompt_buffer = "do the thing".into();
-            let effects = app.execute(Command::Sessions(SessionsCommand::SubmitPrompt));
-            assert!(effects.is_empty());
-            let spawns = runtime.spawns.lock().unwrap();
-            assert_eq!(spawns.len(), 1);
+            let (mut app, _rt) = app_with(vec![]);
+            app.execute(Command::Sessions(SessionsCommand::OpenModelPicker));
+            app.model_picker_move(-1);
+            assert_eq!(app.model_picker.as_ref().unwrap().selected, 0);
+            app.model_picker_move(100);
             assert_eq!(
-                spawns[0].cwd,
-                dirs::home_dir().unwrap().display().to_string()
+                app.model_picker.as_ref().unwrap().selected,
+                crate::app::SPAWN_MODELS.len() - 1
             );
-            assert!(app.has_pending_dispatch());
         });
     }
 

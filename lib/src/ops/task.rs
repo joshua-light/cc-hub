@@ -153,7 +153,7 @@ pub fn orchestrate_start(
     } else {
         None
     };
-    let tmux_name = spawn::spawn_agent_session(&agent_id, &cwd, None, initial_prompt, false)
+    let tmux_name = spawn::spawn_agent_session(&agent_id, &cwd, None, initial_prompt, None, false)
         .map_err(|e| OpError::Other(format!("spawn orchestrator: {}", e)))?;
 
     // Locked re-read + merge: the spawn takes long enough that writing the

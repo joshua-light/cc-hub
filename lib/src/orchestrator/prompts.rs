@@ -289,6 +289,7 @@ fn launch_orchestrator_session(
         &cwd,
         None,
         supports_initial.then_some(orchestrator_prompt.as_str()),
+        None,
         false,
     )?;
 

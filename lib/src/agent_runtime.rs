@@ -18,6 +18,7 @@ pub trait AgentRuntime: Send + Sync {
         cwd: &str,
         resume: Option<ResumeTarget>,
         initial_prompt: Option<&str>,
+        model: Option<&str>,
         readonly_tools: bool,
     ) -> io::Result<String>;
 }
@@ -41,6 +42,7 @@ pub(crate) mod testing {
         pub cwd: String,
         pub resume: Option<String>,
         pub initial_prompt: Option<String>,
+        pub model: Option<String>,
         pub readonly_tools: bool,
     }
 
@@ -94,6 +96,7 @@ pub(crate) mod testing {
             cwd: &str,
             resume: Option<ResumeTarget>,
             initial_prompt: Option<&str>,
+            model: Option<&str>,
             readonly_tools: bool,
         ) -> io::Result<String> {
             self.spawns.lock().unwrap().push(SpawnCall {
@@ -101,6 +104,7 @@ pub(crate) mod testing {
                 cwd: cwd.to_string(),
                 resume: resume.map(|r| format!("{:?}", r)),
                 initial_prompt: initial_prompt.map(str::to_string),
+                model: model.map(str::to_string),
                 readonly_tools,
             });
             match &self.spawn_error {
@@ -137,8 +141,9 @@ impl AgentRuntime for SystemAgentRuntime {
         cwd: &str,
         resume: Option<ResumeTarget>,
         initial_prompt: Option<&str>,
+        model: Option<&str>,
         readonly_tools: bool,
     ) -> io::Result<String> {
-        crate::spawn::spawn_agent_session(agent_id, cwd, resume, initial_prompt, readonly_tools)
+        crate::spawn::spawn_agent_session(agent_id, cwd, resume, initial_prompt, model, readonly_tools)
     }
 }

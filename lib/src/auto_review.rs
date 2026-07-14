@@ -170,7 +170,7 @@ pub fn tick() -> TickOutcome {
         None
     };
     let tmux = match crate::spawn::spawn_agent_session(
-        &agent_id, &cwd, None, initial, /* readonly */ true,
+        &agent_id, &cwd, None, initial, None, /* readonly */ true,
     ) {
         Ok(name) => name,
         Err(e) => {

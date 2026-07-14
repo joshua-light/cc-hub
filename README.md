@@ -375,9 +375,9 @@ the plan, so the plan-first workflow works with one fewer column.
 | `W` | Toggle visibility of orchestrator/worker sessions (hidden by default — these belong to the Projects tab) |
 | `o` | Open an embedded shell pane in the selected session's cwd |
 | `n` | Spawn a new `cc-hub-new` session in the selected session's cwd |
-| `N` | Folder picker → spawn a new `cc-hub-new` session (`c` / `C` in the picker creates a public/private GitHub repo via `gh`) |
-| `M` | Bookmarks picker → spawn a new `cc-hub-new` session in a bookmarked folder (add one with `m` on a folder in the `N` picker) |
-| `p` | Dispatch a prompt to the first idle agent (auto-spawns if none) |
+| `N` | Model picker (Opus 4.8 / Sonnet 5 / Fable 5) → spawn a new session in the selected session's cwd pinned to that model via `--model` |
+| `p` | Project/folder picker → spawn a new `cc-hub-new` session there (`c` / `C` in the picker creates a public/private GitHub repo via `gh`) |
+| `M` | Bookmarks picker → spawn a new `cc-hub-new` session in a bookmarked folder (add one with `m` on a folder in the `p` picker) |
 | `x` | Close the selected session's window (Unix WM only) |
 | `Space` | Ack / mark selected session idle |
 | `D` | State-debug popup (why is this session in this state?) |

@@ -8,7 +8,6 @@
 //! (pane/shell attach failures, window-reattach results), whose status
 //! strings preserve the original inline arms verbatim.
 
-use crate::ScanMsg;
 use cc_hub_lib::app::{App, Effect};
 use cc_hub_lib::{focus, spawn, tmux_pane};
 use ratatui::backend::CrosstermBackend;
@@ -20,7 +19,6 @@ pub(crate) async fn apply_effect(
     app: &mut App,
     effect: Effect,
     terminal: &Terminal<CrosstermBackend<io::Stdout>>,
-    scan_tx_main: &mpsc::Sender<ScanMsg>,
     detail_tx: &mpsc::Sender<String>,
     state_debug_tx: &mpsc::Sender<String>,
     spawn_metrics: &impl Fn(),
@@ -57,14 +55,6 @@ pub(crate) async fn apply_effect(
                     app.set_status(format!("shell spawn failed: {}", e));
                 }
             }
-        }
-        Effect::DispatchPrompt {
-            tmux,
-            prompt,
-            ok_msg,
-            err_prefix,
-        } => {
-            crate::spawn_dispatch(scan_tx_main.clone(), tmux, prompt, ok_msg, err_prefix);
         }
         Effect::FocusWindow { pid, cwd } => match focus::focus_window(pid) {
             focus::FocusOutcome::Focused => {}

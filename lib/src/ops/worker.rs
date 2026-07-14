@@ -167,7 +167,7 @@ pub fn spawn_worker(
         None
     };
     let tmux_name =
-        spawn::spawn_agent_session(&agent_id, &cwd, None, initial_prompt, opts.readonly)
+        spawn::spawn_agent_session(&agent_id, &cwd, None, initial_prompt, None, opts.readonly)
             .map_err(|e| OpError::Other(format!("spawn session: {}", e)))?;
 
     let worker = Worker {

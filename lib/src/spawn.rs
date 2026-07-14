@@ -32,12 +32,13 @@ pub fn spawn_agent_session(
     cwd: &str,
     resume: Option<ResumeTarget>,
     initial_prompt: Option<&str>,
+    model: Option<&str>,
     readonly_tools: bool,
 ) -> io::Result<String> {
     let agent = config::get()
         .agent(agent_id)
         .ok_or_else(|| io::Error::other(format!("unknown agent id: {}", agent_id)))?;
-    spawn_agent_session_with_config(&agent, cwd, resume, initial_prompt, readonly_tools)
+    spawn_agent_session_with_config(&agent, cwd, resume, initial_prompt, model, readonly_tools)
 }
 
 pub fn spawn_claude_session(cwd: &str, resume_id: Option<&str>) -> io::Result<String> {
@@ -45,6 +46,7 @@ pub fn spawn_claude_session(cwd: &str, resume_id: Option<&str>) -> io::Result<St
         "claude",
         cwd,
         resume_id.map(|sid| ResumeTarget::SessionId(sid.to_string())),
+        None,
         None,
         false,
     )
@@ -55,10 +57,11 @@ pub fn spawn_agent_session_with_config(
     cwd: &str,
     resume: Option<ResumeTarget>,
     initial_prompt: Option<&str>,
+    model: Option<&str>,
     readonly_tools: bool,
 ) -> io::Result<String> {
     let name = unique_session_name("cchub");
-    let cmd = build_agent_command(agent, cwd, &name, resume, initial_prompt, readonly_tools)?;
+    let cmd = build_agent_command(agent, cwd, &name, resume, initial_prompt, model, readonly_tools)?;
     if agent.kind == AgentKind::Claude {
         ensure_path_trusted(cwd)?;
     }
@@ -92,12 +95,17 @@ fn build_agent_command(
     tmux_name: &str,
     resume: Option<ResumeTarget>,
     initial_prompt: Option<&str>,
+    model: Option<&str>,
     readonly_tools: bool,
 ) -> io::Result<String> {
     let mut cmd = agent.command.clone();
 
     match agent.kind {
         AgentKind::Claude => {
+            if let Some(model) = model {
+                cmd.push_str(" --model ");
+                cmd.push_str(&shell_quote(model));
+            }
             match resume {
                 Some(ResumeTarget::SessionId(sid)) => {
                     cmd.push_str(" --resume ");
@@ -341,7 +349,28 @@ fn unique_session_name(prefix: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{prefix_env, shell_quote, stalled_spawn_message};
+    use super::{build_agent_command, prefix_env, shell_quote, stalled_spawn_message};
+    use crate::agent::{AgentConfig, AgentKind};
+
+    #[test]
+    fn claude_command_carries_model_flag() {
+        let agent = AgentConfig {
+            id: "claude".into(),
+            kind: AgentKind::Claude,
+            command: "claude".into(),
+            use_bridge: false,
+        };
+        let cmd =
+            build_agent_command(&agent, "/tmp", "cchub-1-2", None, None, Some("claude-sonnet-5"), false)
+                .unwrap();
+        assert!(
+            cmd.contains("claude --model 'claude-sonnet-5'"),
+            "got: {}",
+            cmd
+        );
+        let cmd = build_agent_command(&agent, "/tmp", "cchub-1-2", None, None, None, false).unwrap();
+        assert!(!cmd.contains("--model"), "got: {}", cmd);
+    }
 
     // The real failure this was built for: a pane blocked at oh-my-zsh's
     // update prompt. The prompt line must surface in the status message so

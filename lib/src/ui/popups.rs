@@ -379,31 +379,17 @@ pub(crate) fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
     let popup = centered_fixed(area, desired_w, desired_h);
     frame.render_widget(Clear, popup);
 
-    let project_mode = app.prompt_input_for_project();
-    let (title, target_label, title_color) = if project_mode {
-        let cwd = app
-            .projects
-            .pending_cwd
-            .clone()
-            .unwrap_or_else(|| "?".into());
-        let agent = app.pending_agent_label().unwrap_or_else(|| "?".into());
-        (
-            " New project task ",
-            format!(" → {} orchestrator in {} ", agent, cwd),
-            Color::Cyan,
-        )
-    } else {
-        let target = app.dispatch_target();
-        let label = target
-            .map(|(pid, name, tmux)| format!(" → {} (PID {}) [{}] ", name, pid, tmux))
-            .unwrap_or_else(|| " → no idle agent — will spawn a new one ".to_string());
-        let color = if target.is_some() {
-            Color::Green
-        } else {
-            Color::Yellow
-        };
-        (" Dispatch prompt ", label, color)
-    };
+    let cwd = app
+        .projects
+        .pending_cwd
+        .clone()
+        .unwrap_or_else(|| "?".into());
+    let agent = app.pending_agent_label().unwrap_or_else(|| "?".into());
+    let (title, target_label, title_color) = (
+        " New project task ",
+        format!(" → {} orchestrator in {} ", agent, cwd),
+        Color::Cyan,
+    );
 
     let block = popup_block(Span::styled(
         title,
@@ -433,7 +419,7 @@ pub(crate) fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" dispatch   ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" create task   ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             "[esc]",
             Style::default()
@@ -442,7 +428,7 @@ pub(crate) fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
         ),
         Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
     ];
-    if project_mode && config::get().resolved_agents().len() > 1 {
+    if config::get().resolved_agents().len() > 1 {
         footer_spans.push(Span::styled("   ", Style::default().fg(Color::DarkGray)));
         footer_spans.push(Span::styled(
             "[tab]",
@@ -471,6 +457,60 @@ pub(crate) fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
     ];
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// `N` on the Sessions tab: pick which Claude model the new session starts
+/// with. The footer shows where it will spawn (captured at open time).
+pub(crate) fn render_model_picker(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(picker) = app.model_picker.as_ref() else {
+        return;
+    };
+    let models = crate::app::SPAWN_MODELS;
+
+    let desired_w = 60u16.min(area.width);
+    let desired_h = (models.len() as u16 + 4).min(area.height);
+    let popup = centered_fixed(area, desired_w, desired_h);
+    frame.render_widget(Clear, popup);
+
+    let block = popup_block(Span::styled(
+        " New session — pick a model ",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .title_bottom(Span::styled(
+        format!(" → {} in {} ", picker.agent_id, picker.cwd),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let mut lines = vec![Line::raw("")];
+    for (i, (label, model_id)) in models.iter().enumerate() {
+        let selected = i == picker.selected;
+        let marker = if selected { " ▸ " } else { "   " };
+        let label_style = if selected {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(marker, Style::default().fg(Color::Green)),
+            Span::styled(format!("{:<12}", label), label_style),
+            Span::styled(format!("  {}", model_id), Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Word-wrap `text` to `width` columns for the to-do panel: break on

@@ -356,7 +356,7 @@ pub(crate) fn dispatch_picked_cwd(app: &mut App, cwd: &str) {
     } else {
         app.close_folder_picker();
         let agent_id = config::get().default_session_agent_id();
-        let status = match spawn::spawn_agent_session(&agent_id, cwd, None, None, false) {
+        let status = match spawn::spawn_agent_session(&agent_id, cwd, None, None, None, false) {
             Ok(name) => {
                 let status = format!("started {} [{}]", agent_id, name);
                 app.watch_spawn(name, agent_id);

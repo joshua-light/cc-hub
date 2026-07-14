@@ -33,10 +33,9 @@ pub(crate) enum KeyOutcome {
 /// Map a key press onto a [`Command`] when a converted arm covers it.
 ///
 /// Guards mirror the original match arms exactly; anything returning `None`
-/// falls through to the legacy match below. The one stateful check: a
-/// non-empty PromptInput submission in the Projects flow stays legacy (the
-/// orchestrator-spawn path is out of the Sessions command scope), while an
-/// empty submission is always the command (it cancels regardless of flow).
+/// falls through to the legacy match below. PromptInput submission stays
+/// legacy entirely — the orchestrator-spawn path is out of the Sessions
+/// command scope.
 fn map_command(app: &App, key: &KeyEvent, on_sessions: bool, on_tasks: bool) -> Option<Command> {
     if let Some(cmd) = tasks::map_tasks_command(app, key, on_tasks) {
         return Some(cmd);
@@ -82,19 +81,16 @@ fn map_sessions_command(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<
         (View::Grid, KeyCode::Char('x')) if on_sessions => Command::Sessions(S::StageConfirmClose),
         (View::Grid, KeyCode::Char(' ')) if on_sessions => Command::Sessions(S::AckSelected),
         (View::Grid, KeyCode::Char('n')) if on_sessions => Command::Sessions(S::SpawnAgentHere),
-        (View::Grid, KeyCode::Char('N')) if on_sessions => Command::Sessions(S::OpenPlacesPicker),
+        (View::Grid, KeyCode::Char('N')) if on_sessions => Command::Sessions(S::OpenModelPicker),
         (View::Grid, KeyCode::Char('M')) if on_sessions => {
             Command::Sessions(S::OpenBookmarksPicker)
         }
-        (View::Grid, KeyCode::Char('p')) if on_sessions => Command::Sessions(S::OpenPromptInput),
+        // Matches plain `p` and ⌘p alike — modifiers are deliberately not
+        // checked here, so terminals that forward Cmd (kitty protocol)
+        // land on the same arm.
+        (View::Grid, KeyCode::Char('p')) if on_sessions => Command::Sessions(S::OpenPlacesPicker),
         (View::Grid, KeyCode::Char('t')) if on_sessions => Command::Sessions(S::OpenTodoPanel),
         (View::Grid, KeyCode::Char('r')) if on_sessions => Command::Sessions(S::OpenRenameSession),
-        (View::PromptInput, KeyCode::Enter) => {
-            if !app.prompt_buffer.trim().is_empty() && app.prompt_input_for_project() {
-                return None;
-            }
-            Command::Sessions(S::SubmitPrompt)
-        }
         (View::RenameSession, KeyCode::Enter) => Command::Sessions(S::SubmitRename),
         _ => return None,
     };
@@ -125,7 +121,6 @@ pub(crate) async fn handle_key(
                 app,
                 effect,
                 terminal,
-                scan_tx_main,
                 detail_tx,
                 state_debug_tx,
                 spawn_metrics,
@@ -356,6 +351,7 @@ pub(crate) async fn handle_key(
                         &task.orchestrator_agent_id,
                         &cwd,
                         Some(resume.resume.clone()),
+                        None,
                         None,
                         false,
                     ) {
@@ -868,6 +864,18 @@ pub(crate) async fn handle_key(
                 ));
             }
         }
+        (View::ModelPicker, KeyCode::Esc | KeyCode::Char('q')) => {
+            app.close_model_picker();
+        }
+        (View::ModelPicker, KeyCode::Down | KeyCode::Char('j')) => {
+            app.model_picker_move(1);
+        }
+        (View::ModelPicker, KeyCode::Up | KeyCode::Char('k')) => {
+            app.model_picker_move(-1);
+        }
+        (View::ModelPicker, KeyCode::Enter | KeyCode::Char(' ')) => {
+            app.spawn_from_model_picker();
+        }
         (View::RenameSession, KeyCode::Esc) => {
             app.close_rename_session();
         }
@@ -889,11 +897,15 @@ pub(crate) async fn handle_key(
         (View::PromptInput, KeyCode::Char(c)) => {
             app.prompt_buffer.push(c);
         }
-        // Projects-tab flow only: create task, spawn orchestrator, queue the
-        // orchestrator prompt for dispatch when Idle. The Sessions flow and
-        // the empty-prompt cancel are Command::Sessions(SubmitPrompt) via
-        // map_command above.
+        // Projects-tab flow: create task, spawn orchestrator, queue the
+        // orchestrator prompt for dispatch when Idle. PromptInput only opens
+        // from the Projects flows now, so this is the sole Enter handler.
         (View::PromptInput, KeyCode::Enter) => {
+            if app.prompt_buffer.trim().is_empty() {
+                app.close_prompt_input();
+                app.set_status("empty prompt — task creation cancelled".into());
+                return KeyOutcome::Continue;
+            }
             let Some((cwd, prompt, agent_id)) = app.submit_project_task() else {
                 app.set_status("project task: missing cwd".into());
                 return KeyOutcome::Continue;

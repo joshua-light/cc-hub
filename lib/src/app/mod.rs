@@ -66,6 +66,9 @@ pub enum View {
     RenameSession,
     TmuxPane,
     FolderPicker,
+    /// Model list for `N` on the Sessions tab: pick which Claude model the
+    /// new session starts with.
+    ModelPicker,
     GhCreateInput,
     ProjectsResult,
     Backlog,
@@ -192,6 +195,24 @@ pub enum PendingConfirm {
     TaskRestart(PendingTaskRestart),
 }
 
+/// `(label, model id)` pairs offered by the Sessions-tab model picker (`N`).
+/// The id is passed to the agent CLI verbatim via `--model`.
+pub const SPAWN_MODELS: &[(&str, &str)] = &[
+    ("Opus 4.8", "claude-opus-4-8"),
+    ("Sonnet 5", "claude-sonnet-5"),
+    ("Fable 5", "claude-fable-5"),
+];
+
+/// State behind [`View::ModelPicker`]: where the new session will spawn
+/// (captured at open time so a rescan can't move the target) and which
+/// [`SPAWN_MODELS`] row is highlighted.
+#[derive(Clone, Debug)]
+pub struct ModelPickerState {
+    pub cwd: String,
+    pub agent_id: String,
+    pub selected: usize,
+}
+
 /// A prompt queued for a freshly-spawned tmux session that isn't yet Idle.
 /// Drained by [`App::poll_pending_dispatch`] once the session shows up in the
 /// next scan and its state flips to Idle, or times out after
@@ -245,7 +266,7 @@ pub struct App {
     /// the submit can target the right session even if the selection moves
     /// underneath the modal on a rescan.
     pub rename_target: Option<String>,
-    pub dispatch_target: Option<(u32, String, String)>,
+    pub model_picker: Option<ModelPickerState>,
     pub tmux_pane: Option<TmuxPaneView>,
     pub folder_picker: Option<FolderPicker>,
     /// Persistent folder bookmarks shown by the bookmarks picker (`M`) and
@@ -325,7 +346,7 @@ impl App {
             prompt_buffer: String::new(),
             rename_buffer: String::new(),
             rename_target: None,
-            dispatch_target: None,
+            model_picker: None,
             tmux_pane: None,
             folder_picker: None,
             bookmarks: Bookmarks::load(),
@@ -639,6 +660,7 @@ impl App {
             &agent_id,
             &cwd,
             Some(crate::spawn::ResumeTarget::SessionId(sid)),
+            None,
             None,
             false,
         ) {
@@ -963,6 +985,7 @@ impl App {
             cwd,
             None,
             supports_initial_prompt.then_some(prompt.as_str()),
+            None,
             false,
         ) {
             Ok(tmux) => {
@@ -1007,6 +1030,7 @@ impl App {
                 agent_id,
                 cwd,
                 Some(crate::spawn::ResumeTarget::SessionId(sid)),
+                None,
                 None,
                 false,
             )
@@ -1493,7 +1517,7 @@ impl App {
         self.view = View::FolderPicker;
     }
 
-    /// `N` on the Sessions tab: the same places picker the task-assign
+    /// `p` on the Sessions tab: the same places picker the task-assign
     /// flow uses (registered projects, bookmarks, recent dirs —
     /// fuzzy-filterable) to choose where the new session spawns, falling
     /// back to the filesystem browser when nothing is known yet. The
@@ -1510,6 +1534,67 @@ impl App {
         }
         self.folder_picker = Some(picker);
         self.view = View::FolderPicker;
+    }
+
+    /// `N` on the Sessions tab: open the model picker for a new session in
+    /// the selected session's cwd (falling back to `$HOME`). The target cwd
+    /// and agent are captured now so a rescan can't move them under the
+    /// popup; the spawn happens in [`Self::spawn_from_model_picker`].
+    pub fn enter_model_picker(&mut self) {
+        let Some(cwd) = self.default_spawn_cwd() else {
+            self.set_status("no cwd to spawn in".into());
+            return;
+        };
+        self.model_picker = Some(ModelPickerState {
+            cwd,
+            agent_id: config::get().default_session_agent_id(),
+            selected: 0,
+        });
+        self.view = View::ModelPicker;
+    }
+
+    pub fn close_model_picker(&mut self) {
+        self.model_picker = None;
+        self.view = View::Grid;
+    }
+
+    /// Move the model-picker highlight by `delta` rows, clamped to the
+    /// [`SPAWN_MODELS`] list.
+    pub fn model_picker_move(&mut self, delta: isize) {
+        if let Some(picker) = self.model_picker.as_mut() {
+            let last = SPAWN_MODELS.len().saturating_sub(1);
+            picker.selected = picker
+                .selected
+                .saturating_add_signed(delta)
+                .min(last);
+        }
+    }
+
+    /// Enter on the model picker: spawn a fresh agent session in the
+    /// captured cwd pinned to the highlighted model, with the spawn
+    /// watchdog armed (same contract as `n`).
+    pub fn spawn_from_model_picker(&mut self) {
+        let Some(picker) = self.model_picker.take() else {
+            return;
+        };
+        self.view = View::Grid;
+        let (label, model_id) = SPAWN_MODELS[picker.selected.min(SPAWN_MODELS.len() - 1)];
+        let status = match self.runtime.spawn_session(
+            &picker.agent_id,
+            &picker.cwd,
+            None,
+            None,
+            Some(model_id),
+            false,
+        ) {
+            Ok(name) => {
+                let status = format!("started {} ({}) [{}]", picker.agent_id, label, name);
+                self.watch_spawn(name, picker.agent_id);
+                status
+            }
+            Err(e) => format!("spawn failed: {}", e),
+        };
+        self.set_status(status);
     }
 
     /// Open the picker pre-loaded with the user's bookmarked folders.
@@ -1595,7 +1680,6 @@ impl App {
         self.projects.pending_cwd = Some(cwd);
         self.projects.pending_agent_id = None;
         self.prompt_buffer.clear();
-        self.dispatch_target = None;
         self.view = View::PromptInput;
     }
 
@@ -1709,25 +1793,12 @@ impl App {
         self.view = View::Grid;
     }
 
-    pub fn enter_prompt_input(&mut self) {
-        self.prompt_buffer.clear();
-        self.dispatch_target = Self::compute_dispatch_target(&self.sessions.groups);
-        self.view = View::PromptInput;
-    }
-
     pub fn close_prompt_input(&mut self) {
         self.prompt_buffer.clear();
-        self.dispatch_target = None;
         self.projects.pending_cwd = None;
         self.projects.pending_agent_id = None;
         self.projects.creating_task = false;
         self.view = View::Grid;
-    }
-
-    /// True when the prompt input should be routed through the orchestrator
-    /// project-task flow instead of the regular session-dispatch flow.
-    pub fn prompt_input_for_project(&self) -> bool {
-        self.projects.pending_cwd.is_some()
     }
 
     /// Consumes the pending cwd, prompt, and agent override, clears
@@ -1741,11 +1812,6 @@ impl App {
         self.view = View::Grid;
         let prompt = std::mem::take(&mut self.prompt_buffer);
         Some((cwd, prompt, agent_id))
-    }
-
-    pub fn submit_prompt_input(&mut self) -> String {
-        self.view = View::Grid;
-        std::mem::take(&mut self.prompt_buffer)
     }
 
     /// Open the rename-title modal for the currently selected session,
@@ -1810,10 +1876,6 @@ impl App {
             }
         }
         Some((sid, title))
-    }
-
-    pub fn dispatch_target(&self) -> Option<&(u32, String, String)> {
-        self.dispatch_target.as_ref()
     }
 
     pub fn queue_pending_dispatch(&mut self, tmux: String, prompt: String) {
@@ -1915,22 +1977,6 @@ impl App {
     /// Tmux session name of the current pending dispatch, if any.
     pub fn pending_dispatch_target(&self) -> Option<&str> {
         self.pending_dispatch.front().map(|pd| pd.tmux.as_str())
-    }
-
-    fn compute_dispatch_target(
-        groups: &[crate::models::ProjectGroup],
-    ) -> Option<(u32, String, String)> {
-        let panes = crate::send::tmux_panes();
-        groups
-            .iter()
-            .flat_map(|g| &g.sessions)
-            .filter(|s| s.state == SessionState::Idle)
-            .filter_map(|s| {
-                let tmux = crate::send::tmux_session_for_pid_in(s.pid, &panes)?;
-                Some((s, tmux))
-            })
-            .max_by_key(|(s, _)| s.last_activity.unwrap_or(s.started_at))
-            .map(|(s, tmux)| (s.pid, s.project_name.clone(), tmux))
     }
 
     pub fn update_usage(&mut self, usage: UsageInfo, rendered: Line<'static>) {
@@ -2346,9 +2392,6 @@ impl App {
             let changed = new_groups != self.sessions.groups;
             self.sessions.groups = new_groups;
             self.sessions.last_sessions = sessions;
-            if changed && self.view == View::PromptInput {
-                self.dispatch_target = Self::compute_dispatch_target(&self.sessions.groups);
-            }
             return changed || task_bindings_changed || spawn_watch_fired;
         }
 
@@ -2455,10 +2498,6 @@ impl App {
         let prev_id = self.selected_session_id();
         let sel_before = (self.sessions.sel_group, self.sessions.sel_in_group);
         self.sessions.groups = groups;
-
-        if self.view == View::PromptInput {
-            self.dispatch_target = Self::compute_dispatch_target(&self.sessions.groups);
-        }
 
         // Re-anchor the selection on the previously-selected session id;
         // clamp into range when it's gone.
@@ -2587,14 +2626,6 @@ impl App {
         }
         if let Some(PendingConfirm::Close(pc)) = &self.pending_confirm {
             log::info!("pending_close: pid={} display={}", pc.pid, pc.display);
-        }
-        if let Some((target_pid, name, tmux)) = &self.dispatch_target {
-            log::info!(
-                "dispatch_target: pid={} project={} tmux={}",
-                target_pid,
-                name,
-                tmux
-            );
         }
         if !self.sessions.acks.is_empty() {
             log::info!("acks: active");
