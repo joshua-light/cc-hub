@@ -771,6 +771,167 @@ mod tests {
     }
 
     #[test]
+    fn model_picker_fuzzy_filters_labels_and_model_ids() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt) = app_with(vec![]);
+            app.execute(Command::Sessions(SessionsCommand::OpenModelPicker));
+            let picker = app.model_picker.as_mut().unwrap();
+
+            for c in "sn5".chars() {
+                picker.push_filter(c);
+            }
+            assert_eq!(picker.rows.len(), 1);
+            assert_eq!(
+                picker.selected_model(),
+                Some((
+                    crate::app::SPAWN_MODELS[1].0,
+                    Some(crate::app::SPAWN_MODELS[1].1)
+                ))
+            );
+            assert!(!picker.rows[0].label_indices.is_empty());
+
+            for _ in 0..3 {
+                picker.pop_filter();
+            }
+            for c in "-f".chars() {
+                picker.push_filter(c);
+            }
+            assert_eq!(picker.rows.len(), 1);
+            assert_eq!(
+                picker.selected_model(),
+                Some((
+                    crate::app::SPAWN_MODELS[2].0,
+                    Some(crate::app::SPAWN_MODELS[2].1)
+                ))
+            );
+            assert!(!picker.rows[0].detail_indices.is_empty());
+        });
+    }
+
+    #[test]
+    fn model_picker_tab_cycles_agents_and_their_model_choices() {
+        use crate::agent::{default_claude_models, AgentConfig, AgentKind, AgentModel};
+
+        let mut picker = crate::app::ModelPickerState::new(
+            "/tmp/proj".into(),
+            "claude".into(),
+            vec![
+                AgentConfig {
+                    id: "pi-codex".into(),
+                    kind: AgentKind::Pi,
+                    command: "pi --provider openai-codex".into(),
+                    use_bridge: true,
+                    models: vec![
+                        AgentModel {
+                            label: "GPT-5.6".into(),
+                            id: "gpt-5.6".into(),
+                        },
+                        AgentModel {
+                            label: "Sol".into(),
+                            id: "sol".into(),
+                        },
+                    ],
+                },
+                AgentConfig {
+                    id: "claude".into(),
+                    kind: AgentKind::Claude,
+                    command: "claude".into(),
+                    use_bridge: false,
+                    models: default_claude_models(),
+                },
+            ],
+        );
+        picker.push_filter('s');
+
+        picker.cycle_agent();
+
+        assert_eq!(picker.agent_id, "pi-codex");
+        assert!(picker.filter.is_empty());
+        assert_eq!(picker.rows.len(), 2);
+        assert_eq!(picker.selected_model(), Some(("GPT-5.6", Some("gpt-5.6"))));
+
+        picker.cycle_agent();
+        assert_eq!(picker.agent_id, "claude");
+        assert_eq!(picker.rows.len(), crate::app::SPAWN_MODELS.len());
+    }
+
+    #[test]
+    fn configured_agent_spawns_without_a_claude_model_override() {
+        use crate::agent::{AgentConfig, AgentKind};
+
+        crate::test_util::with_temp_home(|| {
+            let (mut app, runtime) = app_with(vec![]);
+            app.model_picker = Some(crate::app::ModelPickerState::new(
+                "/tmp/proj".into(),
+                "pi-codex".into(),
+                vec![AgentConfig {
+                    id: "pi-codex".into(),
+                    kind: AgentKind::Pi,
+                    command: "pi --provider openai-codex --model gpt-5.5".into(),
+                    use_bridge: true,
+                    models: Vec::new(),
+                }],
+            ));
+            app.view = crate::app::View::ModelPicker;
+
+            app.spawn_from_model_picker();
+
+            let spawns = runtime.spawns.lock().unwrap();
+            assert_eq!(spawns.len(), 1);
+            assert_eq!(spawns[0].agent_id, "pi-codex");
+            assert_eq!(spawns[0].model, None);
+        });
+    }
+
+    #[test]
+    fn configured_pi_model_is_forwarded_to_spawn() {
+        use crate::agent::{AgentConfig, AgentKind, AgentModel};
+
+        crate::test_util::with_temp_home(|| {
+            let (mut app, runtime) = app_with(vec![]);
+            app.model_picker = Some(crate::app::ModelPickerState::new(
+                "/tmp/proj".into(),
+                "pi-codex".into(),
+                vec![AgentConfig {
+                    id: "pi-codex".into(),
+                    kind: AgentKind::Pi,
+                    command: "pi --provider openai-codex".into(),
+                    use_bridge: true,
+                    models: vec![AgentModel {
+                        label: "GPT-5.6".into(),
+                        id: "gpt-5.6".into(),
+                    }],
+                }],
+            ));
+            app.view = crate::app::View::ModelPicker;
+
+            app.spawn_from_model_picker();
+
+            let spawns = runtime.spawns.lock().unwrap();
+            assert_eq!(spawns.len(), 1);
+            assert_eq!(spawns[0].agent_id, "pi-codex");
+            assert_eq!(spawns[0].model.as_deref(), Some("gpt-5.6"));
+        });
+    }
+
+    #[test]
+    fn model_picker_no_match_does_not_spawn_or_close() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, runtime) = app_with(vec![]);
+            app.execute(Command::Sessions(SessionsCommand::OpenModelPicker));
+            for c in "xyz".chars() {
+                app.model_picker.as_mut().unwrap().push_filter(c);
+            }
+
+            app.spawn_from_model_picker();
+
+            assert_eq!(app.view, crate::app::View::ModelPicker);
+            assert!(app.model_picker.is_some());
+            assert!(runtime.spawns.lock().unwrap().is_empty());
+        });
+    }
+
+    #[test]
     fn spawn_agent_here_records_and_watches() {
         crate::test_util::with_temp_home(|| {
             let (mut app, runtime) = app_with(vec![session(

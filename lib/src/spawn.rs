@@ -128,6 +128,10 @@ fn build_agent_command(
             }
         }
         AgentKind::Pi => {
+            if let Some(model) = model {
+                cmd.push_str(" --model ");
+                cmd.push_str(&shell_quote(model));
+            }
             if agent.use_bridge {
                 let bridge = pi_bridge::ensure_bridge_file()?;
                 cmd.push_str(" -e ");
@@ -359,6 +363,7 @@ mod tests {
             kind: AgentKind::Claude,
             command: "claude".into(),
             use_bridge: false,
+            models: Vec::new(),
         };
         let cmd =
             build_agent_command(&agent, "/tmp", "cchub-1-2", None, None, Some("claude-sonnet-5"), false)
@@ -370,6 +375,28 @@ mod tests {
         );
         let cmd = build_agent_command(&agent, "/tmp", "cchub-1-2", None, None, None, false).unwrap();
         assert!(!cmd.contains("--model"), "got: {}", cmd);
+    }
+
+    #[test]
+    fn pi_command_carries_model_flag() {
+        let agent = AgentConfig {
+            id: "pi-codex".into(),
+            kind: AgentKind::Pi,
+            command: "pi --provider openai-codex".into(),
+            use_bridge: false,
+            models: Vec::new(),
+        };
+        let cmd = build_agent_command(
+            &agent,
+            "/tmp",
+            "cchub-1-2",
+            None,
+            None,
+            Some("gpt-5.6"),
+            false,
+        )
+        .unwrap();
+        assert!(cmd.contains("--model 'gpt-5.6'"), "got: {}", cmd);
     }
 
     // The real failure this was built for: a pane blocked at oh-my-zsh's

@@ -17,8 +17,8 @@ From the grid you can:
 
 ## Tasks board
 
-The personal layer: a four-column board — **To-Do · Planning · In Progress ·
-Done** — stored one file per task under `~/.cc-hub/tasks/` (a pre-existing
+The personal layer: a three-column board — **To-Do · In Progress · Done** —
+stored one file per task under `~/.cc-hub/tasks/` (a pre-existing
 `tasks.json` migrates automatically on first launch; the original is kept as
 `tasks.json.migrated-v1` — don't run pre-migration builds against the same
 home afterwards, or you'll get a second, empty board). Jot tasks and check
@@ -163,11 +163,22 @@ command = "cc-hub-new"
 [agents.claude]
 kind = "claude"
 command = "cc-hub-new"
+# Optional picker entries. A label/id table gives a friendly display name;
+# a bare string uses the model id as its label. The selected id is passed as
+# `--model`. Claude keeps these three defaults when `models` is omitted.
+models = [
+  { label = "Opus 4.8", id = "claude-opus-4-8" },
+  { label = "Sonnet 5", id = "claude-sonnet-5" },
+  { label = "Fable 5", id = "claude-fable-5" },
+]
 
 [agents.pi-codex]
 kind = "pi"
-command = "pi --provider openai-codex --model gpt-5.5 --thinking xhigh"
+command = "pi --provider openai-codex --thinking xhigh"
 use_bridge = true
+# Pi and other command-configured agents use their command's built-in model
+# when this is omitted. When present, keep `--model` out of `command`.
+models = ["gpt-5.6", "sol"]
 
 [projects]
 default_orchestrator_agent = "claude"
@@ -222,10 +233,10 @@ cell_width = 42
 # The Projects tab (orchestrator kanban) is WIP and hidden from the tab
 # strip + Tab cycle by default. Set true to bring it back.
 show_projects_tab = false
-# The Planning column on the Tasks board. On by default. Set false to drop
-# it; its cards fold into In Progress (Space still approves a plan-ready
-# card — the action keys off the card's status, not the column).
-show_planning_column = true
+# The Planning column on the Tasks board. Off by default. Set true to show
+# it; otherwise its cards fold into In Progress (Space still approves a
+# plan-ready card — the action keys off the card's status, not the column).
+show_planning_column = false
 
 [metrics]
 # Minimum assistant turns before a session is eligible for context-growth
@@ -311,7 +322,7 @@ cc-hub behaves the same everywhere it can, but a few things genuinely differ:
 
 ### Tasks tab
 
-A personal task board: **To-Do · Planning · In Progress · Done**. Each card
+A personal task board: **To-Do · In Progress · Done** by default. Each card
 is a `state.json` under `~/.cc-hub/tasks/<task-id>/` — the same per-task
 format the Projects layer uses, hand-editable — with board-level metadata in
 `~/.cc-hub/board.json`.
@@ -344,8 +355,8 @@ columns; Enter keeps it applied, Esc clears it.
 Deletions are recoverable: `u` restores the last `x`/`c` removal, and every
 removed task is also appended to `~/.cc-hub/tasks-archive-v2.json`.
 
-The **Planning** column is optional — set
-`[ui] show_planning_column = false` to drop it. Its cards fold into
+The **Planning** column is opt-in — set
+`[ui] show_planning_column = true` to show it. By default its cards fold into
 **In Progress** (still showing `● plan ready`), and `Space` still approves
 the plan, so the plan-first workflow works with one fewer column.
 
@@ -375,7 +386,7 @@ the plan, so the plan-first workflow works with one fewer column.
 | `W` | Toggle visibility of orchestrator/worker sessions (hidden by default — these belong to the Projects tab) |
 | `o` | Open an embedded shell pane in the selected session's cwd |
 | `n` | Spawn a new `cc-hub-new` session in the selected session's cwd |
-| `N` | Model picker (Opus 4.8 / Sonnet 5 / Fable 5) → spawn a new session in the selected session's cwd pinned to that model via `--model` |
+| `N` | Fuzzy model/agent picker → choose a model, use `Tab` to cycle configured coding agents/providers, and spawn in the selected session's cwd |
 | `p` | Project/folder picker → spawn a new `cc-hub-new` session there (`c` / `C` in the picker creates a public/private GitHub repo via `gh`) |
 | `M` | Bookmarks picker → spawn a new `cc-hub-new` session in a bookmarked folder (add one with `m` on a folder in the `p` picker) |
 | `x` | Close the selected session's window (Unix WM only) |

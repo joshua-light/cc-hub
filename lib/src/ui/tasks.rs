@@ -1,10 +1,11 @@
-//! Tasks-tab body: a kanban board (To-Do · Planning · In Progress · Done)
+//! Tasks-tab body: a kanban board (To-Do · In Progress · Done by default)
 //! over the personal task store. Visually a sibling of the Projects kanban,
 //! but each card is a flat task, optionally annotated with its bound agent
 //! session's live state (resolved by tmux name, same as project cards).
 //! Planning holds cards whose agent is drafting a plan; Space approves it and
-//! the card moves to In Progress. The Planning column is optional
-//! (`ui.show_planning_column`); when hidden its cards fold into In Progress.
+//! the card moves to In Progress. The Planning column is opt-in
+//! (`ui.show_planning_column = true`); when hidden its cards fold into In
+//! Progress.
 
 use crate::app::{visible_task_columns, App, View};
 use crate::models::{self, SessionInfo, SessionState};

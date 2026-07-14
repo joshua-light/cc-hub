@@ -33,6 +33,29 @@ pub struct AgentConfig {
     pub kind: AgentKind,
     pub command: String,
     pub use_bridge: bool,
+    pub models: Vec<AgentModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentModel {
+    pub label: String,
+    pub id: String,
+}
+
+pub const DEFAULT_CLAUDE_MODELS: &[(&str, &str)] = &[
+    ("Opus 4.8", "claude-opus-4-8"),
+    ("Sonnet 5", "claude-sonnet-5"),
+    ("Fable 5", "claude-fable-5"),
+];
+
+pub fn default_claude_models() -> Vec<AgentModel> {
+    DEFAULT_CLAUDE_MODELS
+        .iter()
+        .map(|(label, id)| AgentModel {
+            label: (*label).into(),
+            id: (*id).into(),
+        })
+        .collect()
 }
 
 impl AgentConfig {

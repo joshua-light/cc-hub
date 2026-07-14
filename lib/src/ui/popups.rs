@@ -459,21 +459,22 @@ pub(crate) fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-/// `N` on the Sessions tab: pick which Claude model the new session starts
-/// with. The footer shows where it will spawn (captured at open time).
+/// `N` on the Sessions tab: fuzzy-filter the model for the selected coding
+/// agent. The footer shows the agent and spawn cwd captured by the picker.
 pub(crate) fn render_model_picker(frame: &mut Frame, area: Rect, app: &App) {
     let Some(picker) = app.model_picker.as_ref() else {
         return;
     };
-    let models = crate::app::SPAWN_MODELS;
+    let choices = &picker.choices;
 
     let desired_w = 60u16.min(area.width);
-    let desired_h = (models.len() as u16 + 4).min(area.height);
+    let desired_h = (crate::app::SPAWN_MODELS.len().max(choices.len()) as u16 + 5)
+        .min(area.height);
     let popup = centered_fixed(area, desired_w, desired_h);
     frame.render_widget(Clear, popup);
 
     let block = popup_block(Span::styled(
-        " New session — pick a model ",
+        " New session — pick model / agent ",
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
@@ -488,29 +489,108 @@ pub(crate) fn render_model_picker(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    if inner.height == 0 || inner.width == 0 {
+    if inner.height < 3 || inner.width == 0 {
         return;
     }
 
-    let mut lines = vec![Line::raw("")];
-    for (i, (label, model_id)) in models.iter().enumerate() {
-        let selected = i == picker.selected;
-        let marker = if selected { " ▸ " } else { "   " };
-        let label_style = if selected {
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(marker, Style::default().fg(Color::Green)),
-            Span::styled(format!("{:<12}", label), label_style),
-            Span::styled(format!("  {}", model_id), Style::default().fg(Color::DarkGray)),
-        ]));
+    let filter_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    let mut filter_line = picker.filter.clone();
+    filter_line.push('▎');
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                " ❯ ",
+                Style::default()
+                    .fg(ACCENT_BLUE)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                filter_line,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        filter_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("{}/{} ", picker.rows.len(), choices.len()),
+            Style::default().fg(DIM_TEXT),
+        )))
+        .alignment(Alignment::Right),
+        filter_area,
+    );
+
+    let list_area = Rect::new(inner.x, inner.y + 2, inner.width, inner.height - 2);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if picker.rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (no matches — backspace to widen)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        let visible = list_area.height as usize;
+        let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+        let label_width = choices
+            .iter()
+            .map(|choice| choice.label.chars().count())
+            .max()
+            .unwrap_or(0);
+        for (i, row) in picker.rows.iter().enumerate().skip(start).take(visible) {
+            let Some(choice) = choices.get(row.choice) else {
+                continue;
+            };
+            let label = &choice.label;
+            let detail = &choice.detail;
+            let selected = i == picker.selected;
+            let bar = if selected {
+                Style::default().bg(Color::White)
+            } else {
+                Style::default()
+            };
+            let (label_base, label_hl, id_base, id_hl) = if selected {
+                (
+                    bar.fg(Color::Black).add_modifier(Modifier::BOLD),
+                    bar.fg(Color::Blue).add_modifier(Modifier::BOLD),
+                    bar.fg(Color::Rgb(90, 90, 100)),
+                    bar.fg(Color::Blue),
+                )
+            } else {
+                (
+                    Style::default().fg(Color::Gray),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Color::Cyan),
+                )
+            };
+            let mut spans = vec![Span::styled(
+                if selected { "▶ " } else { "  " },
+                bar.fg(Color::Black).add_modifier(Modifier::BOLD),
+            )];
+            spans.extend(highlight_spans(
+                label,
+                &row.label_indices,
+                label_base,
+                label_hl,
+            ));
+            spans.push(Span::styled(
+                " ".repeat(label_width.saturating_sub(label.chars().count()) + 2),
+                bar,
+            ));
+            spans.extend(highlight_spans(
+                detail,
+                &row.detail_indices,
+                id_base,
+                id_hl,
+            ));
+            lines.push(Line::from(spans));
+        }
     }
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines), list_area);
 }
 
 /// Word-wrap `text` to `width` columns for the to-do panel: break on
@@ -1778,6 +1858,95 @@ mod places_picker_tests {
             assert!(
                 !rendered.contains("reddit"),
                 "filtered-out row must not render:\n{}",
+                rendered
+            );
+        });
+    }
+}
+
+#[cfg(all(test, unix))]
+mod model_picker_tests {
+    use crate::agent::{default_claude_models, AgentConfig, AgentKind, AgentModel};
+    use crate::app::{App, ModelPickerState, View};
+    use crate::test_util::with_temp_home;
+    use crate::ui::common::buffer_to_string;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    #[test]
+    fn renders_filter_match_count_and_surviving_model() {
+        with_temp_home(|| {
+            let mut app = App::new();
+            app.enter_model_picker();
+            for c in "sn5".chars() {
+                app.model_picker.as_mut().unwrap().push_filter(c);
+            }
+            assert_eq!(app.view, View::ModelPicker);
+
+            let backend = TestBackend::new(70, 16);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|f| super::render_model_picker(f, f.area(), &app))
+                .expect("render");
+            let rendered = buffer_to_string(terminal.backend().buffer());
+
+            assert!(rendered.contains("sn5▎"), "filter line:\n{}", rendered);
+            assert!(rendered.contains("1/3"), "match count:\n{}", rendered);
+            assert!(rendered.contains("Sonnet 5"), "matched row:\n{}", rendered);
+            assert!(
+                !rendered.contains("Opus 4.8") && !rendered.contains("Fable 5"),
+                "filtered-out rows must not render:\n{}",
+                rendered
+            );
+        });
+    }
+
+    #[test]
+    fn renders_cycled_agent_and_its_models() {
+        with_temp_home(|| {
+            let mut app = App::new();
+            app.model_picker = Some(ModelPickerState::new(
+                "/tmp/proj".into(),
+                "claude".into(),
+                vec![
+                    AgentConfig {
+                        id: "claude".into(),
+                        kind: AgentKind::Claude,
+                        command: "claude".into(),
+                        use_bridge: false,
+                        models: default_claude_models(),
+                    },
+                    AgentConfig {
+                        id: "pi-codex".into(),
+                        kind: AgentKind::Pi,
+                        command: "pi --provider openai-codex".into(),
+                        use_bridge: true,
+                        models: vec![AgentModel {
+                            label: "GPT-5.6".into(),
+                            id: "gpt-5.6".into(),
+                        }],
+                    },
+                ],
+            ));
+            app.model_picker.as_mut().unwrap().cycle_agent();
+            app.view = View::ModelPicker;
+
+            let backend = TestBackend::new(80, 16);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|f| super::render_model_picker(f, f.area(), &app))
+                .expect("render");
+            let rendered = buffer_to_string(terminal.backend().buffer());
+
+            assert!(rendered.contains("pi-codex"), "agent footer:\n{}", rendered);
+            assert!(
+                rendered.contains("GPT-5.6"),
+                "configured model:\n{}",
+                rendered
+            );
+            assert!(
+                rendered.contains("gpt-5.6"),
+                "model id:\n{}",
                 rendered
             );
         });
