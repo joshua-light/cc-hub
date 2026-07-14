@@ -261,7 +261,14 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             View::ConfirmClose => "y:confirm  n/esc:cancel",
             View::StateDebug => "j/k:scroll  esc:close  q:close",
             View::PromptInput => "type prompt  enter:create task  esc:cancel",
-            View::ModelPicker => "j/k:model  enter:start  esc:cancel",
+            View::ModelPicker if app
+                .model_picker
+                .as_ref()
+                .is_some_and(|picker| picker.has_multiple_agents()) =>
+            {
+                "type:filter  ↑/↓:move  tab:agent  enter/space:start  esc:cancel"
+            }
+            View::ModelPicker => "type:filter  ↑/↓:move  enter/space:start  esc:cancel",
             View::RenameSession => "edit title  enter:rename  esc:cancel",
             View::TodoPanel => {
                 if app.todo.adding {

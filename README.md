@@ -163,11 +163,22 @@ command = "cc-hub-new"
 [agents.claude]
 kind = "claude"
 command = "cc-hub-new"
+# Optional picker entries. A label/id table gives a friendly display name;
+# a bare string uses the model id as its label. The selected id is passed as
+# `--model`. Claude keeps these three defaults when `models` is omitted.
+models = [
+  { label = "Opus 4.8", id = "claude-opus-4-8" },
+  { label = "Sonnet 5", id = "claude-sonnet-5" },
+  { label = "Fable 5", id = "claude-fable-5" },
+]
 
 [agents.pi-codex]
 kind = "pi"
-command = "pi --provider openai-codex --model gpt-5.5 --thinking xhigh"
+command = "pi --provider openai-codex --thinking xhigh"
 use_bridge = true
+# Pi and other command-configured agents use their command's built-in model
+# when this is omitted. When present, keep `--model` out of `command`.
+models = ["gpt-5.6", "sol"]
 
 [projects]
 default_orchestrator_agent = "claude"
@@ -375,7 +386,7 @@ the plan, so the plan-first workflow works with one fewer column.
 | `W` | Toggle visibility of orchestrator/worker sessions (hidden by default — these belong to the Projects tab) |
 | `o` | Open an embedded shell pane in the selected session's cwd |
 | `n` | Spawn a new `cc-hub-new` session in the selected session's cwd |
-| `N` | Model picker (Opus 4.8 / Sonnet 5 / Fable 5) → spawn a new session in the selected session's cwd pinned to that model via `--model` |
+| `N` | Fuzzy model/agent picker → choose a model, use `Tab` to cycle configured coding agents/providers, and spawn in the selected session's cwd |
 | `p` | Project/folder picker → spawn a new `cc-hub-new` session there (`c` / `C` in the picker creates a public/private GitHub repo via `gh`) |
 | `M` | Bookmarks picker → spawn a new `cc-hub-new` session in a bookmarked folder (add one with `m` on a folder in the `p` picker) |
 | `x` | Close the selected session's window (Unix WM only) |

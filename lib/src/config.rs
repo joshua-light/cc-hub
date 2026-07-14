@@ -3,7 +3,7 @@
 //! to [`Default`], so this is a pure knob layer — removing the file yields
 //! the same behaviour as shipped defaults.
 
-use crate::agent::{AgentConfig, AgentKind};
+use crate::agent::{default_claude_models, AgentConfig, AgentKind, AgentModel};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -39,6 +39,7 @@ impl Config {
                 kind: AgentKind::Claude,
                 command: self.spawn.command.clone(),
                 use_bridge: false,
+                models: default_claude_models(),
             },
         );
         for (id, cfg) in &self.agents {
@@ -49,6 +50,11 @@ impl Config {
                     kind: cfg.kind,
                     command: cfg.command.clone(),
                     use_bridge: cfg.use_bridge,
+                    models: if cfg.models.is_empty() && cfg.kind == AgentKind::Claude {
+                        default_claude_models()
+                    } else {
+                        cfg.models.iter().map(ConfiguredModel::resolve).collect()
+                    },
                 },
             );
         }
@@ -104,6 +110,7 @@ pub struct ConfiguredAgent {
     pub kind: AgentKind,
     pub command: String,
     pub use_bridge: bool,
+    pub models: Vec<ConfiguredModel>,
 }
 
 impl Default for ConfiguredAgent {
@@ -112,8 +119,40 @@ impl Default for ConfiguredAgent {
             kind: AgentKind::Claude,
             command: "cc-hub-new".into(),
             use_bridge: false,
+            models: Vec::new(),
         }
     }
+}
+
+/// A concise model id (`"gpt-5.6"`) or a friendly label/id pair for an
+/// entry in the model picker.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ConfiguredModel {
+    Id(String),
+    Detailed(ConfiguredModelDetails),
+}
+
+impl ConfiguredModel {
+    fn resolve(&self) -> AgentModel {
+        match self {
+            Self::Id(id) => AgentModel {
+                label: id.clone(),
+                id: id.clone(),
+            },
+            Self::Detailed(model) => AgentModel {
+                label: model.label.clone(),
+                id: model.id.clone(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfiguredModelDetails {
+    pub label: String,
+    pub id: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -475,6 +514,7 @@ mod tests {
         let agent = cfg.agent("claude").unwrap();
         assert_eq!(agent.kind, AgentKind::Claude);
         assert_eq!(agent.command, "my-claude");
+        assert_eq!(agent.models, default_claude_models());
     }
 
     #[test]
@@ -482,8 +522,12 @@ mod tests {
         let src = r#"
             [agents.pi-codex]
             kind = "pi"
-            command = "pi --provider openai-codex --model gpt-5.5"
+            command = "pi --provider openai-codex"
             use_bridge = true
+            models = [
+                { label = "GPT-5.6", id = "gpt-5.6" },
+                { label = "Sol", id = "sol" },
+            ]
 
             [projects]
             default_orchestrator_agent = "claude"
@@ -493,7 +537,26 @@ mod tests {
         let pi = cfg.agent("pi-codex").unwrap();
         assert_eq!(pi.kind, AgentKind::Pi);
         assert!(pi.use_bridge);
+        assert_eq!(pi.models[0].label, "GPT-5.6");
+        assert_eq!(pi.models[0].id, "gpt-5.6");
+        assert_eq!(pi.models[1].id, "sol");
         assert_eq!(cfg.default_orchestrator_agent_id(), "claude");
         assert_eq!(cfg.default_session_agent_id(), "pi-codex");
+    }
+
+    #[test]
+    fn agent_models_accept_id_shorthand() {
+        let src = r#"
+            [agents.pi-codex]
+            kind = "pi"
+            command = "pi --provider openai-codex"
+            models = ["gpt-5.6", "sol"]
+        "#;
+        let cfg: Config = toml::from_str(src).unwrap();
+        let models = cfg.agent("pi-codex").unwrap().models;
+        assert_eq!(models[0].label, "gpt-5.6");
+        assert_eq!(models[0].id, "gpt-5.6");
+        assert_eq!(models[1].label, "sol");
+        assert_eq!(models[1].id, "sol");
     }
 }

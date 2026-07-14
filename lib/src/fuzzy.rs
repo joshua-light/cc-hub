@@ -1,4 +1,4 @@
-//! Tiny fuzzy matcher for the places picker: case-insensitive subsequence
+//! Tiny fuzzy matcher for picker UIs: case-insensitive subsequence
 //! match with a score that prefers consecutive runs, word-boundary starts
 //! (after `-`, `_`, `/`, `.`, space), and matches near the front. Greedy
 //! left-to-right, so it can miss a better alignment further right — fine
