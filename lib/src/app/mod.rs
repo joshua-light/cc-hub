@@ -6,7 +6,7 @@ use crate::conversation::StateExplanation;
 use crate::folder_picker::{FolderPicker, PickerMode, Place};
 use crate::live_view::LiveView;
 use crate::metrics::{MetricsAnalysis, SelectableSession};
-use crate::models::{ProjectGroup, SessionDetail, SessionInfo, SessionState};
+use crate::models::{ProjectGroup, SessionDetail, SessionInfo, SessionState, TaskGroupLabel};
 use crate::projects_scan::ProjectsSnapshot;
 use crate::session_count::SessionCounts;
 use crate::orchestrator::{TaskPriority, TaskState, TaskStatus};
@@ -23,6 +23,7 @@ mod metrics_view;
 mod projects_view;
 mod render_state;
 mod sessions_view;
+mod task_link_picker;
 mod tasks_view;
 mod todo_panel;
 
@@ -31,6 +32,7 @@ pub use metrics_view::MetricsView;
 pub use projects_view::ProjectsView;
 pub use render_state::RenderState;
 pub use sessions_view::SessionsView;
+pub use task_link_picker::{TaskLinkAction, TaskLinkChoice, TaskLinkPickerState, TaskLinkRow};
 pub use tasks_view::{column_statuses, visible_task_columns, TasksView, TASK_COLUMNS};
 pub use todo_panel::TodoPanelState;
 
@@ -56,6 +58,57 @@ fn planning_prompt(text: &str) -> String {
     )
 }
 
+/// A task's display label: its Haiku title when present, else the first
+/// line of the prompt truncated to fit picker rows and group headers.
+fn task_display_title(task: &TaskState) -> String {
+    task.title
+        .clone()
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| crate::models::first_line_truncated(&task.prompt, 48))
+}
+
+/// Task-link picker band order: the Tasks-board columns left to right
+/// (To-Do → Planning → In Progress → Done). Personal-board tasks never hold
+/// the orchestrated-only Review/Merging phases; they rank between In
+/// Progress and Done for exhaustiveness.
+fn task_link_status_rank(status: TaskStatus) -> u8 {
+    match status {
+        TaskStatus::Backlog => 0,
+        TaskStatus::Planning => 1,
+        TaskStatus::Running => 2,
+        TaskStatus::Review => 3,
+        TaskStatus::Merging => 4,
+        TaskStatus::Done => 5,
+    }
+}
+
+/// One task-link picker candidate plus its sort key parts:
+/// `(status band, not-local-to-the-session's-cwd, updated_at)`. The detail
+/// is just the status board label — every candidate is a personal-board
+/// task, so a store/project prefix would repeat the same word on every row.
+fn task_link_candidate(task: &TaskState, session_cwd: &str) -> (u8, bool, i64, TaskLinkChoice) {
+    let title = task_display_title(task);
+    // "Local" means the task's board assignment ran in the session's cwd —
+    // those tasks lead their band.
+    let local = task.cwd.as_deref() == Some(session_cwd);
+    let choice = TaskLinkChoice {
+        label: title.clone(),
+        detail: task.status.board_label().to_string(),
+        status: Some(task.status),
+        action: TaskLinkAction::Link {
+            task_id: task.task_id.clone(),
+            project_id: task.project_id.clone(),
+            title,
+        },
+    };
+    (
+        task_link_status_rank(task.status),
+        !local,
+        task.updated_at,
+        choice,
+    )
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum View {
     Grid,
@@ -70,6 +123,10 @@ pub enum View {
     /// Model list for `N` on the Sessions tab: pick which Claude model the
     /// new session starts with.
     ModelPicker,
+    /// Fuzzy task selector for `L` on the Sessions tab: link (or unlink)
+    /// the selected session to a personal-board or project task so the grid
+    /// groups it under `project ▸ task`.
+    TaskLinkPicker,
     GhCreateInput,
     ProjectsResult,
     Backlog,
@@ -419,6 +476,13 @@ pub struct App {
     /// underneath the modal on a rescan.
     pub rename_target: Option<String>,
     pub model_picker: Option<ModelPickerState>,
+    /// State behind [`View::TaskLinkPicker`] (`L` on the Sessions tab).
+    pub task_link_picker: Option<TaskLinkPickerState>,
+    /// `session_id → TaskLink` sidecar snapshot driving the `project ▸ task`
+    /// grouping in [`Self::build_groups`]. Reloaded from disk on every scan
+    /// tick (mirroring how the scanner re-reads the title sidecar) so links
+    /// written by another instance show up without a restart.
+    pub(crate) session_task_links: HashMap<String, crate::session_tasks::TaskLink>,
     pub tmux_pane: Option<TmuxPaneView>,
     pub folder_picker: Option<FolderPicker>,
     /// Persistent folder bookmarks shown by the bookmarks picker (`M`) and
@@ -499,6 +563,8 @@ impl App {
             rename_buffer: String::new(),
             rename_target: None,
             model_picker: None,
+            task_link_picker: None,
+            session_task_links: crate::session_tasks::load(),
             tmux_pane: None,
             folder_picker: None,
             bookmarks: Bookmarks::load(),
@@ -1758,6 +1824,135 @@ impl App {
         self.set_status(status);
     }
 
+    /// `L` on the Sessions tab: open the fuzzy task selector to link the
+    /// selected session to a task (or unlink it). The target session is
+    /// captured now so a rescan can't move it under the popup. Returns
+    /// `false` when nothing is selected or there is nothing to offer.
+    pub fn enter_task_link_picker(&mut self) -> bool {
+        let Some(session) = self.selected_session_info().cloned() else {
+            return false;
+        };
+        let current = self.session_task_links.get(&session.session_id).cloned();
+        let mut choices: Vec<TaskLinkChoice> = Vec::new();
+        if current.is_some() {
+            choices.push(TaskLinkChoice {
+                label: "✕ unlink".into(),
+                detail: "remove the task link".into(),
+                status: None,
+                action: TaskLinkAction::Unlink,
+            });
+        }
+        choices.extend(self.task_link_candidates(&session));
+        if choices.is_empty() {
+            return false;
+        }
+        let label = session
+            .title
+            .clone()
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| crate::models::short_sid(&session.session_id).to_string());
+        self.task_link_picker = Some(TaskLinkPickerState::new(
+            session.session_id.clone(),
+            label,
+            choices,
+            current.as_ref().map(|l| l.task_id.as_str()),
+        ));
+        self.view = View::TaskLinkPicker;
+        true
+    }
+
+    /// Every linkable task — the personal board, i.e. exactly what the
+    /// Tasks tab shows (orchestrated project tasks are deliberately absent:
+    /// they live behind the WIP-gated Projects tab and would read as noise
+    /// from nowhere) — as picker rows, banded by status in Tasks-board
+    /// column order (To-Do → Planning → In Progress → Done); within a band,
+    /// tasks local to the session's cwd first, then newest first.
+    fn task_link_candidates(&self, session: &SessionInfo) -> Vec<TaskLinkChoice> {
+        let mut candidates: Vec<(u8, bool, i64, TaskLinkChoice)> = self
+            .tasks
+            .board
+            .tasks()
+            .iter()
+            .map(|t| task_link_candidate(t, &session.cwd))
+            .collect();
+        candidates.sort_by_key(|(band, not_local, updated_at, choice)| {
+            (
+                *band,
+                *not_local,
+                std::cmp::Reverse(*updated_at),
+                choice.label.to_lowercase(),
+            )
+        });
+        candidates.into_iter().map(|(_, _, _, c)| c).collect()
+    }
+
+    pub fn close_task_link_picker(&mut self) {
+        self.task_link_picker = None;
+        self.view = View::Grid;
+    }
+
+    /// Move the task-link-picker highlight by `delta` rows, clamped to the
+    /// live filtered result list.
+    pub fn task_link_picker_move(&mut self, delta: isize) {
+        if let Some(picker) = self.task_link_picker.as_mut() {
+            picker.move_selection(delta);
+        }
+    }
+
+    /// Enter on the task-link picker: persist the link (or unlink) for the
+    /// captured session and regroup the grid immediately. An empty match
+    /// list keeps the picker open, mirroring the model picker.
+    pub fn confirm_task_link_picker(&mut self) {
+        let Some(action) = self
+            .task_link_picker
+            .as_ref()
+            .and_then(TaskLinkPickerState::selected_action)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(picker) = self.task_link_picker.take() else {
+            return;
+        };
+        self.view = View::Grid;
+        let sid = picker.session_id;
+        let status = match action {
+            TaskLinkAction::Unlink => match crate::session_tasks::unlink(&sid) {
+                Ok(()) => {
+                    self.session_task_links.remove(&sid);
+                    "task link removed".to_string()
+                }
+                Err(e) => {
+                    log::warn!("task link: unlink failed for {}: {}", sid, e);
+                    format!("unlink failed: {}", e)
+                }
+            },
+            TaskLinkAction::Link {
+                task_id,
+                project_id,
+                title,
+            } => {
+                let link = crate::session_tasks::TaskLink {
+                    task_id,
+                    project_id,
+                    title: title.clone(),
+                };
+                match crate::session_tasks::link(&sid, link.clone()) {
+                    Ok(()) => {
+                        self.session_task_links.insert(sid.clone(), link);
+                        format!("linked to “{}”", title)
+                    }
+                    Err(e) => {
+                        log::warn!("task link: persist failed for {}: {}", sid, e);
+                        format!("link failed: {}", e)
+                    }
+                }
+            }
+        };
+        self.rebuild_groups();
+        self.set_status(status);
+    }
+
     /// Open the picker pre-loaded with the user's bookmarked folders.
     /// Returns `false` (no-op) when no bookmarks exist so the caller can
     /// show a hint instead of silently opening an empty popup.
@@ -2494,6 +2689,10 @@ impl App {
     /// - membership changed → full rebuild with restore-selection-by-id and
     ///   the new-session focus jump.
     pub fn update_sessions(&mut self, mut sessions: Vec<SessionInfo>) -> bool {
+        // Refresh the session→task sidecar so links written by another
+        // instance (or the CLI) regroup the grid without a restart — the
+        // same per-tick re-read the scanner does for the title sidecar.
+        self.session_task_links = crate::session_tasks::load();
         let acks_active = !self.sessions.acks.is_empty();
         if acks_active {
             // Apply user acks: if a non-Idle session is still at its acked
@@ -2624,23 +2823,35 @@ impl App {
         // cursor.
         sessions.sort_by_key(|s| s.state.liveness_rank());
 
-        // Group sessions by cwd. HashMap::entry preserves bucket-relative
-        // order, so each group comes out in the flat list's order.
-        let mut group_map: HashMap<String, Vec<SessionInfo>> = HashMap::new();
+        // Group sessions by (cwd, linked task). HashMap::entry preserves
+        // bucket-relative order, so each group comes out in the flat list's
+        // order. A task link (`L`) splits its sessions out of the plain cwd
+        // group so the grid renders them nested inside the project, under an
+        // indented `▸ task` sub-header.
+        let mut group_map: HashMap<(String, Option<String>), Vec<SessionInfo>> = HashMap::new();
         for s in sessions {
-            group_map.entry(s.cwd.clone()).or_default().push(s);
+            let task_id = self
+                .session_task_links
+                .get(&s.session_id)
+                .map(|l| l.task_id.clone());
+            group_map
+                .entry((s.cwd.clone(), task_id))
+                .or_default()
+                .push(s);
         }
 
         let mut groups: Vec<ProjectGroup> = group_map
             .into_iter()
-            .map(|(cwd, sessions)| {
+            .map(|((cwd, task_id), sessions)| {
                 let name = sessions
                     .first()
                     .map(|s| s.project_name.clone())
                     .unwrap_or_default();
+                let task = task_id.map(|tid| self.task_group_label(&tid, &sessions));
                 ProjectGroup {
                     name,
                     cwd,
+                    task,
                     sessions,
                 }
             })
@@ -2650,9 +2861,63 @@ impl App {
         // the cwd basename, so distinct projects that share a basename
         // (~/work/api vs ~/personal/api) tie; without the cwd tie-break the
         // stable sort would preserve HashMap's random per-instance iteration
-        // order and those groups would swap slots between scan ticks.
-        groups.sort_by_key(|a| (a.name.to_lowercase(), a.cwd.clone()));
+        // order and those groups would swap slots between scan ticks. Task
+        // groups sort directly under their plain project group (None < Some),
+        // by title with the task id as the final tie-break so equal titles
+        // can't swap either.
+        groups.sort_by_key(|a| {
+            (
+                a.name.to_lowercase(),
+                a.cwd.clone(),
+                a.task.is_some(),
+                a.task
+                    .as_ref()
+                    .map(|t| (t.title.to_lowercase(), t.task_id.clone())),
+            )
+        });
         groups
+    }
+
+    /// Resolve a linked task id to its grid header label: live title and
+    /// status from the personal board or the projects snapshot while the
+    /// task is still readable, else the sidecar's title snapshot. `stale`
+    /// covers both a missing task and a Done one — either way the header
+    /// dims so the group visibly outlived its task.
+    fn task_group_label(&self, task_id: &str, sessions: &[SessionInfo]) -> TaskGroupLabel {
+        let live = self
+            .tasks
+            .board
+            .get(task_id)
+            .map(|t| (task_display_title(t), t.status))
+            .or_else(|| {
+                self.projects
+                    .snapshot
+                    .tasks
+                    .values()
+                    .flatten()
+                    .find(|t| t.task_id == task_id)
+                    .map(|t| (task_display_title(t), t.status))
+            });
+        match live {
+            Some((title, status)) => TaskGroupLabel {
+                task_id: task_id.to_string(),
+                title,
+                stale: status == TaskStatus::Done,
+            },
+            None => {
+                let snapshot = sessions
+                    .iter()
+                    .find_map(|s| self.session_task_links.get(&s.session_id))
+                    .map(|l| l.title.clone())
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| crate::orchestrator::short_task_id(task_id));
+                TaskGroupLabel {
+                    task_id: task_id.to_string(),
+                    title: snapshot,
+                    stale: true,
+                }
+            }
+        }
     }
 
     /// Install a freshly-built group list and re-anchor the selection on the
@@ -3052,6 +3317,109 @@ mod tests {
                 "/home/work/api".to_string()
             ],
         );
+    }
+
+    #[test]
+    fn build_groups_splits_linked_sessions_into_a_task_group() {
+        crate::test_util::with_temp_home(|| {
+            let mut app = App::new();
+            let a = fake_session("s-a", SessionState::Idle);
+            let b = fake_session("s-b", SessionState::Idle);
+            let c = fake_session("s-c", SessionState::Idle);
+            crate::session_tasks::link(
+                "s-b",
+                crate::session_tasks::TaskLink {
+                    task_id: "tk-9".into(),
+                    project_id: None,
+                    title: "Fix auth".into(),
+                },
+            )
+            .unwrap();
+            app.session_task_links = crate::session_tasks::load();
+
+            let groups = app.build_groups(&[a, b, c]);
+            assert_eq!(groups.len(), 2);
+            // Plain cwd group leads; the task group sits directly under it.
+            assert!(groups[0].task.is_none());
+            assert_eq!(groups[0].sessions.len(), 2);
+            let task = groups[1].task.as_ref().expect("task group");
+            assert_eq!(task.task_id, "tk-9");
+            // No live task with this id — the label falls back to the
+            // sidecar's title snapshot and marks itself stale.
+            assert_eq!(task.title, "Fix auth");
+            assert!(task.stale);
+            assert_eq!(groups[1].sessions.len(), 1);
+            assert_eq!(groups[1].sessions[0].session_id, "s-b");
+        });
+    }
+
+    #[test]
+    fn task_link_candidates_band_in_tasks_board_column_order() {
+        crate::test_util::with_temp_home(|| {
+            let mut app = App::new();
+            use crate::orchestrator::TaskStatus;
+            // Insert out of band order so the sort has to do the work.
+            let done = app.tasks.board.add("done task").unwrap().unwrap();
+            app.tasks.board.set_status(&done, TaskStatus::Done).unwrap();
+            let running = app.tasks.board.add("running task").unwrap().unwrap();
+            app.tasks
+                .board
+                .set_status(&running, TaskStatus::Running)
+                .unwrap();
+            let todo = app.tasks.board.add("todo task").unwrap().unwrap();
+            let planning = app.tasks.board.add("planning task").unwrap().unwrap();
+            app.tasks
+                .board
+                .set_status(&planning, TaskStatus::Planning)
+                .unwrap();
+
+            let session = fake_session("s-1", SessionState::Idle);
+            let choices = app.task_link_candidates(&session);
+            let labels: Vec<&str> = choices.iter().map(|c| c.label.as_str()).collect();
+            assert_eq!(
+                labels,
+                vec!["todo task", "planning task", "running task", "done task"]
+            );
+            // Details carry the board label (not the wire name), and the
+            // status rides along for the renderer's coloring.
+            assert_eq!(choices[0].detail, "To-Do");
+            assert_eq!(choices[0].status, Some(TaskStatus::Backlog));
+            assert_eq!(choices[2].detail, "In Progress");
+            let _ = todo;
+        });
+    }
+
+    #[test]
+    fn task_group_label_prefers_live_title_and_dims_done() {
+        crate::test_util::with_temp_home(|| {
+            let mut app = App::new();
+            let id = app.tasks.board.add("Ship the parser").unwrap().unwrap();
+            crate::session_tasks::link(
+                "s-linked",
+                crate::session_tasks::TaskLink {
+                    task_id: id.clone(),
+                    project_id: None,
+                    title: "old snapshot".into(),
+                },
+            )
+            .unwrap();
+            app.session_task_links = crate::session_tasks::load();
+            let linked = fake_session("s-linked", SessionState::Idle);
+
+            let groups = app.build_groups(std::slice::from_ref(&linked));
+            let task = groups[0].task.as_ref().expect("task group");
+            // Live board task wins over the sidecar snapshot.
+            assert_eq!(task.title, "Ship the parser");
+            assert!(!task.stale);
+
+            // A Done task keeps the group but dims it.
+            app.tasks
+                .board
+                .set_status(&id, crate::orchestrator::TaskStatus::Done)
+                .unwrap();
+            let groups = app.build_groups(std::slice::from_ref(&linked));
+            assert!(groups[0].task.as_ref().unwrap().stale);
+        });
     }
 
     #[test]

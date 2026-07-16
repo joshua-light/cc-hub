@@ -191,10 +191,24 @@ pub struct SessionDetail {
     pub total_output_tokens: u64,
 }
 
+/// Header label for a grid group of sessions linked (`L`) to one task.
+/// `stale` marks a task that is Done or no longer readable — the header
+/// renders dimmed so the group visibly outlived its task.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TaskGroupLabel {
+    pub task_id: String,
+    pub title: String,
+    pub stale: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectGroup {
     pub name: String,
     pub cwd: String,
+    /// `Some` splits this group out of the plain cwd group: it holds only
+    /// the sessions linked to this task, rendered nested inside the project
+    /// — an indented `▸ task` sub-header and cards under the project header.
+    pub task: Option<TaskGroupLabel>,
     pub sessions: Vec<SessionInfo>,
 }
 

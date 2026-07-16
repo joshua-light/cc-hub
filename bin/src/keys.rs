@@ -89,6 +89,9 @@ fn map_sessions_command(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<
         // checked here, so terminals that forward Cmd (kitty protocol)
         // land on the same arm.
         (View::Grid, KeyCode::Char('p')) if on_sessions => Command::Sessions(S::OpenPlacesPicker),
+        (View::Grid, KeyCode::Char('L')) if on_sessions => {
+            Command::Sessions(S::OpenTaskLinkPicker)
+        }
         (View::Grid, KeyCode::Char('t')) if on_sessions => Command::Sessions(S::OpenTodoPanel),
         (View::Grid, KeyCode::Char('r')) if on_sessions => Command::Sessions(S::OpenRenameSession),
         (View::RenameSession, KeyCode::Enter) => Command::Sessions(S::SubmitRename),
@@ -884,6 +887,30 @@ pub(crate) async fn handle_key(
             },
             KeyCode::Char(c) => {
                 if let Some(picker) = app.model_picker.as_mut() {
+                    picker.push_filter(c);
+                }
+            }
+            _ => {}
+        },
+        // Same interaction model as the model picker: printable keys belong
+        // to the fuzzy filter; arrows or ctrl-j/k/n/p navigate.
+        (View::TaskLinkPicker, code) => match code {
+            KeyCode::Esc => app.close_task_link_picker(),
+            KeyCode::Enter | KeyCode::Char(' ') => app.confirm_task_link_picker(),
+            KeyCode::Down => app.task_link_picker_move(1),
+            KeyCode::Up => app.task_link_picker_move(-1),
+            KeyCode::Backspace => {
+                if let Some(picker) = app.task_link_picker.as_mut() {
+                    picker.pop_filter();
+                }
+            }
+            KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => match c {
+                'j' | 'n' => app.task_link_picker_move(1),
+                'k' | 'p' => app.task_link_picker_move(-1),
+                _ => {}
+            },
+            KeyCode::Char(c) => {
+                if let Some(picker) = app.task_link_picker.as_mut() {
                     picker.push_filter(c);
                 }
             }

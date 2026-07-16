@@ -3,8 +3,9 @@
 
 use crate::app::App;
 use crate::models::SessionInfo;
+use crate::orchestrator::TaskStatus;
 use crate::ui::now_ms;
-use crate::ui::palette::{DIM_TEXT, DOT_IDLE, LABEL_GRAY, PURPLE};
+use crate::ui::palette::{DIM_TEXT, DOT_IDLE, LABEL_GRAY};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -56,14 +57,16 @@ pub(crate) fn render_kanban_board(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 pub(crate) fn kanban_column_meta(col: usize) -> (&'static str, &'static str, Color) {
-    // (label, status icon, accent color). Indices match `kanban_column_tasks`.
-    let (icon, accent) = match col {
-        0 => ("󰟶", PURPLE),
-        1 => ("󰒓", Color::LightYellow),
-        2 => ("󱋲", Color::LightCyan),
-        3 => ("", Color::LightMagenta),
-        _ => ("󰸞", Color::LightGreen),
+    // (label, status icon, accent color). Indices match `kanban_column_tasks`;
+    // icon/accent come from the shared status palette.
+    let status = match col {
+        0 => TaskStatus::Planning,
+        1 => TaskStatus::Running,
+        2 => TaskStatus::Review,
+        3 => TaskStatus::Merging,
+        _ => TaskStatus::Done,
     };
+    let (icon, accent) = crate::ui::common::task_status_meta(status);
     (crate::app::kanban_col_name(col), icon, accent)
 }
 

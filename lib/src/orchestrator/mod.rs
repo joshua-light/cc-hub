@@ -211,6 +211,19 @@ impl TaskStatus {
             TaskStatus::Done => "done",
         }
     }
+
+    /// Human label as shown on the Tasks-board columns ("To-Do",
+    /// "In Progress", …). Distinct from [`Self::as_str`], the wire name.
+    pub fn board_label(&self) -> &'static str {
+        match self {
+            TaskStatus::Backlog => "To-Do",
+            TaskStatus::Planning => "Planning",
+            TaskStatus::Running => "In Progress",
+            TaskStatus::Review => "Review",
+            TaskStatus::Merging => "Merging",
+            TaskStatus::Done => "Done",
+        }
+    }
 }
 
 impl std::str::FromStr for TaskStatus {

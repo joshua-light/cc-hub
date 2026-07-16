@@ -12,7 +12,7 @@ use crate::models::{self, SessionInfo, SessionState};
 use crate::orchestrator::{TaskPriority, TaskState, TaskStatus};
 use crate::ui::now_ms;
 use crate::ui::palette::{
-    ACCENT_BLUE, BACKLOG_BLUE, DIM_TEXT, DOT_IDLE, LABEL_GRAY, META_GRAY, PURPLE, TAG_SLATE,
+    ACCENT_BLUE, DIM_TEXT, DOT_IDLE, LABEL_GRAY, META_GRAY, TAG_SLATE,
 };
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -111,15 +111,15 @@ fn render_filter_bar(frame: &mut Frame, area: Rect, app: &App, editing: bool) {
 }
 
 fn column_meta(status: TaskStatus) -> (&'static str, &'static str, Color) {
-    // Planning borrows the Projects kanban's planning icon/accent so the
-    // same phase reads the same across both boards.
     match status {
-        TaskStatus::Backlog => ("To-Do", "󰄱", BACKLOG_BLUE),
-        TaskStatus::Planning => ("Planning", "󰟶", PURPLE),
-        TaskStatus::Running => ("In Progress", "󰒓", Color::LightYellow),
-        TaskStatus::Done => ("Done", "󰸞", Color::LightGreen),
         // Orchestrated-only states never render as board columns.
         TaskStatus::Review | TaskStatus::Merging => ("", "", Color::DarkGray),
+        // Icon/accent come from the shared status palette so the columns,
+        // the Projects kanban, and the task-link picker read the same.
+        _ => {
+            let (icon, accent) = crate::ui::common::task_status_meta(status);
+            (status.board_label(), icon, accent)
+        }
     }
 }
 
@@ -506,6 +506,7 @@ mod tests {
     use super::*;
     use crate::orchestrator::TaskStatus;
     use crate::ui::common::buffer_to_string;
+    use crate::ui::palette::BACKLOG_BLUE;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 

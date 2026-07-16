@@ -68,6 +68,8 @@ pub enum SessionsCommand {
     OpenPlacesPicker,
     /// `M` — bookmarks picker.
     OpenBookmarksPicker,
+    /// `L` — task-link picker: group the selected session under a task.
+    OpenTaskLinkPicker,
     /// `t` — todo side panel.
     OpenTodoPanel,
     /// `r` — rename input.
@@ -277,6 +279,17 @@ impl App {
             OpenBookmarksPicker => {
                 if !self.enter_bookmarks_picker() {
                     self.set_status("no bookmarks — press N then m on a folder to add one".into());
+                }
+                Vec::new()
+            }
+            OpenTaskLinkPicker => {
+                if !self.enter_task_link_picker() {
+                    let msg = if self.selected_session_info().is_none() {
+                        "no session selected"
+                    } else {
+                        "no tasks to link — add one on the Tasks tab first"
+                    };
+                    self.set_status(msg.into());
                 }
                 Vec::new()
             }
@@ -928,6 +941,70 @@ mod tests {
             assert_eq!(app.view, crate::app::View::ModelPicker);
             assert!(app.model_picker.is_some());
             assert!(runtime.spawns.lock().unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn task_link_picker_links_then_unlinks_selected_session() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt) = app_with(vec![session("sid-1", SessionState::Idle, None)]);
+            let tid = app.tasks.board.add("fix the auth flow").unwrap().unwrap();
+
+            // First open: no link yet, so no unlink row; Enter links.
+            let effects = app.execute(Command::Sessions(SessionsCommand::OpenTaskLinkPicker));
+            assert!(effects.is_empty());
+            assert_eq!(app.view, crate::app::View::TaskLinkPicker);
+            {
+                let picker = app.task_link_picker.as_ref().expect("picker state");
+                assert!(picker
+                    .choices
+                    .iter()
+                    .all(|c| c.action != crate::app::TaskLinkAction::Unlink));
+            }
+            app.confirm_task_link_picker();
+            assert_eq!(app.view, crate::app::View::Grid);
+            assert_eq!(
+                crate::session_tasks::load().get("sid-1").unwrap().task_id,
+                tid
+            );
+            // The grid regrouped immediately: the session sits in a live
+            // (non-stale) task group labelled from the board task.
+            let task = app.sessions.groups[0].task.as_ref().expect("task group");
+            assert_eq!(task.task_id, tid);
+            assert!(!task.stale);
+            assert!(status(&app).starts_with("linked to"), "got: {}", status(&app));
+
+            // Second open: the unlink row leads and the linked task is
+            // pre-selected; picking unlink drops the link and regroups.
+            app.execute(Command::Sessions(SessionsCommand::OpenTaskLinkPicker));
+            {
+                let picker = app.task_link_picker.as_ref().expect("picker state");
+                assert_eq!(picker.choices[0].action, crate::app::TaskLinkAction::Unlink);
+                assert!(matches!(
+                    picker.selected_action(),
+                    Some(crate::app::TaskLinkAction::Link { task_id, .. }) if *task_id == tid
+                ));
+            }
+            app.task_link_picker.as_mut().unwrap().move_selection(-100);
+            app.confirm_task_link_picker();
+            assert!(crate::session_tasks::load().is_empty());
+            assert!(app.sessions.groups[0].task.is_none());
+            assert_eq!(status(&app), "task link removed");
+        });
+    }
+
+    #[test]
+    fn task_link_picker_without_tasks_reports_instead_of_opening() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt) = app_with(vec![session("sid-1", SessionState::Idle, None)]);
+            app.execute(Command::Sessions(SessionsCommand::OpenTaskLinkPicker));
+            assert_eq!(app.view, crate::app::View::Grid);
+            assert!(app.task_link_picker.is_none());
+            assert!(
+                status(&app).starts_with("no tasks to link"),
+                "got: {}",
+                status(&app)
+            );
         });
     }
 

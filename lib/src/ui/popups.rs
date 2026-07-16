@@ -593,6 +593,200 @@ pub(crate) fn render_model_picker(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), list_area);
 }
 
+/// `L` on the Sessions tab: fuzzy-filter which task the selected session is
+/// linked to. Same chrome and interaction as the model picker; the footer
+/// names the session being linked.
+pub(crate) fn render_task_link_picker(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(picker) = app.task_link_picker.as_ref() else {
+        return;
+    };
+    let choices = &picker.choices;
+
+    // Wide enough for a 48-char title column plus the longest
+    // `icon board-label` status chip without truncating it.
+    let desired_w = 72u16.min(area.width);
+    let desired_h = (choices.len().max(8) as u16 + 5).min(area.height);
+    let popup = centered_fixed(area, desired_w, desired_h);
+    frame.render_widget(Clear, popup);
+
+    let block = popup_block(Span::styled(
+        " Link session → task ",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .title_bottom(Span::styled(
+        format!(" → {} ", picker.session_label),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if inner.height < 3 || inner.width == 0 {
+        return;
+    }
+
+    let filter_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    let mut filter_line = picker.filter.clone();
+    filter_line.push('▎');
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                " ❯ ",
+                Style::default()
+                    .fg(ACCENT_BLUE)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                filter_line,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        filter_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("{}/{} ", picker.rows.len(), choices.len()),
+            Style::default().fg(DIM_TEXT),
+        )))
+        .alignment(Alignment::Right),
+        filter_area,
+    );
+
+    let list_area = Rect::new(inner.x, inner.y + 2, inner.width, inner.height - 2);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if picker.rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (no matches — backspace to widen)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        let visible = list_area.height as usize;
+        let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+        let label_width = choices
+            .iter()
+            .map(|choice| choice.label.chars().count())
+            .max()
+            .unwrap_or(0);
+        for (i, row) in picker.rows.iter().enumerate().skip(start).take(visible) {
+            let Some(choice) = choices.get(row.choice) else {
+                continue;
+            };
+            let label = &choice.label;
+            let detail = &choice.detail;
+            let selected = i == picker.selected;
+            let unlink = choice.action == crate::app::TaskLinkAction::Unlink;
+            let bar = if selected {
+                Style::default().bg(Color::White)
+            } else {
+                Style::default()
+            };
+            let (label_base, label_hl, detail_base, detail_hl) = if selected {
+                (
+                    bar.fg(Color::Black).add_modifier(Modifier::BOLD),
+                    bar.fg(Color::Blue).add_modifier(Modifier::BOLD),
+                    bar.fg(Color::Rgb(90, 90, 100)),
+                    bar.fg(Color::Blue),
+                )
+            } else if unlink {
+                // The destructive row reads differently at a glance.
+                (
+                    Style::default().fg(Color::Red),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Color::Red),
+                )
+            } else {
+                (
+                    Style::default().fg(Color::Gray),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Color::Cyan),
+                )
+            };
+            let mut spans = vec![Span::styled(
+                if selected { "▶ " } else { "  " },
+                bar.fg(Color::Black).add_modifier(Modifier::BOLD),
+            )];
+            spans.extend(highlight_spans(
+                label,
+                &row.label_indices,
+                label_base,
+                label_hl,
+            ));
+            spans.push(Span::styled(
+                " ".repeat(label_width.saturating_sub(label.chars().count()) + 2),
+                bar,
+            ));
+            match choice.status {
+                // Task rows end their detail with the status's board label
+                // (see `task_link_candidate`); render that tail as a colored
+                // status chip — same hue as the Tasks-board column — with an
+                // icon the fuzzy filter never sees.
+                Some(status) => {
+                    let (icon, accent) = crate::ui::common::task_status_meta(status);
+                    let status_label = status.board_label();
+                    let prefix_chars = detail
+                        .chars()
+                        .count()
+                        .saturating_sub(status_label.chars().count());
+                    let prefix: String = detail.chars().take(prefix_chars).collect();
+                    let prefix_idx: Vec<usize> = row
+                        .detail_indices
+                        .iter()
+                        .copied()
+                        .filter(|i| *i < prefix_chars)
+                        .collect();
+                    let status_idx: Vec<usize> = row
+                        .detail_indices
+                        .iter()
+                        .copied()
+                        .filter(|i| *i >= prefix_chars)
+                        .map(|i| i - prefix_chars)
+                        .collect();
+                    // On the white selection bar the light status hues wash
+                    // out — readability wins there; the bar itself already
+                    // marks the row.
+                    let status_base = if selected {
+                        bar.fg(Color::Black).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(accent)
+                    };
+                    spans.extend(highlight_spans(
+                        &prefix,
+                        &prefix_idx,
+                        detail_base,
+                        detail_hl,
+                    ));
+                    spans.push(Span::styled(format!("{} ", icon), status_base));
+                    spans.extend(highlight_spans(
+                        status_label,
+                        &status_idx,
+                        status_base,
+                        detail_hl,
+                    ));
+                }
+                None => spans.extend(highlight_spans(
+                    detail,
+                    &row.detail_indices,
+                    detail_base,
+                    detail_hl,
+                )),
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines), list_area);
+}
+
 /// Word-wrap `text` to `width` columns for the to-do panel: break on
 /// whitespace, hard-split any single word longer than `width`, and count each
 /// char as one column (matching the add-input's `chars().count()` budget).
@@ -1859,6 +2053,84 @@ mod places_picker_tests {
                 !rendered.contains("reddit"),
                 "filtered-out row must not render:\n{}",
                 rendered
+            );
+        });
+    }
+}
+
+#[cfg(all(test, unix))]
+mod task_link_picker_tests {
+    use crate::app::{App, TaskLinkAction, TaskLinkChoice, TaskLinkPickerState, View};
+    use crate::orchestrator::TaskStatus;
+    use crate::test_util::with_temp_home;
+    use crate::ui::common::buffer_to_string;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
+    use ratatui::Terminal;
+
+    fn choice(label: &str, status: TaskStatus) -> TaskLinkChoice {
+        TaskLinkChoice {
+            label: label.into(),
+            detail: status.board_label().to_string(),
+            status: Some(status),
+            action: TaskLinkAction::Link {
+                task_id: format!("tk-{label}"),
+                project_id: None,
+                title: label.into(),
+            },
+        }
+    }
+
+    /// Style of the first buffer cell whose symbol is `ch`.
+    fn cell_fg(buf: &ratatui::buffer::Buffer, ch: char) -> Option<Color> {
+        let area = *buf.area();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if buf[(x, y)].symbol() == ch.to_string() {
+                    return buf[(x, y)].style().fg;
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn status_chip_uses_the_tasks_board_colors() {
+        with_temp_home(|| {
+            let mut app = App::new();
+            app.task_link_picker = Some(TaskLinkPickerState::new(
+                "sid".into(),
+                "sid".into(),
+                vec![
+                    // Row 0 is selected — its chip drops the accent for
+                    // readability on the white bar, so the color assertions
+                    // target the unselected rows below it (Done's label
+                    // shares no capitals with theirs).
+                    choice("current", TaskStatus::Done),
+                    choice("second", TaskStatus::Running),
+                    choice("third", TaskStatus::Backlog),
+                ],
+                None,
+            ));
+            app.view = View::TaskLinkPicker;
+
+            let backend = TestBackend::new(80, 20);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|f| super::render_task_link_picker(f, f.area(), &app))
+                .expect("render");
+            let buf = terminal.backend().buffer().clone();
+            let rendered = buffer_to_string(&buf);
+
+            assert!(rendered.contains("In Progress"), "chip text:\n{}", rendered);
+            assert!(rendered.contains("To-Do"), "chip text:\n{}", rendered);
+            // Board-label capitals are unique to the chips in this frame, so
+            // their cells pin the chip color: In *P*rogress → the In Progress
+            // column accent, *T*o-Do → the To-Do column accent.
+            assert_eq!(cell_fg(&buf, 'P'), Some(Color::LightYellow));
+            assert_eq!(
+                cell_fg(&buf, 'T'),
+                Some(crate::ui::palette::BACKLOG_BLUE)
             );
         });
     }

@@ -62,6 +62,7 @@ pub(crate) mod test_util {
 pub mod scanner;
 pub mod send;
 pub mod session_count;
+pub mod session_tasks;
 pub mod spawn;
 pub mod tasks;
 pub mod title;

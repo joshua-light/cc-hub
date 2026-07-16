@@ -80,6 +80,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         View::StateDebug => popups::render_state_debug(frame, frame.area(), app),
         View::PromptInput => popups::render_prompt_input(frame, frame.area(), app),
         View::ModelPicker => popups::render_model_picker(frame, frame.area(), app),
+        View::TaskLinkPicker => popups::render_task_link_picker(frame, frame.area(), app),
         View::RenameSession => popups::render_rename_session(frame, frame.area(), app),
         View::TmuxPane => popups::render_tmux_pane(frame, frame.area(), app),
         View::FolderPicker => popups::render_folder_picker(frame, frame.area(), app),
@@ -253,7 +254,7 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 // it is never the first thing clipped.
                 Tab::Tasks => "a/n:add  enter/f:focus agent  s:assign agent  S:agent in ~  h/l:col  j/k:task  H/L:move  /:filter  1-4:priority  t:tags  r:rename  x:delete  u:undo  c:clear done  tab:next  q:quit",
                 Tab::Projects => "enter:focus orch  n:new task  r:result  f:agent terminal/resurrect  R:restart  b:backlog  h/l:col  j/k:task  H/L:project  N:register project  c:copy id  x:delete task  X:remove project  tab:next  q:quit",
-                Tab::Sessions => "enter/f:focus/resume  n:new  N:new+model  p:new in…  i:info  r:rename  t:to-do  o:shell  M:bookmarks  D:why?  h/j/k/l:nav  x:close  H:inactive  W:workers  tab:next  q:quit",
+                Tab::Sessions => "enter/f:focus/resume  n:new  N:new+model  p:new in…  i:info  r:rename  L:link task  t:to-do  o:shell  M:bookmarks  D:why?  h/j/k/l:nav  x:close  H:inactive  W:workers  tab:next  q:quit",
                 Tab::Metrics => "enter:view transcript  j/k:select  r:refresh  tab:next  q:quit",
             },
             View::Popup => "j/k:scroll  esc:close  q:close",
@@ -269,6 +270,7 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 "type:filter  ↑/↓:move  tab:agent  enter/space:start  esc:cancel"
             }
             View::ModelPicker => "type:filter  ↑/↓:move  enter/space:start  esc:cancel",
+            View::TaskLinkPicker => "type:filter  ↑/↓:move  enter/space:link  esc:cancel",
             View::RenameSession => "edit title  enter:rename  esc:cancel",
             View::TodoPanel => {
                 if app.todo.adding {

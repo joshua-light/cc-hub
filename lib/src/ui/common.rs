@@ -4,13 +4,30 @@
 
 use crate::models;
 use crate::models::SessionState;
-use crate::ui::palette::{GRAY_80, MUTED_TEXT, SEP_GRAY};
+use crate::orchestrator::TaskStatus;
+use crate::ui::palette::{BACKLOG_BLUE, GRAY_80, MUTED_TEXT, PURPLE, SEP_GRAY};
 use crate::usage::UsageInfo;
 use chrono::{DateTime, Local, TimeZone};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders};
+
+/// Canonical (icon, accent color) for a task status: the Tasks-board column
+/// palette, extended with the Projects kanban's Review/Merging accents.
+/// Every surface that colors a status (board columns, the task-link picker)
+/// goes through here so the hues can't drift apart. The display label lives
+/// on [`TaskStatus::board_label`].
+pub(crate) fn task_status_meta(status: TaskStatus) -> (&'static str, Color) {
+    match status {
+        TaskStatus::Backlog => ("󰄱", BACKLOG_BLUE),
+        TaskStatus::Planning => ("󰟶", PURPLE),
+        TaskStatus::Running => ("󰒓", Color::LightYellow),
+        TaskStatus::Review => ("󱋲", Color::LightCyan),
+        TaskStatus::Merging => ("", Color::LightMagenta),
+        TaskStatus::Done => ("󰸞", Color::LightGreen),
+    }
+}
 
 pub(crate) fn popup_block<'a>(title: impl Into<ratatui::text::Line<'a>>) -> Block<'a> {
     Block::default()
