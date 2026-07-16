@@ -6,7 +6,7 @@ use crate::conversation::StateExplanation;
 use crate::folder_picker::{FolderPicker, PickerMode, Place};
 use crate::live_view::LiveView;
 use crate::metrics::{MetricsAnalysis, SelectableSession};
-use crate::models::{ProjectGroup, SessionDetail, SessionInfo, SessionState, TaskGroupLabel};
+use crate::models::{ProjectGroup, SessionDetail, SessionInfo, SessionState, TaskBadge};
 use crate::projects_scan::ProjectsSnapshot;
 use crate::session_count::SessionCounts;
 use crate::orchestrator::{TaskPriority, TaskState, TaskStatus};
@@ -1949,7 +1949,8 @@ impl App {
                 }
             }
         };
-        self.rebuild_groups();
+        // No group rebuild: links don't shape the grid's groups — the card
+        // badge resolves live from `session_task_links` on the next draw.
         self.set_status(status);
     }
 
@@ -2823,35 +2824,23 @@ impl App {
         // cursor.
         sessions.sort_by_key(|s| s.state.liveness_rank());
 
-        // Group sessions by (cwd, linked task). HashMap::entry preserves
-        // bucket-relative order, so each group comes out in the flat list's
-        // order. A task link (`L`) splits its sessions out of the plain cwd
-        // group so the grid renders them nested inside the project, under an
-        // indented `▸ task` sub-header.
-        let mut group_map: HashMap<(String, Option<String>), Vec<SessionInfo>> = HashMap::new();
+        // Group sessions by cwd. HashMap::entry preserves bucket-relative
+        // order, so each group comes out in the flat list's order.
+        let mut group_map: HashMap<String, Vec<SessionInfo>> = HashMap::new();
         for s in sessions {
-            let task_id = self
-                .session_task_links
-                .get(&s.session_id)
-                .map(|l| l.task_id.clone());
-            group_map
-                .entry((s.cwd.clone(), task_id))
-                .or_default()
-                .push(s);
+            group_map.entry(s.cwd.clone()).or_default().push(s);
         }
 
         let mut groups: Vec<ProjectGroup> = group_map
             .into_iter()
-            .map(|((cwd, task_id), sessions)| {
+            .map(|(cwd, sessions)| {
                 let name = sessions
                     .first()
                     .map(|s| s.project_name.clone())
                     .unwrap_or_default();
-                let task = task_id.map(|tid| self.task_group_label(&tid, &sessions));
                 ProjectGroup {
                     name,
                     cwd,
-                    task,
                     sessions,
                 }
             })
@@ -2861,29 +2850,20 @@ impl App {
         // the cwd basename, so distinct projects that share a basename
         // (~/work/api vs ~/personal/api) tie; without the cwd tie-break the
         // stable sort would preserve HashMap's random per-instance iteration
-        // order and those groups would swap slots between scan ticks. Task
-        // groups sort directly under their plain project group (None < Some),
-        // by title with the task id as the final tie-break so equal titles
-        // can't swap either.
-        groups.sort_by_key(|a| {
-            (
-                a.name.to_lowercase(),
-                a.cwd.clone(),
-                a.task.is_some(),
-                a.task
-                    .as_ref()
-                    .map(|t| (t.title.to_lowercase(), t.task_id.clone())),
-            )
-        });
+        // order and those groups would swap slots between scan ticks.
+        groups.sort_by_key(|a| (a.name.to_lowercase(), a.cwd.clone()));
         groups
     }
 
-    /// Resolve a linked task id to its grid header label: live title and
+    /// Resolve a session's task link (`L`) to its card badge: live title and
     /// status from the personal board or the projects snapshot while the
     /// task is still readable, else the sidecar's title snapshot. `stale`
-    /// covers both a missing task and a Done one — either way the header
-    /// dims so the group visibly outlived its task.
-    fn task_group_label(&self, task_id: &str, sessions: &[SessionInfo]) -> TaskGroupLabel {
+    /// covers both a missing task and a Done one — either way the badge
+    /// dims so the link visibly outlived its task. `None` for unlinked
+    /// sessions.
+    pub(crate) fn task_badge(&self, session_id: &str) -> Option<TaskBadge> {
+        let link = self.session_task_links.get(session_id)?;
+        let task_id = link.task_id.as_str();
         let live = self
             .tasks
             .board
@@ -2898,26 +2878,23 @@ impl App {
                     .find(|t| t.task_id == task_id)
                     .map(|t| (task_display_title(t), t.status))
             });
-        match live {
-            Some((title, status)) => TaskGroupLabel {
+        Some(match live {
+            Some((title, status)) => TaskBadge {
                 task_id: task_id.to_string(),
                 title,
                 stale: status == TaskStatus::Done,
             },
             None => {
-                let snapshot = sessions
-                    .iter()
-                    .find_map(|s| self.session_task_links.get(&s.session_id))
-                    .map(|l| l.title.clone())
+                let snapshot = Some(link.title.clone())
                     .filter(|t| !t.is_empty())
                     .unwrap_or_else(|| crate::orchestrator::short_task_id(task_id));
-                TaskGroupLabel {
+                TaskBadge {
                     task_id: task_id.to_string(),
                     title: snapshot,
                     stale: true,
                 }
             }
-        }
+        })
     }
 
     /// Install a freshly-built group list and re-anchor the selection on the
@@ -3320,7 +3297,7 @@ mod tests {
     }
 
     #[test]
-    fn build_groups_splits_linked_sessions_into_a_task_group() {
+    fn task_links_mark_cards_without_splitting_groups() {
         crate::test_util::with_temp_home(|| {
             let mut app = App::new();
             let a = fake_session("s-a", SessionState::Idle);
@@ -3337,19 +3314,20 @@ mod tests {
             .unwrap();
             app.session_task_links = crate::session_tasks::load();
 
+            // A link is card metadata, not structure: all three sessions
+            // stay in their one cwd group.
             let groups = app.build_groups(&[a, b, c]);
-            assert_eq!(groups.len(), 2);
-            // Plain cwd group leads; the task group sits directly under it.
-            assert!(groups[0].task.is_none());
-            assert_eq!(groups[0].sessions.len(), 2);
-            let task = groups[1].task.as_ref().expect("task group");
-            assert_eq!(task.task_id, "tk-9");
-            // No live task with this id — the label falls back to the
-            // sidecar's title snapshot and marks itself stale.
-            assert_eq!(task.title, "Fix auth");
-            assert!(task.stale);
-            assert_eq!(groups[1].sessions.len(), 1);
-            assert_eq!(groups[1].sessions[0].session_id, "s-b");
+            assert_eq!(groups.len(), 1);
+            assert_eq!(groups[0].sessions.len(), 3);
+
+            // The linked session resolves a badge; no live task with this
+            // id, so it falls back to the sidecar's title snapshot and
+            // marks itself stale. Unlinked sessions resolve none.
+            let badge = app.task_badge("s-b").expect("badge");
+            assert_eq!(badge.task_id, "tk-9");
+            assert_eq!(badge.title, "Fix auth");
+            assert!(badge.stale);
+            assert!(app.task_badge("s-a").is_none());
         });
     }
 
@@ -3390,7 +3368,7 @@ mod tests {
     }
 
     #[test]
-    fn task_group_label_prefers_live_title_and_dims_done() {
+    fn task_badge_prefers_live_title_and_dims_done() {
         crate::test_util::with_temp_home(|| {
             let mut app = App::new();
             let id = app.tasks.board.add("Ship the parser").unwrap().unwrap();
@@ -3404,21 +3382,18 @@ mod tests {
             )
             .unwrap();
             app.session_task_links = crate::session_tasks::load();
-            let linked = fake_session("s-linked", SessionState::Idle);
 
-            let groups = app.build_groups(std::slice::from_ref(&linked));
-            let task = groups[0].task.as_ref().expect("task group");
+            let badge = app.task_badge("s-linked").expect("badge");
             // Live board task wins over the sidecar snapshot.
-            assert_eq!(task.title, "Ship the parser");
-            assert!(!task.stale);
+            assert_eq!(badge.title, "Ship the parser");
+            assert!(!badge.stale);
 
-            // A Done task keeps the group but dims it.
+            // A Done task keeps the badge but dims it.
             app.tasks
                 .board
                 .set_status(&id, crate::orchestrator::TaskStatus::Done)
                 .unwrap();
-            let groups = app.build_groups(std::slice::from_ref(&linked));
-            assert!(groups[0].task.as_ref().unwrap().stale);
+            assert!(app.task_badge("s-linked").unwrap().stale);
         });
     }
 

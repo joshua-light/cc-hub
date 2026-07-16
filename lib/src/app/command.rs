@@ -967,15 +967,15 @@ mod tests {
                 crate::session_tasks::load().get("sid-1").unwrap().task_id,
                 tid
             );
-            // The grid regrouped immediately: the session sits in a live
-            // (non-stale) task group labelled from the board task.
-            let task = app.sessions.groups[0].task.as_ref().expect("task group");
-            assert_eq!(task.task_id, tid);
-            assert!(!task.stale);
+            // The card badge resolves live (non-stale) from the board task;
+            // the grid's groups are untouched by links.
+            let badge = app.task_badge("sid-1").expect("badge");
+            assert_eq!(badge.task_id, tid);
+            assert!(!badge.stale);
             assert!(status(&app).starts_with("linked to"), "got: {}", status(&app));
 
             // Second open: the unlink row leads and the linked task is
-            // pre-selected; picking unlink drops the link and regroups.
+            // pre-selected; picking unlink drops the link and the badge.
             app.execute(Command::Sessions(SessionsCommand::OpenTaskLinkPicker));
             {
                 let picker = app.task_link_picker.as_ref().expect("picker state");
@@ -988,7 +988,7 @@ mod tests {
             app.task_link_picker.as_mut().unwrap().move_selection(-100);
             app.confirm_task_link_picker();
             assert!(crate::session_tasks::load().is_empty());
-            assert!(app.sessions.groups[0].task.is_none());
+            assert!(app.task_badge("sid-1").is_none());
             assert_eq!(status(&app), "task link removed");
         });
     }

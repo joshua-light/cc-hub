@@ -29,6 +29,32 @@ pub(crate) fn task_status_meta(status: TaskStatus) -> (&'static str, Color) {
     }
 }
 
+/// Identity palette for task badges on session cards: hues picked to stay
+/// apart from each other and from the state accents (yellow = waiting,
+/// green = processing, blue = question) that already color card chrome.
+const TASK_COLORS: [Color; 8] = [
+    Color::Rgb(255, 160, 122), // salmon
+    Color::Rgb(135, 206, 250), // sky blue
+    Color::Rgb(221, 160, 221), // plum
+    Color::Rgb(152, 251, 152), // pale green
+    Color::Rgb(240, 230, 140), // khaki
+    Color::Rgb(175, 238, 238), // pale turquoise
+    Color::Rgb(255, 182, 193), // light pink
+    Color::Rgb(222, 184, 135), // tan
+];
+
+/// Stable per-task identity color: FNV-1a over the task id into
+/// [`TASK_COLORS`], so every card linked to the same task carries the same
+/// hue — across groups, scans, and restarts.
+pub(crate) fn task_color(task_id: &str) -> Color {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in task_id.bytes() {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    TASK_COLORS[(hash % TASK_COLORS.len() as u64) as usize]
+}
+
 pub(crate) fn popup_block<'a>(title: impl Into<ratatui::text::Line<'a>>) -> Block<'a> {
     Block::default()
         .borders(Borders::ALL)

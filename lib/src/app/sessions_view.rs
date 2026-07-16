@@ -165,7 +165,6 @@ mod tests {
         ProjectGroup {
             name: name.into(),
             cwd: format!("/tmp/{name}"),
-            task: None,
             sessions: (0..n).map(|i| session(&format!("{name}-{i}"))).collect(),
         }
     }

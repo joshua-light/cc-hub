@@ -389,7 +389,7 @@ the plan, so the plan-first workflow works with one fewer column.
 | `N` | Fuzzy model/agent picker → choose a model, use `Tab` to cycle configured coding agents/providers, and spawn in the selected session's cwd |
 | `p` | Project/folder picker → spawn a new `cc-hub-new` session there (`c` / `C` in the picker creates a public/private GitHub repo via `gh`) |
 | `M` | Bookmarks picker → spawn a new `cc-hub-new` session in a bookmarked folder (add one with `m` on a folder in the `p` picker) |
-| `L` | Link the selected session to a task from the Tasks board (fuzzy picker, banded by status in board-column order with the board's status colors; tasks assigned to the session's cwd lead their band). Linked sessions nest inside their project: an indented `▸ task` sub-header (with the group's own counts) and indented cards under the single project header; press `L` again to switch tasks or pick `✕ unlink`. A Done/deleted task keeps the group but dims the header. Links live in `~/.cc-hub/session-tasks.json` |
+| `L` | Link the selected session to a task from the Tasks board (fuzzy picker, banded by status in board-column order with the board's status colors; tasks assigned to the session's cwd lead their band). A linked session's card carries a `󰓹 task` badge on its bottom border, colored per task (stable hash of the task id), so cards of the same task share a mark without regrouping the grid; press `L` again to switch tasks or pick `✕ unlink`. A Done/deleted task keeps the group but dims the header. Links live in `~/.cc-hub/session-tasks.json` |
 | `x` | Close the selected session's window (Unix WM only) |
 | `Space` | Ack / mark selected session idle |
 | `D` | State-debug popup (why is this session in this state?) |

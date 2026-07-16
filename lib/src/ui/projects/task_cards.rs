@@ -559,7 +559,9 @@ mod kanban_card_tests {
         let backend = TestBackend::new(w, 6);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
-            .draw(|f| crate::ui::sessions::render_card(f, f.area(), s, None, false, 1_000_000_000))
+            .draw(|f| {
+                crate::ui::sessions::render_card(f, f.area(), s, None, None, false, 1_000_000_000)
+            })
             .expect("render");
         let buf = terminal.backend().buffer();
         (0..buf.area().width)
@@ -598,6 +600,7 @@ mod kanban_card_tests {
                                 f,
                                 f.area(),
                                 &s,
+                                None,
                                 None,
                                 false,
                                 1_000_000_000,

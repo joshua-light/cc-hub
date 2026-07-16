@@ -5,7 +5,7 @@ use crate::models::{first_line_truncated, short_sid, SessionDetail, SessionInfo,
 use crate::ui::common::{
     centered_rect, context_window_size, ctx_bar, ctx_color, format_datetime, format_elapsed,
     format_time, format_tokens, format_tool_label, popup_block, short_model, state_color,
-    state_indicator,
+    state_indicator, task_color,
 };
 use crate::ui::palette::{CONTEXT_GRAY, MUTED_TEXT, PURPLE, SEP_GRAY};
 use crate::ui::popups::wrapped_total_rows;
@@ -18,16 +18,6 @@ use ratatui::Frame;
 
 pub(crate) const GROUP_HEADER_HEIGHT: u16 = 1;
 pub(crate) const GROUP_GAP: u16 = 1;
-/// Horizontal shift for a task sub-group's header and cards, so linked
-/// sessions visibly nest inside their project.
-pub(crate) const TASK_INDENT: u16 = 3;
-
-/// True when `gi` opens a new cwd family. `build_groups` sorts a project's
-/// plain group and its task groups adjacently, so a family is simply a run
-/// of groups sharing a cwd.
-fn family_head(groups: &[crate::models::ProjectGroup], gi: usize) -> bool {
-    gi == 0 || groups[gi - 1].cwd != groups[gi].cwd
-}
 
 pub(crate) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
     if app.sessions.groups.is_empty() {
@@ -40,35 +30,20 @@ pub(crate) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
     let cols = app.render.grid_cols as usize;
     let cell_width = area.width / app.render.grid_cols;
 
-    // Compute content-space y offset for each group. A cwd family renders
-    // as one unit: the head carries the project header, task groups follow
-    // gaplessly with an indented `▸ task` sub-header. A task group that
-    // opens its family (every session linked) still needs the project line,
-    // so its header grows to two rows.
+    // Compute content-space y offset for each group
     let mut group_offsets: Vec<u16> = Vec::new();
-    let mut header_heights: Vec<u16> = Vec::new();
     let mut y_acc: u16 = 0;
-    for (gi, group) in app.sessions.groups.iter().enumerate() {
-        let header_h = if family_head(&app.sessions.groups, gi) && group.task.is_some() {
-            GROUP_HEADER_HEIGHT + 1
-        } else {
-            GROUP_HEADER_HEIGHT
-        };
+    for group in &app.sessions.groups {
         group_offsets.push(y_acc);
-        header_heights.push(header_h);
         let rows = group.sessions.len().div_ceil(cols) as u16;
-        let gap = match app.sessions.groups.get(gi + 1) {
-            Some(next) if next.cwd == group.cwd => 0,
-            _ => GROUP_GAP,
-        };
-        y_acc = y_acc.saturating_add(header_h + rows * cell_height() + gap);
+        y_acc = y_acc.saturating_add(GROUP_HEADER_HEIGHT + rows * cell_height() + GROUP_GAP);
     }
 
     // Auto-scroll to keep selected card visible (prefer showing group header too)
     {
         let g_offset = group_offsets[app.sessions.sel_group];
         let card_row = (app.sessions.sel_in_group / cols) as u16;
-        let card_y = g_offset + header_heights[app.sessions.sel_group] + card_row * cell_height();
+        let card_y = g_offset + GROUP_HEADER_HEIGHT + card_row * cell_height();
         let card_bottom = card_y + cell_height();
 
         if card_bottom.saturating_sub(g_offset) <= area.height {
@@ -98,94 +73,49 @@ pub(crate) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
     for (gi, group) in app.sessions.groups.iter().enumerate() {
         let g_y = group_offsets[gi];
 
-        // Project header — one per cwd family, counting every session in it
-        // so the line reads as the project's total, not the plain group's.
-        if family_head(&app.sessions.groups, gi) {
-            let header_sy = g_y as i32 - scroll as i32;
-            if header_sy >= 0 && header_sy < area.height as i32 {
-                let hy = area.y + header_sy as u16;
-                let family = app.sessions.groups[gi..]
-                    .iter()
-                    .take_while(|g| g.cwd == group.cwd);
-                let (mut total, mut attn) = (0usize, 0usize);
-                for g in family {
-                    total += g.sessions.len();
-                    attn += g.sessions.iter().filter(|s| s.needs_attention()).count();
-                }
+        // Render group header
+        let header_sy = g_y as i32 - scroll as i32;
+        if header_sy >= 0 && header_sy < area.height as i32 {
+            let hy = area.y + header_sy as u16;
+            let total = group.sessions.len();
+            let attn = group
+                .sessions
+                .iter()
+                .filter(|s| s.needs_attention())
+                .count();
 
-                let mut spans = vec![Span::styled(
-                    format!(" 󰉋 {} ", group.name),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                )];
+            let mut spans = vec![Span::styled(
+                format!(" 󰉋 {} ", group.name),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )];
+            spans.push(Span::styled(
+                format!(" {} sessions", total),
+                Style::default().fg(Color::DarkGray),
+            ));
+            if attn > 0 {
                 spans.push(Span::styled(
-                    format!(" {} sessions", total),
-                    Style::default().fg(Color::DarkGray),
+                    format!("  󰂞 {}", attn),
+                    Style::default().fg(Color::Yellow),
                 ));
-                if attn > 0 {
-                    spans.push(Span::styled(
-                        format!("  󰂞 {}", attn),
-                        Style::default().fg(Color::Yellow),
-                    ));
-                }
-                // Show cwd path dimmed after the counts
-                spans.push(Span::styled(
-                    format!("  {}", group.cwd),
-                    Style::default().fg(SEP_GRAY),
-                ));
-
-                let header = Paragraph::new(Line::from(spans));
-                frame.render_widget(header, Rect::new(area.x, hy, area.width, 1));
             }
+            // Show cwd path dimmed after the counts
+            spans.push(Span::styled(
+                format!("  {}", group.cwd),
+                Style::default().fg(SEP_GRAY),
+            ));
+
+            let header = Paragraph::new(Line::from(spans));
+            frame.render_widget(header, Rect::new(area.x, hy, area.width, 1));
         }
 
-        // Task sub-header — indented under the project line, with the
-        // group's own counts. A stale task (Done or deleted) dims so the
-        // group visibly outlived it.
-        if let Some(task) = &group.task {
-            let sub_sy = (g_y + header_heights[gi] - 1) as i32 - scroll as i32;
-            if sub_sy >= 0 && sub_sy < area.height as i32 {
-                let attn = group
-                    .sessions
-                    .iter()
-                    .filter(|s| s.needs_attention())
-                    .count();
-                let task_style = if task.stale {
-                    Style::default().fg(Color::DarkGray)
-                } else {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-                };
-                let mut spans = vec![
-                    Span::styled("   ▸ ", Style::default().fg(SEP_GRAY)),
-                    Span::styled(format!("󰄬 {} ", task.title), task_style),
-                    Span::styled(
-                        format!(" {} sessions", group.sessions.len()),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ];
-                if attn > 0 {
-                    spans.push(Span::styled(
-                        format!("  󰂞 {}", attn),
-                        Style::default().fg(Color::Yellow),
-                    ));
-                }
-                let header = Paragraph::new(Line::from(spans));
-                frame.render_widget(
-                    header,
-                    Rect::new(area.x, area.y + sub_sy as u16, area.width, 1),
-                );
-            }
-        }
-
-        // Render cards for this group; task-group cards shift right so they
-        // nest under the sub-header.
-        let indent = if group.task.is_some() { TASK_INDENT } else { 0 };
+        // Render cards for this group
         for (si, session) in group.sessions.iter().enumerate() {
             let col = (si % cols) as u16;
             let row = (si / cols) as u16;
 
-            let card_cy = g_y + header_heights[gi] + row * cell_height();
+            let card_cy = g_y + GROUP_HEADER_HEIGHT + row * cell_height();
             let card_sy = card_cy as i32 - scroll as i32;
 
             // Only render if fully visible within the area
@@ -193,10 +123,10 @@ pub(crate) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
                 continue;
             }
 
-            let x = area.x + indent + col * cell_width;
+            let x = area.x + col * cell_width;
             let cy = area.y + card_sy as u16;
             let w = if col == app.render.grid_cols - 1 {
-                (area.x + area.width).saturating_sub(x)
+                area.x + area.width - x
             } else {
                 cell_width
             };
@@ -207,7 +137,8 @@ pub(crate) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
                 .tmux_session
                 .as_deref()
                 .and_then(|t| roles_by_tmux.get(t));
-            render_card(frame, cell_area, session, role, is_selected, now);
+            let badge = app.task_badge(&session.session_id);
+            render_card(frame, cell_area, session, role, badge.as_ref(), is_selected, now);
         }
     }
 }
@@ -228,6 +159,7 @@ pub(crate) fn render_card(
     area: Rect,
     session: &SessionInfo,
     role: Option<&crate::projects_scan::SessionRole>,
+    badge: Option<&crate::models::TaskBadge>,
     selected: bool,
     now: u64,
 ) {
@@ -340,11 +272,31 @@ pub(crate) fn render_card(
             Style::default().fg(ind_color).add_modifier(Modifier::BOLD),
         )
     };
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(border_type)
         .border_style(Style::default().fg(border_color))
         .title(Span::styled(title, title_style));
+
+    // Task link mark (`L`): the task title on the bottom border, in a color
+    // stable per task id — every card of the same task carries the same
+    // mark, wherever it sits in the grid. A stale link (task Done or
+    // deleted) dims to gray.
+    if let Some(badge) = badge {
+        let color = if badge.stale {
+            Color::DarkGray
+        } else {
+            task_color(&badge.task_id)
+        };
+        let label = format!(
+            " 󰓹 {} ",
+            first_line_truncated(&badge.title, (area.width as usize).saturating_sub(7).max(4))
+        );
+        block = block.title_bottom(Line::from(Span::styled(
+            label,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )));
+    }
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -877,7 +829,7 @@ mod tests {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
-            .draw(|f| super::render_card(f, f.area(), s, None, false, NOW))
+            .draw(|f| super::render_card(f, f.area(), s, None, None, false, NOW))
             .expect("render");
         terminal.backend().buffer().clone()
     }
@@ -889,87 +841,57 @@ mod tests {
     }
 
     #[test]
-    fn grid_renders_task_group_header_and_dims_stale() {
-        crate::test_util::with_temp_home(|| {
-            let mut app = crate::app::App::new();
-            app.update_grid_cols(80);
-            let group = |task: Option<crate::models::TaskGroupLabel>| crate::models::ProjectGroup {
-                name: "p".into(),
-                cwd: "/tmp/p".into(),
-                task,
-                sessions: vec![fake_session()],
-            };
-            app.sessions.groups = vec![
-                group(None),
-                group(Some(crate::models::TaskGroupLabel {
-                    task_id: "tk-live".into(),
-                    title: "Fix auth".into(),
-                    stale: false,
-                })),
-                group(Some(crate::models::TaskGroupLabel {
-                    task_id: "tk-gone".into(),
-                    title: "Old task".into(),
-                    stale: true,
-                })),
-            ];
+    fn card_task_badge_colors_by_task_and_dims_stale() {
+        let live = crate::models::TaskBadge {
+            task_id: "tk-live".into(),
+            title: "Fix auth".into(),
+            stale: false,
+        };
+        let stale = crate::models::TaskBadge {
+            task_id: "tk-gone".into(),
+            title: "Old task".into(),
+            stale: true,
+        };
+        let s = fake_session();
 
-            let backend = TestBackend::new(80, 30);
+        let render_badged = |badge: &crate::models::TaskBadge| {
+            let backend = TestBackend::new(42, 7);
             let mut terminal = Terminal::new(backend).expect("terminal");
             terminal
-                .draw(|f| super::render_grid(f, f.area(), &mut app))
+                .draw(|f| super::render_card(f, f.area(), &s, None, Some(badge), false, NOW))
                 .expect("render");
-            let buf = terminal.backend().buffer().clone();
-            let plain = crate::ui::common::buffer_to_string(&buf);
-            assert!(plain.contains("Fix auth"), "task header missing:\n{}", plain);
-            assert!(plain.contains("Old task"), "stale header missing:\n{}", plain);
+            terminal.backend().buffer().clone()
+        };
 
-            // One project header for the whole family, counting every
-            // session in it; the cwd never repeats on sub-headers.
-            assert_eq!(plain.matches("󰉋").count(), 1, "project header repeated:\n{}", plain);
-            assert_eq!(plain.matches("/tmp/p").count(), 1, "cwd repeated:\n{}", plain);
-            assert!(plain.contains("3 sessions"), "family total missing:\n{}", plain);
+        // The badge sits on the bottom border in the task's identity color.
+        let buf = render_badged(&live);
+        let plain = buffer_to_string(&buf);
+        assert!(plain.contains("Fix auth"), "badge missing:\n{}", plain);
+        let bottom = buf.area().height - 1;
+        let fx = (0..buf.area().width)
+            .find(|&x| buf[(x, bottom)].symbol() == "F")
+            .expect("badge on bottom border");
+        assert_eq!(
+            buf[(fx, bottom)].style().fg,
+            Some(crate::ui::common::task_color("tk-live")),
+            "badge not in the task's color"
+        );
 
-            // Task sub-headers nest: `▸` indented under the project line,
-            // directly below the plain group's cards (no family-internal gap),
-            // and the task group's cards shift right by the same indent.
-            let row_str = |y: u16| -> String {
-                (0..buf.area().width)
-                    .map(|x| buf[(x, y)].symbol().to_string())
-                    .collect()
-            };
-            let sub_y = (0..buf.area().height)
-                .find(|&y| row_str(y).contains("Fix auth"))
-                .expect("task sub-header row");
-            assert_eq!(sub_y, 1 + crate::ui::cell_height(), "gap inside family");
-            assert!(
-                row_str(sub_y).starts_with("   ▸"),
-                "sub-header not indented:\n{}",
-                row_str(sub_y)
-            );
-            assert_ne!(buf[(0, 1)].symbol(), " ", "plain card must not indent");
-            assert_eq!(buf[(0, sub_y + 1)].symbol(), " ", "task card starts flush");
-            assert_eq!(
-                buf[(super::TASK_INDENT, sub_y + 1)].symbol(),
-                "╭",
-                "task card not indented:\n{}",
-                row_str(sub_y + 1)
-            );
+        // Distinct tasks may hash to the same hue, but these two don't —
+        // and a stale badge always dims to gray instead.
+        assert_ne!(
+            crate::ui::common::task_color("tk-live"),
+            crate::ui::common::task_color("tk-gone"),
+        );
+        let buf = render_badged(&stale);
+        let ox = (0..buf.area().width)
+            .find(|&x| buf[(x, bottom)].symbol() == "O")
+            .expect("stale badge on bottom border");
+        assert_eq!(buf[(ox, bottom)].style().fg, Some(Color::DarkGray));
 
-            // The live task label is the cyan accent; the stale one dims.
-            let find = |needle: char, expect_fg: Color| {
-                let area = *buf.area();
-                for y in 0..area.height {
-                    for x in 0..area.width {
-                        if buf[(x, y)].symbol() == needle.to_string() {
-                            return buf[(x, y)].style().fg == Some(expect_fg);
-                        }
-                    }
-                }
-                false
-            };
-            assert!(find('F', Color::Cyan), "live task label not cyan");
-            assert!(find('O', Color::DarkGray), "stale task label not dimmed");
-        });
+        // Unlinked cards carry no mark.
+        let plain = buffer_to_string(&render(&s, 42, 7));
+        assert!(!plain.contains('\u{f04f9}'), "badge on unlinked card:\n{}", plain);
     }
 
     #[test]
