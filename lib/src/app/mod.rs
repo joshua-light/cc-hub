@@ -2352,18 +2352,8 @@ impl App {
         let id = session.session_id.clone();
         let watermark = session.last_activity;
         self.sessions.acks.ack(&id, watermark);
-        // Apply immediately so the UI reflects the ack before the next scan tick.
-        let (sel_group, sel_in_group) = (self.sessions.sel_group, self.sessions.sel_in_group);
-        if let Some(s) = self
-            .sessions
-            .groups
-            .get_mut(sel_group)
-            .and_then(|g| g.sessions.get_mut(sel_in_group))
-        {
-            s.state = SessionState::Idle;
-        }
-        // Mirror the downgrade onto the snapshot rebuild_groups derives from,
-        // so a rebuild before the next scan (filter toggle, projects snapshot)
+        // Apply the downgrade to the snapshot rebuild_groups derives from, so
+        // a rebuild before the next scan (filter toggle, projects snapshot)
         // doesn't revert the ack. The next scan re-derives it via is_acked.
         if let Some(s) = self
             .sessions
@@ -2373,6 +2363,11 @@ impl App {
         {
             s.state = SessionState::Idle;
         }
+        // Rebuild immediately: the badge flips to idle and the card re-slots
+        // into the idle bucket without waiting for the next scan tick.
+        // adopt_groups re-anchors the cursor on the acked session's id, so
+        // the selection follows the card to its new slot.
+        self.rebuild_groups();
         true
     }
 
@@ -2601,7 +2596,7 @@ impl App {
     fn build_groups(&self, sessions: &[SessionInfo]) -> Vec<ProjectGroup> {
         let roles = self.projects.snapshot.roles_by_tmux();
 
-        let sessions: Vec<SessionInfo> = sessions
+        let mut sessions: Vec<SessionInfo> = sessions
             .iter()
             .filter(|s| self.sessions.show_inactive || s.state != SessionState::Inactive)
             .filter(|s| {
@@ -2619,11 +2614,18 @@ impl App {
             .cloned()
             .collect();
 
-        // Group sessions by cwd. The scanner pre-sorts by stable keys
-        // (started_at desc, session id), and HashMap::entry preserves
-        // bucket-relative order, so each group comes out sorted — and the
-        // order never depends on volatile session state, so an ack downgrade
-        // or a state flip can't reshuffle cards under the cursor.
+        // Re-assert the liveness bucketing (active first, idle after,
+        // inactive last) on the app-side state. The scanner already sorts by
+        // (bucket, started_at desc, session id), but acks downgrade sessions
+        // to Idle *after* that sort, so the scan order can be stale for acked
+        // cards. The sort is stable and keys on the bucket alone: within a
+        // bucket the scanner's order is preserved, and active-state flavors
+        // (processing vs waiting) still can't reshuffle cards under the
+        // cursor.
+        sessions.sort_by_key(|s| s.state.liveness_rank());
+
+        // Group sessions by cwd. HashMap::entry preserves bucket-relative
+        // order, so each group comes out in the flat list's order.
         let mut group_map: HashMap<String, Vec<SessionInfo>> = HashMap::new();
         for s in sessions {
             group_map.entry(s.cwd.clone()).or_default().push(s);
@@ -3078,6 +3080,52 @@ mod tests {
     }
 
     #[test]
+    fn ack_reslots_card_into_idle_bucket_immediately() {
+        let mut app = App::new();
+        let mut a = fake_session("A", SessionState::WaitingForInput);
+        a.tmux_session = None;
+        let mut b = fake_session("B", SessionState::WaitingForInput);
+        b.tmux_session = None;
+        assert!(app.update_sessions(vec![a, b]));
+        assert_eq!(app.selected_session_id().as_deref(), Some("A"));
+
+        // Acking A downgrades it to Idle, which must push it behind the
+        // still-active B right away — not on the next scan tick — with the
+        // cursor following the card.
+        assert!(app.ack_selected());
+        let order: Vec<&str> = app.sessions.groups[0]
+            .sessions
+            .iter()
+            .map(|s| s.session_id.as_str())
+            .collect();
+        assert_eq!(order, vec!["B", "A"]);
+        assert_eq!(app.selected_session_id().as_deref(), Some("A"));
+        assert_eq!(
+            app.selected_session_info().map(|s| s.state.clone()),
+            Some(SessionState::Idle)
+        );
+    }
+
+    #[test]
+    fn build_groups_orders_acked_idle_behind_active_sessions() {
+        let app = App::new();
+        // Simulate the post-scan ack downgrade: the flat list arrives in
+        // scanner order (both were active when sorted), but one is Idle by
+        // the time groups are built. build_groups must re-bucket it last.
+        let mut idle = fake_session("acked", SessionState::Idle);
+        idle.tmux_session = None;
+        let mut active = fake_session("active", SessionState::Processing);
+        active.tmux_session = None;
+        let groups = app.build_groups(&[idle, active]);
+        let order: Vec<&str> = groups[0]
+            .sessions
+            .iter()
+            .map(|s| s.session_id.as_str())
+            .collect();
+        assert_eq!(order, vec!["active", "acked"]);
+    }
+
+    #[test]
     fn rebuild_revealed_session_does_not_teleport_cursor() {
         let mut app = App::new();
         let mut a = fake_session("A", SessionState::WaitingForInput);
@@ -3484,11 +3532,19 @@ mod tests {
         app.sessions.move_right();
         assert_eq!(app.selected_session_id().as_deref(), Some("b"));
 
-        // b flips state: same cards, same slots — content-only update.
+        // b flips between active flavors: same bucket, same slots —
+        // content-only update. (Waking from Idle *does* re-slot; that case is
+        // covered by waking_session_moves_ahead_of_idle_ones.)
         let changed = app.update_sessions(vec![
-            fake_session("a", SessionState::Idle),
+            fake_session("a", SessionState::Processing),
+            fake_session("b", SessionState::WaitingForInput),
+            fake_session("c", SessionState::Processing),
+        ]);
+        assert!(changed, "a state flip is a visible change");
+        let changed = app.update_sessions(vec![
+            fake_session("a", SessionState::Processing),
             fake_session("b", SessionState::Processing),
-            fake_session("c", SessionState::Idle),
+            fake_session("c", SessionState::Processing),
         ]);
         assert!(changed, "a state flip is a visible change");
         assert_eq!(grid_ids(&app), ["a", "b", "c"], "order must not change");
@@ -3498,6 +3554,25 @@ mod tests {
             SessionState::Processing,
             "card content must refresh"
         );
+    }
+
+    #[test]
+    fn waking_session_moves_ahead_of_idle_ones() {
+        let mut app = App::new();
+        seed_three(&mut app);
+        app.sessions.move_right();
+        assert_eq!(app.selected_session_id().as_deref(), Some("b"));
+
+        // b wakes up: it leaves the idle bucket and re-slots ahead of the
+        // still-idle a and c; the cursor follows b's id to its new slot.
+        let changed = app.update_sessions(vec![
+            fake_session("a", SessionState::Idle),
+            fake_session("b", SessionState::Processing),
+            fake_session("c", SessionState::Idle),
+        ]);
+        assert!(changed, "waking is a visible change");
+        assert_eq!(grid_ids(&app), ["b", "a", "c"]);
+        assert_eq!(app.selected_session_id().as_deref(), Some("b"));
     }
 
     #[test]

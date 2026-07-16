@@ -1028,16 +1028,24 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
     sessions
 }
 
-/// Order sessions by stable keys only — newest first, session id as the
-/// deterministic tiebreak. Deliberately excludes `state`: it flips every few
-/// seconds while agents work, and sorting by it made cards swap positions
-/// under the cursor on every scan tick (the selection followed the session id
-/// to its new slot, so a keypress could advance the selection logically while
-/// the highlight visibly stayed put). State is a card *badge*, not an order.
+/// Order sessions by liveness bucket, then stable keys — active sessions
+/// first, idle after them, inactive last; within a bucket newest first with
+/// session id as the deterministic tiebreak.
+///
+/// The bucket is deliberately coarse: Processing, WaitingForInput and
+/// Question all rank equally because they flip between each other every few
+/// seconds while agents work, and sorting on those flips made cards swap
+/// positions under the cursor on every scan tick (the selection followed the
+/// session id to its new slot, so a keypress could advance the selection
+/// logically while the highlight visibly stayed put). Falling asleep or
+/// waking up is a rare, meaningful transition, so a card moving then is
+/// intended, not churn.
 fn sort_stable(sessions: &mut [SessionInfo]) {
     sessions.sort_by(|a, b| {
-        b.started_at
-            .cmp(&a.started_at)
+        a.state
+            .liveness_rank()
+            .cmp(&b.state.liveness_rank())
+            .then_with(|| b.started_at.cmp(&a.started_at))
             .then_with(|| a.session_id.cmp(&b.session_id))
     });
 }
@@ -1191,6 +1199,73 @@ mod tests {
             None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
         }
         out
+    }
+
+    fn session(id: &str, started_at: u64, state: SessionState) -> SessionInfo {
+        SessionInfo {
+            agent_id: "claude".into(),
+            agent_kind: crate::agent::AgentKind::Claude,
+            pid: 1,
+            session_id: id.into(),
+            cwd: "/tmp".into(),
+            project_name: "tmp".into(),
+            started_at,
+            last_activity: None,
+            state,
+            last_user_message: None,
+            summary: None,
+            title: None,
+            titling: false,
+            model: None,
+            git_branch: None,
+            version: None,
+            jsonl_path: None,
+            tmux_session: None,
+            current_tool: None,
+            is_thinking: false,
+            context_tokens: None,
+            tool_uses_count: 0,
+        }
+    }
+
+    #[test]
+    fn sort_stable_puts_idle_after_active_and_inactive_last() {
+        let mut sessions = vec![
+            session("idle-new", 400, SessionState::Idle),
+            session("inactive", 500, SessionState::Inactive),
+            session("processing-old", 100, SessionState::Processing),
+            session("idle-old", 200, SessionState::Idle),
+            session("waiting", 300, SessionState::WaitingForInput),
+        ];
+        sort_stable(&mut sessions);
+        let order: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
+        // Active bucket first (newest first), then idle (newest first),
+        // inactive dead last regardless of recency.
+        assert_eq!(
+            order,
+            vec![
+                "waiting",
+                "processing-old",
+                "idle-new",
+                "idle-old",
+                "inactive"
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_stable_ranks_all_active_flavors_equally() {
+        // Processing / WaitingForInput / Question must not order against each
+        // other by state — only by the stable keys — so the rapid flips
+        // between them can't reshuffle cards.
+        let mut sessions = vec![
+            session("question", 100, SessionState::Question),
+            session("processing", 300, SessionState::Processing),
+            session("waiting", 200, SessionState::WaitingForInput),
+        ];
+        sort_stable(&mut sessions);
+        let order: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
+        assert_eq!(order, vec!["processing", "waiting", "question"]);
     }
 
     #[test]

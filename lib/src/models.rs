@@ -95,6 +95,20 @@ pub enum SessionState {
     Inactive,
 }
 
+impl SessionState {
+    /// Coarse liveness bucket for ordering: all active flavors rank equally
+    /// (they flip between each other every few seconds, and ordering on that
+    /// churn made cards swap under the cursor), idle sorts after them,
+    /// inactive last.
+    pub fn liveness_rank(&self) -> u8 {
+        match self {
+            SessionState::Processing | SessionState::WaitingForInput | SessionState::Question => 0,
+            SessionState::Idle => 1,
+            SessionState::Inactive => 2,
+        }
+    }
+}
+
 impl fmt::Display for SessionState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
