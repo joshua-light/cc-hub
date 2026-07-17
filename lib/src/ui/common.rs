@@ -4,7 +4,7 @@
 
 use crate::models;
 use crate::models::SessionState;
-use crate::orchestrator::TaskStatus;
+use crate::orchestrator::{TaskPriority, TaskStatus};
 use crate::ui::palette::{BACKLOG_BLUE, GRAY_80, MUTED_TEXT, PURPLE, SEP_GRAY};
 use crate::usage::UsageInfo;
 use chrono::{DateTime, Local, TimeZone};
@@ -26,6 +26,18 @@ pub(crate) fn task_status_meta(status: TaskStatus) -> (&'static str, Color) {
         TaskStatus::Review => ("󱋲", Color::LightCyan),
         TaskStatus::Merging => ("", Color::LightMagenta),
         TaskStatus::Done => ("󰸞", Color::LightGreen),
+    }
+}
+
+/// Badge colour per priority: P1 red, P2 yellow, P3 green, P4 blue. Light
+/// variants so the bold badge stays legible on the dark board. Shared by the
+/// Tasks-board chip and the session-card task badge so the hues can't drift.
+pub(crate) fn priority_color(p: TaskPriority) -> Color {
+    match p {
+        TaskPriority::P1 => Color::LightRed,
+        TaskPriority::P2 => Color::LightYellow,
+        TaskPriority::P3 => Color::LightGreen,
+        TaskPriority::P4 => Color::LightBlue,
     }
 }
 

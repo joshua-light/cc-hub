@@ -5,12 +5,12 @@ use crate::models::{first_line_truncated, short_sid, SessionDetail, SessionInfo,
 use crate::ui::common::{
     centered_rect, context_window_size, ctx_bar, ctx_color, format_datetime, format_elapsed,
     format_time, format_tokens, format_tool_label, popup_block, short_model, state_color,
-    state_indicator, task_color,
+    priority_color, state_indicator, task_color,
 };
 use crate::ui::palette::{CONTEXT_GRAY, MUTED_TEXT, PURPLE, SEP_GRAY};
 use crate::ui::popups::wrapped_total_rows;
 use crate::ui::{cell_height, now_ms};
-use ratatui::layout::Rect;
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
@@ -281,21 +281,42 @@ pub(crate) fn render_card(
     // Task link mark (`L`): the task title on the bottom border, in a color
     // stable per task id — every card of the same task carries the same
     // mark, wherever it sits in the grid. A stale link (task Done or
-    // deleted) dims to gray.
+    // deleted) dims to gray. The task's priority rides the bottom-right
+    // corner in the board's priority hue (colored text, not a filled chip —
+    // background fill on this card is reserved for "needs you"), and the
+    // title's truncation budget shrinks so the two never collide.
     if let Some(badge) = badge {
         let color = if badge.stale {
             Color::DarkGray
         } else {
             task_color(&badge.task_id)
         };
+        let prio_w = badge.priority.map_or(0, |p| p.label().chars().count() + 2);
         let label = format!(
             " 󰓹 {} ",
-            first_line_truncated(&badge.title, (area.width as usize).saturating_sub(7).max(4))
+            first_line_truncated(
+                &badge.title,
+                (area.width as usize).saturating_sub(7 + prio_w).max(4)
+            )
         );
         block = block.title_bottom(Line::from(Span::styled(
             label,
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         )));
+        if let Some(priority) = badge.priority {
+            let prio_color = if badge.stale {
+                Color::DarkGray
+            } else {
+                priority_color(priority)
+            };
+            block = block.title_bottom(
+                Line::from(Span::styled(
+                    format!(" {} ", priority.label()),
+                    Style::default().fg(prio_color).add_modifier(Modifier::BOLD),
+                ))
+                .alignment(Alignment::Right),
+            );
+        }
     }
 
     let inner = block.inner(area);
@@ -845,11 +866,13 @@ mod tests {
         let live = crate::models::TaskBadge {
             task_id: "tk-live".into(),
             title: "Fix auth".into(),
+            priority: Some(crate::orchestrator::TaskPriority::P1),
             stale: false,
         };
         let stale = crate::models::TaskBadge {
             task_id: "tk-gone".into(),
             title: "Old task".into(),
+            priority: Some(crate::orchestrator::TaskPriority::P2),
             stale: true,
         };
         let s = fake_session();
@@ -877,8 +900,17 @@ mod tests {
             "badge not in the task's color"
         );
 
+        // The priority label sits on the bottom-right, in the board's
+        // priority hue rather than the task's identity color.
+        let px = (0..buf.area().width)
+            .rev()
+            .find(|&x| buf[(x, bottom)].symbol() == "P")
+            .expect("priority label on bottom border");
+        assert_eq!(buf[(px + 1, bottom)].symbol(), "1");
+        assert_eq!(buf[(px, bottom)].style().fg, Some(Color::LightRed));
+
         // Distinct tasks may hash to the same hue, but these two don't —
-        // and a stale badge always dims to gray instead.
+        // and a stale badge always dims to gray instead, priority included.
         assert_ne!(
             crate::ui::common::task_color("tk-live"),
             crate::ui::common::task_color("tk-gone"),
@@ -888,6 +920,11 @@ mod tests {
             .find(|&x| buf[(x, bottom)].symbol() == "O")
             .expect("stale badge on bottom border");
         assert_eq!(buf[(ox, bottom)].style().fg, Some(Color::DarkGray));
+        let px = (0..buf.area().width)
+            .rev()
+            .find(|&x| buf[(x, bottom)].symbol() == "P")
+            .expect("stale priority label on bottom border");
+        assert_eq!(buf[(px, bottom)].style().fg, Some(Color::DarkGray));
 
         // Unlinked cards carry no mark.
         let plain = buffer_to_string(&render(&s, 42, 7));

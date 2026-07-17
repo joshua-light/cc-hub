@@ -9,7 +9,8 @@
 
 use crate::app::{visible_task_columns, App, View};
 use crate::models::{self, SessionInfo, SessionState};
-use crate::orchestrator::{TaskPriority, TaskState, TaskStatus};
+use crate::orchestrator::{TaskState, TaskStatus};
+use crate::ui::common::priority_color;
 use crate::ui::now_ms;
 use crate::ui::palette::{
     ACCENT_BLUE, DIM_TEXT, DOT_IDLE, LABEL_GRAY, META_GRAY, TAG_SLATE,
@@ -448,17 +449,6 @@ fn tags_title_text(tags: &[String], budget: usize) -> Option<String> {
     Some(out)
 }
 
-/// Card badge colour per priority: P1 red, P2 yellow, P3 green, P4 blue.
-/// Light variants so the bold badge stays legible on the dark board.
-fn priority_color(p: TaskPriority) -> Color {
-    match p {
-        TaskPriority::P1 => Color::LightRed,
-        TaskPriority::P2 => Color::LightYellow,
-        TaskPriority::P3 => Color::LightGreen,
-        TaskPriority::P4 => Color::LightBlue,
-    }
-}
-
 fn dir_basename(cwd: &str) -> String {
     std::path::Path::new(cwd)
         .file_name()
@@ -504,7 +494,7 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orchestrator::TaskStatus;
+    use crate::orchestrator::{TaskPriority, TaskStatus};
     use crate::ui::common::buffer_to_string;
     use crate::ui::palette::BACKLOG_BLUE;
     use ratatui::backend::TestBackend;

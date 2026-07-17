@@ -69,16 +69,19 @@ fn task_display_title(task: &TaskState) -> String {
 
 /// Reorder one group's sessions so task-linked cards lead the group and
 /// cards linked to the same task always sit next to each other. Clusters
-/// order by their first member in the incoming order (the liveness sort, so
-/// a cluster ranks by its most-live member) and the remaining members are
-/// pulled up behind it; unlinked cards follow in their incoming order. The
-/// pass adds no churn of its own — links only change on user action.
+/// order by task priority (P1 first; a task that's gone has no readable
+/// priority and ranks last), ties by their first member in the incoming
+/// order (the liveness sort, so a cluster ranks by its most-live member),
+/// and the remaining members are pulled up behind that anchor; unlinked
+/// cards follow in their incoming order. The pass adds no churn of its own —
+/// links and priorities only change on user action.
 fn cluster_by_task(
     sessions: Vec<SessionInfo>,
     links: &HashMap<String, crate::session_tasks::TaskLink>,
+    priorities: &HashMap<String, TaskPriority>,
 ) -> Vec<SessionInfo> {
     let mut slots: Vec<Option<SessionInfo>> = sessions.into_iter().map(Some).collect();
-    let mut out = Vec::with_capacity(slots.len());
+    let mut clusters: Vec<(u8, Vec<SessionInfo>)> = Vec::new();
     for i in 0..slots.len() {
         let Some(task_id) = slots[i]
             .as_ref()
@@ -87,17 +90,22 @@ fn cluster_by_task(
         else {
             continue;
         };
-        out.push(slots[i].take().expect("checked above"));
+        let mut members = vec![slots[i].take().expect("checked above")];
         for slot in slots.iter_mut().skip(i + 1) {
             let same_task = slot
                 .as_ref()
                 .and_then(|s| links.get(&s.session_id))
                 .is_some_and(|l| l.task_id == task_id);
             if same_task {
-                out.push(slot.take().expect("checked above"));
+                members.push(slot.take().expect("checked above"));
             }
         }
+        let rank = priorities.get(&task_id).map_or(u8::MAX, |p| *p as u8);
+        clusters.push((rank, members));
     }
+    // Stable sort: equal-priority clusters keep their liveness order.
+    clusters.sort_by_key(|(rank, _)| *rank);
+    let mut out: Vec<SessionInfo> = clusters.into_iter().flat_map(|(_, m)| m).collect();
     out.extend(slots.into_iter().flatten());
     out
 }
@@ -2866,6 +2874,15 @@ impl App {
             group_map.entry(s.cwd.clone()).or_default().push(s);
         }
 
+        // Cluster ordering needs each linked task's priority; resolve them
+        // once per rebuild instead of per group. Gone tasks simply stay out
+        // of the map and rank last.
+        let priorities: HashMap<String, TaskPriority> = self
+            .session_task_links
+            .values()
+            .filter_map(|l| Some((l.task_id.clone(), self.task_priority(&l.task_id)?)))
+            .collect();
+
         let mut groups: Vec<ProjectGroup> = group_map
             .into_iter()
             .map(|(cwd, sessions)| {
@@ -2876,7 +2893,7 @@ impl App {
                 ProjectGroup {
                     name,
                     cwd,
-                    sessions: cluster_by_task(sessions, &self.session_task_links),
+                    sessions: cluster_by_task(sessions, &self.session_task_links, &priorities),
                 }
             })
             .collect();
@@ -2888,6 +2905,25 @@ impl App {
         // order and those groups would swap slots between scan ticks.
         groups.sort_by_key(|a| (a.name.to_lowercase(), a.cwd.clone()));
         groups
+    }
+
+    /// Priority of a task while it's still readable — the personal board
+    /// first, then the projects snapshot (the same resolution order as
+    /// [`Self::task_badge`]). `None` once the task is gone.
+    fn task_priority(&self, task_id: &str) -> Option<TaskPriority> {
+        self.tasks
+            .board
+            .get(task_id)
+            .map(|t| t.priority)
+            .or_else(|| {
+                self.projects
+                    .snapshot
+                    .tasks
+                    .values()
+                    .flatten()
+                    .find(|t| t.task_id == task_id)
+                    .map(|t| t.priority)
+            })
     }
 
     /// Resolve a session's task link (`L`) to its card badge: live title and
@@ -2903,7 +2939,7 @@ impl App {
             .tasks
             .board
             .get(task_id)
-            .map(|t| (task_display_title(t), t.status))
+            .map(|t| (task_display_title(t), t.status, t.priority))
             .or_else(|| {
                 self.projects
                     .snapshot
@@ -2911,12 +2947,13 @@ impl App {
                     .values()
                     .flatten()
                     .find(|t| t.task_id == task_id)
-                    .map(|t| (task_display_title(t), t.status))
+                    .map(|t| (task_display_title(t), t.status, t.priority))
             });
         Some(match live {
-            Some((title, status)) => TaskBadge {
+            Some((title, status, priority)) => TaskBadge {
                 task_id: task_id.to_string(),
                 title,
+                priority: Some(priority),
                 stale: status == TaskStatus::Done,
             },
             None => {
@@ -2926,6 +2963,7 @@ impl App {
                 TaskBadge {
                     task_id: task_id.to_string(),
                     title: snapshot,
+                    priority: None,
                     stale: true,
                 }
             }
@@ -3402,6 +3440,57 @@ mod tests {
             // behind its anchor across the bucket boundary; the unlinked
             // cards follow in their relative order.
             assert_eq!(order, vec!["s-a", "s-c", "s-b", "s-d"]);
+        });
+    }
+
+    #[test]
+    fn task_clusters_order_by_priority_with_gone_tasks_last() {
+        crate::test_util::with_temp_home(|| {
+            use crate::orchestrator::TaskPriority;
+            let mut app = App::new();
+            let low = app.tasks.board.add("low task").unwrap().unwrap();
+            app.tasks
+                .board
+                .set_priority(&low, TaskPriority::P4)
+                .unwrap();
+            let high = app.tasks.board.add("high task").unwrap().unwrap();
+            app.tasks
+                .board
+                .set_priority(&high, TaskPriority::P1)
+                .unwrap();
+
+            // Liveness would order the clusters gone → low → high; priority
+            // must invert that, with the unreadable task's cluster falling
+            // to the back regardless of how live its member is.
+            let gone_s = fake_session("s-gone", SessionState::Processing);
+            let low_s = fake_session("s-low", SessionState::Processing);
+            let high_s = fake_session("s-high", SessionState::Idle);
+            let unlinked = fake_session("s-plain", SessionState::Processing);
+            for (sid, task_id) in [
+                ("s-gone", "tk-deleted"),
+                ("s-low", low.as_str()),
+                ("s-high", high.as_str()),
+            ] {
+                crate::session_tasks::link(
+                    sid,
+                    crate::session_tasks::TaskLink {
+                        task_id: task_id.into(),
+                        project_id: None,
+                        title: String::new(),
+                    },
+                )
+                .unwrap();
+            }
+            app.session_task_links = crate::session_tasks::load();
+
+            let groups = app.build_groups(&[gone_s, low_s, high_s, unlinked]);
+            assert_eq!(groups.len(), 1);
+            let order: Vec<&str> = groups[0]
+                .sessions
+                .iter()
+                .map(|s| s.session_id.as_str())
+                .collect();
+            assert_eq!(order, vec!["s-high", "s-low", "s-gone", "s-plain"]);
         });
     }
 

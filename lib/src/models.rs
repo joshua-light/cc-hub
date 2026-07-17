@@ -200,6 +200,9 @@ pub struct SessionDetail {
 pub struct TaskBadge {
     pub task_id: String,
     pub title: String,
+    /// Priority of the linked task while it's still readable; `None` once
+    /// only the sidecar title snapshot remains (it records no priority).
+    pub priority: Option<crate::orchestrator::TaskPriority>,
     pub stale: bool,
 }
 
