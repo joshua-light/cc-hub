@@ -728,6 +728,11 @@ async fn run(
     };
 
     let mut app = App::new();
+    // Swap in the persisted ack tracker so Space-idled cards survive a
+    // restart. Same rationale as the migration above for living here and not
+    // in App::new(): tests and hot-reload paths must never touch the real
+    // home, so App::new() constructs a purely in-memory tracker.
+    app.sessions.acks = cc_hub_lib::acks::Acks::load();
     app.image_picker = Some(image_picker);
     if let Some(msg) = migration_error {
         app.tasks.persistence_error = Some(msg);
