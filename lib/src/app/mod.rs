@@ -31,7 +31,7 @@ pub use command::{Command, Effect, GlobalCommand, SessionsCommand, TasksCommand}
 pub use metrics_view::MetricsView;
 pub use projects_view::ProjectsView;
 pub use render_state::RenderState;
-pub use sessions_view::SessionsView;
+pub use sessions_view::{SessionsLayout, SessionsView};
 pub use task_link_picker::{TaskLinkAction, TaskLinkChoice, TaskLinkPickerState, TaskLinkRow};
 pub use tasks_view::{column_statuses, visible_task_columns, TasksView, TASK_COLUMNS};
 pub use todo_panel::TodoPanelState;
@@ -1421,6 +1421,26 @@ impl App {
     pub fn toggle_show_orch_workers(&mut self) {
         self.sessions.show_orch_workers = !self.sessions.show_orch_workers;
         self.rebuild_groups();
+    }
+
+    pub fn toggle_sessions_layout(&mut self) {
+        self.sessions.layout = match self.sessions.layout {
+            SessionsLayout::Grid => SessionsLayout::List,
+            SessionsLayout::List => SessionsLayout::Grid,
+        };
+        // The two layouts measure content height differently, so a
+        // carried-over offset can strand the viewport past the content;
+        // the renderer re-clamps onto the selection from zero next frame.
+        self.render.grid_scroll = 0;
+    }
+
+    /// Column count the Sessions nav methods should move by: the derived
+    /// grid column count, or 1 in the linear list layout.
+    pub(crate) fn sessions_nav_cols(&self) -> u16 {
+        match self.sessions.layout {
+            SessionsLayout::Grid => self.render.grid_cols,
+            SessionsLayout::List => 1,
+        }
     }
 
     pub fn set_tab(&mut self, tab: Tab) {
@@ -3629,6 +3649,44 @@ mod tests {
             .map(|s| s.session_id.as_str())
             .collect();
         assert_eq!(order, vec!["active", "acked"]);
+    }
+
+    #[test]
+    fn toggle_sessions_layout_cycles_and_resets_scroll() {
+        let mut app = App::new();
+        app.render.grid_scroll = 7;
+        app.toggle_sessions_layout();
+        assert_eq!(app.sessions.layout, SessionsLayout::List);
+        assert_eq!(
+            app.render.grid_scroll, 0,
+            "a grid scroll offset can strand the shorter list viewport"
+        );
+        app.toggle_sessions_layout();
+        assert_eq!(app.sessions.layout, SessionsLayout::Grid);
+    }
+
+    #[test]
+    fn list_layout_nav_is_linear() {
+        let mut app = App::new();
+        let mut a = fake_session("A", SessionState::Processing);
+        a.tmux_session = None;
+        let mut b = fake_session("B", SessionState::Processing);
+        b.tmux_session = None;
+        let mut c = fake_session("C", SessionState::Processing);
+        c.tmux_session = None;
+        assert!(app.update_sessions(vec![a, b, c]));
+        app.sessions.layout = SessionsLayout::List;
+        // Even with the grid reporting 3 columns, list nav moves one row at
+        // a time — down and right are the same linear step.
+        app.render.grid_cols = 3;
+        app.execute(Command::Sessions(SessionsCommand::NavDown));
+        assert_eq!(app.sessions.sel_in_group, 1);
+        app.execute(Command::Sessions(SessionsCommand::NavRight));
+        assert_eq!(app.sessions.sel_in_group, 2);
+        app.execute(Command::Sessions(SessionsCommand::NavLeft));
+        assert_eq!(app.sessions.sel_in_group, 1);
+        app.execute(Command::Sessions(SessionsCommand::NavUp));
+        assert_eq!(app.sessions.sel_in_group, 0);
     }
 
     #[test]

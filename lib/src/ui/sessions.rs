@@ -19,11 +19,65 @@ use ratatui::Frame;
 pub(crate) const GROUP_HEADER_HEIGHT: u16 = 1;
 pub(crate) const GROUP_GAP: u16 = 1;
 
+/// Sessions-tab body: dispatch to whichever layout is active. The card grid
+/// is the default; the compact list is the `v`-toggled experiment (see
+/// [`crate::app::SessionsLayout`]).
+pub(crate) fn render_sessions_body(frame: &mut Frame, area: Rect, app: &mut App) {
+    match app.sessions.layout {
+        crate::app::SessionsLayout::Grid => render_grid(frame, area, app),
+        crate::app::SessionsLayout::List => super::sessions_list::render_list(frame, area, app),
+    }
+}
+
+/// The empty-state hint, shared by both layouts.
+pub(crate) fn render_no_sessions(frame: &mut Frame, area: Rect) {
+    let empty = Paragraph::new("No sessions found. Start an agent session to see it here.")
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(empty, area);
+}
+
+/// One-row project group header: name, session count, attention count, cwd.
+/// Shared by the grid and list layouts.
+pub(crate) fn render_group_header(
+    frame: &mut Frame,
+    area: Rect,
+    group: &crate::models::ProjectGroup,
+) {
+    let total = group.sessions.len();
+    let attn = group
+        .sessions
+        .iter()
+        .filter(|s| s.needs_attention())
+        .count();
+
+    let mut spans = vec![Span::styled(
+        format!(" 󰉋 {} ", group.name),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )];
+    spans.push(Span::styled(
+        format!(" {} sessions", total),
+        Style::default().fg(Color::DarkGray),
+    ));
+    if attn > 0 {
+        spans.push(Span::styled(
+            format!("  󰂞 {}", attn),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    // Show cwd path dimmed after the counts
+    spans.push(Span::styled(
+        format!("  {}", group.cwd),
+        Style::default().fg(SEP_GRAY),
+    ));
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
 pub(crate) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
     if app.sessions.groups.is_empty() {
-        let empty = Paragraph::new("No sessions found. Start an agent session to see it here.")
-            .style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(empty, area);
+        render_no_sessions(frame, area);
         return;
     }
 
@@ -77,37 +131,7 @@ pub(crate) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
         let header_sy = g_y as i32 - scroll as i32;
         if header_sy >= 0 && header_sy < area.height as i32 {
             let hy = area.y + header_sy as u16;
-            let total = group.sessions.len();
-            let attn = group
-                .sessions
-                .iter()
-                .filter(|s| s.needs_attention())
-                .count();
-
-            let mut spans = vec![Span::styled(
-                format!(" 󰉋 {} ", group.name),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            )];
-            spans.push(Span::styled(
-                format!(" {} sessions", total),
-                Style::default().fg(Color::DarkGray),
-            ));
-            if attn > 0 {
-                spans.push(Span::styled(
-                    format!("  󰂞 {}", attn),
-                    Style::default().fg(Color::Yellow),
-                ));
-            }
-            // Show cwd path dimmed after the counts
-            spans.push(Span::styled(
-                format!("  {}", group.cwd),
-                Style::default().fg(SEP_GRAY),
-            ));
-
-            let header = Paragraph::new(Line::from(spans));
-            frame.render_widget(header, Rect::new(area.x, hy, area.width, 1));
+            render_group_header(frame, Rect::new(area.x, hy, area.width, 1), group);
         }
 
         // Render cards for this group
@@ -154,6 +178,37 @@ pub(crate) fn spinner_frame(now: u64) -> &'static str {
     SPINNER_FRAMES[((now / 120) % SPINNER_FRAMES.len() as u64) as usize]
 }
 
+/// Role badge — prepended into a card/row title so a glance tells the user
+/// whether a session is an orchestrator or a worker, and which task it's
+/// attached to. Workers also get their worktree name (or "RO" for
+/// read-only). None for ordinary sessions. Shared by both layouts.
+pub(crate) fn role_prefix(role: Option<&crate::projects_scan::SessionRole>) -> Option<String> {
+    match role {
+        Some(crate::projects_scan::SessionRole::Orchestrator { task_id, .. }) => Some(format!(
+            "★ orch[{}] ",
+            crate::orchestrator::short_task_id(task_id)
+        )),
+        Some(crate::projects_scan::SessionRole::Worker {
+            task_id,
+            worktree,
+            readonly,
+            ..
+        }) => {
+            let suffix = if *readonly {
+                "RO".to_string()
+            } else {
+                worktree.clone().unwrap_or_else(|| "wt".into())
+            };
+            Some(format!(
+                "↳ wkr[{}/{}] ",
+                crate::orchestrator::short_task_id(task_id),
+                suffix
+            ))
+        }
+        None => None,
+    }
+}
+
 pub(crate) fn render_card(
     frame: &mut Frame,
     area: Rect,
@@ -195,34 +250,7 @@ pub(crate) fn render_card(
         BorderType::Rounded
     };
 
-    // Role badge — prepended into the title so a glance tells the user
-    // whether a card is an orchestrator or a worker, and which task it's
-    // attached to. Workers also get their worktree name (or "RO" for
-    // read-only). None for ordinary sessions.
-    let role_prefix = match role {
-        Some(crate::projects_scan::SessionRole::Orchestrator { task_id, .. }) => Some(format!(
-            "★ orch[{}] ",
-            crate::orchestrator::short_task_id(task_id)
-        )),
-        Some(crate::projects_scan::SessionRole::Worker {
-            task_id,
-            worktree,
-            readonly,
-            ..
-        }) => {
-            let suffix = if *readonly {
-                "RO".to_string()
-            } else {
-                worktree.clone().unwrap_or_else(|| "wt".into())
-            };
-            Some(format!(
-                "↳ wkr[{}/{}] ",
-                crate::orchestrator::short_task_id(task_id),
-                suffix
-            ))
-        }
-        None => None,
-    };
+    let role_prefix = role_prefix(role);
     let prefix = role_prefix.as_deref().unwrap_or("");
     // Claude is the ~99% default — labelling every card "[Claude]" is pure
     // noise — so the badge is shown only for non-Claude agents.

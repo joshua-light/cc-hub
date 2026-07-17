@@ -2,6 +2,26 @@ use crate::acks::Acks;
 use crate::models::{ProjectGroup, SessionInfo};
 use std::collections::HashSet;
 
+/// How the Sessions tab lays out its sessions. `Grid` is the classic card
+/// wall; `List` renders one compact row per session, table-style. Runtime
+/// toggle (`v`), in-memory only — resets to `Grid` on relaunch, same
+/// lifetime as the `show_*` filters on [`SessionsView`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SessionsLayout {
+    #[default]
+    Grid,
+    List,
+}
+
+impl SessionsLayout {
+    pub fn label(self) -> &'static str {
+        match self {
+            SessionsLayout::Grid => "grid",
+            SessionsLayout::List => "list",
+        }
+    }
+}
+
 /// Sessions-tab state: the grouped-session grid plus its cursor and
 /// view-filter toggles. Pulled out of [`App`] so the grid cursor can't be
 /// moved out of range without going through the clamping methods here.
@@ -9,6 +29,7 @@ pub struct SessionsView {
     pub groups: Vec<ProjectGroup>,
     pub sel_group: usize,
     pub sel_in_group: usize,
+    pub layout: SessionsLayout,
     pub show_inactive: bool,
     /// When false, the Sessions view hides any session whose tmux name is
     /// claimed by an orchestrator or worker in the current projects
@@ -29,6 +50,7 @@ impl SessionsView {
             groups: Vec::new(),
             sel_group: 0,
             sel_in_group: 0,
+            layout: SessionsLayout::default(),
             show_inactive: false,
             show_orch_workers: false,
             acks: Acks::new(),

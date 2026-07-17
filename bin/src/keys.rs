@@ -74,6 +74,7 @@ fn map_sessions_command(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<
         (View::Grid, KeyCode::Char('W')) if on_sessions => {
             Command::Sessions(S::ToggleShowOrchWorkers)
         }
+        (View::Grid, KeyCode::Char('v')) if on_sessions => Command::Sessions(S::ToggleLayout),
         (View::Grid, KeyCode::Char('f') | KeyCode::Enter) if on_sessions => {
             Command::Sessions(S::FocusSelected)
         }

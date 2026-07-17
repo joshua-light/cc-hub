@@ -13,7 +13,7 @@
 //! character editing) stay as thin `bin` arms — only their submit/logic arms
 //! became commands.
 
-use super::{App, Tab};
+use super::{App, SessionsLayout, Tab};
 use crate::agent::AgentKind;
 use crate::orchestrator::TaskPriority;
 use crate::{models, spawn, title};
@@ -52,6 +52,8 @@ pub enum SessionsCommand {
     ToggleShowInactive,
     /// `W` — toggle orchestrator/worker sessions.
     ToggleShowOrchWorkers,
+    /// `v` — cycle the Sessions layout (card grid ↔ compact list).
+    ToggleLayout,
     /// `f`/Enter — resume inactive, attach live tmux, or focus the window.
     FocusSelected,
     /// `o` — shell pane in the selected session's cwd.
@@ -197,21 +199,30 @@ impl App {
     fn execute_sessions(&mut self, cmd: SessionsCommand) -> Vec<Effect> {
         use SessionsCommand::*;
         match cmd {
+            // In the list layout every row is one column wide, so
+            // left/right degenerate to up/down instead of cycling within
+            // the group (a jump that reads as random on a linear list).
             NavRight => {
-                self.sessions.move_right();
+                match self.sessions.layout {
+                    SessionsLayout::Grid => self.sessions.move_right(),
+                    SessionsLayout::List => self.sessions.move_down(1),
+                }
                 Vec::new()
             }
             NavLeft => {
-                self.sessions.move_left();
+                match self.sessions.layout {
+                    SessionsLayout::Grid => self.sessions.move_left(),
+                    SessionsLayout::List => self.sessions.move_up(1),
+                }
                 Vec::new()
             }
             NavDown => {
-                let cols = self.render.grid_cols;
+                let cols = self.sessions_nav_cols();
                 self.sessions.move_down(cols);
                 Vec::new()
             }
             NavUp => {
-                let cols = self.render.grid_cols;
+                let cols = self.sessions_nav_cols();
                 self.sessions.move_up(cols);
                 Vec::new()
             }
@@ -247,6 +258,11 @@ impl App {
                     "hidden"
                 };
                 self.set_status(format!("orchestrator/worker sessions {}", state));
+                Vec::new()
+            }
+            ToggleLayout => {
+                self.toggle_sessions_layout();
+                self.set_status(format!("sessions layout: {}", self.sessions.layout.label()));
                 Vec::new()
             }
             FocusSelected => self.focus_selected_session(),

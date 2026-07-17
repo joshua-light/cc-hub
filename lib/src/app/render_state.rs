@@ -10,8 +10,9 @@ use std::collections::{HashMap, HashSet};
 ///
 /// All writer sites:
 /// - `ui/mod.rs` → [`App::update_grid_cols`] writes [`Self::grid_cols`].
-/// - `ui/sessions.rs` writes [`Self::grid_scroll`] (keep-selection-visible clamp)
-///   and clamps [`Self::popup_scroll`].
+/// - `ui/sessions.rs` and `ui/sessions_list.rs` write [`Self::grid_scroll`]
+///   (keep-selection-visible clamp, one writer per layout);
+///   `ui/sessions.rs` also clamps [`Self::popup_scroll`].
 /// - `ui/metrics.rs` writes [`Self::metrics_view_height`],
 ///   [`Self::metrics_row_lines`], and [`Self::metrics_scroll`].
 /// - `ui/projects/result_popup.rs` clamps [`Self::result_scroll`] and reads

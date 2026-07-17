@@ -10,6 +10,7 @@ pub mod palette;
 pub mod popups;
 pub mod projects;
 pub mod sessions;
+pub mod sessions_list;
 pub mod tasks;
 
 // Items consumed by bin/src/main.rs keep their `cc_hub_lib::ui::X` paths.
@@ -68,7 +69,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     match app.current_tab {
         Tab::Tasks => tasks::render_tasks_body(frame, chunks[2], app),
         Tab::Projects => projects::render_projects_body(frame, chunks[2], app),
-        Tab::Sessions => sessions::render_grid(frame, chunks[2], app),
+        Tab::Sessions => sessions::render_sessions_body(frame, chunks[2], app),
         Tab::Metrics => metrics::render_metrics_body(frame, chunks[2], app),
     }
     render_status_bar(frame, chunks[3], app);
@@ -254,7 +255,7 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 // it is never the first thing clipped.
                 Tab::Tasks => "a/n:add  enter/f:focus agent  s:assign agent  S:agent in ~  h/l:col  j/k:task  H/L:move  /:filter  1-4:priority  t:tags  r:rename  x:delete  u:undo  c:clear done  tab:next  q:quit",
                 Tab::Projects => "enter:focus orch  n:new task  r:result  f:agent terminal/resurrect  R:restart  b:backlog  h/l:col  j/k:task  H/L:project  N:register project  c:copy id  x:delete task  X:remove project  tab:next  q:quit",
-                Tab::Sessions => "enter/f:focus/resume  n:new  N:new+model  p:new in…  i:info  r:rename  L:link task  t:to-do  o:shell  M:bookmarks  D:why?  h/j/k/l:nav  x:close  H:inactive  W:workers  tab:next  q:quit",
+                Tab::Sessions => "enter/f:focus/resume  n:new  N:new+model  p:new in…  i:info  r:rename  L:link task  t:to-do  o:shell  M:bookmarks  D:why?  h/j/k/l:nav  v:layout  x:close  H:inactive  W:workers  tab:next  q:quit",
                 Tab::Metrics => "enter:view transcript  j/k:select  r:refresh  tab:next  q:quit",
             },
             View::Popup => "j/k:scroll  esc:close  q:close",
