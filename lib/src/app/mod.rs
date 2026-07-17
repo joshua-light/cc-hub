@@ -67,6 +67,41 @@ fn task_display_title(task: &TaskState) -> String {
         .unwrap_or_else(|| crate::models::first_line_truncated(&task.prompt, 48))
 }
 
+/// Reorder one group's sessions so task-linked cards lead the group and
+/// cards linked to the same task always sit next to each other. Clusters
+/// order by their first member in the incoming order (the liveness sort, so
+/// a cluster ranks by its most-live member) and the remaining members are
+/// pulled up behind it; unlinked cards follow in their incoming order. The
+/// pass adds no churn of its own — links only change on user action.
+fn cluster_by_task(
+    sessions: Vec<SessionInfo>,
+    links: &HashMap<String, crate::session_tasks::TaskLink>,
+) -> Vec<SessionInfo> {
+    let mut slots: Vec<Option<SessionInfo>> = sessions.into_iter().map(Some).collect();
+    let mut out = Vec::with_capacity(slots.len());
+    for i in 0..slots.len() {
+        let Some(task_id) = slots[i]
+            .as_ref()
+            .and_then(|s| links.get(&s.session_id))
+            .map(|l| l.task_id.clone())
+        else {
+            continue;
+        };
+        out.push(slots[i].take().expect("checked above"));
+        for slot in slots.iter_mut().skip(i + 1) {
+            let same_task = slot
+                .as_ref()
+                .and_then(|s| links.get(&s.session_id))
+                .is_some_and(|l| l.task_id == task_id);
+            if same_task {
+                out.push(slot.take().expect("checked above"));
+            }
+        }
+    }
+    out.extend(slots.into_iter().flatten());
+    out
+}
+
 /// Task-link picker band order: the Tasks-board columns left to right
 /// (To-Do → Planning → In Progress → Done). Personal-board tasks never hold
 /// the orchestrated-only Review/Merging phases; they rank between In
@@ -2841,7 +2876,7 @@ impl App {
                 ProjectGroup {
                     name,
                     cwd,
-                    sessions,
+                    sessions: cluster_by_task(sessions, &self.session_task_links),
                 }
             })
             .collect();
@@ -3328,6 +3363,45 @@ mod tests {
             assert_eq!(badge.title, "Fix auth");
             assert!(badge.stale);
             assert!(app.task_badge("s-a").is_none());
+        });
+    }
+
+    #[test]
+    fn linked_sessions_lead_the_group_and_cluster_by_task() {
+        crate::test_util::with_temp_home(|| {
+            let mut app = App::new();
+            // An unlinked card leads the liveness order, two tk-1 members
+            // straddle a liveness bucket boundary, and another unlinked
+            // card trails.
+            let b = fake_session("s-b", SessionState::Processing);
+            let a = fake_session("s-a", SessionState::Processing);
+            let c = fake_session("s-c", SessionState::Idle);
+            let d = fake_session("s-d", SessionState::Idle);
+            for sid in ["s-a", "s-c"] {
+                crate::session_tasks::link(
+                    sid,
+                    crate::session_tasks::TaskLink {
+                        task_id: "tk-1".into(),
+                        project_id: None,
+                        title: "Fix auth".into(),
+                    },
+                )
+                .unwrap();
+            }
+            app.session_task_links = crate::session_tasks::load();
+
+            let groups = app.build_groups(&[b, a, c, d]);
+            assert_eq!(groups.len(), 1);
+            let order: Vec<&str> = groups[0]
+                .sessions
+                .iter()
+                .map(|s| s.session_id.as_str())
+                .collect();
+            // The tk-1 cluster jumps ahead of the unlinked s-b even though
+            // s-b is first in the liveness order, and s-c is pulled up
+            // behind its anchor across the bucket boundary; the unlinked
+            // cards follow in their relative order.
+            assert_eq!(order, vec!["s-a", "s-c", "s-b", "s-d"]);
         });
     }
 
