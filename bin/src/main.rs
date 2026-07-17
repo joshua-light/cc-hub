@@ -38,9 +38,60 @@ use std::fs::File;
 use std::io;
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+
+/// Byte-counting wrapper around the terminal writer. Every escape byte
+/// ratatui flushes passes through here, so the draw trace can report each
+/// frame's real diff size — the work the host terminal (or tmux/ssh hop)
+/// must do to paint it. The counter is shared out through an `Arc` because
+/// ratatui owns the writer once the backend is built.
+pub(crate) struct CountingWriter<W> {
+    inner: W,
+    written: Arc<AtomicU64>,
+}
+
+impl<W> CountingWriter<W> {
+    fn new(inner: W, written: Arc<AtomicU64>) -> Self {
+        Self { inner, written }
+    }
+}
+
+impl<W: io::Write> io::Write for CountingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.written.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// The concrete terminal type after the byte-counting writer was threaded
+/// under the backend — one alias so `run()`, `keys::handle_key`, and
+/// `effects::apply_effect` don't each spell the full generic stack.
+pub(crate) type Term = Terminal<CrosstermBackend<CountingWriter<io::Stdout>>>;
+
+/// Log the 1/5/15-minute load averages. Input-lag forensics repeatedly dead-end
+/// at "the app was fast, the delay was outside the process" — this line ties
+/// each felt incident to how loaded the whole machine was at that moment.
+#[cfg(unix)]
+fn log_loadavg() {
+    let mut la = [0f64; 3];
+    // SAFETY: `la` is a valid buffer of 3 doubles and getloadavg writes at
+    // most the 3 requested entries.
+    let n = unsafe { libc::getloadavg(la.as_mut_ptr(), 3) };
+    if n == 3 {
+        log::debug!("sys: loadavg={:.2} {:.2} {:.2}", la[0], la[1], la[2]);
+    }
+}
+
+#[cfg(not(unix))]
+fn log_loadavg() {}
 
 /// How long to suppress re-titling a session/task after a successful run.
 /// Long enough to outlast any in-flight `projects_scan::scan` snapshot
@@ -413,7 +464,7 @@ pub(crate) fn pick_from_folder_picker(app: &mut App) {
 
 /// Size for a popup tmux pane: terminal minus a margin, with floor. The
 /// renderer re-resizes on first draw, so a rough starting size is fine.
-pub(crate) fn popup_pane_size(terminal: &Terminal<CrosstermBackend<io::Stdout>>) -> (u16, u16) {
+pub(crate) fn popup_pane_size(terminal: &Term) -> (u16, u16) {
     terminal
         .size()
         .map(|s| {
@@ -566,10 +617,13 @@ async fn main() -> io::Result<()> {
     #[allow(deprecated)]
     let image_picker = cc_hub_lib::ratatui_image::picker::Picker::from_query_stdio()
         .unwrap_or_else(|_| cc_hub_lib::ratatui_image::picker::Picker::from_fontsize((8, 16)));
-    let backend = CrosstermBackend::new(stdout);
+    // Frame-diff byte counter, drained once per draw by `run()` for the
+    // `bytes=` field of the draw trace.
+    let frame_bytes = Arc::new(AtomicU64::new(0));
+    let backend = CrosstermBackend::new(CountingWriter::new(stdout, Arc::clone(&frame_bytes)));
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run(&mut terminal, image_picker).await;
+    let result = run(&mut terminal, image_picker, frame_bytes).await;
 
     // Ask any still-running title subprocesses to kill themselves so the
     // tokio runtime's shutdown doesn't wait up to ~45s on a hung `claude
@@ -708,8 +762,9 @@ fn apply_scan_msg(
 }
 
 async fn run(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Term,
     image_picker: cc_hub_lib::ratatui_image::picker::Picker,
+    frame_bytes: Arc<AtomicU64>,
 ) -> io::Result<()> {
     // Migrate a pre-unification ~/.cc-hub/tasks.json into the per-task store
     // BEFORE the board's first load. Deliberately here, not in App::new():
@@ -994,6 +1049,27 @@ async fn run(
     /// Any single loop phase taking this long is a responsiveness incident
     /// worth a warn-level breakdown in the log.
     const STALL: Duration = Duration::from_millis(30);
+    /// Minimum spacing between terminal round-trip probes, so a key mash
+    /// costs at most one probe every 2s.
+    const PROBE_INTERVAL: Duration = Duration::from_secs(2);
+
+    // Terminal round-trip probe state. In-process telemetry keeps proving
+    // the loop innocent while users still feel 500-1000ms on a keypress, so
+    // after an input-triggered frame is flushed we ask the terminal where
+    // its cursor is (CPR, ESC[6n) and time the answer. The reply can only
+    // arrive after the terminal has consumed everything we wrote, so the
+    // round trip exposes a backlogged terminal/tmux/ssh hop — the part of
+    // the pipeline no in-process timer can see. One failed probe disables
+    // probing for the rest of the run: a terminal that doesn't answer CPR
+    // would otherwise cost a 2s blocking timeout per probe.
+    let mut probe_ok = true;
+    let mut last_probe = Instant::now();
+    // The pane redraws at stream rate and its per-frame trace is skipped to
+    // keep the log readable; aggregate its flushed bytes and report ~1Hz so
+    // pane-driven terminal load still shows up in forensics.
+    let mut pane_bytes: u64 = 0;
+    let mut last_pane_bytes_log = Instant::now();
+    let mut last_sys_log = Instant::now();
 
     loop {
         // Poll live view for new JSONL entries
@@ -1036,6 +1112,15 @@ async fn run(
         if dirty || in_tmux || clock_tick {
             terminal.draw(|frame| hot::render(frame, &mut app))?;
             draw_dur = t_draw.elapsed();
+            // Diff size this frame pushed at the terminal. Drained even for
+            // pane frames so their bytes can't leak into the next Grid
+            // frame's number.
+            let flushed = frame_bytes.swap(0, Ordering::Relaxed);
+            let input_latency = if in_tmux {
+                None
+            } else {
+                last_input_at.take().map(|t| t.elapsed())
+            };
             // Trace what each frame actually rendered (key/selection traces
             // alone proved state correct while a user still saw a stale
             // highlight — this line closes the state↔pixels gap). `latency`
@@ -1044,17 +1129,55 @@ async fn run(
             // stream to keep the log readable.
             if !in_tmux {
                 log::debug!(
-                    "draw: sel=({}, {}) view={:?} trigger={} took={:?} latency={:?}",
+                    "draw: sel=({}, {}) view={:?} trigger={} took={:?} bytes={} latency={:?}",
                     app.sessions.sel_group,
                     app.sessions.sel_in_group,
                     app.view,
                     if dirty { "dirty" } else { "clock" },
                     draw_dur,
-                    last_input_at.take().map(|t| t.elapsed()),
+                    flushed,
+                    input_latency,
                 );
+            } else {
+                pane_bytes = pane_bytes.saturating_add(flushed);
+                if last_pane_bytes_log.elapsed() >= Duration::from_secs(1) {
+                    log::debug!(
+                        "draw: pane flushed {} bytes in {:?}",
+                        pane_bytes,
+                        last_pane_bytes_log.elapsed()
+                    );
+                    pane_bytes = 0;
+                    last_pane_bytes_log = Instant::now();
+                }
             }
             dirty = false;
             last_clock_redraw = Instant::now();
+
+            // Terminal round-trip probe (see `probe_ok` above): fired only
+            // right after a keypress-triggered frame, at most once per
+            // PROBE_INTERVAL. A slow answer here with a fast `latency=` on
+            // the same frame localizes the felt lag to the terminal side.
+            if probe_ok && input_latency.is_some() && last_probe.elapsed() >= PROBE_INTERVAL {
+                last_probe = Instant::now();
+                let t_probe = Instant::now();
+                match crossterm::cursor::position() {
+                    Ok(_) => {
+                        let rtt = t_probe.elapsed();
+                        if rtt >= Duration::from_millis(100) {
+                            log::warn!(
+                                "probe: terminal answered CPR in {:?} — terminal-side backlog",
+                                rtt
+                            );
+                        } else {
+                            log::debug!("probe: terminal CPR rtt={:?}", rtt);
+                        }
+                    }
+                    Err(e) => {
+                        probe_ok = false;
+                        log::warn!("probe: CPR failed ({}); probing disabled for this run", e);
+                    }
+                }
+            }
         }
 
         // Replay clipboard escapes (OSC 52) captured from the embedded pane
@@ -1248,6 +1371,14 @@ async fn run(
             app::DispatchAction::Wait => {}
         }
         let dispatch_dur = t_dispatch.elapsed();
+
+        // Periodic machine-load line: felt lag with clean loop phases and a
+        // clean probe points at the OS/emulator being starved — this ties
+        // each incident window to the load averages at that moment.
+        if last_sys_log.elapsed() >= Duration::from_secs(10) {
+            last_sys_log = Instant::now();
+            log_loadavg();
+        }
 
         // Self-profiling: any phase that held the loop past STALL is exactly
         // the kind of incident users report as "input lag" — name it with

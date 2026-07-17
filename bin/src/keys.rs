@@ -13,9 +13,6 @@ use cc_hub_lib::app::{App, Command, View};
 use cc_hub_lib::folder_picker::PickerMode;
 use cc_hub_lib::{focus, live_view, models, platform, send, spawn, tmux_pane};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::backend::CrosstermBackend;
-use ratatui::Terminal;
-use std::io;
 use tokio::sync::mpsc;
 
 mod tasks;
@@ -90,9 +87,7 @@ fn map_sessions_command(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<
         // checked here, so terminals that forward Cmd (kitty protocol)
         // land on the same arm.
         (View::Grid, KeyCode::Char('p')) if on_sessions => Command::Sessions(S::OpenPlacesPicker),
-        (View::Grid, KeyCode::Char('L')) if on_sessions => {
-            Command::Sessions(S::OpenTaskLinkPicker)
-        }
+        (View::Grid, KeyCode::Char('L')) if on_sessions => Command::Sessions(S::OpenTaskLinkPicker),
         (View::Grid, KeyCode::Char('t')) if on_sessions => Command::Sessions(S::OpenTodoPanel),
         (View::Grid, KeyCode::Char('r')) if on_sessions => Command::Sessions(S::OpenRenameSession),
         (View::RenameSession, KeyCode::Enter) => Command::Sessions(S::SubmitRename),
@@ -109,7 +104,7 @@ fn map_sessions_command(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<
 pub(crate) async fn handle_key(
     app: &mut App,
     key: KeyEvent,
-    terminal: &Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &crate::Term,
     scan_tx_main: &mpsc::Sender<ScanMsg>,
     detail_tx: &mpsc::Sender<String>,
     state_debug_tx: &mpsc::Sender<String>,

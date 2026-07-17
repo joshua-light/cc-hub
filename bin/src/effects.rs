@@ -10,15 +10,12 @@
 
 use cc_hub_lib::app::{App, Effect};
 use cc_hub_lib::{focus, spawn, tmux_pane};
-use ratatui::backend::CrosstermBackend;
-use ratatui::Terminal;
-use std::io;
 use tokio::sync::mpsc;
 
 pub(crate) async fn apply_effect(
     app: &mut App,
     effect: Effect,
-    terminal: &Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &crate::Term,
     detail_tx: &mpsc::Sender<String>,
     state_debug_tx: &mpsc::Sender<String>,
     spawn_metrics: &impl Fn(),

@@ -322,6 +322,7 @@ dependencies = [
  "chrono",
  "crossterm",
  "hot-lib-reloader",
+ "libc",
  "log",
  "ratatui",
  "serde_json",

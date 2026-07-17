@@ -21,5 +21,10 @@ simplelog.workspace = true
 time = { version = "0.3", features = ["macros"] }
 hot-lib-reloader = { version = "0.7", optional = true }
 
+# getloadavg for the periodic `sys: loadavg=` forensics line; unix-only —
+# Windows builds fall back to a no-op.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
