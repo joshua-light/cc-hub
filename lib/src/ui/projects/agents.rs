@@ -70,7 +70,10 @@ pub(crate) fn collect_agent_summary(
                 sum.waiting += 1;
                 sum.alive += 1;
             }
-            SessionState::Idle => {
+            // Starting is app-synthesized for spawn placeholders and never
+            // reaches the orch/worker summary; bucketed with Idle (it shares
+            // the idle liveness rank) for exhaustiveness.
+            SessionState::Starting | SessionState::Idle => {
                 sum.idle += 1;
                 sum.alive += 1;
             }
@@ -93,7 +96,7 @@ pub(crate) fn collect_agent_summary(
         let pri = match s.state {
             SessionState::Processing => 3,
             SessionState::WaitingForInput | SessionState::Question => 2,
-            SessionState::Idle => 1,
+            SessionState::Starting | SessionState::Idle => 1,
             SessionState::Inactive => 0,
         };
         if pri > tool_priority {

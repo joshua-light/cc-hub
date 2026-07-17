@@ -320,8 +320,8 @@ pub fn task_report(
         // out of Running. By this point the orchestrator's post-merge /bump
         // has already landed on the project's main branch, so the manifest
         // at `project_root` reflects the version that was just shipped.
-        let leaving_running =
-            prev == TaskStatus::Running && matches!(s.status, TaskStatus::Review | TaskStatus::Done);
+        let leaving_running = prev == TaskStatus::Running
+            && matches!(s.status, TaskStatus::Review | TaskStatus::Done);
         if leaving_running && s.shipped_version.is_none() {
             s.shipped_version = s.project_root.as_deref().and_then(crate::version::detect);
         }

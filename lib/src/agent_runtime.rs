@@ -144,6 +144,13 @@ impl AgentRuntime for SystemAgentRuntime {
         model: Option<&str>,
         readonly_tools: bool,
     ) -> io::Result<String> {
-        crate::spawn::spawn_agent_session(agent_id, cwd, resume, initial_prompt, model, readonly_tools)
+        crate::spawn::spawn_agent_session(
+            agent_id,
+            cwd,
+            resume,
+            initial_prompt,
+            model,
+            readonly_tools,
+        )
     }
 }

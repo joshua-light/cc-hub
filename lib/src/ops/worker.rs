@@ -287,7 +287,8 @@ pub fn merge_worktree(
     // can restore it afterward instead of silently leaving the user on main.
     let prior_ref = capture_head_ref(&project_root);
 
-    let (outcome, stdout, stderr) = match orchestrator::merge_branch(&project_root, &main, &branch) {
+    let (outcome, stdout, stderr) = match orchestrator::merge_branch(&project_root, &main, &branch)
+    {
         Ok(v) => v,
         Err(e) => {
             let _ = crate::merge_lock::release(project_id, task_id);

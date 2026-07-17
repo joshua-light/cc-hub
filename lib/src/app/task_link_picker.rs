@@ -176,8 +176,7 @@ mod tests {
             link_choice("Fix auth", "tk-1"),
             link_choice("Ship parser", "tk-2"),
         ];
-        let picker =
-            TaskLinkPickerState::new("sid".into(), "sid".into(), choices, Some("tk-2"));
+        let picker = TaskLinkPickerState::new("sid".into(), "sid".into(), choices, Some("tk-2"));
         assert_eq!(picker.selected, 2);
         assert!(matches!(
             picker.selected_action(),
@@ -187,7 +186,10 @@ mod tests {
 
     #[test]
     fn filter_narrows_and_highlights_labels() {
-        let choices = vec![link_choice("Fix auth", "tk-1"), link_choice("Ship it", "tk-2")];
+        let choices = vec![
+            link_choice("Fix auth", "tk-1"),
+            link_choice("Ship it", "tk-2"),
+        ];
         let mut picker = TaskLinkPickerState::new("sid".into(), "sid".into(), choices, None);
         assert_eq!(picker.rows.len(), 2);
         for c in "fixa".chars() {

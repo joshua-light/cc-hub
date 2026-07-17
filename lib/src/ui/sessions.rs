@@ -4,8 +4,8 @@ use crate::app::App;
 use crate::models::{first_line_truncated, short_sid, SessionDetail, SessionInfo, SessionState};
 use crate::ui::common::{
     centered_rect, context_window_size, ctx_bar, ctx_color, format_datetime, format_elapsed,
-    format_time, format_tokens, format_tool_label, popup_block, short_model, state_color,
-    priority_color, state_indicator, task_color,
+    format_time, format_tokens, format_tool_label, popup_block, priority_color, short_model,
+    state_color, state_indicator, task_color,
 };
 use crate::ui::palette::{CONTEXT_GRAY, MUTED_TEXT, PURPLE, SEP_GRAY};
 use crate::ui::popups::wrapped_total_rows;
@@ -162,7 +162,15 @@ pub(crate) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
                 .as_deref()
                 .and_then(|t| roles_by_tmux.get(t));
             let badge = app.task_badge(&session.session_id);
-            render_card(frame, cell_area, session, role, badge.as_ref(), is_selected, now);
+            render_card(
+                frame,
+                cell_area,
+                session,
+                role,
+                badge.as_ref(),
+                is_selected,
+                now,
+            );
         }
     }
 }
@@ -176,6 +184,16 @@ const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 
 pub(crate) fn spinner_frame(now: u64) -> &'static str {
     SPINNER_FRAMES[((now / 120) % SPINNER_FRAMES.len() as u64) as usize]
+}
+
+/// Single-dot orbit shown while a spawn placeholder is Starting. Same
+/// braille family as [`SPINNER_FRAMES`] but unmistakably different motion
+/// (one dot circling vs. a churning cluster), so a booting agent can't be
+/// read as one that's already processing.
+const STARTING_FRAMES: [&str; 8] = ["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"];
+
+pub(crate) fn starting_frame(now: u64) -> &'static str {
+    STARTING_FRAMES[((now / 120) % STARTING_FRAMES.len() as u64) as usize]
 }
 
 /// Role badge — prepended into a card/row title so a glance tells the user
@@ -219,10 +237,10 @@ pub(crate) fn render_card(
     now: u64,
 ) {
     let (indicator, ind_color) = state_indicator(&session.state);
-    let indicator = if session.state == SessionState::Processing {
-        spinner_frame(now)
-    } else {
-        indicator
+    let indicator = match session.state {
+        SessionState::Processing => spinner_frame(now),
+        SessionState::Starting => starting_frame(now),
+        _ => indicator,
     };
 
     let border_color = if selected {
@@ -463,7 +481,9 @@ fn activity_line(session: &SessionInfo, inner_w: usize) -> Option<Line<'static>>
                 None
             }
         }
-        SessionState::Idle | SessionState::Inactive => None,
+        // Starting has no payload by construction: the placeholder's title
+        // already says "starting …" and no transcript exists yet.
+        SessionState::Starting | SessionState::Idle | SessionState::Inactive => None,
     }
 }
 
@@ -956,7 +976,11 @@ mod tests {
 
         // Unlinked cards carry no mark.
         let plain = buffer_to_string(&render(&s, 42, 7));
-        assert!(!plain.contains('\u{f04f9}'), "badge on unlinked card:\n{}", plain);
+        assert!(
+            !plain.contains('\u{f04f9}'),
+            "badge on unlinked card:\n{}",
+            plain
+        );
     }
 
     #[test]

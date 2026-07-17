@@ -12,9 +12,7 @@ use crate::models::{self, SessionInfo, SessionState};
 use crate::orchestrator::{TaskState, TaskStatus};
 use crate::ui::common::priority_color;
 use crate::ui::now_ms;
-use crate::ui::palette::{
-    ACCENT_BLUE, DIM_TEXT, DOT_IDLE, LABEL_GRAY, META_GRAY, TAG_SLATE,
-};
+use crate::ui::palette::{ACCENT_BLUE, DIM_TEXT, DOT_IDLE, LABEL_GRAY, META_GRAY, TAG_SLATE};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -390,6 +388,9 @@ fn meta_line(
                     ("●", "review ready", Color::LightCyan)
                 }
                 SessionState::Idle => ("●", "idle", Color::LightGreen),
+                // App-synthesized spawn placeholder; task-linked sessions come
+                // from the scanner so this arm is exhaustiveness-only.
+                SessionState::Starting => ("◌", "starting…", DOT_IDLE),
                 SessionState::Inactive => ("○", "inactive", DOT_IDLE),
             },
             // Spawned but not scanned yet, or the tmux died. With a resolved

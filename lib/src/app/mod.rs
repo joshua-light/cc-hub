@@ -1,15 +1,15 @@
-use crate::bookmarks::Bookmarks;
 use crate::agent::AgentConfig;
 use crate::agent_runtime::{AgentRuntime, SystemAgentRuntime};
+use crate::bookmarks::Bookmarks;
 use crate::config;
 use crate::conversation::StateExplanation;
 use crate::folder_picker::{FolderPicker, PickerMode, Place};
 use crate::live_view::LiveView;
 use crate::metrics::{MetricsAnalysis, SelectableSession};
 use crate::models::{ProjectGroup, SessionDetail, SessionInfo, SessionState, TaskBadge};
+use crate::orchestrator::{TaskPriority, TaskState, TaskStatus};
 use crate::projects_scan::ProjectsSnapshot;
 use crate::session_count::SessionCounts;
-use crate::orchestrator::{TaskPriority, TaskState, TaskStatus};
 use crate::tmux_pane::TmuxPaneView;
 use crate::usage::UsageInfo;
 use ratatui::text::Line;
@@ -555,11 +555,16 @@ pub struct App {
 }
 
 /// One pending spawn-verification: the agent must show up in a scan snapshot
-/// hosted by `tmux_name` before `deadline`, else the user gets told.
+/// hosted by `tmux_name` before `deadline`, else the user gets told. While
+/// pending it also backs a placeholder "starting…" card in `cwd`'s group
+/// (see [`App::build_groups`]), so the spawn is visible before the scanner
+/// first sees the session.
 struct SpawnWatch {
     tmux_name: String,
-    /// Display label for the status line (agent badge / id).
+    /// Agent id: names the placeholder card and the diagnosis status line.
     agent: String,
+    /// Where the session was spawned; parents the placeholder card's group.
+    cwd: String,
     deadline: Instant,
 }
 
@@ -568,6 +573,54 @@ struct SpawnWatch {
 /// spawn; the slack covers slow cold starts. A false alarm costs one status
 /// line, so generous beats jumpy.
 const SPAWN_WATCH_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Synthetic session id backing a spawn watch's placeholder card. Prefixed so
+/// it can never collide with a real scanner-issued session id, and derived
+/// from the tmux name so the same spawn maps to the same id across rebuilds.
+fn spawning_session_id(tmux_name: &str) -> String {
+    format!("spawning:{}", tmux_name)
+}
+
+/// Loading-state stand-in for a spawn the scanner hasn't seen yet: Starting
+/// (its own orbit spinner and color, and the idle liveness rank — the slot
+/// the real card first appears in) with a "starting …" title. `tmux_session`
+/// is real, so opening the card attaches to the pane where the agent is
+/// actually booting.
+fn spawning_placeholder(watch: &SpawnWatch) -> SessionInfo {
+    let agent_kind = config::get()
+        .agent(&watch.agent)
+        .map(|a| a.kind)
+        .unwrap_or(crate::agent::AgentKind::Claude);
+    let mut info = SessionInfo {
+        agent_id: watch.agent.clone(),
+        agent_kind,
+        pid: 0,
+        session_id: spawning_session_id(&watch.tmux_name),
+        cwd: watch.cwd.clone(),
+        project_name: std::path::Path::new(&watch.cwd)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| watch.cwd.clone()),
+        started_at: 0,
+        last_activity: None,
+        state: SessionState::Starting,
+        last_user_message: None,
+        summary: None,
+        title: None,
+        titling: false,
+        model: None,
+        git_branch: None,
+        version: None,
+        jsonl_path: None,
+        tmux_session: Some(watch.tmux_name.clone()),
+        current_tool: None,
+        is_thinking: false,
+        context_tokens: None,
+        tool_uses_count: 0,
+    };
+    info.title = Some(format!("starting {}…", info.agent_badge()));
+    info
+}
 
 impl Default for App {
     fn default() -> Self {
@@ -746,7 +799,11 @@ impl App {
         let Some(id) = self.tasks.tagging.take() else {
             return false;
         };
-        if let Err(e) = self.tasks.board.set_tags(&id, crate::tasks::parse_tags(&text)) {
+        if let Err(e) = self
+            .tasks
+            .board
+            .set_tags(&id, crate::tasks::parse_tags(&text))
+        {
             self.tasks.record_persistence_error("tag update", e);
             return false;
         }
@@ -765,10 +822,7 @@ impl App {
     pub fn task_column(&self, status: TaskStatus) -> Vec<&TaskState> {
         let mut tasks = self.tasks.board.column(status);
         tasks.retain(|t| self.tasks.matches_filter(t));
-        if matches!(
-            status,
-            TaskStatus::Planning | TaskStatus::Running
-        ) {
+        if matches!(status, TaskStatus::Planning | TaskStatus::Running) {
             let frozen = |id: &str| self.tasks.in_progress_order.iter().position(|x| x == id);
             // Stable sort: ids missing from the frozen order all key to MAX
             // and keep their relative insertion order at the tail.
@@ -882,10 +936,7 @@ impl App {
         };
         let id = t.task_id.clone();
         let preview = crate::models::first_line_truncated(&t.prompt, 32);
-        let live_tmux = t
-            .tmux
-            .clone()
-            .filter(|n| self.runtime.session_exists(n));
+        let live_tmux = t.tmux.clone().filter(|n| self.runtime.session_exists(n));
         if let Some(tmux) = live_tmux {
             return match self.runtime.send_prompt(&tmux, PROCEED_PROMPT) {
                 Ok(()) => {
@@ -1254,7 +1305,9 @@ impl App {
                     self.queue_pending_dispatch(tmux.clone(), prompt);
                 }
                 if let Err(e) = self.tasks.board.assign(&id, cwd, &agent_id, &tmux) {
-                    let cleanup = self.runtime.kill_session(&tmux)
+                    let cleanup = self
+                        .runtime
+                        .kill_session(&tmux)
                         .err()
                         .map(|cleanup| format!("; cleanup failed: {cleanup}"))
                         .unwrap_or_default();
@@ -1879,7 +1932,7 @@ impl App {
         ) {
             Ok(name) => {
                 let status = format!("started {} ({}) [{}]", picker.agent_id, label, name);
-                self.watch_spawn(name, picker.agent_id);
+                self.watch_spawn(name, picker.agent_id, picker.cwd);
                 status
             }
             Err(e) => format!("spawn failed: {}", e),
@@ -2701,13 +2754,40 @@ impl App {
         self.sessions.selected_session_info()
     }
 
-    /// Register a watchdog for a just-spawned detached agent session.
-    pub fn watch_spawn(&mut self, tmux_name: String, agent: String) {
+    /// Register a watchdog for a just-spawned detached agent session and
+    /// surface its placeholder card immediately, cursor on it — the spawned
+    /// agent takes seconds to write a session file the scanner can see, and
+    /// until this rebuild the keypress had no visible effect.
+    pub fn watch_spawn(&mut self, tmux_name: String, agent: String, cwd: String) {
+        let placeholder_id = spawning_session_id(&tmux_name);
         self.spawn_watches.push(SpawnWatch {
             tmux_name,
             agent,
+            cwd,
             deadline: Instant::now() + SPAWN_WATCH_TIMEOUT,
         });
+        self.rebuild_groups();
+        self.select_session_by_id(&placeholder_id);
+    }
+
+    /// Move the cursor onto `session_id` if it's currently visible.
+    fn select_session_by_id(&mut self, session_id: &str) {
+        let found = self
+            .sessions
+            .groups
+            .iter()
+            .enumerate()
+            .find_map(|(gi, group)| {
+                group
+                    .sessions
+                    .iter()
+                    .position(|s| s.session_id == session_id)
+                    .map(|si| (gi, si))
+            });
+        if let Some((gi, si)) = found {
+            self.sessions.sel_group = gi;
+            self.sessions.sel_in_group = si;
+        }
     }
 
     /// Resolve pending spawn watches against a scan snapshot. A watch clears
@@ -2859,6 +2939,21 @@ impl App {
     fn build_groups(&self, sessions: &[SessionInfo]) -> Vec<ProjectGroup> {
         let roles = self.projects.snapshot.roles_by_tmux();
 
+        // Placeholder cards for spawns the scanner hasn't seen yet. Checked
+        // against the unfiltered snapshot: once any session is hosted by the
+        // watched tmux name, the real card replaces the placeholder (the
+        // watch itself is cleared by `check_spawn_watches` on the same tick).
+        let placeholders: Vec<SessionInfo> = self
+            .spawn_watches
+            .iter()
+            .filter(|w| {
+                !sessions
+                    .iter()
+                    .any(|s| s.tmux_session.as_deref() == Some(w.tmux_name.as_str()))
+            })
+            .map(spawning_placeholder)
+            .collect();
+
         let mut sessions: Vec<SessionInfo> = sessions
             .iter()
             .filter(|s| self.sessions.show_inactive || s.state != SessionState::Inactive)
@@ -2876,6 +2971,12 @@ impl App {
             })
             .cloned()
             .collect();
+
+        // Placeholders ride the same sort/cluster pipeline as scanned
+        // sessions so each one occupies the exact slot its real card will
+        // take over. Prepended: the real session will be the group's newest,
+        // and the scanner sorts newest-first within a liveness bucket.
+        sessions.splice(0..0, placeholders);
 
         // Re-assert the liveness bucketing (active first, idle after,
         // inactive last) on the app-side state. The scanner already sorts by
@@ -3300,7 +3401,7 @@ mod tests {
     #[test]
     fn spawn_watch_clears_when_agent_appears() {
         let mut app = App::new();
-        app.watch_spawn("cchub-w-1".into(), "claude".into());
+        app.watch_spawn("cchub-w-1".into(), "claude".into(), "/tmp".into());
         let sessions = vec![fake_session("cchub-w-1", SessionState::Idle)];
         let fired = app.check_spawn_watches(&sessions, Instant::now() + 2 * SPAWN_WATCH_TIMEOUT);
         assert!(!fired);
@@ -3311,7 +3412,7 @@ mod tests {
     #[test]
     fn spawn_watch_stays_quiet_before_deadline() {
         let mut app = App::new();
-        app.watch_spawn("cchub-w-2".into(), "claude".into());
+        app.watch_spawn("cchub-w-2".into(), "claude".into(), "/tmp".into());
         let fired = app.check_spawn_watches(&[], Instant::now());
         assert!(!fired);
         assert_eq!(app.spawn_watches.len(), 1);
@@ -3323,7 +3424,11 @@ mod tests {
     #[test]
     fn spawn_watch_fires_diagnosis_after_timeout() {
         let mut app = App::new();
-        app.watch_spawn("cchub-watchtest-missing".into(), "claude".into());
+        app.watch_spawn(
+            "cchub-watchtest-missing".into(),
+            "claude".into(),
+            "/tmp".into(),
+        );
         let fired = app.check_spawn_watches(&[], Instant::now() + 2 * SPAWN_WATCH_TIMEOUT);
         assert!(fired);
         assert!(app.spawn_watches.is_empty());
@@ -3333,6 +3438,83 @@ mod tests {
             "status should name the tmux session: {}",
             msg
         );
+    }
+
+    // A spawn is visible (and focused) the moment the watch is armed: a
+    // Starting placeholder card in the spawn cwd's group, no scan needed.
+    #[test]
+    fn watch_spawn_shows_placeholder_immediately() {
+        let mut app = App::new();
+        app.watch_spawn("cchub-w-3".into(), "claude".into(), "/tmp/proj".into());
+        let all: Vec<&SessionInfo> = app
+            .sessions
+            .groups
+            .iter()
+            .flat_map(|g| &g.sessions)
+            .collect();
+        assert_eq!(all.len(), 1);
+        let p = all[0];
+        assert_eq!(p.session_id, "spawning:cchub-w-3");
+        assert_eq!(p.state, SessionState::Starting);
+        assert_eq!(p.cwd, "/tmp/proj");
+        assert_eq!(p.tmux_session.as_deref(), Some("cchub-w-3"));
+        assert_eq!(
+            app.selected_session_id().as_deref(),
+            Some("spawning:cchub-w-3")
+        );
+    }
+
+    // The placeholder must sit where the real card will land: after the
+    // group's active sessions, at the head of the idle band (a fresh spawn
+    // first scans in as Idle and the scanner orders newest-first within a
+    // bucket). Pinning it to the top of the group made the card jump to the
+    // idle band once the scanner took over.
+    #[test]
+    fn placeholder_sorts_into_the_idle_band() {
+        let mut app = App::new();
+        app.update_sessions(vec![
+            fake_session("cchub-active", SessionState::Processing),
+            fake_session("cchub-idle", SessionState::Idle),
+        ]);
+        app.watch_spawn("cchub-w-6".into(), "claude".into(), "/tmp".into());
+        let ids: Vec<&str> = app.sessions.groups[0]
+            .sessions
+            .iter()
+            .map(|s| s.session_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["cchub-active", "spawning:cchub-w-6", "cchub-idle"]
+        );
+    }
+
+    // The scanner reporting a session hosted by the watched tmux name swaps
+    // the placeholder for the real card on the same tick.
+    #[test]
+    fn placeholder_replaced_by_real_session() {
+        let mut app = App::new();
+        app.watch_spawn("cchub-w-4".into(), "claude".into(), "/tmp".into());
+        let real = fake_session("cchub-w-4", SessionState::Idle);
+        assert!(app.update_sessions(vec![real]));
+        let ids: Vec<String> = app
+            .sessions
+            .groups
+            .iter()
+            .flat_map(|g| g.sessions.iter().map(|s| s.session_id.clone()))
+            .collect();
+        assert_eq!(ids, vec!["cchub-w-4".to_string()]);
+        assert!(app.spawn_watches.is_empty());
+    }
+
+    // An expired watch takes its placeholder with it — the diagnosis status
+    // is the only trace of the failed spawn.
+    #[test]
+    fn placeholder_dropped_when_watch_expires() {
+        let mut app = App::new();
+        app.watch_spawn("cchub-w-5".into(), "claude".into(), "/tmp".into());
+        app.check_spawn_watches(&[], Instant::now() + 2 * SPAWN_WATCH_TIMEOUT);
+        app.rebuild_groups();
+        assert!(app.sessions.groups.is_empty());
     }
 
     fn fake_session(tmux: &str, state: SessionState) -> SessionInfo {
@@ -4204,7 +4386,8 @@ mod tests {
                 let id = app.tasks.board.add("t").unwrap().unwrap();
                 app.tasks
                     .board
-                    .assign(&id, "/tmp/recent", "claude", "mux-1").unwrap();
+                    .assign(&id, "/tmp/recent", "claude", "mux-1")
+                    .unwrap();
 
                 let places = app.known_places();
                 let got: Vec<(&str, PlaceSource)> =
@@ -4229,7 +4412,10 @@ mod tests {
                 let id = app.tasks.board.add("do the thing").unwrap().unwrap();
                 // A previous assignment on p-b: reopening the picker must
                 // land the cursor there, not on the first candidate.
-                app.tasks.board.assign(&id, "/tmp/p-b", "claude", "mux-1").unwrap();
+                app.tasks
+                    .board
+                    .assign(&id, "/tmp/p-b", "claude", "mux-1")
+                    .unwrap();
                 app.focus_task(&id);
 
                 assert!(app.enter_task_assign_picker());
@@ -4249,7 +4435,10 @@ mod tests {
                 // An earlier task went to p-b: a fresh task's picker must
                 // open with p-b first and selected, ready for plain Enter.
                 let prev = app.tasks.board.add("earlier").unwrap().unwrap();
-                app.tasks.board.assign(&prev, "/tmp/p-b", "claude", "mux-1").unwrap();
+                app.tasks
+                    .board
+                    .assign(&prev, "/tmp/p-b", "claude", "mux-1")
+                    .unwrap();
                 let id = app.tasks.board.add("next").unwrap().unwrap();
                 app.focus_task(&id);
 
@@ -4275,7 +4464,8 @@ mod tests {
                 let prev = app.tasks.board.add("earlier").unwrap().unwrap();
                 app.tasks
                     .board
-                    .assign(&prev, "/tmp/gone", "claude", "mux-1").unwrap();
+                    .assign(&prev, "/tmp/gone", "claude", "mux-1")
+                    .unwrap();
                 app.tasks.board.remove(&prev).unwrap();
                 let id = app.tasks.board.add("next").unwrap().unwrap();
                 app.focus_task(&id);
@@ -4361,7 +4551,10 @@ mod tests {
                     snapshot_many(vec![(project("p-a"), vec![]), (project("p-b"), vec![])]);
                 let home = dirs::home_dir().unwrap().display().to_string();
                 let prev = app.tasks.board.add("broad question").unwrap().unwrap();
-                app.tasks.board.assign(&prev, &home, "claude", "mux-1").unwrap();
+                app.tasks
+                    .board
+                    .assign(&prev, &home, "claude", "mux-1")
+                    .unwrap();
                 let id = app.tasks.board.add("next").unwrap().unwrap();
                 app.focus_task(&id);
 
@@ -4426,7 +4619,10 @@ mod tests {
             with_temp_home(|| {
                 let mut app = App::new();
                 let id = app.tasks.board.add("t").unwrap().unwrap();
-                app.tasks.board.assign(&id, "/tmp/proj", "claude", "mux-1").unwrap();
+                app.tasks
+                    .board
+                    .assign(&id, "/tmp/proj", "claude", "mux-1")
+                    .unwrap();
                 app.focus_task(&id);
                 assert!(app.enter_task_rename());
                 app.tasks.input = "sharper wording".into();
@@ -4460,9 +4656,18 @@ mod tests {
                 let a = app.tasks.board.add("a").unwrap().unwrap();
                 let b = app.tasks.board.add("b").unwrap().unwrap();
                 let c = app.tasks.board.add("c").unwrap().unwrap();
-                app.tasks.board.assign(&a, "/tmp", "claude", "mux-a").unwrap();
-                app.tasks.board.assign(&b, "/tmp", "claude", "mux-b").unwrap();
-                app.tasks.board.assign(&c, "/tmp", "claude", "mux-c").unwrap();
+                app.tasks
+                    .board
+                    .assign(&a, "/tmp", "claude", "mux-a")
+                    .unwrap();
+                app.tasks
+                    .board
+                    .assign(&b, "/tmp", "claude", "mux-b")
+                    .unwrap();
+                app.tasks
+                    .board
+                    .assign(&c, "/tmp", "claude", "mux-c")
+                    .unwrap();
                 app.sessions.last_sessions = vec![
                     fake_session("mux-a", SessionState::Processing),
                     fake_session("mux-b", SessionState::WaitingForInput),
@@ -4510,7 +4715,10 @@ mod tests {
             with_temp_home(|| {
                 let mut app = App::new();
                 let id = app.tasks.board.add("plan me").unwrap().unwrap();
-                app.tasks.board.assign(&id, "/tmp", "claude", "mux-dead").unwrap();
+                app.tasks
+                    .board
+                    .assign(&id, "/tmp", "claude", "mux-dead")
+                    .unwrap();
                 app.focus_task(&id);
                 // No live mux and no resolved session id: nothing to deliver
                 // the proceed prompt to, so the card must not move — an In
@@ -4530,8 +4738,14 @@ mod tests {
                 let mut app = App::new();
                 let a = app.tasks.board.add("a").unwrap().unwrap();
                 let b = app.tasks.board.add("b").unwrap().unwrap();
-                app.tasks.board.assign(&a, "/tmp", "claude", "mux-a").unwrap();
-                app.tasks.board.assign(&b, "/tmp", "claude", "mux-b").unwrap();
+                app.tasks
+                    .board
+                    .assign(&a, "/tmp", "claude", "mux-a")
+                    .unwrap();
+                app.tasks
+                    .board
+                    .assign(&b, "/tmp", "claude", "mux-b")
+                    .unwrap();
                 app.sessions.last_sessions = vec![
                     fake_session("mux-a", SessionState::Processing),
                     fake_session("mux-b", SessionState::WaitingForInput),
@@ -4554,7 +4768,10 @@ mod tests {
                 // A task assigned mid-tab joins below the frozen order
                 // instead of re-shuffling it.
                 let c = app.tasks.board.add("c").unwrap().unwrap();
-                app.tasks.board.assign(&c, "/tmp", "claude", "mux-c").unwrap();
+                app.tasks
+                    .board
+                    .assign(&c, "/tmp", "claude", "mux-c")
+                    .unwrap();
                 assert_eq!(column_order(&app), vec![b, a, c]);
             });
         }
@@ -4565,8 +4782,14 @@ mod tests {
                 let mut app = App::new();
                 let a = app.tasks.board.add("a").unwrap().unwrap();
                 let b = app.tasks.board.add("b").unwrap().unwrap();
-                app.tasks.board.assign(&a, "/tmp", "claude", "mux-a").unwrap();
-                app.tasks.board.assign(&b, "/tmp", "claude", "mux-b").unwrap();
+                app.tasks
+                    .board
+                    .assign(&a, "/tmp", "claude", "mux-a")
+                    .unwrap();
+                app.tasks
+                    .board
+                    .assign(&b, "/tmp", "claude", "mux-b")
+                    .unwrap();
                 app.set_tab(Tab::Tasks);
                 assert_eq!(column_order(&app), vec![a.clone(), b.clone()]);
                 app.focus_task(&b);
@@ -4629,8 +4852,14 @@ mod tests {
                 let mut app = App::new();
                 let a = app.tasks.board.add("a").unwrap().unwrap();
                 let b = app.tasks.board.add("b").unwrap().unwrap();
-                app.tasks.board.assign(&a, "/tmp", "claude", "mux-a").unwrap();
-                app.tasks.board.assign(&b, "/tmp", "claude", "mux-b").unwrap();
+                app.tasks
+                    .board
+                    .assign(&a, "/tmp", "claude", "mux-a")
+                    .unwrap();
+                app.tasks
+                    .board
+                    .assign(&b, "/tmp", "claude", "mux-b")
+                    .unwrap();
                 // a is just working; b is blocked on input, so the float alone
                 // would put b first.
                 app.sessions.last_sessions = vec![
@@ -4652,7 +4881,10 @@ mod tests {
             with_temp_home(|| {
                 let mut app = App::new();
                 let id = app.tasks.board.add("ship it").unwrap().unwrap();
-                app.tasks.board.assign(&id, "/tmp", "claude", "mux-dead").unwrap();
+                app.tasks
+                    .board
+                    .assign(&id, "/tmp", "claude", "mux-dead")
+                    .unwrap();
                 app.focus_task(&id);
                 // No live mux session in the test env: the close is skipped
                 // and the status stays the plain "done" line.
@@ -4671,9 +4903,18 @@ mod tests {
                 let a = app.tasks.board.add("a").unwrap().unwrap();
                 let b = app.tasks.board.add("b").unwrap().unwrap();
                 let c = app.tasks.board.add("c").unwrap().unwrap();
-                app.tasks.board.assign(&a, "/tmp", "claude", "mux-a").unwrap();
-                app.tasks.board.assign(&b, "/tmp", "claude", "mux-b").unwrap();
-                app.tasks.board.assign(&c, "/tmp", "claude", "mux-c").unwrap();
+                app.tasks
+                    .board
+                    .assign(&a, "/tmp", "claude", "mux-a")
+                    .unwrap();
+                app.tasks
+                    .board
+                    .assign(&b, "/tmp", "claude", "mux-b")
+                    .unwrap();
+                app.tasks
+                    .board
+                    .assign(&c, "/tmp", "claude", "mux-c")
+                    .unwrap();
                 app.sessions.last_sessions = vec![
                     fake_session("mux-a", SessionState::Processing),
                     fake_session("mux-b", SessionState::Idle),
@@ -4738,7 +4979,10 @@ mod tests {
             with_temp_home(|| {
                 let mut app = App::new();
                 let id = app.tasks.board.add("agent task").unwrap().unwrap();
-                app.tasks.board.assign(&id, "/tmp", "claude", "mux-x").unwrap();
+                app.tasks
+                    .board
+                    .assign(&id, "/tmp", "claude", "mux-x")
+                    .unwrap();
                 app.focus_task(&id);
                 // Right: Planning → In Progress, but the agent is NOT told
                 // to proceed — approving stays Space's job.
@@ -4748,7 +4992,10 @@ mod tests {
                 assert_eq!(t.status, TaskStatus::Running);
                 assert_eq!(t.tmux.as_deref(), Some("mux-x"));
                 // A Planning card can also be parked back in To-Do.
-                app.tasks.board.set_status(&id, TaskStatus::Planning).unwrap();
+                app.tasks
+                    .board
+                    .set_status(&id, TaskStatus::Planning)
+                    .unwrap();
                 app.focus_task(&id);
                 app.move_selected_task(-1).unwrap();
                 assert_eq!(
@@ -4865,14 +5112,8 @@ mod tests {
                 assert!(app.tasks.board.tasks().is_empty());
                 assert_eq!(app.undo_task_delete().unwrap(), "restored 2 tasks");
                 // They come back Done, not To-Do — undo is not a reopen.
-                assert_eq!(
-                    app.tasks.board.get(&a).unwrap().status,
-                    TaskStatus::Done
-                );
-                assert_eq!(
-                    app.tasks.board.get(&b).unwrap().status,
-                    TaskStatus::Done
-                );
+                assert_eq!(app.tasks.board.get(&a).unwrap().status, TaskStatus::Done);
+                assert_eq!(app.tasks.board.get(&b).unwrap().status, TaskStatus::Done);
             });
         }
     }

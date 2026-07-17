@@ -468,8 +468,7 @@ pub(crate) fn render_model_picker(frame: &mut Frame, area: Rect, app: &App) {
     let choices = &picker.choices;
 
     let desired_w = 60u16.min(area.width);
-    let desired_h = (crate::app::SPAWN_MODELS.len().max(choices.len()) as u16 + 5)
-        .min(area.height);
+    let desired_h = (crate::app::SPAWN_MODELS.len().max(choices.len()) as u16 + 5).min(area.height);
     let popup = centered_fixed(area, desired_w, desired_h);
     frame.render_widget(Clear, popup);
 
@@ -580,12 +579,7 @@ pub(crate) fn render_model_picker(frame: &mut Frame, area: Rect, app: &App) {
                 " ".repeat(label_width.saturating_sub(label.chars().count()) + 2),
                 bar,
             ));
-            spans.extend(highlight_spans(
-                detail,
-                &row.detail_indices,
-                id_base,
-                id_hl,
-            ));
+            spans.extend(highlight_spans(detail, &row.detail_indices, id_base, id_hl));
             lines.push(Line::from(spans));
         }
     }
@@ -2128,10 +2122,7 @@ mod task_link_picker_tests {
             // their cells pin the chip color: In *P*rogress → the In Progress
             // column accent, *T*o-Do → the To-Do column accent.
             assert_eq!(cell_fg(&buf, 'P'), Some(Color::LightYellow));
-            assert_eq!(
-                cell_fg(&buf, 'T'),
-                Some(crate::ui::palette::BACKLOG_BLUE)
-            );
+            assert_eq!(cell_fg(&buf, 'T'), Some(crate::ui::palette::BACKLOG_BLUE));
         });
     }
 }
@@ -2216,11 +2207,7 @@ mod model_picker_tests {
                 "configured model:\n{}",
                 rendered
             );
-            assert!(
-                rendered.contains("gpt-5.6"),
-                "model id:\n{}",
-                rendered
-            );
+            assert!(rendered.contains("gpt-5.6"), "model id:\n{}", rendered);
         });
     }
 }

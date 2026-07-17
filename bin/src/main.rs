@@ -410,7 +410,7 @@ pub(crate) fn dispatch_picked_cwd(app: &mut App, cwd: &str) {
         let status = match spawn::spawn_agent_session(&agent_id, cwd, None, None, None, false) {
             Ok(name) => {
                 let status = format!("started {} [{}]", agent_id, name);
-                app.watch_spawn(name, agent_id);
+                app.watch_spawn(name, agent_id, cwd.to_string());
                 status
             }
             Err(e) => format!("spawn failed: {}", e),

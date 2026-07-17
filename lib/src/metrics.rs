@@ -410,7 +410,8 @@ fn parse_claude_session_file(path: &Path, is_subagent: bool) -> Option<ParsedSes
         if entry_type == "user" {
             let is_meta = v.get("isMeta").and_then(|m| m.as_bool()).unwrap_or(false);
             let message_content = v.get("message").and_then(|m| m.get("content"));
-            let mut genuine = matches!(message_content.and_then(|c| c.as_str()), Some(s) if !s.trim().is_empty());
+            let mut genuine =
+                matches!(message_content.and_then(|c| c.as_str()), Some(s) if !s.trim().is_empty());
             if let Some(content) = message_content.and_then(|c| c.as_array()) {
                 for block in content {
                     if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {

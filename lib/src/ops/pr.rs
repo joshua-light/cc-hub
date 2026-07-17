@@ -1020,9 +1020,7 @@ mod tests {
 
             // No orphan pr.json was written.
             assert!(
-                pr::read_pr(project_id, task_id)
-                    .expect("read pr")
-                    .is_none(),
+                pr::read_pr(project_id, task_id).expect("read pr").is_none(),
                 "a rejected create must not leave a pr.json behind"
             );
         });
@@ -1064,8 +1062,14 @@ mod tests {
         crate::test_util::with_temp_home(|| {
             let (project_id, task_id) = ("p-approve-guard", "t-approve-guard");
             let state = seed(project_id, task_id, TaskStatus::Running);
-            pr::create_pr(&state, "feature".into(), "main".into(), "t".into(), "d".into())
-                .expect("create pr");
+            pr::create_pr(
+                &state,
+                "feature".into(),
+                "main".into(),
+                "t".into(),
+                "d".into(),
+            )
+            .expect("create pr");
 
             let err = pr_approve(project_id, task_id).expect_err("non-Review must be rejected");
             assert!(matches!(err, OpError::Usage(_)), "got {:?}", err);

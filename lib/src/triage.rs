@@ -127,11 +127,9 @@ pub fn tick() -> TickOutcome {
                     // candidate — without this stamp triage would re-ask Claude
                     // (a paid call) every tick. Stamp it now so the TTL throttle
                     // applies until the next window.
-                    if let Err(stamp_err) =
-                        update_task_state_no_touch(&project.id, &task_id, |s| {
-                            s.triaged_at = Some(now);
-                        })
-                    {
+                    if let Err(stamp_err) = update_task_state_no_touch(&project.id, &task_id, |s| {
+                        s.triaged_at = Some(now);
+                    }) {
                         warn!(
                             "triage: failed to stamp triaged_at on {}: {}",
                             task_id, stamp_err

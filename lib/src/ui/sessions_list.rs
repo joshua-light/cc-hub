@@ -7,7 +7,8 @@
 //! tool odometer, last-activity clock, context %) on the right, so values
 //! line up vertically across rows. Columns that don't fit the terminal
 //! width are dropped for every row at once, lowest-value first, to keep
-//! alignment.
+//! alignment. The task column alone is elastic: it widens into leftover
+//! row space until the longest visible task name fits.
 //!
 //! All width math counts terminal *advance* — `chars().count()`, one cell
 //! per glyph. Nerd Font icons visually bleed into the following cell but
@@ -21,12 +22,12 @@ use crate::models::{first_line_truncated, SessionInfo, SessionState};
 use crate::ui::common::{
     context_window_size, ctx_color, format_elapsed, short_model, state_indicator, task_color,
 };
+use crate::ui::now_ms;
 use crate::ui::palette::{CONTEXT_GRAY, MUTED_TEXT};
 use crate::ui::sessions::{
-    render_group_header, render_no_sessions, role_prefix, spinner_frame, GROUP_GAP,
+    render_group_header, render_no_sessions, role_prefix, spinner_frame, starting_frame, GROUP_GAP,
     GROUP_HEADER_HEIGHT,
 };
-use crate::ui::now_ms;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -34,8 +35,14 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 // Fixed advance widths of the metadata columns: icon(1) + space(1) + value.
-/// Linked-task mark: icon + 20 chars of task title.
+/// Linked-task mark, minimum width: icon + 20 chars of task title. The
+/// column grows into leftover row space (up to [`TASK_W_MAX`]) until the
+/// longest visible task name fits — see [`plan_columns`].
 const TASK_W: usize = 22;
+/// Growth cap for the task column: past this, extra width pads titles again.
+/// Keeps one very long task name from squeezing every row's title down to
+/// [`MIN_TITLE`].
+const TASK_W_MAX: usize = 42;
 const BRANCH_W: usize = 22;
 const MODEL_W: usize = 10;
 /// Tool odometer: up to 5 digits.
@@ -55,23 +62,25 @@ const MIN_TITLE: usize = 24;
 /// requires at least one visible session to carry a task link — a column of
 /// blanks would waste a quarter of the row for nothing.
 struct ListColumns {
-    task: bool,
+    /// Advance width of the linked-task column; 0 when the column is hidden.
+    task_w: usize,
     branch: bool,
     model: bool,
     tools: bool,
 }
 
-fn plan_columns(width: usize, any_task: bool) -> ListColumns {
-    let mut avail =
-        width.saturating_sub(LEFT_FIXED + MIN_TITLE + ELAPSED_W + CTX_W + 2 * COL_SEP);
+/// `task_need` is the advance width the widest visible task name would take
+/// untruncated (`None` when no session carries a task link).
+fn plan_columns(width: usize, task_need: Option<usize>) -> ListColumns {
+    let mut avail = width.saturating_sub(LEFT_FIXED + MIN_TITLE + ELAPSED_W + CTX_W + 2 * COL_SEP);
     let mut cols = ListColumns {
-        task: false,
+        task_w: 0,
         branch: false,
         model: false,
         tools: false,
     };
-    if any_task && avail >= TASK_W + COL_SEP {
-        cols.task = true;
+    if task_need.is_some() && avail >= TASK_W + COL_SEP {
+        cols.task_w = TASK_W;
         avail -= TASK_W + COL_SEP;
     }
     if avail >= BRANCH_W + COL_SEP {
@@ -84,6 +93,14 @@ fn plan_columns(width: usize, any_task: bool) -> ListColumns {
     }
     if avail >= MODEL_W + COL_SEP {
         cols.model = true;
+        avail -= MODEL_W + COL_SEP;
+    }
+    // Leftover space would otherwise just pad the title region; spend it on
+    // the task column instead, up to what the longest task name actually
+    // needs (capped so one huge name can't starve the titles).
+    if cols.task_w > 0 {
+        let need = task_need.unwrap_or(0).clamp(TASK_W, TASK_W_MAX);
+        cols.task_w += need.saturating_sub(TASK_W).min(avail);
     }
     cols
 }
@@ -100,8 +117,7 @@ pub(crate) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
     let mut y_acc: u16 = 0;
     for group in &app.sessions.groups {
         group_offsets.push(y_acc);
-        y_acc =
-            y_acc.saturating_add(GROUP_HEADER_HEIGHT + group.sessions.len() as u16 + GROUP_GAP);
+        y_acc = y_acc.saturating_add(GROUP_HEADER_HEIGHT + group.sessions.len() as u16 + GROUP_GAP);
     }
 
     // Auto-scroll to keep the selected row visible (prefer its header too).
@@ -124,13 +140,17 @@ pub(crate) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let scroll = app.render.grid_scroll;
     let now = now_ms();
-    let any_task = app
+    // Widest task name across every row (not just scrolled-into-view ones),
+    // so the column width can't shift while scrolling.
+    let task_need = app
         .sessions
         .groups
         .iter()
         .flat_map(|g| &g.sessions)
-        .any(|s| app.task_badge(&s.session_id).is_some());
-    let cols = plan_columns(area.width as usize, any_task);
+        .filter_map(|s| app.task_badge(&s.session_id))
+        .map(|b| b.title.lines().next().unwrap_or("").chars().count() + 2)
+        .max();
+    let cols = plan_columns(area.width as usize, task_need);
     let roles_by_tmux = app.projects.snapshot.roles_by_tmux();
 
     for (gi, group) in app.sessions.groups.iter().enumerate() {
@@ -204,14 +224,14 @@ fn render_row(
 ) {
     let width = area.width as usize;
     let (indicator, ind_color) = state_indicator(&session.state);
-    let indicator = if session.state == SessionState::Processing {
-        spinner_frame(now)
-    } else {
-        indicator
+    let indicator = match session.state {
+        SessionState::Processing => spinner_frame(now),
+        SessionState::Starting => starting_frame(now),
+        _ => indicator,
     };
 
     let mut cluster: Vec<Cell> = Vec::new();
-    if cols.task {
+    if cols.task_w > 0 {
         let (text, style) = match badge {
             Some(b) => {
                 let color = if b.stale {
@@ -220,7 +240,7 @@ fn render_row(
                     task_color(&b.task_id)
                 };
                 (
-                    format!("󰓹 {}", first_line_truncated(&b.title, TASK_W - 2)),
+                    format!("󰓹 {}", first_line_truncated(&b.title, cols.task_w - 2)),
                     Style::default().fg(color),
                 )
             }
@@ -228,7 +248,7 @@ fn render_row(
         };
         cluster.push(Cell {
             text,
-            target: TASK_W,
+            target: cols.task_w,
             style,
             right_align: false,
         });
@@ -368,4 +388,53 @@ fn render_row(
         row = row.style(Style::default().bg(Color::Rgb(40, 40, 52)));
     }
     frame.render_widget(row, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Width where every column fits at its base width with `extra` cells
+    /// left over.
+    fn width_with_leftover(extra: usize) -> usize {
+        LEFT_FIXED
+            + MIN_TITLE
+            + ELAPSED_W
+            + CTX_W
+            + TASK_W
+            + BRANCH_W
+            + TOOLS_W
+            + MODEL_W
+            + 6 * COL_SEP
+            + extra
+    }
+
+    #[test]
+    fn task_column_stays_at_base_width_without_leftover() {
+        let cols = plan_columns(width_with_leftover(0), Some(40));
+        assert_eq!(cols.task_w, TASK_W);
+        assert!(cols.branch && cols.tools && cols.model);
+    }
+
+    #[test]
+    fn task_column_grows_into_leftover_up_to_need() {
+        // Need 30 cells, 100 spare: grow exactly to the need.
+        let cols = plan_columns(width_with_leftover(100), Some(30));
+        assert_eq!(cols.task_w, 30);
+        // Need 30 cells, 5 spare: grow only as far as the leftover allows.
+        let cols = plan_columns(width_with_leftover(5), Some(30));
+        assert_eq!(cols.task_w, TASK_W + 5);
+    }
+
+    #[test]
+    fn task_column_growth_is_capped() {
+        let cols = plan_columns(width_with_leftover(200), Some(120));
+        assert_eq!(cols.task_w, TASK_W_MAX);
+    }
+
+    #[test]
+    fn task_column_hidden_without_any_task() {
+        let cols = plan_columns(width_with_leftover(100), None);
+        assert_eq!(cols.task_w, 0);
+    }
 }

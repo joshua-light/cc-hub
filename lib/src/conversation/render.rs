@@ -199,7 +199,10 @@ mod tests {
     #[test]
     fn strip_xml_tags_removes_leaked_tags() {
         assert_eq!(strip_xml_tags("<bash-stdout>ok</bash-stdout>"), "ok");
-        assert_eq!(strip_xml_tags("before<system-reminder>after"), "beforeafter");
+        assert_eq!(
+            strip_xml_tags("before<system-reminder>after"),
+            "beforeafter"
+        );
     }
 
     #[test]

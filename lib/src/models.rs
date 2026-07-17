@@ -84,6 +84,10 @@ pub struct RawSession {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionState {
+    /// App-synthesized only: a spawn-watch placeholder for an agent that was
+    /// just launched but hasn't registered a session file yet. The scanner
+    /// never emits this state.
+    Starting,
     Processing,
     WaitingForInput,
     /// Agent's latest unresolved tool_use is `AskUserQuestion` — it is
@@ -99,11 +103,15 @@ impl SessionState {
     /// Coarse liveness bucket for ordering: all active flavors rank equally
     /// (they flip between each other every few seconds, and ordering on that
     /// churn made cards swap under the cursor), idle sorts after them,
-    /// inactive last.
+    /// inactive last. Starting ranks with Idle deliberately: a fresh spawn
+    /// first appears in a scan as Idle, so its placeholder must occupy the
+    /// slot the real card will land in — ranking it "active" made the card
+    /// jump from the top of the group to the idle band once the scanner took
+    /// over.
     pub fn liveness_rank(&self) -> u8 {
         match self {
             SessionState::Processing | SessionState::WaitingForInput | SessionState::Question => 0,
-            SessionState::Idle => 1,
+            SessionState::Starting | SessionState::Idle => 1,
             SessionState::Inactive => 2,
         }
     }
@@ -112,6 +120,7 @@ impl SessionState {
 impl fmt::Display for SessionState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            SessionState::Starting => write!(f, "starting"),
             SessionState::Processing => write!(f, "processing"),
             SessionState::WaitingForInput => write!(f, "waiting for input"),
             SessionState::Question => write!(f, "question"),

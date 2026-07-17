@@ -94,9 +94,8 @@ mod tests {
         let projects = paths::claude_home().expect("claude_home").join("projects");
         let real = projects.join("-home-me-proj");
         // The scratch project dir is exactly what scanner.rs skips.
-        let scratch = projects.join(
-            crate::scanner::scratch_project_dir_name().expect("scratch project dir name"),
-        );
+        let scratch = projects
+            .join(crate::scanner::scratch_project_dir_name().expect("scratch project dir name"));
         fs::create_dir_all(&real).unwrap();
         fs::create_dir_all(&scratch).unwrap();
         // Both JSONLs are created now, so both land in today's window.

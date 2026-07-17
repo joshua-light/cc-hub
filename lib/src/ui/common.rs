@@ -165,6 +165,10 @@ pub(crate) fn format_reset(iso: &str, fmt: &str) -> Option<String> {
 
 pub(crate) fn state_indicator(state: &SessionState) -> (&'static str, Color) {
     match state {
+        // Static fallback; both session renderers animate Starting with the
+        // orbit spinner (see `ui::sessions::starting_frame`). Magenta keeps
+        // "booting" visually apart from the green Processing spinner.
+        SessionState::Starting => ("◌", Color::Magenta),
         SessionState::Processing => ("󰒓", Color::Green),
         SessionState::WaitingForInput => ("󰂞", Color::Yellow),
         SessionState::Question => ("󰋗", Color::LightBlue),

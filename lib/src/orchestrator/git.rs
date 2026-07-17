@@ -379,10 +379,16 @@ mod tests {
 
         // Drop the worktree but keep the branch (mirrors gc /
         // remove_task_worktrees, which never delete the branch).
-        run_git(root, &["worktree", "remove", "--force", &p1.to_string_lossy()])
-            .expect("worktree remove");
+        run_git(
+            root,
+            &["worktree", "remove", "--force", &p1.to_string_lossy()],
+        )
+        .expect("worktree remove");
         assert!(!p1.exists(), "dir should be gone after remove");
-        assert!(branch_exists(root, &branch), "branch must survive the remove");
+        assert!(
+            branch_exists(root, &branch),
+            "branch must survive the remove"
+        );
 
         let p2 = create_worktree(root, "t-x", "edit", "main").expect("re-create");
         assert_eq!(p1, p2);
@@ -406,6 +412,9 @@ mod tests {
 
         let p2 = create_worktree(root, "t-y", "edit", "main").expect("re-create over stale");
         assert_eq!(p1, p2);
-        assert!(p2.exists(), "worktree dir must exist after prune + re-attach");
+        assert!(
+            p2.exists(),
+            "worktree dir must exist after prune + re-attach"
+        );
     }
 }

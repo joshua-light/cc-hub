@@ -547,7 +547,10 @@ mod tests {
         // Nothing resolves the queried command → None, so the caller falls
         // back to spawning through the shell rather than exec'ing garbage.
         assert_eq!(
-            parse_resolution("EDITOR=nvim\nPAGER=less\nGREP_OPTIONS=--color\n", "cc-hub-new"),
+            parse_resolution(
+                "EDITOR=nvim\nPAGER=less\nGREP_OPTIONS=--color\n",
+                "cc-hub-new"
+            ),
             None
         );
     }
@@ -568,7 +571,10 @@ mod tests {
         // PowerShell `(Get-Command cc-hub-new).Definition` for a $PROFILE
         // function prints its body; split it and drop the `@args` splat.
         assert_eq!(
-            parse_resolution("claude --dangerously-skip-permissions @args\n", "cc-hub-new"),
+            parse_resolution(
+                "claude --dangerously-skip-permissions @args\n",
+                "cc-hub-new"
+            ),
             Some(vec![
                 "claude".into(),
                 "--dangerously-skip-permissions".into()

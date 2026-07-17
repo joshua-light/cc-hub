@@ -387,17 +387,18 @@ impl App {
         let Some(sess) = self.selected_session_info().cloned() else {
             return;
         };
-        let status = match self
-            .runtime
-            .spawn_session(&sess.agent_id, &sess.cwd, None, None, None, false)
-        {
-            Ok(name) => {
-                let status = format!("started {} [{}]", sess.agent_badge(), name);
-                self.watch_spawn(name, sess.agent_badge());
-                status
-            }
-            Err(e) => format!("spawn failed: {}", e),
-        };
+        let status =
+            match self
+                .runtime
+                .spawn_session(&sess.agent_id, &sess.cwd, None, None, None, false)
+            {
+                Ok(name) => {
+                    let status = format!("started {} [{}]", sess.agent_badge(), name);
+                    self.watch_spawn(name, sess.agent_id.clone(), sess.cwd.clone());
+                    status
+                }
+                Err(e) => format!("spawn failed: {}", e),
+            };
         self.set_status(status);
     }
 
@@ -988,7 +989,11 @@ mod tests {
             let badge = app.task_badge("sid-1").expect("badge");
             assert_eq!(badge.task_id, tid);
             assert!(!badge.stale);
-            assert!(status(&app).starts_with("linked to"), "got: {}", status(&app));
+            assert!(
+                status(&app).starts_with("linked to"),
+                "got: {}",
+                status(&app)
+            );
 
             // Second open: the unlink row leads and the linked task is
             // pre-selected; picking unlink drops the link and the badge.

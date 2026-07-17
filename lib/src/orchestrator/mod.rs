@@ -1285,9 +1285,7 @@ fn lock_projects() -> io::Result<Option<fs::File>> {
 /// returns `(persist, value)`: the mutated file is written back only when
 /// `persist` is `true`, and `value` is handed to the caller. Every registry
 /// mutation must route through here.
-fn update_projects<T>(
-    f: impl FnOnce(&mut ProjectsFile) -> io::Result<(bool, T)>,
-) -> io::Result<T> {
+fn update_projects<T>(f: impl FnOnce(&mut ProjectsFile) -> io::Result<(bool, T)>) -> io::Result<T> {
     let _lock = lock_projects()?;
     let mut file = load_projects();
     let (persist, value) = f(&mut file)?;

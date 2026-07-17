@@ -61,7 +61,15 @@ pub fn spawn_agent_session_with_config(
     readonly_tools: bool,
 ) -> io::Result<String> {
     let name = unique_session_name("cchub");
-    let cmd = build_agent_command(agent, cwd, &name, resume, initial_prompt, model, readonly_tools)?;
+    let cmd = build_agent_command(
+        agent,
+        cwd,
+        &name,
+        resume,
+        initial_prompt,
+        model,
+        readonly_tools,
+    )?;
     if agent.kind == AgentKind::Claude {
         ensure_path_trusted(cwd)?;
     }
@@ -124,7 +132,12 @@ fn build_agent_command(
             // session attaches to a possibly-pre-existing tmux server whose
             // captured environment may not include it — so set it explicitly.
             if let Some(dir) = paths::claude_config_dir() {
-                cmd = prefix_env("CLAUDE_CONFIG_DIR", &dir.to_string_lossy(), &cmd, cfg!(windows));
+                cmd = prefix_env(
+                    "CLAUDE_CONFIG_DIR",
+                    &dir.to_string_lossy(),
+                    &cmd,
+                    cfg!(windows),
+                );
             }
         }
         AgentKind::Pi => {
@@ -365,15 +378,23 @@ mod tests {
             use_bridge: false,
             models: Vec::new(),
         };
-        let cmd =
-            build_agent_command(&agent, "/tmp", "cchub-1-2", None, None, Some("claude-sonnet-5"), false)
-                .unwrap();
+        let cmd = build_agent_command(
+            &agent,
+            "/tmp",
+            "cchub-1-2",
+            None,
+            None,
+            Some("claude-sonnet-5"),
+            false,
+        )
+        .unwrap();
         assert!(
             cmd.contains("claude --model 'claude-sonnet-5'"),
             "got: {}",
             cmd
         );
-        let cmd = build_agent_command(&agent, "/tmp", "cchub-1-2", None, None, None, false).unwrap();
+        let cmd =
+            build_agent_command(&agent, "/tmp", "cchub-1-2", None, None, None, false).unwrap();
         assert!(!cmd.contains("--model"), "got: {}", cmd);
     }
 
@@ -423,8 +444,16 @@ mod tests {
     fn prefix_env_unix_is_posix_and_byte_identical() {
         // Must match the pre-fix `VAR='value' cmd` form exactly.
         assert_eq!(
-            prefix_env("CLAUDE_CONFIG_DIR", "/home/u/.claude", "claude --resume x", false),
-            format!("CLAUDE_CONFIG_DIR={} claude --resume x", shell_quote("/home/u/.claude")),
+            prefix_env(
+                "CLAUDE_CONFIG_DIR",
+                "/home/u/.claude",
+                "claude --resume x",
+                false
+            ),
+            format!(
+                "CLAUDE_CONFIG_DIR={} claude --resume x",
+                shell_quote("/home/u/.claude")
+            ),
         );
         // A value with a single quote gets POSIX close/escape/reopen quoting.
         assert_eq!(
@@ -436,7 +465,12 @@ mod tests {
     #[test]
     fn prefix_env_windows_is_pwsh() {
         assert_eq!(
-            prefix_env("CLAUDE_CONFIG_DIR", r"C:\Users\u\.claude", "claude --resume x", true),
+            prefix_env(
+                "CLAUDE_CONFIG_DIR",
+                r"C:\Users\u\.claude",
+                "claude --resume x",
+                true
+            ),
             r"$env:CLAUDE_CONFIG_DIR = 'C:\Users\u\.claude'; claude --resume x",
         );
         // pwsh single-quote literal: an embedded single quote is doubled.
