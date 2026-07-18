@@ -69,19 +69,21 @@ fn task_display_title(task: &TaskState) -> String {
 
 /// Reorder one group's sessions so task-linked cards lead the group and
 /// cards linked to the same task always sit next to each other. Clusters
-/// order by task priority (P1 first; a task that's gone has no readable
-/// priority and ranks last), ties by their first member in the incoming
-/// order (the liveness sort, so a cluster ranks by its most-live member),
-/// and the remaining members are pulled up behind that anchor; unlinked
-/// cards follow in their incoming order. The pass adds no churn of its own —
-/// links and priorities only change on user action.
+/// order by the liveness bucket of their most-live member first — an idle
+/// cluster trails an active one just like unlinked cards do — then by task
+/// priority (P1 first; a task that's gone has no readable priority and
+/// ranks last within its bucket), ties by their first member in the
+/// incoming order, and the remaining members are pulled up behind that
+/// anchor; unlinked cards follow in their incoming order. The pass adds no
+/// churn of its own — links and priorities only change on user action, and
+/// liveness flips already reorder the underlying sort.
 fn cluster_by_task(
     sessions: Vec<SessionInfo>,
     links: &HashMap<String, crate::session_tasks::TaskLink>,
     priorities: &HashMap<String, TaskPriority>,
 ) -> Vec<SessionInfo> {
     let mut slots: Vec<Option<SessionInfo>> = sessions.into_iter().map(Some).collect();
-    let mut clusters: Vec<(u8, Vec<SessionInfo>)> = Vec::new();
+    let mut clusters: Vec<((u8, u8), Vec<SessionInfo>)> = Vec::new();
     for i in 0..slots.len() {
         let Some(task_id) = slots[i]
             .as_ref()
@@ -100,11 +102,16 @@ fn cluster_by_task(
                 members.push(slot.take().expect("checked above"));
             }
         }
+        let liveness = members
+            .iter()
+            .map(|s| s.state.liveness_rank())
+            .min()
+            .expect("cluster has at least its anchor");
         let rank = priorities.get(&task_id).map_or(u8::MAX, |p| *p as u8);
-        clusters.push((rank, members));
+        clusters.push(((liveness, rank), members));
     }
-    // Stable sort: equal-priority clusters keep their liveness order.
-    clusters.sort_by_key(|(rank, _)| *rank);
+    // Stable sort: equal-key clusters keep their incoming (liveness) order.
+    clusters.sort_by_key(|(key, _)| *key);
     let mut out: Vec<SessionInfo> = clusters.into_iter().flat_map(|(_, m)| m).collect();
     out.extend(slots.into_iter().flatten());
     out
@@ -3646,7 +3653,7 @@ mod tests {
     }
 
     #[test]
-    fn task_clusters_order_by_priority_with_gone_tasks_last() {
+    fn task_clusters_order_by_liveness_then_priority() {
         crate::test_util::with_temp_home(|| {
             use crate::orchestrator::TaskPriority;
             let mut app = App::new();
@@ -3661,9 +3668,10 @@ mod tests {
                 .set_priority(&high, TaskPriority::P1)
                 .unwrap();
 
-            // Liveness would order the clusters gone → low → high; priority
-            // must invert that, with the unreadable task's cluster falling
-            // to the back regardless of how live its member is.
+            // The high-priority cluster is idle, so it trails both active
+            // clusters despite its P1 — liveness buckets first. Within the
+            // active bucket priority takes over: P4 beats the unreadable
+            // (gone) task, which has no priority and ranks last there.
             let gone_s = fake_session("s-gone", SessionState::Processing);
             let low_s = fake_session("s-low", SessionState::Processing);
             let high_s = fake_session("s-high", SessionState::Idle);
@@ -3692,7 +3700,7 @@ mod tests {
                 .iter()
                 .map(|s| s.session_id.as_str())
                 .collect();
-            assert_eq!(order, vec!["s-high", "s-low", "s-gone", "s-plain"]);
+            assert_eq!(order, vec!["s-low", "s-gone", "s-high", "s-plain"]);
         });
     }
 
