@@ -10,6 +10,10 @@
 //! alignment. The task column alone is elastic: it widens into leftover
 //! row space until the longest visible task name fits.
 //!
+//! Within a group, a blank separator row splits runs of rows linked to
+//! different tasks (the unlinked tail counts as one run of its own), so
+//! the task clusters the sort already builds read as visual blocks.
+//!
 //! All width math counts terminal *advance* — `chars().count()`, one cell
 //! per glyph. Nerd Font icons visually bleed into the following cell but
 //! still advance the cursor by one, so every icon is followed by a space
@@ -105,6 +109,25 @@ fn plan_columns(width: usize, task_need: Option<usize>) -> ListColumns {
     cols
 }
 
+/// Body-row offset of each session under its group header (0 = the row
+/// right below it): the session index plus one blank separator row at
+/// every task boundary — adjacent rows linked to different tasks, with
+/// unlinked rows all counting as one shared run.
+fn body_row_offsets<'a>(tasks: impl Iterator<Item = Option<&'a str>>) -> Vec<u16> {
+    let mut offsets = Vec::new();
+    let mut y: u16 = 0;
+    let mut prev: Option<Option<&'a str>> = None;
+    for task in tasks {
+        if prev.is_some_and(|p| p != task) {
+            y = y.saturating_add(1);
+        }
+        offsets.push(y);
+        y = y.saturating_add(1);
+        prev = Some(task);
+    }
+    offsets
+}
+
 pub(crate) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
     if app.sessions.groups.is_empty() {
         render_no_sessions(frame, area);
@@ -112,18 +135,29 @@ pub(crate) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     // Content-space y offset of each group: header + one row per session
-    // + gap. Same bookkeeping as the grid with a cell height of 1.
+    // + separators at task boundaries + gap. Same bookkeeping as the grid
+    // with a cell height of 1, plus the separator rows.
     let mut group_offsets: Vec<u16> = Vec::new();
+    let mut row_offsets: Vec<Vec<u16>> = Vec::new();
     let mut y_acc: u16 = 0;
     for group in &app.sessions.groups {
         group_offsets.push(y_acc);
-        y_acc = y_acc.saturating_add(GROUP_HEADER_HEIGHT + group.sessions.len() as u16 + GROUP_GAP);
+        let offsets = body_row_offsets(group.sessions.iter().map(|s| {
+            app.session_task_links
+                .get(&s.session_id)
+                .map(|l| l.task_id.as_str())
+        }));
+        let body_h = offsets.last().map_or(0, |&o| o + 1);
+        row_offsets.push(offsets);
+        y_acc = y_acc.saturating_add(GROUP_HEADER_HEIGHT + body_h + GROUP_GAP);
     }
 
     // Auto-scroll to keep the selected row visible (prefer its header too).
     {
         let g_offset = group_offsets[app.sessions.sel_group];
-        let row_y = g_offset + GROUP_HEADER_HEIGHT + app.sessions.sel_in_group as u16;
+        let row_y = g_offset
+            + GROUP_HEADER_HEIGHT
+            + row_offsets[app.sessions.sel_group][app.sessions.sel_in_group];
         let row_bottom = row_y + 1;
         if row_bottom.saturating_sub(g_offset) <= area.height {
             if g_offset < app.render.grid_scroll {
@@ -163,7 +197,7 @@ pub(crate) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
         }
 
         for (si, session) in group.sessions.iter().enumerate() {
-            let row_sy = (g_y + GROUP_HEADER_HEIGHT + si as u16) as i32 - scroll as i32;
+            let row_sy = (g_y + GROUP_HEADER_HEIGHT + row_offsets[gi][si]) as i32 - scroll as i32;
             if row_sy < 0 || row_sy >= area.height as i32 {
                 continue;
             }
@@ -436,5 +470,20 @@ mod tests {
     fn task_column_hidden_without_any_task() {
         let cols = plan_columns(width_with_leftover(100), None);
         assert_eq!(cols.task_w, 0);
+    }
+
+    #[test]
+    fn separator_rows_split_task_runs() {
+        // tk-1, tk-1 | tk-2 | unlinked, unlinked: one blank row at each
+        // run boundary, none inside a run and none between unlinked rows.
+        let offsets =
+            body_row_offsets([Some("tk-1"), Some("tk-1"), Some("tk-2"), None, None].into_iter());
+        assert_eq!(offsets, vec![0, 1, 3, 5, 6]);
+    }
+
+    #[test]
+    fn no_separators_without_task_links() {
+        let offsets = body_row_offsets([None, None, None].into_iter());
+        assert_eq!(offsets, vec![0, 1, 2]);
     }
 }
