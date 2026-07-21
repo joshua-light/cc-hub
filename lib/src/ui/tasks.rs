@@ -10,15 +10,21 @@
 use crate::app::{visible_task_columns, App, View};
 use crate::models::{self, SessionInfo, SessionState};
 use crate::orchestrator::{TaskState, TaskStatus};
-use crate::ui::common::priority_color;
+use crate::ui::common::{centered_rect, popup_block, priority_color};
 use crate::ui::now_ms;
-use crate::ui::palette::{ACCENT_BLUE, DIM_TEXT, DOT_IDLE, LABEL_GRAY, META_GRAY, TAG_SLATE};
+use crate::ui::palette::{
+    ACCENT_BLUE, DIM_TEXT, DOT_IDLE, FAINT_TEXT, LABEL_GRAY, META_GRAY, TAG_SLATE,
+};
+use crate::ui::projects::{
+    classify_artifact, evidence_card_header, read_text_excerpt, truncated_footer, CardKind,
+};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use std::collections::HashMap;
+use std::path::Path;
 
 pub fn render_tasks_body(frame: &mut Frame, area: Rect, app: &App) {
     if area.height < 3 || area.width < 30 {
@@ -107,6 +113,227 @@ fn render_filter_bar(frame: &mut Frame, area: Rect, app: &App, editing: bool) {
         Span::styled(hint, Style::default().fg(DIM_TEXT)),
     ]);
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Body-line budget for one attachment's inline excerpt in the Task Info
+/// popup. Fixed and modest — the popup is a reference list, not a reader;
+/// `o` opens the full document externally.
+const INFO_EXCERPT_LINES: usize = 6;
+
+/// Task Info popup for the focused board card: prompt + metadata up top, then
+/// every attachment as a card — text files inline a short excerpt, URLs and
+/// media render a one-line pointer. `j`/`k` select, `c` copies the stored
+/// path, `o` opens externally, `x` removes, `a` attaches another.
+pub(crate) fn render_task_info(frame: &mut Frame, area: Rect, app: &mut App) {
+    let popup_area = centered_rect(area, 0.8);
+    frame.render_widget(Clear, popup_area);
+
+    let Some(t) = app.selected_board_task().cloned() else {
+        frame.render_widget(popup_block(" Task — nothing focused "), popup_area);
+        return;
+    };
+
+    let title = match t.title.as_deref().filter(|s| !s.is_empty()) {
+        Some(name) => format!(
+            " Task · {} · {} ",
+            crate::orchestrator::short_task_id(&t.task_id),
+            name,
+        ),
+        None => format!(
+            " Task · {} ",
+            crate::orchestrator::short_task_id(&t.task_id)
+        ),
+    };
+    let block = popup_block(Span::styled(
+        title,
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+    if inner.height < 2 || inner.width == 0 {
+        return;
+    }
+
+    let now_secs = now_ms() / 1000;
+    let n_attach = t.artifacts.len();
+    let sel = if n_attach == 0 {
+        0
+    } else {
+        app.tasks.info_sel.min(n_attach - 1)
+    };
+
+    // ── Canvas: header + prompt + attachment cards, one Line per row ──────
+    let (status_icon, status_accent) = crate::ui::common::task_status_meta(t.status);
+    let mut header_spans = vec![
+        Span::styled(
+            format!("{} {}", status_icon, t.status.board_label()),
+            Style::default()
+                .fg(status_accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            t.priority.label().to_string(),
+            Style::default().fg(priority_color(t.priority)),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            models::relative_age(now_secs.saturating_sub(t.created_at.max(0) as u64)),
+            Style::default().fg(META_GRAY),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!(
+                "📎 {} attachment{}",
+                n_attach,
+                if n_attach == 1 { "" } else { "s" }
+            ),
+            Style::default().fg(Color::Rgb(150, 130, 200)),
+        ),
+    ];
+    if !t.tags.is_empty() {
+        let tags = t
+            .tags
+            .iter()
+            .map(|tag| format!("#{}", tag))
+            .collect::<Vec<_>>()
+            .join(" ");
+        header_spans.push(Span::raw("  "));
+        header_spans.push(Span::styled(tags, Style::default().fg(TAG_SLATE)));
+    }
+    let mut lines: Vec<Line<'static>> = vec![Line::from(header_spans), Line::raw("")];
+
+    // Prompt, wrapped and capped — the popup is about the attachments, the
+    // full text is one `r` (rename) away.
+    let prompt_lines = wrap_text(&t.prompt, inner.width as usize);
+    let capped = prompt_lines.len() > 8;
+    for seg in prompt_lines.into_iter().take(8) {
+        lines.push(Line::from(Span::styled(
+            seg,
+            Style::default().fg(Color::Rgb(200, 200, 210)),
+        )));
+    }
+    if capped {
+        lines.push(Line::from(Span::styled("…", Style::default().fg(DIM_TEXT))));
+    }
+    lines.push(Line::raw(""));
+
+    // ── Attachment cards ──────────────────────────────────────────────────
+    // Track each card's (top, end) canvas rows so the scroll clamp below can
+    // keep the selected card in view.
+    let mut card_spans: Vec<(u16, u16)> = Vec::with_capacity(n_attach);
+    if n_attach == 0 {
+        lines.push(Line::from(Span::styled(
+            "  (no attachments — a attaches a file or URL, p pastes the clipboard as a note)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for (i, a) in t.artifacts.iter().enumerate() {
+        let top = lines.len() as u16;
+        let is_lead = t.lead_artifact == Some(i);
+        lines.push(evidence_card_header(a, i == sel, is_lead));
+        match classify_artifact(a) {
+            CardKind::Text | CardKind::Diff => {
+                let path = Path::new(&a.path);
+                match read_text_excerpt(path, 8 * 1024) {
+                    None => {
+                        let msg = if std::fs::metadata(path).is_ok() {
+                            Span::styled(
+                                "  (binary file — open externally with `o`)",
+                                Style::default().fg(Color::DarkGray),
+                            )
+                        } else {
+                            Span::styled(
+                                format!("  (cannot read {})", a.path),
+                                Style::default().fg(Color::Rgb(220, 100, 100)),
+                            )
+                        };
+                        lines.push(Line::from(msg));
+                    }
+                    Some((content, truncated)) => {
+                        let shown = content.len().min(INFO_EXCERPT_LINES);
+                        for s in content.iter().take(shown) {
+                            lines.push(Line::from(Span::styled(
+                                format!("  {}", s),
+                                Style::default().fg(Color::Gray),
+                            )));
+                        }
+                        let hidden = content.len().saturating_sub(shown) + truncated;
+                        if hidden > 0 {
+                            lines.push(truncated_footer(hidden));
+                        }
+                    }
+                }
+            }
+            CardKind::Url => {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", a.path),
+                    Style::default().fg(ACCENT_BLUE),
+                )));
+            }
+            CardKind::Image => {
+                lines.push(Line::from(Span::styled(
+                    "  (image — press `o` to open)",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            CardKind::Video => {
+                lines.push(Line::from(Span::styled(
+                    "  (video — press `o` to open)",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            CardKind::Fallback => {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", a.path),
+                    Style::default().fg(FAINT_TEXT),
+                )));
+            }
+        }
+        lines.push(Line::raw(""));
+        card_spans.push((top, lines.len() as u16));
+    }
+
+    // ── Scroll clamp + draw ───────────────────────────────────────────────
+    let body_h = inner.height - 1;
+    let total = lines.len() as u16;
+    let mut scroll = app.render.task_info_scroll;
+    if let Some(&(top, end)) = card_spans.get(sel) {
+        // Keep the selected card visible, same contract as the Result popup.
+        let h = end.saturating_sub(top);
+        if top < scroll {
+            scroll = top;
+        } else if top + h > scroll + body_h {
+            scroll = (top + h).saturating_sub(body_h);
+        }
+    }
+    scroll = scroll.min(total.saturating_sub(body_h));
+    app.render.task_info_scroll = scroll;
+
+    let body_area = Rect::new(inner.x, inner.y, inner.width, body_h);
+    // No wrap: the scroll math above assumes one visual row per canvas line;
+    // over-long excerpt/URL lines clip instead of pushing content down.
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), body_area);
+
+    let footer_area = Rect::new(inner.x, inner.y + body_h, inner.width, 1);
+    let pos = if n_attach == 0 {
+        "attachment —".to_string()
+    } else {
+        format!("attachment {}/{}", sel + 1, n_attach)
+    };
+    let hint = format!(
+        " {}   j/k:select   a:attach   p:paste note   c:copy path   o:open   x:remove   esc/v:close ",
+        pos
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            hint,
+            Style::default().fg(Color::DarkGray),
+        ))),
+        footer_area,
+    );
 }
 
 fn column_meta(status: TaskStatus) -> (&'static str, &'static str, Color) {
@@ -332,6 +559,10 @@ fn meta_line(
     now_secs: u64,
 ) -> Line<'static> {
     let age_style = Style::default().fg(META_GRAY);
+    // Attachment chip: rendered at the end of either branch so a card with
+    // reference docs is recognizable from the board.
+    let clip = (!t.artifacts.is_empty())
+        .then(|| Span::styled(format!("  📎{}", t.artifacts.len()), age_style));
     if status == TaskStatus::Done {
         let when = t.done_at.unwrap_or(t.created_at);
         let mut spans = vec![Span::styled(
@@ -361,6 +592,7 @@ fn meta_line(
                 ));
             }
         }
+        spans.extend(clip);
         return Line::from(spans);
     }
 
@@ -412,6 +644,7 @@ fn meta_line(
         models::relative_age(now_secs.saturating_sub(t.created_at.max(0) as u64)),
         age_style,
     ));
+    spans.extend(clip);
     Line::from(spans)
 }
 
@@ -565,6 +798,29 @@ mod tests {
     }
 
     #[test]
+    fn card_shows_attachment_chip() {
+        let mut t = card(TaskPriority::P3);
+        t.artifacts.push(crate::orchestrator::Artifact {
+            kind: "file".into(),
+            path: "/tmp/store/1-doc.md".into(),
+            original: "/tmp/doc.md".into(),
+            caption: None,
+            added_at: 1,
+        });
+        let painted = buffer_to_string(&render_card(&t));
+        // The emoji is double-width, so the test backend inserts a placeholder
+        // space cell after it — compare with spaces squeezed out.
+        assert!(
+            painted.replace(' ', "").contains("📎1"),
+            "card should show the attachment chip:\n{}",
+            painted
+        );
+        // A card without attachments shows no chip.
+        let bare = buffer_to_string(&render(TaskPriority::P3));
+        assert!(!bare.contains("📎"), "no chip expected:\n{}", bare);
+    }
+
+    #[test]
     fn tags_title_overflows_to_count_marker() {
         // Plenty of tags but a tiny budget folds the leftovers into `+N`.
         let tags: Vec<String> = vec!["alpha".into(), "bravo".into(), "charlie".into()];
@@ -640,5 +896,99 @@ mod tests {
             assert_eq!(bg, want, "{} badge fill", p.label());
             assert_eq!(fg, Color::Black, "{} badge text", p.label());
         }
+    }
+}
+
+// Unix-only: these construct an App over the on-disk personal store, which
+// with_temp_home isolates by redirecting $HOME (unix-only mechanism).
+#[cfg(all(test, unix))]
+mod task_info_tests {
+    use crate::app::App;
+    use crate::test_util::with_temp_home;
+    use crate::ui::common::buffer_to_string;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    #[test]
+    fn info_popup_inlines_excerpt_url_and_footer() {
+        with_temp_home(|| {
+            let mut app = App::new();
+            let id = app.tasks.board.add("write the report").unwrap().unwrap();
+            let dir = std::env::temp_dir().join(format!("cchub-info-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let doc = dir.join("notes.md");
+            std::fs::write(&doc, "alpha finding\nbeta finding\n").unwrap();
+            crate::ops::task::task_artifact_add(
+                None,
+                &id,
+                doc.to_str().unwrap(),
+                None,
+                Some("research notes".into()),
+                false,
+            )
+            .unwrap();
+            crate::ops::task::task_artifact_add(
+                None,
+                &id,
+                "https://example.com/spec",
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+            app.tasks.reload();
+            app.focus_task(&id);
+            assert!(app.enter_task_info());
+
+            let backend = TestBackend::new(100, 30);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|f| super::render_task_info(f, f.area(), &mut app))
+                .expect("render");
+            let dump = buffer_to_string(terminal.backend().buffer());
+            assert!(
+                dump.contains("write the report"),
+                "prompt visible\n{}",
+                dump
+            );
+            assert!(
+                dump.contains("alpha finding"),
+                "text excerpt inlined\n{}",
+                dump
+            );
+            assert!(
+                dump.contains("research notes"),
+                "caption on card header\n{}",
+                dump
+            );
+            assert!(
+                dump.contains("https://example.com/spec"),
+                "url card shows the URL\n{}",
+                dump
+            );
+            assert!(dump.contains("attachment 1/2"), "footer position\n{}", dump);
+            std::fs::remove_dir_all(&dir).ok();
+        });
+    }
+
+    #[test]
+    fn info_popup_without_attachments_hints_attach_key() {
+        with_temp_home(|| {
+            let mut app = App::new();
+            let id = app.tasks.board.add("bare card").unwrap().unwrap();
+            app.focus_task(&id);
+            assert!(app.enter_task_info());
+            let backend = TestBackend::new(80, 24);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|f| super::render_task_info(f, f.area(), &mut app))
+                .expect("render");
+            let dump = buffer_to_string(terminal.backend().buffer());
+            assert!(
+                dump.contains("no attachments"),
+                "empty state hint expected\n{}",
+                dump
+            );
+        });
     }
 }

@@ -52,7 +52,7 @@ pub(crate) fn classify_artifact(a: &Artifact) -> CardKind {
         "screenshot" | "image" | "photo" => return CardKind::Image,
         "video" => return CardKind::Video,
         "diff" | "patch" => return CardKind::Diff,
-        "log" | "build" | "test" | "text" | "output" => return CardKind::Text,
+        "log" | "build" | "test" | "text" | "output" | "note" => return CardKind::Text,
         _ => {}
     }
     match ext.as_str() {

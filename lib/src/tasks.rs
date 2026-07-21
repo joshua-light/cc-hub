@@ -408,6 +408,13 @@ impl PersonalBoard {
         Ok(done)
     }
 
+    /// Adopt the state a locked write performed *outside* the board returned
+    /// (e.g. the attach/remove artifact ops in `ops::task`), so the snapshot
+    /// shows what landed without a full disk reload.
+    pub(crate) fn adopt(&mut self, updated: TaskState) {
+        self.apply(updated);
+    }
+
     /// Replace the in-memory copy of a task with the state a locked write
     /// returned, so the snapshot always shows what actually landed on disk.
     fn apply(&mut self, updated: TaskState) {

@@ -75,6 +75,17 @@ pub struct TasksView {
     /// Task id awaiting a folder pick: set when `s` opens the picker, consumed
     /// by the pick handler, cleared if the picker is cancelled.
     pub pending_assign: Option<String>,
+    /// Task id whose attach input is open
+    /// ([`crate::app::View::TaskAttachInput`]): set when `A` (grid) or `a`
+    /// (info popup) opens it, consumed on submit, cleared on cancel. Shares
+    /// the `input` buffer with the other single-line task popups.
+    pub attaching: Option<String>,
+    /// Whether the attach input was opened from the Task Info popup, so
+    /// submit/cancel return there instead of the grid.
+    pub attach_from_info: bool,
+    /// Selected attachment index inside the Task Info popup
+    /// ([`crate::app::View::TaskInfo`]).
+    pub info_sel: usize,
     /// Frozen display order (task ids) for the In Progress column. The
     /// needs-input float is computed once on tab entry
     /// ([`crate::app::App::refresh_in_progress_order`]) instead of live in
@@ -117,6 +128,9 @@ impl TasksView {
             renaming: None,
             tagging: None,
             pending_assign: None,
+            attaching: None,
+            attach_from_info: false,
+            info_sel: 0,
             in_progress_order: Vec::new(),
             filter: String::new(),
             undo: None,

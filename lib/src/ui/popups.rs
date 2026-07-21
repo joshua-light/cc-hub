@@ -1091,6 +1091,81 @@ pub(crate) fn render_task_input(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
+/// Centered single-line input for attaching a file path or URL to the focused
+/// board card. Same shape as the task input popup; the buffer accepts a paste
+/// (bracketed paste routes here via `App::paste_into_input`), enter attaches,
+/// esc cancels.
+pub(crate) fn render_task_attach_input(frame: &mut Frame, area: Rect, app: &App) {
+    let mut input_line = app.tasks.input.clone();
+    input_line.push('▎');
+
+    let desired_w = 70u16.min(area.width);
+    let wrap_width = desired_w.saturating_sub(6) as usize;
+    let input_rows: u16 = if wrap_width == 0 {
+        1
+    } else {
+        let w = input_line.chars().count();
+        w.div_ceil(wrap_width).max(1).try_into().unwrap_or(u16::MAX)
+    };
+    let desired_h = 5u16.saturating_add(input_rows).max(9).min(area.height);
+    let popup = centered_fixed(area, desired_w, desired_h);
+    frame.render_widget(Clear, popup);
+
+    let block = popup_block(Span::styled(
+        " Attach file or URL ",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .title_bottom(Span::styled(
+        " files are copied into the task — safe to clean the original ",
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    ));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let footer_spans = vec![
+        Span::raw("  "),
+        Span::styled(
+            "[enter]",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" attach   ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "[esc]",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+    ];
+    let lines = vec![
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("  📎 ", Style::default().fg(Color::Green)),
+            Span::styled(
+                input_line,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::raw(""),
+        Line::from(footer_spans),
+    ];
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
 /// Centered single-line editor for the focused task's tags. Same shape as the
 /// task input popup: the buffer is prefilled with the current tags, typing
 /// edits the whole set (space/comma separated), enter saves, esc cancels.

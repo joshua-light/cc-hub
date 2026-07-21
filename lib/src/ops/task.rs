@@ -452,11 +452,26 @@ fn looks_like_url(s: &str) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
 }
 
-/// `cc-hub task artifact add` body: copy a file (or record a URL) into the
-/// task's artifacts dir and append an `Artifact` record. Returns the persisted
-/// state so the caller can echo the added artifact + lead index.
+/// Locked read-mutate-write routed by task flavor: `Some(pid)` hits the
+/// project store, `None` the personal one.
+fn update_task_for<F>(project_id: Option<&str>, task_id: &str, f: F) -> Result<TaskState, OpError>
+where
+    F: FnOnce(&mut TaskState),
+{
+    match project_id {
+        Some(pid) => orchestrator::update_task_state(pid, task_id, f),
+        None => orchestrator::update_personal_task(task_id, f),
+    }
+    .map_err(|e| OpError::Other(format!("persist state: {}", e)))
+}
+
+/// `cc-hub task artifact add` body (and the Tasks board's attach action):
+/// copy a file (or record a URL) into the task's artifacts dir and append an
+/// `Artifact` record. `project_id: None` addresses a personal-board task.
+/// Returns the persisted state so the caller can echo the added artifact +
+/// lead index.
 pub fn task_artifact_add(
-    project_id: &str,
+    project_id: Option<&str>,
     task_id: &str,
     raw_path: &str,
     kind: Option<String>,
@@ -465,7 +480,7 @@ pub fn task_artifact_add(
 ) -> Result<TaskState, OpError> {
     // Confirm the task exists before doing any filesystem work, so we don't
     // copy files into a directory that points at a nonexistent task.
-    let _ = orchestrator::read_task_state(project_id, task_id)
+    let _ = orchestrator::read_task_state_for(project_id, task_id)
         .map_err(|e| OpError::Other(format!("load state: {}", e)))?;
 
     let (kind, stored_path) = if looks_like_url(raw_path) {
@@ -492,7 +507,7 @@ pub fn task_artifact_add(
             .map(|n| n.to_string_lossy().into_owned())
             .ok_or_else(|| OpError::Other(format!("{} has no file name", src.display())))?;
 
-        let dest_dir = orchestrator::task_state_dir(project_id, task_id)
+        let dest_dir = orchestrator::task_dir_for(project_id, task_id)
             .ok_or_else(|| OpError::Other("no home dir".into()))?
             .join("artifacts");
         std::fs::create_dir_all(&dest_dir)
@@ -519,21 +534,122 @@ pub fn task_artifact_add(
         added_at: orchestrator::now_unix_secs(),
     };
     let mark_lead = lead;
-    let state = orchestrator::update_task_state(project_id, task_id, |s| {
+    update_task_for(project_id, task_id, |s| {
         s.artifacts.push(artifact.clone());
         if mark_lead {
             s.lead_artifact = Some(s.artifacts.len() - 1);
         }
     })
-    .map_err(|e| OpError::Other(format!("persist state: {}", e)))?;
-
-    Ok(state)
 }
 
 /// `cc-hub task artifact list` body: load the task state for its artifacts.
-pub fn task_artifact_list(project_id: &str, task_id: &str) -> Result<TaskState, OpError> {
-    orchestrator::read_task_state(project_id, task_id)
+/// `project_id: None` addresses a personal-board task.
+pub fn task_artifact_list(project_id: Option<&str>, task_id: &str) -> Result<TaskState, OpError> {
+    orchestrator::read_task_state_for(project_id, task_id)
         .map_err(|e| OpError::Other(format!("load state: {}", e)))
+}
+
+/// Attach pasted text to a task: write it as a fresh `<ts>-note.md` inside
+/// the task's artifacts dir (there is no source file to copy) and append a
+/// `note` Artifact record whose caption is the text's first line, so the
+/// card header says what the note is about. `original` is `"clipboard"` —
+/// the text never had a path. Returns the persisted state.
+pub fn task_artifact_add_text(
+    project_id: Option<&str>,
+    task_id: &str,
+    text: &str,
+) -> Result<TaskState, OpError> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(OpError::Usage("no text to attach".into()));
+    }
+    // Confirm the task exists before touching the filesystem, mirroring
+    // `task_artifact_add`.
+    let _ = orchestrator::read_task_state_for(project_id, task_id)
+        .map_err(|e| OpError::Other(format!("load state: {}", e)))?;
+
+    let dest_dir = orchestrator::task_dir_for(project_id, task_id)
+        .ok_or_else(|| OpError::Other("no home dir".into()))?
+        .join("artifacts");
+    std::fs::create_dir_all(&dest_dir)
+        .map_err(|e| OpError::Other(format!("create {}: {}", dest_dir.display(), e)))?;
+
+    // Every note shares the `note.md` basename, so a same-second double
+    // paste would silently overwrite (and removal of one record would
+    // delete the other's file) — probe for a free name instead.
+    let ts = orchestrator::now_unix_secs();
+    let mut dest = dest_dir.join(format!("{}-note.md", ts));
+    let mut n = 2;
+    while dest.exists() {
+        dest = dest_dir.join(format!("{}-note-{}.md", ts, n));
+        n += 1;
+    }
+    std::fs::write(&dest, text)
+        .map_err(|e| OpError::Other(format!("write {}: {}", dest.display(), e)))?;
+
+    let artifact = Artifact {
+        kind: "note".into(),
+        path: dest.to_string_lossy().into_owned(),
+        original: "clipboard".into(),
+        caption: Some(crate::models::first_line_truncated(trimmed, 48)),
+        added_at: ts,
+    };
+    update_task_for(project_id, task_id, |s| s.artifacts.push(artifact.clone()))
+}
+
+/// Remove artifact `index` from a personal-board task: drop the record (fixing
+/// `lead_artifact` if it pointed at or past the removed slot) and best-effort
+/// delete the stored copy — but only when it lives inside the task's own
+/// artifacts dir, so a URL or a hand-attached external path is never touched.
+/// Personal-only by design: orchestrated artifacts stay append-only as
+/// proof-of-work evidence. Returns the persisted state plus the removed record.
+pub fn task_artifact_remove(task_id: &str, index: usize) -> Result<(TaskState, Artifact), OpError> {
+    let state = orchestrator::read_task_state_for(None, task_id)
+        .map_err(|e| OpError::Other(format!("load state: {}", e)))?;
+    if index >= state.artifacts.len() {
+        return Err(OpError::NotFound(format!(
+            "task {} has no artifact #{}",
+            task_id, index
+        )));
+    }
+    // State first, file second: a crash in between leaves an orphan file
+    // (harmless), while the reverse order would leave a record pointing at
+    // nothing.
+    let mut removed: Option<Artifact> = None;
+    let state = update_task_for(None, task_id, |s| {
+        if index < s.artifacts.len() {
+            removed = Some(s.artifacts.remove(index));
+            s.lead_artifact = match s.lead_artifact {
+                Some(lead) if lead == index => None,
+                Some(lead) if lead > index => Some(lead - 1),
+                other => other,
+            };
+        }
+    })?;
+    let removed = removed.ok_or_else(|| OpError::Conflict {
+        msg: format!(
+            "artifact #{} vanished before removal (concurrent edit?)",
+            index
+        ),
+        recipe: None,
+    })?;
+
+    let artifacts_dir = orchestrator::task_dir_for(None, task_id)
+        .ok_or_else(|| OpError::Other("no home dir".into()))?
+        .join("artifacts");
+    let stored = PathBuf::from(&removed.path);
+    if stored.starts_with(&artifacts_dir) {
+        if let Err(e) = std::fs::remove_file(&stored) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log::warn!(
+                    "artifact remove: file cleanup failed for {}: {}",
+                    removed.path,
+                    e
+                );
+            }
+        }
+    }
+    Ok((state, removed))
 }
 
 // ─── task todos ──────────────────────────────────────────────────────────

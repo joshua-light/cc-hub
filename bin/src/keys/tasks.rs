@@ -1,4 +1,4 @@
-use cc_hub_lib::app::{App, Command, TasksCommand, View};
+use cc_hub_lib::app::{App, Command, Tab, TasksCommand, View};
 use crossterm::event::{KeyCode, KeyEvent};
 
 /// Map a Tasks-board or Tasks-modal-submit key onto a [`Command`]. Guards and
@@ -39,8 +39,13 @@ pub(super) fn map_tasks_command(app: &App, key: &KeyEvent, on_tasks: bool) -> Op
         (View::Grid, KeyCode::Char('c')) if on_tasks => T::ClearDone,
         (View::Grid, KeyCode::Char('P')) if on_tasks => T::PromoteSelected,
         (View::Grid, KeyCode::Char('f') | KeyCode::Enter) if on_tasks => T::FocusAgent,
+        (View::Grid, KeyCode::Char('v')) if on_tasks => T::OpenTaskInfo,
+        (View::Grid, KeyCode::Char('A')) if on_tasks => T::OpenAttachInput { from_info: false },
+        (View::TaskInfo, KeyCode::Char('a')) => T::OpenAttachInput { from_info: true },
+        (View::TaskInfo, KeyCode::Char('x')) => T::RemoveAttachment,
         (View::TaskInput, KeyCode::Enter) => T::SubmitInput,
         (View::TaskTags, KeyCode::Enter) => T::SubmitTags,
+        (View::TaskAttachInput, KeyCode::Enter) => T::SubmitAttach,
         (View::TaskFilter, KeyCode::Enter) => T::ApplyFilter,
         _ => return None,
     };
@@ -64,10 +69,61 @@ pub(super) fn handle(app: &mut App, key: KeyEvent) -> bool {
             app.tasks.input.pop();
         }
         (View::TaskTags, KeyCode::Char(c)) => app.tasks.input.push(c),
+        (View::TaskAttachInput, KeyCode::Esc) => app.close_task_attach(),
+        (View::TaskAttachInput, KeyCode::Backspace) => {
+            app.tasks.input.pop();
+        }
+        (View::TaskAttachInput, KeyCode::Char(c)) => app.tasks.input.push(c),
+        // Task Info popup: nav + per-attachment actions. `a`/`x` are commands
+        // (see `map_tasks_command`); copy/open stay bin arms like the
+        // Projects Result popup's — they need the clipboard / OS opener.
+        (View::TaskInfo, KeyCode::Esc | KeyCode::Char('v') | KeyCode::Char('q')) => {
+            app.close_task_info();
+        }
+        (View::TaskInfo, KeyCode::Down | KeyCode::Char('j')) => app.task_info_next(),
+        (View::TaskInfo, KeyCode::Up | KeyCode::Char('k')) => app.task_info_prev(),
+        (View::TaskInfo, KeyCode::PageDown) => app.task_info_scroll_by(10),
+        (View::TaskInfo, KeyCode::PageUp) => app.task_info_scroll_by(-10),
+        (View::TaskInfo, KeyCode::Char('c')) => {
+            match app.selected_task_attachment().map(|a| a.path.clone()) {
+                None => app.set_status("no attachment to copy".into()),
+                Some(path) => match cc_hub_lib::clipboard::copy(&path) {
+                    Ok(()) => app.set_status(format!("copied: {}", path)),
+                    Err(e) => app.set_status(format!("copy failed: {}", e)),
+                },
+            }
+        }
+        (View::TaskInfo, KeyCode::Char('o')) => {
+            match app.selected_task_attachment().map(|a| a.path.clone()) {
+                None => app.set_status("no attachment to open".into()),
+                Some(path) => match crate::open_path_detached(&path) {
+                    Ok(()) => app.set_status(format!("opening {}", path)),
+                    Err(e) => app.set_status(format!("open failed: {}", e)),
+                },
+            }
+        }
+        // `p`: attach the clipboard's text as a note — from the popup or
+        // straight from a focused card. Clipboard read stays bin-side like
+        // the `c` copy arm, so App (and its tests) never touch the real
+        // clipboard.
+        (View::TaskInfo, KeyCode::Char('p')) => paste_note(app),
+        (View::Grid, KeyCode::Char('p')) if app.current_tab == Tab::Tasks => paste_note(app),
         (View::TaskFilter, KeyCode::Esc) => app.clear_task_filter(),
         (View::TaskFilter, KeyCode::Backspace) => app.task_filter_pop(),
         (View::TaskFilter, KeyCode::Char(c)) => app.task_filter_push(c),
         _ => return false,
     }
     true
+}
+
+/// Read the host clipboard and attach its text to the focused card as a
+/// `note` attachment. All failure modes land in the status bar.
+fn paste_note(app: &mut App) {
+    match cc_hub_lib::clipboard::paste() {
+        Ok(text) => match app.attach_text_to_selected(&text) {
+            Some(msg) => app.set_status(msg),
+            None => app.set_status("no task focused".into()),
+        },
+        Err(e) => app.set_status(format!("clipboard read failed: {}", e)),
+    }
 }

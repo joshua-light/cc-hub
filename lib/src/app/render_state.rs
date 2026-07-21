@@ -50,6 +50,10 @@ pub struct RenderState {
     /// Scroll offset of the state-debug popup; clamped to content by the
     /// renderer.
     pub state_debug_scroll: u16,
+    /// Scroll offset (lines) of the Tasks-tab Task Info popup body. Clamped
+    /// by the renderer (`ui/tasks.rs`) to keep the selected attachment
+    /// visible.
+    pub task_info_scroll: u16,
     /// Per-artifact decoded image cache, keyed by `Artifact::path`. Populated
     /// lazily on first popup render so non-image work doesn't pay decode cost;
     /// entries persist for the App lifetime since artifact paths are
@@ -72,6 +76,7 @@ impl Default for RenderState {
             result_scroll: 0,
             result_artifact_expanded: false,
             state_debug_scroll: 0,
+            task_info_scroll: 0,
             artifact_images: HashMap::new(),
             artifact_image_failed: HashSet::new(),
         }

@@ -458,7 +458,7 @@ fn task_artifact_add(args: &[String]) -> Result<(), CliError> {
         .ok_or_else(|| CliError::Usage("--path is required".into()))?;
 
     let state = ops::task::task_artifact_add(
-        &project_id,
+        Some(project_id.as_str()),
         &task_id,
         &raw_path,
         f.kind.clone(),
@@ -492,7 +492,7 @@ fn task_artifact_list(args: &[String]) -> Result<(), CliError> {
     let task_id = require_task(&f)?;
     let project_id = resolve_project_id(&f)?;
 
-    let state = ops::task::task_artifact_list(&project_id, &task_id)?;
+    let state = ops::task::task_artifact_list(Some(project_id.as_str()), &task_id)?;
 
     let lead_idx = state.lead_artifact;
     let arr: Vec<serde_json::Value> = state

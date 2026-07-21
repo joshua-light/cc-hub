@@ -1230,6 +1230,12 @@ async fn run(
                                     app.set_status(format!("paste failed: {}", e));
                                 }
                             }
+                        } else {
+                            // Single-line task inputs (add/rename, tags,
+                            // attach) accept pastes — without this, bracketed
+                            // paste swallowed the burst and pasting a path
+                            // into the attach popup did nothing.
+                            app.paste_into_input(&text);
                         }
                     }
                     Event::Key(key) => {
