@@ -160,11 +160,19 @@ fn task_link_candidate(task: &TaskState, session_cwd: &str) -> (u8, bool, i64, T
 }
 
 /// Short display name for an attachment in status messages: the URL itself
-/// for URL artifacts, the *original* file's basename otherwise (the stored
-/// copy's name carries a timestamp prefix nobody typed).
+/// for URL artifacts, the caption for notes (their `original` names an
+/// origin like "typed", not a path), the *original* file's basename
+/// otherwise (the stored copy's name carries a timestamp prefix nobody
+/// typed).
 fn attachment_label(a: &crate::orchestrator::Artifact) -> String {
     if a.kind == "url" {
         return a.path.clone();
+    }
+    if a.kind == "note" {
+        return match &a.caption {
+            Some(c) => format!("note — “{}”", c),
+            None => "note".into(),
+        };
     }
     std::path::Path::new(&a.original)
         .file_name()
@@ -202,8 +210,9 @@ pub enum View {
     /// Task Info popup for the focused board card: prompt + attachments,
     /// with per-attachment copy/open/remove.
     TaskInfo,
-    /// Centered single-line input for attaching a file path or URL to the
-    /// focused board card.
+    /// Centered single-line input for attaching to the focused board card:
+    /// opens in note mode (the buffer becomes a typed `note` attachment),
+    /// Tab flips it to file-path/URL mode.
     TaskAttachInput,
     /// Typing edits the Tasks-board filter live; the board renders
     /// underneath, already narrowed. Enter keeps the filter, Esc clears it.
@@ -887,16 +896,24 @@ impl App {
     }
 
     /// `A` on a focused card (or `a` inside the Task Info popup): open the
-    /// attach input. Returns false when no task is focused.
+    /// attach input, in note mode — Tab flips it to file-path/URL mode.
+    /// Returns false when no task is focused.
     pub fn enter_task_attach(&mut self, from_info: bool) -> bool {
         let Some(t) = self.selected_board_task() else {
             return false;
         };
         self.tasks.attaching = Some(t.task_id.clone());
         self.tasks.attach_from_info = from_info;
+        self.tasks.attach_note = true;
         self.tasks.input.clear();
         self.view = View::TaskAttachInput;
         true
+    }
+
+    /// Tab inside the attach input: flip between note and file-path/URL mode.
+    /// The typed buffer is kept — starting in the wrong mode costs nothing.
+    pub fn toggle_task_attach_mode(&mut self) {
+        self.tasks.attach_note = !self.tasks.attach_note;
     }
 
     pub fn close_task_attach(&mut self) {
@@ -910,8 +927,9 @@ impl App {
         self.tasks.attach_from_info = false;
     }
 
-    /// Commit the attach input: copy the file (or record the URL) into the
-    /// task's own artifacts dir via the shared op and adopt the persisted
+    /// Commit the attach input: in note mode write the text as a `note`
+    /// attachment, otherwise copy the file (or record the URL) into the
+    /// task's own artifacts dir via the shared op — then adopt the persisted
     /// state into the board. Empty input cancels. Returns false when nothing
     /// was attached (a failure lands in the persistence-error slot).
     pub fn submit_task_attach(&mut self) -> bool {
@@ -930,7 +948,12 @@ impl App {
         if raw.is_empty() {
             return false;
         }
-        match crate::ops::task::task_artifact_add(None, &id, &raw, None, None, false) {
+        let result = if self.tasks.attach_note {
+            crate::ops::task::task_artifact_add_text(None, &id, &raw, "typed")
+        } else {
+            crate::ops::task::task_artifact_add(None, &id, &raw, None, None, false)
+        };
+        match result {
             Ok(state) => {
                 let label = state
                     .artifacts
@@ -986,7 +1009,7 @@ impl App {
         if text.trim().is_empty() {
             return Some("clipboard empty — nothing attached".into());
         }
-        match crate::ops::task::task_artifact_add_text(None, &id, text) {
+        match crate::ops::task::task_artifact_add_text(None, &id, text, "clipboard") {
             Ok(state) => {
                 let caption = state
                     .artifacts

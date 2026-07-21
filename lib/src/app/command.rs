@@ -1408,6 +1408,8 @@ mod tests {
 
             tasks(&mut app, TasksCommand::OpenAttachInput { from_info: false });
             assert_eq!(app.view, crate::app::View::TaskAttachInput);
+            // The input opens in note mode; Tab over to file/URL mode.
+            app.toggle_task_attach_mode();
             app.tasks.input = doc.display().to_string();
             tasks(&mut app, TasksCommand::SubmitAttach);
 
@@ -1453,6 +1455,7 @@ mod tests {
             app.focus_task(&id);
 
             tasks(&mut app, TasksCommand::OpenAttachInput { from_info: false });
+            app.toggle_task_attach_mode();
             // Trailing whitespace mimics a sloppy paste; submit trims it.
             app.tasks.input = "https://example.com/rfc  ".into();
             tasks(&mut app, TasksCommand::SubmitAttach);
@@ -1461,6 +1464,61 @@ mod tests {
             assert_eq!(t.artifacts.len(), 1);
             assert_eq!(t.artifacts[0].kind, "url");
             assert_eq!(t.artifacts[0].path, "https://example.com/rfc");
+        });
+    }
+
+    #[test]
+    fn attach_default_mode_types_note() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt) = task_app();
+            let id = app.tasks.board.add("jot it down").unwrap().unwrap();
+            app.focus_task(&id);
+
+            tasks(&mut app, TasksCommand::OpenAttachInput { from_info: false });
+            assert!(app.tasks.attach_note, "attach input must open in note mode");
+            app.tasks.input = "check the cache TTL first".into();
+            tasks(&mut app, TasksCommand::SubmitAttach);
+
+            assert_eq!(app.view, crate::app::View::Grid);
+            let t = app.tasks.board.get(&id).unwrap();
+            assert_eq!(t.artifacts.len(), 1);
+            let a = &t.artifacts[0];
+            assert_eq!(a.kind, "note");
+            assert_eq!(a.original, "typed");
+            assert_eq!(a.caption.as_deref(), Some("check the cache TTL first"));
+            assert_eq!(
+                std::fs::read_to_string(&a.path).unwrap(),
+                "check the cache TTL first"
+            );
+            assert!(
+                status(&app).starts_with("attached note — “check the cache TTL first”"),
+                "got: {}",
+                status(&app)
+            );
+        });
+    }
+
+    #[test]
+    fn attach_mode_toggles_and_resets_on_reopen() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt) = task_app();
+            let id = app.tasks.board.add("mode memory").unwrap().unwrap();
+            app.focus_task(&id);
+
+            tasks(&mut app, TasksCommand::OpenAttachInput { from_info: false });
+            app.tasks.input = "half-typed".into();
+            app.toggle_task_attach_mode();
+            assert!(!app.tasks.attach_note);
+            assert_eq!(app.tasks.input, "half-typed", "buffer survives the flip");
+            app.toggle_task_attach_mode();
+            assert!(app.tasks.attach_note);
+
+            // A path-mode session doesn't leak into the next open.
+            app.toggle_task_attach_mode();
+            app.close_task_attach();
+            tasks(&mut app, TasksCommand::OpenAttachInput { from_info: false });
+            assert!(app.tasks.attach_note, "reopen must start back in note mode");
+            app.close_task_attach();
         });
     }
 
@@ -1485,6 +1543,7 @@ mod tests {
             let id = app.tasks.board.add("bad path").unwrap().unwrap();
             app.focus_task(&id);
             tasks(&mut app, TasksCommand::OpenAttachInput { from_info: false });
+            app.toggle_task_attach_mode();
             app.tasks.input = "/nonexistent/research.md".into();
             tasks(&mut app, TasksCommand::SubmitAttach);
             assert!(app.tasks.board.get(&id).unwrap().artifacts.is_empty());
@@ -1506,6 +1565,7 @@ mod tests {
             let doc2 = temp_doc("second.md", "two\n");
             for doc in [&doc1, &doc2] {
                 tasks(&mut app, TasksCommand::OpenAttachInput { from_info: false });
+                app.toggle_task_attach_mode();
                 app.tasks.input = doc.display().to_string();
                 tasks(&mut app, TasksCommand::SubmitAttach);
             }
@@ -1550,12 +1610,14 @@ mod tests {
             let doc1 = temp_doc("a.md", "a\n");
             let doc2 = temp_doc("b.md", "b\n");
             tasks(&mut app, TasksCommand::OpenAttachInput { from_info: false });
+            app.toggle_task_attach_mode();
             app.tasks.input = doc1.display().to_string();
             tasks(&mut app, TasksCommand::SubmitAttach);
 
             tasks(&mut app, TasksCommand::OpenTaskInfo);
             tasks(&mut app, TasksCommand::OpenAttachInput { from_info: true });
             assert_eq!(app.view, crate::app::View::TaskAttachInput);
+            app.toggle_task_attach_mode();
             app.tasks.input = doc2.display().to_string();
             tasks(&mut app, TasksCommand::SubmitAttach);
             assert_eq!(app.view, crate::app::View::TaskInfo);

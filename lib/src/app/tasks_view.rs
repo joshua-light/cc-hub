@@ -83,6 +83,10 @@ pub struct TasksView {
     /// Whether the attach input was opened from the Task Info popup, so
     /// submit/cancel return there instead of the grid.
     pub attach_from_info: bool,
+    /// Attach-input mode: true (the default on open) treats the buffer as a
+    /// typed note, false as a file path or URL. Tab flips it; the buffer
+    /// survives the flip so a wrong-mode start costs nothing.
+    pub attach_note: bool,
     /// Selected attachment index inside the Task Info popup
     /// ([`crate::app::View::TaskInfo`]).
     pub info_sel: usize,
@@ -130,6 +134,7 @@ impl TasksView {
             pending_assign: None,
             attaching: None,
             attach_from_info: false,
+            attach_note: true,
             info_sel: 0,
             in_progress_order: Vec::new(),
             filter: String::new(),

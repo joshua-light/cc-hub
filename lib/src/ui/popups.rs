@@ -1091,11 +1091,13 @@ pub(crate) fn render_task_input(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-/// Centered single-line input for attaching a file path or URL to the focused
-/// board card. Same shape as the task input popup; the buffer accepts a paste
-/// (bracketed paste routes here via `App::paste_into_input`), enter attaches,
-/// esc cancels.
+/// Centered single-line input for attaching to the focused board card. Same
+/// shape as the task input popup; the buffer accepts a paste (bracketed paste
+/// routes here via `App::paste_into_input`), enter attaches, esc cancels.
+/// Opens in note mode — the buffer becomes a typed `note` attachment; Tab
+/// flips to file-path/URL mode and back, keeping the buffer.
 pub(crate) fn render_task_attach_input(frame: &mut Frame, area: Rect, app: &App) {
+    let note_mode = app.tasks.attach_note;
     let mut input_line = app.tasks.input.clone();
     input_line.push('▎');
 
@@ -1111,14 +1113,22 @@ pub(crate) fn render_task_attach_input(frame: &mut Frame, area: Rect, app: &App)
     let popup = centered_fixed(area, desired_w, desired_h);
     frame.render_widget(Clear, popup);
 
+    let (title, hint) = if note_mode {
+        (" Attach note ", " saved as a .md note inside the task ")
+    } else {
+        (
+            " Attach file or URL ",
+            " files are copied into the task — safe to clean the original ",
+        )
+    };
     let block = popup_block(Span::styled(
-        " Attach file or URL ",
+        title,
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
     ))
     .title_bottom(Span::styled(
-        " files are copied into the task — safe to clean the original ",
+        hint,
         Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::ITALIC),
@@ -1141,6 +1151,20 @@ pub(crate) fn render_task_attach_input(frame: &mut Frame, area: Rect, app: &App)
         ),
         Span::styled(" attach   ", Style::default().fg(Color::DarkGray)),
         Span::styled(
+            "[tab]",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            if note_mode {
+                " file/URL   "
+            } else {
+                " note   "
+            },
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
             "[esc]",
             Style::default()
                 .fg(Color::White)
@@ -1151,7 +1175,10 @@ pub(crate) fn render_task_attach_input(frame: &mut Frame, area: Rect, app: &App)
     let lines = vec![
         Line::raw(""),
         Line::from(vec![
-            Span::styled("  📎 ", Style::default().fg(Color::Green)),
+            Span::styled(
+                if note_mode { "  ✎ " } else { "  📎 " },
+                Style::default().fg(Color::Green),
+            ),
             Span::styled(
                 input_line,
                 Style::default()

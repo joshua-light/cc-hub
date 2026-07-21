@@ -309,7 +309,13 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             View::TaskInfo => {
                 "j/k:attachment  a:attach  p:paste note  c:copy path  o:open  x:remove  PgUp/PgDn:scroll  esc/v:close"
             }
-            View::TaskAttachInput => "paste path or URL  enter:attach  esc:cancel",
+            View::TaskAttachInput => {
+                if app.tasks.attach_note {
+                    "type note  tab:file/URL  enter:attach  esc:cancel"
+                } else {
+                    "paste path or URL  tab:note  enter:attach  esc:cancel"
+                }
+            }
             View::TaskFilter => "type to filter (text or #tag)  enter:apply  esc:clear",
             View::ProjectsResult => "j/k:artifact  e:expand  PgUp/PgDn:scroll  c:copy path  o:xdg-open  esc/r:close",
             View::Backlog => "j/k:select  s/enter:start  x:delete  esc/q:close",

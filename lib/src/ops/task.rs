@@ -549,15 +549,18 @@ pub fn task_artifact_list(project_id: Option<&str>, task_id: &str) -> Result<Tas
         .map_err(|e| OpError::Other(format!("load state: {}", e)))
 }
 
-/// Attach pasted text to a task: write it as a fresh `<ts>-note.md` inside
+/// Attach free text to a task: write it as a fresh `<ts>-note.md` inside
 /// the task's artifacts dir (there is no source file to copy) and append a
 /// `note` Artifact record whose caption is the text's first line, so the
-/// card header says what the note is about. `original` is `"clipboard"` —
-/// the text never had a path. Returns the persisted state.
+/// card header says what the note is about. `origin` lands in the record's
+/// `original` slot — the text never had a path, so callers pass where it
+/// came from instead (`"clipboard"` for a paste, `"typed"` for the attach
+/// input's note mode). Returns the persisted state.
 pub fn task_artifact_add_text(
     project_id: Option<&str>,
     task_id: &str,
     text: &str,
+    origin: &str,
 ) -> Result<TaskState, OpError> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -590,7 +593,7 @@ pub fn task_artifact_add_text(
     let artifact = Artifact {
         kind: "note".into(),
         path: dest.to_string_lossy().into_owned(),
-        original: "clipboard".into(),
+        original: origin.into(),
         caption: Some(crate::models::first_line_truncated(trimmed, 48)),
         added_at: ts,
     };

@@ -70,6 +70,7 @@ pub(super) fn handle(app: &mut App, key: KeyEvent) -> bool {
         }
         (View::TaskTags, KeyCode::Char(c)) => app.tasks.input.push(c),
         (View::TaskAttachInput, KeyCode::Esc) => app.close_task_attach(),
+        (View::TaskAttachInput, KeyCode::Tab) => app.toggle_task_attach_mode(),
         (View::TaskAttachInput, KeyCode::Backspace) => {
             app.tasks.input.pop();
         }
