@@ -237,6 +237,21 @@ pub enum ApproveOutcome {
     Failed,
 }
 
+/// Outcome of committing the rename modal, so the command layer knows where
+/// the typed title needs to go without re-deriving it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenameSubmit {
+    /// Title bound to a real session id — the caller persists it to the title
+    /// sidecar.
+    Persist { sid: String, title: String },
+    /// Title captured for a session still booting behind a spawn placeholder;
+    /// it is persisted to the real id the moment the scanner sees it (see
+    /// [`App::adopt_pending_spawn_names`]). Nothing to write yet.
+    Deferred { title: String },
+    /// Empty title — treated as a cancel.
+    Cancelled,
+}
+
 /// Overlay on top of [`View::FolderPicker`] that prompts for a new GitHub
 /// repo name. `cwd` is captured at open time so the run target can't drift
 /// if the picker is reloaded while the input is active.
@@ -587,6 +602,16 @@ pub struct App {
     /// no card ever appears. Checked against each scan snapshot; see
     /// [`Self::check_spawn_watches`].
     spawn_watches: Vec<SpawnWatch>,
+    /// Boot-time name prompts, keyed by the spawning tmux name — the stable
+    /// bridge across a session's placeholder→real transition, since its real
+    /// scanner id isn't known until it loads. A present key means this spawn
+    /// already got its rename popup, so the load-time
+    /// [`Self::maybe_autoprompt_rename_for_new_session`] stays quiet for it.
+    /// `Some(title)` means the user named it while it was still booting; the
+    /// title is persisted to the real session id the moment the scanner sees
+    /// it (see [`Self::adopt_pending_spawn_names`]). Only populated while
+    /// Haiku auto-titling is off.
+    pending_spawn_names: HashMap<String, Option<String>>,
 }
 
 /// One pending spawn-verification: the agent must show up in a scan snapshot
@@ -609,11 +634,23 @@ struct SpawnWatch {
 /// line, so generous beats jumpy.
 const SPAWN_WATCH_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Marks a synthetic placeholder id (see [`spawning_session_id`]) so rename /
+/// titling can special-case a card the scanner hasn't issued a real id for.
+const SPAWNING_ID_PREFIX: &str = "spawning:";
+
 /// Synthetic session id backing a spawn watch's placeholder card. Prefixed so
 /// it can never collide with a real scanner-issued session id, and derived
 /// from the tmux name so the same spawn maps to the same id across rebuilds.
 fn spawning_session_id(tmux_name: &str) -> String {
-    format!("spawning:{}", tmux_name)
+    format!("{SPAWNING_ID_PREFIX}{tmux_name}")
+}
+
+/// The spawning tmux name behind a placeholder id, or `None` for a real
+/// scanner id. The tmux name is the stable bridge from a placeholder to the
+/// real session, so name prompts routed while a session is still booting can
+/// find their target once it lands.
+fn spawning_tmux_of(id: &str) -> Option<&str> {
+    id.strip_prefix(SPAWNING_ID_PREFIX)
 }
 
 /// Loading-state stand-in for a spawn the scanner hasn't seen yet: Starting
@@ -655,6 +692,27 @@ fn spawning_placeholder(watch: &SpawnWatch) -> SessionInfo {
     };
     info.title = Some(format!("starting {}…", info.agent_badge()));
     info
+}
+
+/// Whether a freshly-appeared, just-selected session should trigger the
+/// manual rename prompt that stands in for the Haiku titler when auto-titling
+/// is off — so no session is ever left nameless. Pure (no `self`, no config
+/// singleton) so the branch table is unit-testable without a live scan.
+fn should_autoprompt_rename(
+    auto_title_enabled: bool,
+    on_sessions_grid: bool,
+    session: &SessionInfo,
+) -> bool {
+    // Only stand in for the titler when the titler that would otherwise name
+    // this session is switched off.
+    !auto_title_enabled
+        // Only on the Sessions grid with no overlay already open: a background
+        // scan tick must never yank the user out of another tab or input.
+        && on_sessions_grid
+        // Only a real, still-nameless session: placeholders carry a "starting…"
+        // title, and orphan/Inactive cards aren't worth a naming prompt.
+        && session.title.is_none()
+        && session.state != SessionState::Inactive
 }
 
 impl Default for App {
@@ -705,6 +763,7 @@ impl App {
             last_dispatch_probe_at: None,
             image_picker: None,
             spawn_watches: Vec::new(),
+            pending_spawn_names: HashMap::new(),
         }
     }
 
@@ -2532,7 +2591,14 @@ impl App {
             return false;
         };
         let sid = session.session_id.clone();
-        let title = session.title.clone().unwrap_or_default();
+        // A spawn placeholder's "title" is the synthetic "starting…" label,
+        // not a real name — open its rename with an empty buffer so the user
+        // types onto a clean line instead of clearing the placeholder first.
+        let title = if spawning_tmux_of(&sid).is_some() {
+            String::new()
+        } else {
+            session.title.clone().unwrap_or_default()
+        };
         self.rename_target = Some(sid);
         self.rename_buffer = title;
         self.view = View::RenameSession;
@@ -2545,9 +2611,15 @@ impl App {
         self.view = View::Grid;
     }
 
-    /// Title currently being edited, for the modal's "renaming X" header.
+    /// Title currently being edited, for the modal's "was X" subtitle.
     pub fn rename_original_title(&self) -> Option<&str> {
         let sid = self.rename_target.as_deref()?;
+        // A spawn placeholder's "starting…" label isn't a real prior title —
+        // report it as untitled so the boot-time prompt doesn't claim the
+        // session "was starting…".
+        if spawning_tmux_of(sid).is_some() {
+            return None;
+        }
         self.sessions
             .groups
             .iter()
@@ -2557,35 +2629,76 @@ impl App {
     }
 
     /// Commit the rename: apply the trimmed buffer to the in-memory session
-    /// for instant feedback and return `(session_id, title)` for the caller
-    /// to persist to the title cache. Returns `None` when the title is empty
-    /// (treated as cancel) or no rename is in flight; either way the modal
-    /// closes.
-    pub fn submit_session_rename(&mut self) -> Option<(String, String)> {
+    /// for instant feedback and hand the caller a [`RenameSubmit`] telling it
+    /// where the title needs to go. An empty title is [`RenameSubmit::Cancelled`];
+    /// either way the modal closes.
+    ///
+    /// A boot-time prompt targets a spawn placeholder whose synthetic id can't
+    /// be persisted against, so it routes by the spawning tmux name: if the
+    /// real session has already landed it persists now, otherwise the name is
+    /// stashed for [`Self::adopt_pending_spawn_names`] to apply on arrival.
+    pub fn submit_session_rename(&mut self) -> RenameSubmit {
         self.view = View::Grid;
-        let sid = self.rename_target.take()?;
+        let Some(sid) = self.rename_target.take() else {
+            return RenameSubmit::Cancelled;
+        };
         let title = std::mem::take(&mut self.rename_buffer).trim().to_string();
         if title.is_empty() {
-            return None;
+            return RenameSubmit::Cancelled;
         }
-        for group in &mut self.sessions.groups {
-            for session in &mut group.sessions {
-                if session.session_id == sid {
-                    session.title = Some(title.clone());
-                    session.titling = false;
+        if let Some(tmux) = spawning_tmux_of(&sid).map(str::to_string) {
+            match self.real_session_id_for_tmux(&tmux) {
+                Some(real_sid) => {
+                    // The session loaded while the user was still typing — its
+                    // real id is known, so persist straight to it.
+                    self.pending_spawn_names.remove(&tmux);
+                    self.apply_title_in_memory(&real_sid, &title);
+                    RenameSubmit::Persist {
+                        sid: real_sid,
+                        title,
+                    }
+                }
+                None => {
+                    // Still booting: hold the name until the scanner issues a
+                    // real id (the placeholder card shows it in the meantime).
+                    self.pending_spawn_names.insert(tmux, Some(title.clone()));
+                    RenameSubmit::Deferred { title }
                 }
             }
+        } else {
+            self.apply_title_in_memory(&sid, &title);
+            RenameSubmit::Persist { sid, title }
         }
-        // Keep the snapshot rebuild_groups derives from in sync, so a rebuild
-        // before the next scan doesn't revert to the old title (same hazard as
-        // ack_selected). The next scan restores it from the title cache.
-        for session in &mut self.sessions.last_sessions {
+    }
+
+    /// Stamp `title` on the in-memory copies of session `sid` (the grid and
+    /// the snapshot `rebuild_groups` derives from) so the rename shows
+    /// instantly and a rebuild before the next scan doesn't revert it (same
+    /// hazard as `ack_selected`). The next scan restores it from the sidecar.
+    fn apply_title_in_memory(&mut self, sid: &str, title: &str) {
+        for session in self
+            .sessions
+            .groups
+            .iter_mut()
+            .flat_map(|g| g.sessions.iter_mut())
+            .chain(self.sessions.last_sessions.iter_mut())
+        {
             if session.session_id == sid {
-                session.title = Some(title.clone());
+                session.title = Some(title.to_string());
                 session.titling = false;
             }
         }
-        Some((sid, title))
+    }
+
+    /// Real scanner-issued id of the live session hosted by `tmux`, if the
+    /// scanner has seen it yet. `None` while a just-spawned session is still
+    /// only a placeholder.
+    fn real_session_id_for_tmux(&self, tmux: &str) -> Option<String> {
+        self.sessions
+            .last_sessions
+            .iter()
+            .find(|s| s.tmux_session.as_deref() == Some(tmux))
+            .map(|s| s.session_id.clone())
     }
 
     pub fn queue_pending_dispatch(&mut self, tmux: String, prompt: String) {
@@ -2998,13 +3111,23 @@ impl App {
     pub fn watch_spawn(&mut self, tmux_name: String, agent: String, cwd: String) {
         let placeholder_id = spawning_session_id(&tmux_name);
         self.spawn_watches.push(SpawnWatch {
-            tmux_name,
+            tmux_name: tmux_name.clone(),
             agent,
             cwd,
             deadline: Instant::now() + SPAWN_WATCH_TIMEOUT,
         });
         self.rebuild_groups();
         self.select_session_by_id(&placeholder_id);
+        // With Haiku auto-titling off, prompt for the name now — during the
+        // boot — so the dead seconds while the agent writes its session file
+        // are spent naming it instead of waiting to. The popup targets the
+        // placeholder; the typed name is carried to the real session id in
+        // `adopt_pending_spawn_names` once the scanner sees it. The map entry
+        // also suppresses the redundant load-time prompt for this spawn.
+        if !config::get().title.enabled {
+            self.pending_spawn_names.insert(tmux_name, None);
+            self.enter_rename_session();
+        }
     }
 
     /// Move the cursor onto `session_id` if it's currently visible.
@@ -3047,6 +3170,10 @@ impl App {
         while i < self.spawn_watches.len() {
             if self.spawn_watches[i].deadline <= now {
                 let w = self.spawn_watches.remove(i);
+                // The agent never came up, so its real session will never
+                // arrive — drop any boot-time name entry that would otherwise
+                // linger unresolved.
+                self.pending_spawn_names.remove(&w.tmux_name);
                 let msg = crate::spawn::diagnose_stalled_spawn(&w.tmux_name, &w.agent);
                 log::warn!("spawn watch: {}", msg);
                 self.set_status(msg);
@@ -3094,6 +3221,11 @@ impl App {
         self.last_refresh = Instant::now();
 
         let spawn_watch_fired = self.check_spawn_watches(&sessions, Instant::now());
+
+        // Carry any name typed while a session was still booting onto the real
+        // card the scanner has now produced — before grouping, so the title is
+        // in place the first frame the real session renders.
+        self.adopt_pending_spawn_names(&mut sessions);
 
         // Resolve task-board agent bindings: a freshly-assigned task knows
         // only its tmux name until the scanner sees the session; learning the
@@ -3166,8 +3298,83 @@ impl App {
             );
             self.sessions.sel_group = gi;
             self.sessions.sel_in_group = si;
+            self.maybe_autoprompt_rename_for_new_session();
         }
+
+        // A prompted spawn that has now materialised no longer needs its
+        // suppression entry: the load-time autoprompt above has already been
+        // held back for it this tick, and any name it carried was adopted
+        // before grouping. Entries for spawns still booting are kept.
+        let live_tmux: HashSet<String> = self
+            .sessions
+            .last_sessions
+            .iter()
+            .filter_map(|s| s.tmux_session.clone())
+            .collect();
+        self.pending_spawn_names
+            .retain(|tmux, _| !live_tmux.contains(tmux));
         true
+    }
+
+    /// Bridge names typed while a session was still booting onto the real
+    /// session the scanner has now produced. For each freshly-seen session
+    /// whose spawning tmux carries a stashed name, persist it to the real id
+    /// and stamp it on this snapshot so the card shows it immediately. The
+    /// `None` entries (prompted, not yet named) are left for the cleanup at
+    /// the end of [`Self::update_sessions`].
+    fn adopt_pending_spawn_names(&mut self, sessions: &mut [SessionInfo]) {
+        if self.pending_spawn_names.is_empty() {
+            return;
+        }
+        for s in sessions.iter_mut() {
+            let title = match s.tmux_session.as_deref() {
+                Some(tmux) => match self.pending_spawn_names.get(tmux) {
+                    Some(Some(title)) => {
+                        let title = title.clone();
+                        self.pending_spawn_names.remove(tmux);
+                        title
+                    }
+                    _ => continue,
+                },
+                None => continue,
+            };
+            if let Err(e) = crate::title::persist_title(&s.session_id, &title) {
+                log::warn!(
+                    "rename: deferred persist failed for {}: {}",
+                    s.session_id,
+                    e
+                );
+            }
+            s.title = Some(title);
+            s.titling = false;
+        }
+    }
+
+    /// Stand-in for the Haiku titler when auto-titling is off: the moment a
+    /// new session lands on the grid (the same detection that drives the focus
+    /// jump in [`Self::update_sessions`]), open its rename popup so it never
+    /// sits nameless. No-op when auto-titling is on, when an overlay or another
+    /// tab has focus, or when the session already carries a title — see
+    /// [`should_autoprompt_rename`].
+    fn maybe_autoprompt_rename_for_new_session(&mut self) {
+        let on_grid = self.current_tab == Tab::Sessions && self.view == View::Grid;
+        let enabled = config::get().title.enabled;
+        let trigger = match self.selected_session_info() {
+            Some(s) => {
+                // A spawn already prompted at boot must not prompt again now
+                // that it has loaded — its entry (named or not) is still in
+                // the map until the end-of-tick cleanup.
+                let already_prompted = match s.tmux_session.as_deref() {
+                    Some(tmux) => self.pending_spawn_names.contains_key(tmux),
+                    None => false,
+                };
+                should_autoprompt_rename(enabled, on_grid, s) && !already_prompted
+            }
+            None => false,
+        };
+        if trigger {
+            self.enter_rename_session();
+        }
     }
 
     /// Filter, group, and order `sessions` into the rendered group list.
@@ -3188,7 +3395,16 @@ impl App {
                     .iter()
                     .any(|s| s.tmux_session.as_deref() == Some(w.tmux_name.as_str()))
             })
-            .map(spawning_placeholder)
+            .map(|w| {
+                let mut card = spawning_placeholder(w);
+                // Once the user has named the spawn in the boot-time prompt,
+                // show that name in place of the "starting…" label so the card
+                // doesn't visibly revert until the real session lands.
+                if let Some(Some(name)) = self.pending_spawn_names.get(&w.tmux_name) {
+                    card.title = Some(name.clone());
+                }
+                card
+            })
             .collect();
 
         let mut sessions: Vec<SessionInfo> = sessions
@@ -3644,6 +3860,143 @@ mod tests {
         assert!(!fired);
         assert!(app.spawn_watches.is_empty());
         assert!(app.status_msg.is_none());
+    }
+
+    // The auto-titler stand-in: with titling off, a fresh untitled session on
+    // the grid is prompted for a name; every other combination is a no-op.
+    #[test]
+    fn autoprompt_rename_fires_only_when_titling_off_and_grid_focused() {
+        let live = fake_session("cchub-new", SessionState::Idle);
+
+        // Titling off + on the grid + untitled + live → prompt.
+        assert!(should_autoprompt_rename(false, true, &live));
+
+        // Titling on → the Haiku titler will name it, so never intrude.
+        assert!(!should_autoprompt_rename(true, true, &live));
+
+        // Off the Sessions grid (another tab or an overlay open) → don't yank
+        // the user out of what they're doing.
+        assert!(!should_autoprompt_rename(false, false, &live));
+    }
+
+    #[test]
+    fn autoprompt_rename_skips_titled_and_inactive_sessions() {
+        // Already named (e.g. a resumed session, or the "starting…" placeholder)
+        // → nothing to prompt for.
+        let mut titled = fake_session("cchub-titled", SessionState::Idle);
+        titled.title = Some("existing name".into());
+        assert!(!should_autoprompt_rename(false, true, &titled));
+
+        // Orphan/Inactive cards are synthesized from dead processes — not worth
+        // a naming prompt.
+        let inactive = fake_session("cchub-orphan", SessionState::Inactive);
+        assert!(!should_autoprompt_rename(false, true, &inactive));
+    }
+
+    #[test]
+    fn spawning_tmux_of_reads_placeholder_ids_only() {
+        assert_eq!(spawning_tmux_of("spawning:cchub-w-1"), Some("cchub-w-1"));
+        assert_eq!(spawning_tmux_of("real-scanner-id"), None);
+    }
+
+    // Boot-time naming: submitting a name before the scanner has produced the
+    // real session stashes it against the spawning tmux, to be applied once
+    // the session lands.
+    #[test]
+    fn boot_time_name_defers_until_the_session_loads() {
+        let mut app = App::new();
+        let tmux = "cchub-w-boot";
+        app.pending_spawn_names.insert(tmux.into(), None);
+        app.rename_target = Some(spawning_session_id(tmux));
+        app.rename_buffer = "auth refactor".into();
+        app.view = View::RenameSession;
+
+        assert_eq!(
+            app.submit_session_rename(),
+            RenameSubmit::Deferred {
+                title: "auth refactor".into()
+            }
+        );
+        // Held against the tmux, awaiting the real session id.
+        assert_eq!(
+            app.pending_spawn_names.get(tmux),
+            Some(&Some("auth refactor".to_string()))
+        );
+        assert_eq!(app.view, View::Grid);
+    }
+
+    // If the real session has already landed by the time the user hits Enter,
+    // the name resolves straight to its real id — no deferral.
+    #[test]
+    fn boot_time_name_persists_to_real_id_when_already_loaded() {
+        let mut app = App::new();
+        let tmux = "cchub-w-loaded";
+        let mut real = fake_session("real-id-xyz", SessionState::Idle);
+        real.tmux_session = Some(tmux.into());
+        app.sessions.last_sessions = vec![real];
+        app.pending_spawn_names.insert(tmux.into(), None);
+        app.rename_target = Some(spawning_session_id(tmux));
+        app.rename_buffer = "auth refactor".into();
+        app.view = View::RenameSession;
+
+        assert_eq!(
+            app.submit_session_rename(),
+            RenameSubmit::Persist {
+                sid: "real-id-xyz".into(),
+                title: "auth refactor".into()
+            }
+        );
+        // Resolved to the real id, so no longer pending.
+        assert!(!app.pending_spawn_names.contains_key(tmux));
+        // Applied in-memory so the card shows it before the next scan.
+        assert_eq!(
+            app.sessions.last_sessions[0].title.as_deref(),
+            Some("auth refactor")
+        );
+    }
+
+    // Cancelling the boot-time prompt (empty title) keeps the `None` marker so
+    // the load-time prompt stays suppressed — the user said no once already.
+    #[test]
+    fn empty_boot_time_name_cancels_but_keeps_suppression() {
+        let mut app = App::new();
+        let tmux = "cchub-w-cancel";
+        app.pending_spawn_names.insert(tmux.into(), None);
+        app.rename_target = Some(spawning_session_id(tmux));
+        app.rename_buffer = "   ".into();
+        app.view = View::RenameSession;
+
+        assert_eq!(app.submit_session_rename(), RenameSubmit::Cancelled);
+        assert_eq!(app.pending_spawn_names.get(tmux), Some(&None));
+    }
+
+    // Renaming a real (non-placeholder) session is unchanged: persist by its
+    // own id, apply in-memory.
+    #[test]
+    fn renaming_a_real_session_persists_by_its_own_id() {
+        let mut app = App::new();
+        app.rename_target = Some("real-sid".into());
+        app.rename_buffer = "my title".into();
+        app.view = View::RenameSession;
+
+        assert_eq!(
+            app.submit_session_rename(),
+            RenameSubmit::Persist {
+                sid: "real-sid".into(),
+                title: "my title".into()
+            }
+        );
+    }
+
+    // The boot placeholder opens its rename with an empty buffer, not the
+    // synthetic "starting…" label.
+    #[test]
+    fn enter_rename_on_a_boot_placeholder_starts_empty() {
+        let mut app = App::new();
+        app.watch_spawn("cchub-w-ph".into(), "claude".into(), "/tmp".into());
+        // Idempotent whether or not watch_spawn already auto-opened it.
+        assert!(app.enter_rename_session());
+        assert_eq!(app.rename_buffer, "");
     }
 
     #[test]

@@ -13,7 +13,7 @@
 //! character editing) stay as thin `bin` arms — only their submit/logic arms
 //! became commands.
 
-use super::{App, SessionsLayout, Tab};
+use super::{App, RenameSubmit, SessionsLayout, Tab};
 use crate::agent::AgentKind;
 use crate::orchestrator::TaskPriority;
 use crate::{models, spawn, title};
@@ -334,14 +334,21 @@ impl App {
             }
             SubmitRename => {
                 match self.submit_session_rename() {
-                    Some((sid, title_text)) => match title::persist_title(&sid, &title_text) {
-                        Ok(()) => self.set_status(format!("renamed to “{}”", title_text)),
-                        Err(e) => {
-                            log::warn!("rename: persist failed for {}: {}", sid, e);
-                            self.set_status(format!("rename failed: {}", e));
+                    RenameSubmit::Persist { sid, title } => {
+                        match title::persist_title(&sid, &title) {
+                            Ok(()) => self.set_status(format!("renamed to “{}”", title)),
+                            Err(e) => {
+                                log::warn!("rename: persist failed for {}: {}", sid, e);
+                                self.set_status(format!("rename failed: {}", e));
+                            }
                         }
-                    },
-                    None => self.set_status("rename cancelled — empty title".into()),
+                    }
+                    RenameSubmit::Deferred { title } => {
+                        self.set_status(format!("named “{}” — applies when the session loads", title))
+                    }
+                    RenameSubmit::Cancelled => {
+                        self.set_status("rename cancelled — empty title".into())
+                    }
                 }
                 Vec::new()
             }
