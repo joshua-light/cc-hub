@@ -117,11 +117,73 @@ fn build_session_info(
     })
 }
 
-fn scan_live_heartbeats(agents: &[AgentConfig]) -> Vec<SessionInfo> {
+/// Build a minimal [`SessionInfo`] from a heartbeat alone, for a live session
+/// whose transcript pi has not written to disk yet (a fresh idle session). The
+/// heartbeat carries everything the grid needs to show a stable card — id, cwd,
+/// tmux, model, state — so the transcript-derived fields are simply left empty
+/// until the file appears and [`build_session_info`] takes over on a later tick
+/// (the session id is identical, so the card does not jump).
+fn session_from_heartbeat(
+    hb: &crate::pi_bridge::Heartbeat,
+    agent_id: &str,
+    state: SessionState,
+) -> Option<SessionInfo> {
+    let session_id = hb.session_id.clone().or_else(|| {
+        hb.session_file
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+    })?;
+    Some(SessionInfo {
+        agent_id: agent_id.to_string(),
+        agent_kind: AgentKind::Pi,
+        pid: hb.pid,
+        session_id,
+        cwd: hb.cwd.clone(),
+        project_name: project_name(&hb.cwd),
+        started_at: 0,
+        last_activity: None,
+        state,
+        last_user_message: None,
+        summary: None,
+        title: None,
+        titling: false,
+        model: hb.model.clone(),
+        git_branch: None,
+        version: None,
+        jsonl_path: hb.session_file.clone(),
+        tmux_session: Some(hb.tmux.clone()),
+        current_tool: None,
+        is_thinking: false,
+        context_tokens: None,
+        tool_uses_count: 0,
+    })
+}
+
+/// Live Pi sessions from heartbeats, plus the full set of tmux names and
+/// session files every live heartbeat claims.
+///
+/// Multiple live `pi` processes can share one session file — each resume points
+/// a fresh process at the same `--session <file>`, and they all carry the same
+/// transcript-derived session id. We collapse them to one card, but the two
+/// returned claim-sets cover EVERY live heartbeat (dedup losers included) so the
+/// caller can stop [`scan_external_live_sessions`] from re-pairing a collapsed
+/// duplicate to an unrelated transcript and flickering it into the grid.
+fn scan_live_heartbeats(
+    agents: &[AgentConfig],
+) -> (Vec<SessionInfo>, HashSet<String>, HashSet<PathBuf>) {
+    let mut claimed_tmux: HashSet<String> = HashSet::new();
+    let mut claimed_paths: HashSet<PathBuf> = HashSet::new();
     let Some(default_agent) = default_pi_agent(agents) else {
-        return Vec::new();
+        return (Vec::new(), claimed_tmux, claimed_paths);
     };
-    let mut latest: HashMap<String, (u64, SessionInfo)> = HashMap::new();
+    // Dedup by highest pid, NOT by newest `updatedAt`: when several live
+    // processes shared a session id, the timestamp winner flipped every tick
+    // and the surviving card's pid/tmux churned. A pid is stable for a
+    // process's lifetime, and dead pids are already filtered out below, so the
+    // highest live pid is a deterministic, non-oscillating choice.
+    let mut best: HashMap<String, (u32, SessionInfo)> = HashMap::new();
     for hb in load_heartbeats() {
         if hb.agent.is_empty() {
             continue;
@@ -129,9 +191,18 @@ fn scan_live_heartbeats(agents: &[AgentConfig]) -> Vec<SessionInfo> {
         if !process::is_agent_process(AgentKind::Pi, hb.pid) {
             continue;
         }
-        let Some(path) = hb.session_file.clone().filter(|p| p.exists()) else {
-            continue;
-        };
+        // A live heartbeat is itself proof of a live session — pi does not
+        // flush a transcript until the first turn, so a brand-new idle session
+        // has a heartbeat but no file on disk yet. Claim the tmux (and the
+        // transcript path, present or not) up front regardless: without this,
+        // the external-process scan re-pairs this very process to some
+        // unrelated old transcript in the same cwd, and the card blinks between
+        // the two. This claim also covers per-session dedup losers.
+        claimed_tmux.insert(hb.tmux.clone());
+        let existing = hb.session_file.clone().filter(|p| p.exists());
+        if let Some(path) = hb.session_file.clone() {
+            claimed_paths.insert(path);
+        }
         let state = match hb.state {
             HeartbeatState::Idle => SessionState::Idle,
             HeartbeatState::Processing => SessionState::Processing,
@@ -141,25 +212,32 @@ fn scan_live_heartbeats(agents: &[AgentConfig]) -> Vec<SessionInfo> {
         } else {
             hb.agent.clone()
         };
-        let Some(info) = build_session_info(
-            agent_id,
-            hb.pid,
-            Some(hb.tmux.clone()),
-            state,
-            path,
-            hb.model.clone(),
-        ) else {
+        // Prefer the richer transcript-derived card; fall back to a minimal
+        // card built from the heartbeat alone while the transcript is missing.
+        let info = existing
+            .and_then(|path| {
+                build_session_info(
+                    agent_id.clone(),
+                    hb.pid,
+                    Some(hb.tmux.clone()),
+                    state.clone(),
+                    path,
+                    hb.model.clone(),
+                )
+            })
+            .or_else(|| session_from_heartbeat(&hb, &agent_id, state));
+        let Some(info) = info else {
             continue;
         };
-        let ts = hb.updated_at;
-        match latest.get(&info.session_id) {
-            Some((prev, _)) if *prev >= ts => {}
+        match best.get(&info.session_id) {
+            Some((prev_pid, _)) if *prev_pid >= hb.pid => {}
             _ => {
-                latest.insert(info.session_id.clone(), (ts, info));
+                best.insert(info.session_id.clone(), (hb.pid, info));
             }
         }
     }
-    latest.into_values().map(|(_, info)| info).collect()
+    let sessions = best.into_values().map(|(_, info)| info).collect();
+    (sessions, claimed_tmux, claimed_paths)
 }
 
 fn scan_external_live_sessions(
@@ -319,24 +397,22 @@ fn scan_inactive_sessions(
 }
 
 pub fn scan(agents: &[AgentConfig], titles: &HashMap<String, String>) -> Vec<SessionInfo> {
-    let mut sessions = scan_live_heartbeats(agents);
-    let claimed_paths: HashSet<PathBuf> = sessions
-        .iter()
-        .filter_map(|s| s.jsonl_path.clone())
-        .collect();
-    let claimed_tmux: HashSet<String> = sessions
-        .iter()
-        .filter_map(|s| s.tmux_session.clone())
-        .collect();
-    sessions.extend(scan_external_live_sessions(
-        agents,
-        &claimed_paths,
-        &claimed_tmux,
-    ));
-    let claimed_paths: HashSet<PathBuf> = sessions
-        .iter()
-        .filter_map(|s| s.jsonl_path.clone())
-        .collect();
+    // `claimed_*` come pre-seeded with every live heartbeat's tmux + transcript
+    // (dedup losers included), then accumulate through each phase so a later
+    // phase never re-surfaces a session an earlier one already owns.
+    let (mut sessions, claimed_tmux, mut claimed_paths) = scan_live_heartbeats(agents);
+    for s in &sessions {
+        if let Some(path) = &s.jsonl_path {
+            claimed_paths.insert(path.clone());
+        }
+    }
+    let external = scan_external_live_sessions(agents, &claimed_paths, &claimed_tmux);
+    for s in &external {
+        if let Some(path) = &s.jsonl_path {
+            claimed_paths.insert(path.clone());
+        }
+    }
+    sessions.extend(external);
     sessions.extend(scan_inactive_sessions(agents, &claimed_paths));
 
     for session in sessions.iter_mut() {
@@ -474,6 +550,39 @@ mod tests {
             None => std::env::remove_var("HOME"),
         }
         out
+    }
+
+    #[test]
+    fn session_from_heartbeat_builds_card_without_transcript_on_disk() {
+        // A fresh idle pi session: the heartbeat exists but pi hasn't flushed a
+        // transcript yet. The card must still be built, straight from the
+        // heartbeat, so the session shows instead of being dropped (and then
+        // mis-paired to an old transcript by the external scan → flicker).
+        let hb = crate::pi_bridge::Heartbeat {
+            agent: "codex".into(),
+            pid: 4242,
+            tmux: "cchub-1-2".into(),
+            cwd: "/tmp/proj".into(),
+            session_file: Some(PathBuf::from("/does/not/exist/019f9356.jsonl")),
+            session_id: Some("019f9356".into()),
+            state: HeartbeatState::Idle,
+            model: Some("openai-codex/gpt-5.6-luna".into()),
+            updated_at: 1,
+        };
+        let info = session_from_heartbeat(&hb, "codex", SessionState::Idle)
+            .expect("card built from heartbeat");
+        assert_eq!(info.session_id, "019f9356");
+        assert_eq!(info.cwd, "/tmp/proj");
+        assert_eq!(info.agent_kind, AgentKind::Pi);
+        assert_eq!(info.tmux_session.as_deref(), Some("cchub-1-2"));
+        assert_eq!(info.model.as_deref(), Some("openai-codex/gpt-5.6-luna"));
+        assert_eq!(info.state, SessionState::Idle);
+        // The (not-yet-existing) transcript path is retained so a later tick
+        // can upgrade to the transcript-derived card and resume can target it.
+        assert_eq!(
+            info.jsonl_path,
+            Some(PathBuf::from("/does/not/exist/019f9356.jsonl"))
+        );
     }
 
     #[test]

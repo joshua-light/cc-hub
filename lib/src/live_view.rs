@@ -138,6 +138,7 @@ fn extract_messages(
     match agent_kind {
         AgentKind::Claude => conversation::extract_messages(entries, count),
         AgentKind::Pi => pi_conversation::extract_messages(entries, count),
+        AgentKind::Codex => crate::codex_conversation::extract_messages(entries, count),
     }
 }
 

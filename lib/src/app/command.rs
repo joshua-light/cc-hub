@@ -15,6 +15,7 @@
 
 use super::{App, RenameSubmit, SessionsLayout, Tab};
 use crate::agent::AgentKind;
+use crate::config;
 use crate::orchestrator::TaskPriority;
 use crate::{models, spawn, title};
 
@@ -66,6 +67,8 @@ pub enum SessionsCommand {
     SpawnAgentHere,
     /// `N` — model picker for a new session in the selected session's cwd.
     OpenModelPicker,
+    /// `A` — choose the default agent used by subsequent new sessions.
+    OpenAgentPicker,
     /// `p` — places picker.
     OpenPlacesPicker,
     /// `M` — bookmarks picker.
@@ -301,6 +304,10 @@ impl App {
                 self.enter_model_picker();
                 Vec::new()
             }
+            OpenAgentPicker => {
+                self.enter_agent_picker();
+                Vec::new()
+            }
             OpenPlacesPicker => {
                 self.enter_session_places_picker();
                 Vec::new()
@@ -343,9 +350,10 @@ impl App {
                             }
                         }
                     }
-                    RenameSubmit::Deferred { title } => {
-                        self.set_status(format!("named “{}” — applies when the session loads", title))
-                    }
+                    RenameSubmit::Deferred { title } => self.set_status(format!(
+                        "named “{}” — applies when the session loads",
+                        title
+                    )),
                     RenameSubmit::Cancelled => {
                         self.set_status("rename cancelled — empty title".into())
                     }
@@ -362,8 +370,38 @@ impl App {
             return Vec::new();
         };
         if session.state == models::SessionState::Inactive {
+            // Guard against duplicate live processes on one transcript. Pi
+            // sessions resume by file (`pi --session <file>`), so a second
+            // spawn puts two live `pi` processes on the SAME JSONL — they share
+            // the transcript-derived session id, collapse into one flickering
+            // card, and the loser gets mis-paired to an unrelated transcript by
+            // the external-process scan. If a live session already owns this
+            // transcript, attach to its pane instead of spawning a duplicate.
+            // (Claude forks a fresh session id per resume, so it never collides
+            // this way — but keying on the transcript path is correct for both.)
+            if let Some(path) = session.jsonl_path.as_ref() {
+                if let Some(tmux) = self
+                    .sessions
+                    .last_sessions
+                    .iter()
+                    .find(|s| {
+                        s.state != models::SessionState::Inactive
+                            && s.jsonl_path.as_ref() == Some(path)
+                    })
+                    .and_then(|s| s.tmux_session.clone())
+                {
+                    self.set_status(format!(
+                        "attached live {} [{}]",
+                        models::short_sid(&session.session_id),
+                        tmux
+                    ));
+                    return vec![Effect::OpenTmuxPane { tmux, owned: false }];
+                }
+            }
             let resume = match session.agent_kind {
-                AgentKind::Claude => {
+                // Claude and Codex both resume by session id (`codex resume
+                // <uuid>`); Pi resumes by transcript file path.
+                AgentKind::Claude | AgentKind::Codex => {
                     Some(spawn::ResumeTarget::SessionId(session.session_id.clone()))
                 }
                 AgentKind::Pi => session
@@ -401,24 +439,28 @@ impl App {
         }
     }
 
-    /// `n`: fresh agent session in the selected session's cwd, with the
-    /// spawn watchdog armed.
+    /// `n`: fresh session using the current default agent in the selected
+    /// session's cwd, with the spawn watchdog armed.
     fn spawn_agent_here(&mut self) {
         let Some(sess) = self.selected_session_info().cloned() else {
             return;
         };
-        let status =
-            match self
-                .runtime
-                .spawn_session(&sess.agent_id, &sess.cwd, None, None, None, false)
-            {
-                Ok(name) => {
-                    let status = format!("started {} [{}]", sess.agent_badge(), name);
-                    self.watch_spawn(name, sess.agent_id.clone(), sess.cwd.clone());
-                    status
-                }
-                Err(e) => format!("spawn failed: {}", e),
-            };
+        let agent_id = self.default_session_agent_id.clone();
+        let status = match self
+            .runtime
+            .spawn_session(&agent_id, &sess.cwd, None, None, None, false)
+        {
+            Ok(name) => {
+                let label = config::get()
+                    .agent(&agent_id)
+                    .map(|agent| agent.display_label())
+                    .unwrap_or_else(|| agent_id.clone());
+                let status = format!("started {} [{}]", label, name);
+                self.watch_spawn(name, agent_id, sess.cwd.clone());
+                status
+            }
+            Err(e) => format!("spawn failed: {}", e),
+        };
         self.set_status(status);
     }
 
@@ -771,6 +813,59 @@ mod tests {
     }
 
     #[test]
+    fn focus_inactive_pi_attaches_to_live_sibling_sharing_transcript() {
+        crate::test_util::with_temp_home(|| {
+            // A live pi pane and a stale "inactive" card both point at the SAME
+            // transcript — the shape that made codex/pi sessions flicker. Two
+            // `pi --session <file>` processes would write one JSONL and collapse
+            // into a single churning card. Focusing the dead card must attach to
+            // the live pane, never spawn a duplicate.
+            let shared = std::path::PathBuf::from("/x/shared.jsonl");
+            let mut live = session("sid-live", SessionState::Processing, Some("cc-pi-live"));
+            live.agent_kind = AgentKind::Pi;
+            live.jsonl_path = Some(shared.clone());
+            let mut dead = session("sid-dead", SessionState::Inactive, None);
+            dead.agent_kind = AgentKind::Pi;
+            dead.jsonl_path = Some(shared.clone());
+
+            let (mut app, runtime) = app_with(vec![live, dead]);
+            // Park the cursor on the inactive card regardless of grid ordering.
+            let (g, i) = app
+                .sessions
+                .groups
+                .iter()
+                .enumerate()
+                .find_map(|(gi, grp)| {
+                    grp.sessions
+                        .iter()
+                        .position(|s| s.session_id == "sid-dead")
+                        .map(|si| (gi, si))
+                })
+                .expect("inactive card present");
+            app.sessions.sel_group = g;
+            app.sessions.sel_in_group = i;
+
+            let effects = app.execute(Command::Sessions(SessionsCommand::FocusSelected));
+            assert_eq!(
+                effects,
+                vec![Effect::OpenTmuxPane {
+                    tmux: "cc-pi-live".into(),
+                    owned: false
+                }]
+            );
+            assert!(
+                runtime.spawns.lock().unwrap().is_empty(),
+                "must not spawn a duplicate pi process on the shared transcript"
+            );
+            assert!(
+                status(&app).starts_with("attached live"),
+                "got: {}",
+                status(&app)
+            );
+        });
+    }
+
+    #[test]
     fn focus_live_tmux_session_opens_pane() {
         crate::test_util::with_temp_home(|| {
             let (mut app, _rt) = app_with(vec![session(
@@ -1093,6 +1188,45 @@ mod tests {
             assert_eq!(spawns[0].resume, None);
             assert_eq!(spawns[0].initial_prompt, None);
             assert!(status(&app).starts_with("started"), "got: {}", status(&app));
+        });
+    }
+
+    #[test]
+    fn selected_default_agent_drives_subsequent_new_sessions() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, runtime) = app_with(vec![session("sid-1", SessionState::Idle, None)]);
+            app.agent_picker = Some(crate::app::AgentPickerState::new(
+                "claude",
+                vec![
+                    crate::agent::AgentConfig {
+                        id: "claude".into(),
+                        kind: AgentKind::Claude,
+                        command: "claude".into(),
+                        use_bridge: false,
+                        models: Vec::new(),
+                    },
+                    crate::agent::AgentConfig {
+                        id: "pi-codex".into(),
+                        kind: AgentKind::Pi,
+                        command: "pi".into(),
+                        use_bridge: true,
+                        models: Vec::new(),
+                    },
+                ],
+            ));
+            app.view = crate::app::View::AgentPicker;
+            app.agent_picker_move(1);
+            app.confirm_default_session_agent();
+
+            assert_eq!(app.default_session_agent_id(), "pi-codex");
+            assert_eq!(app.view, crate::app::View::Grid);
+            assert!(app.agent_picker.is_none());
+
+            app.execute(Command::Sessions(SessionsCommand::SpawnAgentHere));
+            let spawns = runtime.spawns.lock().unwrap();
+            assert_eq!(spawns.len(), 1);
+            assert_eq!(spawns[0].agent_id, "pi-codex");
+            assert_eq!(spawns[0].cwd, "/tmp/proj");
         });
     }
 

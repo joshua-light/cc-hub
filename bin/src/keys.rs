@@ -80,6 +80,7 @@ fn map_sessions_command(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<
         (View::Grid, KeyCode::Char(' ')) if on_sessions => Command::Sessions(S::AckSelected),
         (View::Grid, KeyCode::Char('n')) if on_sessions => Command::Sessions(S::SpawnAgentHere),
         (View::Grid, KeyCode::Char('N')) if on_sessions => Command::Sessions(S::OpenModelPicker),
+        (View::Grid, KeyCode::Char('A')) if on_sessions => Command::Sessions(S::OpenAgentPicker),
         (View::Grid, KeyCode::Char('M')) if on_sessions => {
             Command::Sessions(S::OpenBookmarksPicker)
         }
@@ -420,6 +421,7 @@ pub(crate) async fn handle_key(
                     let session_store = match task.orchestrator_agent_kind {
                         cc_hub_lib::agent::AgentKind::Claude => "~/.claude/projects/",
                         cc_hub_lib::agent::AgentKind::Pi => "~/.pi/agent/sessions/",
+                        cc_hub_lib::agent::AgentKind::Codex => "~/.codex/sessions/",
                     };
                     let detail = match task.orchestrator_session_id.as_deref() {
                         Some(sid) => format!(
@@ -886,6 +888,13 @@ pub(crate) async fn handle_key(
                     picker.push_filter(c);
                 }
             }
+            _ => {}
+        },
+        (View::AgentPicker, code) => match code {
+            KeyCode::Esc => app.close_agent_picker(),
+            KeyCode::Enter | KeyCode::Char(' ') => app.confirm_default_session_agent(),
+            KeyCode::Down | KeyCode::Char('j') => app.agent_picker_move(1),
+            KeyCode::Up | KeyCode::Char('k') => app.agent_picker_move(-1),
             _ => {}
         },
         // Same interaction model as the model picker: printable keys belong

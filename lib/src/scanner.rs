@@ -1,4 +1,5 @@
 use crate::agent::AgentKind;
+use crate::codex_scanner;
 use crate::config;
 use crate::conversation;
 use crate::models::{short_sid, RawSession, SessionDetail, SessionInfo, SessionState};
@@ -1076,6 +1077,14 @@ pub fn find_orchestrator_session(
                 session_id: sid,
                 resume: ResumeTarget::SessionFile(path),
             }),
+        AgentKind::Codex => {
+            codex_scanner::find_orchestrator_session(project_root, task_id, stored_sid).map(|sid| {
+                ResumableSession {
+                    session_id: sid.clone(),
+                    resume: ResumeTarget::SessionId(sid),
+                }
+            })
+        }
     }
 }
 
@@ -1096,6 +1105,14 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
             .collect();
         sessions.extend(pi_scanner::scan(&pi_agents, &titles));
     }
+    if enabled.contains(&AgentKind::Codex) {
+        let codex_agents: Vec<_> = config::get()
+            .resolved_agents()
+            .into_values()
+            .filter(|a| a.kind == AgentKind::Codex)
+            .collect();
+        sessions.extend(codex_scanner::scan(&codex_agents, &titles));
+    }
 
     // The tool-use count cache is shared across Claude and Pi transcripts, so
     // evict it here — after both scans — with every live path this tick.
@@ -1112,6 +1129,25 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
     sessions
 }
 
+/// True if `pid` is still a live process of `kind`. The liveness rule is
+/// per-backend: `is_pid_alive` is Claude-specific (executable path, real
+/// parent), so applying it to a Pi session wrongly declares every live `pi`
+/// process dead. Pi only needs "alive and still a pi process" — pi children
+/// legitimately reparent to init, so the has-real-parent orphan rule must not
+/// apply.
+fn session_pid_alive(kind: AgentKind, pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    match kind {
+        AgentKind::Claude => is_pid_alive(pid),
+        // Pi and Codex both need only "alive and still that agent's process" —
+        // the Claude has-real-parent orphan rule must not apply (their children
+        // legitimately reparent to init).
+        AgentKind::Pi | AgentKind::Codex => crate::platform::process::is_agent_process(kind, pid),
+    }
+}
+
 /// Cheap fallback between full filesystem reconciliations. File watchers drive
 /// transcript/state updates; this pass only catches processes that exited
 /// without writing another event, avoiding directory walks and tmux snapshots
@@ -1119,7 +1155,9 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
 pub fn refresh_process_liveness(sessions: &mut [SessionInfo]) -> bool {
     let mut changed = false;
     for session in sessions {
-        if session.state != SessionState::Inactive && !is_pid_alive(session.pid) {
+        if session.state != SessionState::Inactive
+            && !session_pid_alive(session.agent_kind, session.pid)
+        {
             session.state = SessionState::Inactive;
             session.tmux_session = None;
             changed = true;
@@ -1145,6 +1183,7 @@ pub fn load_detail(session_id: &str, sessions: &[SessionInfo]) -> Option<Session
             })
         }
         AgentKind::Pi => pi_scanner::load_detail(info),
+        AgentKind::Codex => codex_scanner::load_detail(info),
     }
 }
 
@@ -1169,6 +1208,7 @@ pub fn load_state_explanation(
             ))
         }
         AgentKind::Pi => pi_scanner::load_state_explanation(info),
+        AgentKind::Codex => codex_scanner::load_state_explanation(info),
     }
 }
 
@@ -1226,6 +1266,42 @@ mod tests {
             context_tokens: None,
             tool_uses_count: 0,
         }
+    }
+
+    // The fallback liveness pass judges each session by its own backend's
+    // rule. The flicker regression was `refresh_process_liveness` running the
+    // Claude-specific `is_pid_alive` over Pi sessions: a live `pi` process
+    // isn't a `claude` binary, so every fallback tick flipped it to Inactive
+    // and cleared its tmux (the next full scan restored it → blink). This locks
+    // the routing helper: pid 0 is the no-process sentinel for both, and a Pi
+    // session is decided by the Pi detector, never the Claude one.
+    #[test]
+    fn session_pid_alive_routes_by_backend() {
+        assert!(!session_pid_alive(AgentKind::Pi, 0));
+        assert!(!session_pid_alive(AgentKind::Claude, 0));
+        // The test process is a real, live pid that is neither `claude` nor
+        // `pi`. Both branches must therefore report it dead — proving each
+        // consults its own detector rather than blindly trusting kill(0).
+        let live_pid = std::process::id();
+        assert!(crate::platform::process::Process::is_alive(live_pid));
+        assert!(!session_pid_alive(AgentKind::Claude, live_pid));
+        assert!(!session_pid_alive(AgentKind::Pi, live_pid));
+    }
+
+    // A live Pi session must not be reaped by the fallback pass. We can't
+    // fabricate a real `pi` process in a unit test, so drive the reaping branch
+    // instead: a Pi session with the no-process sentinel pid is flipped to
+    // Inactive and its tmux cleared, exactly as a genuinely-dead one would be.
+    #[test]
+    fn refresh_liveness_reaps_dead_pi_session() {
+        let mut dead = session("pi-dead", 0, SessionState::Idle);
+        dead.agent_kind = AgentKind::Pi;
+        dead.pid = 0;
+        dead.tmux_session = Some("mux".into());
+        let mut list = [dead];
+        assert!(refresh_process_liveness(&mut list));
+        assert_eq!(list[0].state, SessionState::Inactive);
+        assert_eq!(list[0].tmux_session, None);
     }
 
     #[test]

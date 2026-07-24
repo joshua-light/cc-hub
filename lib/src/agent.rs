@@ -6,6 +6,11 @@ use std::fmt;
 pub enum AgentKind {
     Claude,
     Pi,
+    /// OpenAI's `codex` CLI. Like Claude it writes its own rollout transcript
+    /// to disk (`~/.codex/sessions/…`), so discovery is transcript-based; but
+    /// it has no live status file, so liveness comes from a process scan (see
+    /// [`crate::codex_scanner`]).
+    Codex,
 }
 
 impl AgentKind {
@@ -13,11 +18,13 @@ impl AgentKind {
         match self {
             AgentKind::Claude => "Claude",
             AgentKind::Pi => "Pi",
+            AgentKind::Codex => "Codex",
         }
     }
 
     pub fn supports_initial_prompt(self) -> bool {
-        matches!(self, AgentKind::Pi)
+        // Codex takes a positional `[PROMPT]`; Pi takes a trailing prompt arg.
+        matches!(self, AgentKind::Pi | AgentKind::Codex)
     }
 }
 
@@ -69,6 +76,13 @@ impl AgentConfig {
         }
         if self.id == "pi" {
             return "Pi".into();
+        }
+        if self.kind == AgentKind::Codex {
+            return if self.id == "codex" {
+                "Codex".into()
+            } else {
+                self.id.replace('-', " ")
+            };
         }
 
         let lower = self.id.to_ascii_lowercase();

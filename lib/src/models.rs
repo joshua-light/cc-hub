@@ -171,6 +171,13 @@ impl SessionInfo {
         if self.agent_id == "pi" {
             return "Pi".into();
         }
+        if self.agent_kind == AgentKind::Codex {
+            return if self.agent_id == "codex" {
+                "Codex".into()
+            } else {
+                self.agent_id.replace('-', " ")
+            };
+        }
         let lower = self.agent_id.to_ascii_lowercase();
         if self.agent_kind == AgentKind::Pi && lower.contains("codex") {
             return "Pi/Codex".into();

@@ -406,7 +406,7 @@ pub(crate) fn dispatch_picked_cwd(app: &mut App, cwd: &str) {
         app.enter_project_task_prompt(cwd.to_string());
     } else {
         app.close_folder_picker();
-        let agent_id = config::get().default_session_agent_id();
+        let agent_id = app.default_session_agent_id().to_string();
         let status = match spawn::spawn_agent_session(&agent_id, cwd, None, None, None, false) {
             Ok(name) => {
                 let status = format!("started {} [{}]", agent_id, name);

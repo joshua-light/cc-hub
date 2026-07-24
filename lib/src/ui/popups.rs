@@ -587,6 +587,67 @@ pub(crate) fn render_model_picker(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), list_area);
 }
 
+/// `A` on the Sessions tab: choose the coding agent used by later
+/// new-session actions.
+pub(crate) fn render_agent_picker(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(picker) = app.agent_picker.as_ref() else {
+        return;
+    };
+
+    let desired_w = 64u16.min(area.width);
+    let desired_h = (picker.agents.len().max(4) as u16 + 2).min(area.height);
+    let popup = centered_fixed(area, desired_w, desired_h);
+    frame.render_widget(Clear, popup);
+
+    let block = popup_block(Span::styled(
+        " Default agent for new sessions ",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .title_bottom(Span::styled(
+        " j/k:move · enter/space:select · esc:cancel ",
+        Style::default().fg(DIM_TEXT),
+    ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let label_width = picker
+        .agents
+        .iter()
+        .map(|agent| agent.display_label().chars().count())
+        .max()
+        .unwrap_or(0);
+    let lines: Vec<Line<'static>> = picker
+        .agents
+        .iter()
+        .enumerate()
+        .map(|(i, agent)| {
+            let selected = i == picker.selected;
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            let label = agent.display_label();
+            Line::from(Span::styled(
+                format!(
+                    "{} {}  {}{}",
+                    if selected { "▶" } else { " " },
+                    label,
+                    " ".repeat(label_width.saturating_sub(label.chars().count())),
+                    agent.id
+                ),
+                style,
+            ))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 /// `L` on the Sessions tab: fuzzy-filter which task the selected session is
 /// linked to. Same chrome and interaction as the model picker; the footer
 /// names the session being linked.

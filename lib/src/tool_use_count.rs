@@ -7,7 +7,7 @@
 //! immediately; if it grew, we seek to the old size and only count the
 //! suffix; if it shrank (rewrite), we recount from scratch.
 
-use crate::{conversation, pi_conversation};
+use crate::{codex_conversation, conversation, pi_conversation};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -30,6 +30,7 @@ struct Cached {
 enum Kind {
     Claude,
     Pi,
+    Codex,
 }
 
 fn cache() -> &'static Mutex<HashMap<PathBuf, Cached>> {
@@ -57,6 +58,13 @@ pub fn count_claude(path: &Path) -> u64 {
 /// the file is missing or unreadable.
 pub fn count_pi(path: &Path) -> u64 {
     count_with_kind(path, Kind::Pi)
+}
+
+/// Cumulative tool-call count for a Codex rollout transcript (its
+/// `function_call` and `custom_tool_call` response items). Returns 0 when the
+/// file is missing or unreadable.
+pub fn count_codex(path: &Path) -> u64 {
+    count_with_kind(path, Kind::Codex)
 }
 
 fn count_with_kind(path: &Path, kind: Kind) -> u64 {
@@ -132,6 +140,7 @@ fn count_from(path: &Path, start: u64, kind: Kind) -> Option<(u64, u64)> {
             let line_count = match kind {
                 Kind::Claude => conversation::count_tool_uses_in_reader(buf.as_bytes()),
                 Kind::Pi => pi_conversation::count_tool_uses_in_reader(buf.as_bytes()),
+                Kind::Codex => codex_conversation::count_tool_uses_in_reader(buf.as_bytes()),
             };
             count = count.saturating_add(line_count as u64);
             clean_offset = start + consumed;

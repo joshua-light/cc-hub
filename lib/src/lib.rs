@@ -5,6 +5,8 @@ pub mod app;
 pub mod auto_review;
 pub mod bookmarks;
 pub mod clipboard;
+pub mod codex_conversation;
+pub mod codex_scanner;
 pub mod config;
 pub mod conversation;
 pub mod dir_cache;

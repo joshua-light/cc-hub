@@ -181,6 +181,37 @@ fn build_agent_command(
                 );
             }
         }
+        AgentKind::Codex => {
+            // Codex's CLI shape differs from Claude/Pi: `-m`/`-c` are top-level
+            // options that precede the (optional) `resume <uuid>` subcommand,
+            // and a resumed session restores its own model — so `-m` applies to
+            // fresh sessions only. Any fixed flags (e.g. reasoning effort) live
+            // in `agent.command` from config and are already in `cmd`.
+            match resume {
+                Some(ResumeTarget::SessionId(sid)) => {
+                    cmd.push_str(" resume ");
+                    cmd.push_str(&shell_quote(&sid));
+                }
+                Some(ResumeTarget::SessionFile(path)) => {
+                    return Err(io::Error::other(format!(
+                        "codex backend resumes by session id, not file: {}",
+                        path.display()
+                    )));
+                }
+                None => {
+                    if let Some(model) = model {
+                        cmd.push_str(" -m ");
+                        cmd.push_str(&shell_quote(model));
+                    }
+                }
+            }
+            // Codex takes the initial prompt as a positional `[PROMPT]`, valid
+            // both bare and after `resume <uuid>`.
+            if let Some(prompt) = initial_prompt {
+                cmd.push(' ');
+                cmd.push_str(&shell_quote(prompt));
+            }
+        }
     }
 
     let _ = cwd;
@@ -418,6 +449,77 @@ mod tests {
         )
         .unwrap();
         assert!(cmd.contains("--model 'gpt-5.6'"), "got: {}", cmd);
+    }
+
+    #[test]
+    fn codex_new_session_carries_model_before_prompt() {
+        let agent = AgentConfig {
+            id: "codex".into(),
+            kind: AgentKind::Codex,
+            // Fixed flags (reasoning effort) come from config's command string.
+            command: "codex -c model_reasoning_effort=high".into(),
+            use_bridge: false,
+            models: Vec::new(),
+        };
+        let cmd = build_agent_command(
+            &agent,
+            "/tmp",
+            "cchub-1-2",
+            None,
+            Some("do the thing"),
+            Some("gpt-5.6-luna"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            cmd,
+            "codex -c model_reasoning_effort=high -m 'gpt-5.6-luna' 'do the thing'"
+        );
+    }
+
+    #[test]
+    fn codex_resume_uses_session_id_subcommand_not_model() {
+        let agent = AgentConfig {
+            id: "codex".into(),
+            kind: AgentKind::Codex,
+            command: "codex".into(),
+            use_bridge: false,
+            models: Vec::new(),
+        };
+        // A resumed session restores its own model, so `-m` must NOT be added.
+        let cmd = build_agent_command(
+            &agent,
+            "/tmp",
+            "cchub-1-2",
+            Some(super::ResumeTarget::SessionId("019f60ca-uuid".into())),
+            None,
+            Some("gpt-5.6-luna"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(cmd, "codex resume '019f60ca-uuid'");
+    }
+
+    #[test]
+    fn codex_cannot_resume_by_file() {
+        let agent = AgentConfig {
+            id: "codex".into(),
+            kind: AgentKind::Codex,
+            command: "codex".into(),
+            use_bridge: false,
+            models: Vec::new(),
+        };
+        let err = build_agent_command(
+            &agent,
+            "/tmp",
+            "cchub-1-2",
+            Some(super::ResumeTarget::SessionFile("/x/s.jsonl".into())),
+            None,
+            None,
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("resumes by session id"));
     }
 
     // The real failure this was built for: a pane blocked at oh-my-zsh's

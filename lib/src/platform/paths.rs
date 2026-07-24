@@ -93,6 +93,19 @@ pub fn pi_sessions_dir() -> Option<PathBuf> {
     pi_home().map(|h| h.join("sessions"))
 }
 
+/// Codex CLI's user data directory (`~/.codex`). None when home is
+/// unresolvable.
+pub fn codex_home() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".codex"))
+}
+
+/// Codex rollout transcripts live under `~/.codex/sessions/YYYY/MM/DD/` as
+/// `rollout-<ts>-<uuid>.jsonl` — one file per session, nested three levels
+/// deep by date (unlike Pi's flat per-project layout).
+pub fn codex_sessions_dir() -> Option<PathBuf> {
+    codex_home().map(|h| h.join("sessions"))
+}
+
 pub fn pi_bridge_file() -> Option<PathBuf> {
     cc_hub_home().map(|h| h.join("pi-bridge.ts"))
 }

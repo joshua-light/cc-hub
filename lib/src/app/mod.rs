@@ -194,6 +194,9 @@ pub enum View {
     /// Model list for `N` on the Sessions tab: pick which Claude model the
     /// new session starts with.
     ModelPicker,
+    /// Coding-agent picker for `A` on the Sessions tab. The selected agent
+    /// becomes the default for subsequent new-session actions in this run.
+    AgentPicker,
     /// Fuzzy task selector for `L` on the Sessions tab: link (or unlink)
     /// the selected session to a personal-board or project task so the grid
     /// groups it under `project ▸ task`.
@@ -380,6 +383,34 @@ pub struct ModelPickerChoice {
     pub label: String,
     pub detail: String,
     pub model_id: Option<String>,
+}
+
+/// State behind [`View::AgentPicker`]. Agent ids are sorted so the picker is
+/// stable regardless of TOML map iteration order.
+#[derive(Clone, Debug)]
+pub struct AgentPickerState {
+    pub agents: Vec<AgentConfig>,
+    pub selected: usize,
+}
+
+impl AgentPickerState {
+    pub(crate) fn new(default_agent_id: &str, mut agents: Vec<AgentConfig>) -> Self {
+        agents.sort_by(|a, b| a.id.cmp(&b.id));
+        let selected = agents
+            .iter()
+            .position(|agent| agent.id == default_agent_id)
+            .unwrap_or(0);
+        Self { agents, selected }
+    }
+
+    pub fn move_selection(&mut self, delta: isize) {
+        let last = self.agents.len().saturating_sub(1);
+        self.selected = self.selected.saturating_add_signed(delta).min(last);
+    }
+
+    pub fn selected_agent(&self) -> Option<&AgentConfig> {
+        self.agents.get(self.selected)
+    }
 }
 
 impl ModelPickerState {
@@ -569,6 +600,10 @@ pub struct App {
     /// underneath the modal on a rescan.
     pub rename_target: Option<String>,
     pub model_picker: Option<ModelPickerState>,
+    pub agent_picker: Option<AgentPickerState>,
+    /// Agent used by Sessions-tab new-session actions. Seeded from
+    /// `[projects].default_session_agent`; `A` changes it for this run.
+    default_session_agent_id: String,
     /// State behind [`View::TaskLinkPicker`] (`L` on the Sessions tab).
     pub task_link_picker: Option<TaskLinkPickerState>,
     /// `session_id → TaskLink` sidecar snapshot driving the `project ▸ task`
@@ -752,6 +787,8 @@ impl App {
             rename_buffer: String::new(),
             rename_target: None,
             model_picker: None,
+            agent_picker: None,
+            default_session_agent_id: config::get().default_session_agent_id(),
             task_link_picker: None,
             session_task_links: crate::session_tasks::load(),
             tmux_pane: None,
@@ -2177,7 +2214,7 @@ impl App {
         };
         self.model_picker = Some(ModelPickerState::new(
             cwd,
-            config::get().default_session_agent_id(),
+            self.default_session_agent_id.clone(),
             config::get().resolved_agents().into_values().collect(),
         ));
         self.view = View::ModelPicker;
@@ -2186,6 +2223,47 @@ impl App {
     pub fn close_model_picker(&mut self) {
         self.model_picker = None;
         self.view = View::Grid;
+    }
+
+    /// `A` on the Sessions tab: choose the agent used by subsequent `n` and
+    /// folder-picker new-session spawns. This is deliberately runtime state;
+    /// the configured default remains the startup value.
+    pub fn enter_agent_picker(&mut self) {
+        let agents = config::get().resolved_agents().into_values().collect();
+        self.agent_picker = Some(AgentPickerState::new(
+            &self.default_session_agent_id,
+            agents,
+        ));
+        self.view = View::AgentPicker;
+    }
+
+    pub fn close_agent_picker(&mut self) {
+        self.agent_picker = None;
+        self.view = View::Grid;
+    }
+
+    pub fn agent_picker_move(&mut self, delta: isize) {
+        if let Some(picker) = self.agent_picker.as_mut() {
+            picker.move_selection(delta);
+        }
+    }
+
+    pub fn confirm_default_session_agent(&mut self) {
+        let selected = self
+            .agent_picker
+            .as_ref()
+            .and_then(AgentPickerState::selected_agent)
+            .map(|agent| (agent.id.clone(), agent.display_label()));
+        let Some((agent_id, label)) = selected else {
+            return;
+        };
+        self.default_session_agent_id = agent_id.clone();
+        self.close_agent_picker();
+        self.set_status(format!("new sessions will use {} [{}]", label, agent_id));
+    }
+
+    pub fn default_session_agent_id(&self) -> &str {
+        &self.default_session_agent_id
     }
 
     /// Move the model-picker highlight by `delta` rows, clamped to the live
