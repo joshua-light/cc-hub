@@ -46,7 +46,14 @@ pub fn focus_window(pid: u32) -> FocusOutcome {
         FocusOutcome::Focused
     } else {
         warn!("no window found for pid {} or any ancestor", pid);
-        FocusOutcome::Failed(format!("no window for PID {}", pid))
+        #[cfg(target_os = "macos")]
+        let message = format!(
+            "could not select window for PID {} — grant cc-hub Accessibility access",
+            pid
+        );
+        #[cfg(not(target_os = "macos"))]
+        let message = format!("no window for PID {}", pid);
+        FocusOutcome::Failed(message)
     }
 }
 
@@ -54,8 +61,10 @@ pub fn focus_window(pid: u32) -> FocusOutcome {
 ///
 /// For tmux-backed sessions this kills the whole tmux session, so the agent
 /// exits and any attached terminals close with it. For other sessions it
-/// sends the WM's graceful close (terminal exits → SIGHUP to the claude
-/// process group). Returns true on success.
+/// asks the WM to close the owning terminal. If window automation is
+/// unavailable (notably macOS without Accessibility permission), fall back to
+/// SIGTERM on the exact agent pid so "remove session" still works without
+/// killing its parent shell or terminal.
 pub fn close_window(pid: u32) -> bool {
     info!("close_window called for pid={}", pid);
     if let Some(name) = send::tmux_session_for_pid(pid) {
@@ -72,11 +81,20 @@ pub fn close_window(pid: u32) -> bool {
     }
     let pids = process::collect_pid_chain(pid);
     info!("window lookup chain: {:?}", pids);
-    let ok = window::current().close(&pids);
-    if !ok {
-        warn!("no window found to close for pid {} or any ancestor", pid);
+    if window::current().close(&pids) {
+        return true;
     }
-    ok
+    warn!(
+        "no window found to close for pid {} or any ancestor; terminating agent directly",
+        pid
+    );
+    let terminated = process::terminate(pid);
+    if terminated {
+        info!("close: sent termination request to agent pid {}", pid);
+    } else {
+        warn!("close: failed to terminate agent pid {}", pid);
+    }
+    terminated
 }
 
 /// Attached-client pids for `name` plus each client's ancestor chain, which

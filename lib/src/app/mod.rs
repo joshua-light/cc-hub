@@ -2668,11 +2668,21 @@ impl App {
         let Some(session) = self.selected_session_info() else {
             return false;
         };
-        let sid = session.session_id.clone();
+        let is_codex_process_only =
+            session.agent_kind == crate::agent::AgentKind::Codex && session.jsonl_path.is_none();
+        let sid = if is_codex_process_only {
+            session
+                .tmux_session
+                .as_deref()
+                .map(spawning_session_id)
+                .unwrap_or_else(|| session.session_id.clone())
+        } else {
+            session.session_id.clone()
+        };
         // A spawn placeholder's "title" is the synthetic "starting…" label,
         // not a real name — open its rename with an empty buffer so the user
         // types onto a clean line instead of clearing the placeholder first.
-        let title = if spawning_tmux_of(&sid).is_some() {
+        let title = if spawning_tmux_of(&session.session_id).is_some() {
             String::new()
         } else {
             session.title.clone().unwrap_or_default()
@@ -2775,7 +2785,10 @@ impl App {
         self.sessions
             .last_sessions
             .iter()
-            .find(|s| s.tmux_session.as_deref() == Some(tmux))
+            .find(|s| {
+                s.tmux_session.as_deref() == Some(tmux)
+                    && !(s.agent_kind == crate::agent::AgentKind::Codex && s.jsonl_path.is_none())
+            })
             .map(|s| s.session_id.clone())
     }
 
@@ -3389,8 +3402,16 @@ impl App {
             .iter()
             .filter_map(|s| s.tmux_session.clone())
             .collect();
-        self.pending_spawn_names
-            .retain(|tmux, _| !live_tmux.contains(tmux));
+        self.pending_spawn_names.retain(|tmux, _| {
+            if !live_tmux.contains(tmux) {
+                return true;
+            }
+            self.sessions.last_sessions.iter().any(|s| {
+                s.tmux_session.as_deref() == Some(tmux)
+                    && s.agent_kind == crate::agent::AgentKind::Codex
+                    && s.jsonl_path.is_none()
+            })
+        });
         true
     }
 
@@ -3405,17 +3426,21 @@ impl App {
             return;
         }
         for s in sessions.iter_mut() {
-            let title = match s.tmux_session.as_deref() {
-                Some(tmux) => match self.pending_spawn_names.get(tmux) {
-                    Some(Some(title)) => {
-                        let title = title.clone();
-                        self.pending_spawn_names.remove(tmux);
-                        title
-                    }
-                    _ => continue,
-                },
-                None => continue,
+            let Some(tmux) = s.tmux_session.as_deref() else {
+                continue;
             };
+            let Some(Some(title)) = self.pending_spawn_names.get(tmux) else {
+                continue;
+            };
+            let title = title.clone();
+            // Codex exposes a live process before it opens a rollout. Its
+            // PID-backed card is still temporary: show the pending name, but
+            // keep the tmux bridge until the durable UUID appears.
+            if s.agent_kind == crate::agent::AgentKind::Codex && s.jsonl_path.is_none() {
+                s.title = Some(title);
+                continue;
+            }
+            self.pending_spawn_names.remove(tmux);
             if let Err(e) = crate::title::persist_title(&s.session_id, &title) {
                 log::warn!(
                     "rename: deferred persist failed for {}: {}",
@@ -4033,6 +4058,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn boot_time_name_waits_through_codex_process_only_card() {
+        let mut app = App::new();
+        let tmux = "cchub-w-codex";
+        let mut process_only = fake_session("codex-123", SessionState::Idle);
+        process_only.agent_id = "codex".into();
+        process_only.agent_kind = crate::agent::AgentKind::Codex;
+        process_only.tmux_session = Some(tmux.into());
+        app.sessions.last_sessions = vec![process_only.clone()];
+        app.pending_spawn_names.insert(tmux.into(), None);
+        app.rename_target = Some(spawning_session_id(tmux));
+        app.rename_buffer = "stable name".into();
+        app.view = View::RenameSession;
+
+        assert_eq!(
+            app.submit_session_rename(),
+            RenameSubmit::Deferred {
+                title: "stable name".into()
+            }
+        );
+        assert!(app.update_sessions(vec![process_only]));
+        assert_eq!(
+            app.pending_spawn_names.get(tmux),
+            Some(&Some("stable name".to_string()))
+        );
+        assert_eq!(
+            app.sessions.last_sessions[0].title.as_deref(),
+            Some("stable name")
+        );
+    }
+
     // Cancelling the boot-time prompt (empty title) keeps the `None` marker so
     // the load-time prompt stays suppressed — the user said no once already.
     #[test]
@@ -4075,6 +4131,30 @@ mod tests {
         // Idempotent whether or not watch_spawn already auto-opened it.
         assert!(app.enter_rename_session());
         assert_eq!(app.rename_buffer, "");
+    }
+
+    #[test]
+    fn rename_on_codex_process_only_card_stays_deferred() {
+        let mut app = App::new();
+        let tmux = "cchub-w-codex-manual";
+        let mut process_only = fake_session("codex-456", SessionState::Idle);
+        process_only.agent_id = "codex".into();
+        process_only.agent_kind = crate::agent::AgentKind::Codex;
+        process_only.tmux_session = Some(tmux.into());
+        app.update_sessions(vec![process_only]);
+
+        assert!(app.enter_rename_session());
+        assert_eq!(
+            app.rename_target.as_deref(),
+            Some(spawning_session_id(tmux).as_str())
+        );
+        app.rename_buffer = "manual name".into();
+        assert_eq!(
+            app.submit_session_rename(),
+            RenameSubmit::Deferred {
+                title: "manual name".into()
+            }
+        );
     }
 
     #[test]

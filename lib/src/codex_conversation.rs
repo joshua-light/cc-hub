@@ -207,11 +207,18 @@ pub fn extract_metadata(entries: &[Value]) -> (Option<String>, Option<String>, O
         .find(|e| rec_type(e) == Some("turn_context"))
         .and_then(|e| payload(e)?.get("model").and_then(|v| v.as_str()))
         .map(str::to_string);
-    let version = session_meta(entries)
+    let meta = session_meta(entries);
+    let version = meta
         .and_then(|m| m.get("cli_version"))
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    (None, model, version)
+    // Codex records the repo state once, in `session_meta.git`, rather than
+    // per-entry like Claude — so the branch only ever comes from the head.
+    let git_branch = meta
+        .and_then(|m| m.get("git")?.get("branch")?.as_str())
+        .filter(|b| !b.is_empty())
+        .map(str::to_string);
+    (git_branch, model, version)
 }
 
 pub fn extract_last_activity(entries: &[Value]) -> Option<u64> {
@@ -708,10 +715,42 @@ mod tests {
         assert_eq!(extract_session_id(&e).as_deref(), Some("019f-abc"));
         assert_eq!(extract_cwd(&e).as_deref(), Some("/home/u/proj"));
         let (git, model, version) = extract_metadata(&e);
+        // No `git` block in session_meta (non-repo cwd) → no branch.
         assert_eq!(git, None);
         // Most recent turn_context wins.
         assert_eq!(model.as_deref(), Some("gpt-5.6-luna"));
         assert_eq!(version.as_deref(), Some("0.144.3"));
+    }
+
+    #[test]
+    fn extract_branch_from_session_meta_git_block() {
+        let e = vec![json!({
+            "timestamp": "2026-07-26T15:51:28.614Z",
+            "type": "session_meta",
+            "payload": {
+                "session_id": "019f-abc",
+                "cwd": "/home/u/proj",
+                "cli_version": "0.145.0",
+                "git": {
+                    "commit_hash": "744e6885fb70685fd74a67ca34145960f0f6bcdd",
+                    "branch": "experiment/jobified-ecs",
+                    "repository_url": "ssh://git@example.com/proj.git"
+                }
+            }
+        })];
+        let (git, _, _) = extract_metadata(&e);
+        assert_eq!(git.as_deref(), Some("experiment/jobified-ecs"));
+    }
+
+    #[test]
+    fn empty_branch_is_treated_as_absent() {
+        // A detached HEAD records the git block with an empty branch; that must
+        // not surface as a blank branch chip.
+        let e = vec![json!({
+            "type": "session_meta",
+            "payload": {"session_id": "s", "cwd": "/p", "git": {"branch": ""}}
+        })];
+        assert_eq!(extract_metadata(&e).0, None);
     }
 
     #[test]

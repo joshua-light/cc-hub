@@ -4,8 +4,9 @@
 //! (state, model, tokens, current tool) are derived from the rollout by
 //! [`crate::codex_conversation`]. Unlike Claude it writes no live status file,
 //! so liveness comes from a process scan: enumerate running `codex` processes,
-//! read each one's cwd, and pair it to the newest rollout whose `session_meta`
-//! records that cwd — the same heartbeat-less pairing the Pi external scan uses.
+//! then bind each process to the rollout file it holds open (or the explicit
+//! UUID in `codex resume`). Cwd is only a validation constraint because many
+//! concurrent sessions commonly share one project directory.
 
 use crate::agent::{AgentConfig, AgentKind};
 use crate::codex_conversation;
@@ -19,6 +20,7 @@ use serde_json::Value;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
 /// `session_meta` (rollout line 1) embeds the full codex system prompt in
@@ -103,14 +105,15 @@ fn walk_rollouts(root: &Path) -> Vec<(PathBuf, SystemTime)> {
 }
 
 /// Index every rollout modified within the inactive window by the cwd its
-/// `session_meta` records, newest first. Shared by the live-pairing and
-/// inactive phases so each rollout's head is read at most once per scan.
+/// `session_meta` records, newest first. Live ownership considers every path;
+/// this filtered index only controls which unclaimed rollouts become inactive
+/// cards.
 fn index_recent_by_cwd(
-    root: &Path,
+    rollouts: &[(PathBuf, SystemTime)],
     window_secs: u64,
 ) -> HashMap<String, Vec<(PathBuf, SystemTime)>> {
     let mut by_cwd: HashMap<String, Vec<(PathBuf, SystemTime)>> = HashMap::new();
-    for (path, mtime) in walk_rollouts(root) {
+    for (path, mtime) in rollouts {
         // A live transcript is written "now", so its mtime can equal or slightly
         // lead the wall clock — `elapsed()` then errors. Treat unknown/future
         // mtimes as recent (only drop a file we can positively age past the
@@ -123,15 +126,93 @@ fn index_recent_by_cwd(
         if too_old {
             continue;
         }
-        let head = read_head(&path);
+        let head = read_head(path);
         if let Some(cwd) = codex_conversation::extract_cwd(&head) {
-            by_cwd.entry(cwd).or_default().push((path, mtime));
+            by_cwd.entry(cwd).or_default().push((path.clone(), *mtime));
         }
     }
     for files in by_cwd.values_mut() {
         files.sort_by_key(|b| Reverse(b.1));
     }
     by_cwd
+}
+
+#[derive(Clone, Debug)]
+struct LiveProcess {
+    pid: u32,
+    cwd: String,
+    tmux_session: Option<String>,
+    resume_session_id: Option<String>,
+}
+
+fn rollout_bindings() -> &'static Mutex<HashMap<u32, PathBuf>> {
+    static BINDINGS: OnceLock<Mutex<HashMap<u32, PathBuf>>> = OnceLock::new();
+    BINDINGS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Resolve live processes without guessing from cwd/mtime ordering.
+///
+/// Open-file ownership and an explicit `codex resume <uuid>` are authoritative.
+/// A prior binding is retained while both process and rollout remain present,
+/// covering transient ownership-query failures. An unresolved process gets a
+/// process-only card until Codex opens its rollout.
+fn resolve_live_rollouts(
+    live: &[LiveProcess],
+    all_rollouts: &HashSet<PathBuf>,
+    open_files: &HashMap<u32, PathBuf>,
+    previous: &HashMap<u32, PathBuf>,
+) -> HashMap<u32, PathBuf> {
+    let mut by_session_id = HashMap::<String, PathBuf>::new();
+    for path in all_rollouts {
+        if let Some(sid) = session_id_from_filename(path) {
+            by_session_id.insert(sid, path.clone());
+        }
+    }
+
+    let mut resolved = HashMap::new();
+    let mut claimed = HashSet::<PathBuf>::new();
+
+    for process in live {
+        let Some(path) = open_files.get(&process.pid) else {
+            continue;
+        };
+        if all_rollouts.contains(path) && claimed.insert(path.clone()) {
+            resolved.insert(process.pid, path.clone());
+        }
+    }
+
+    for process in live {
+        if resolved.contains_key(&process.pid) {
+            continue;
+        }
+        let Some(path) = process
+            .resume_session_id
+            .as_ref()
+            .and_then(|sid| by_session_id.get(sid))
+        else {
+            continue;
+        };
+        if claimed.insert(path.clone()) {
+            resolved.insert(process.pid, path.clone());
+        }
+    }
+
+    for process in live {
+        if resolved.contains_key(&process.pid) {
+            continue;
+        }
+        let Some(path) = previous.get(&process.pid) else {
+            continue;
+        };
+        let belongs_to_cwd = all_rollouts.contains(path)
+            && codex_conversation::extract_cwd(&read_head(path)).as_deref()
+                == Some(process.cwd.as_str());
+        if belongs_to_cwd && claimed.insert(path.clone()) {
+            resolved.insert(process.pid, path.clone());
+        }
+    }
+
+    resolved
 }
 
 fn build_session_info(
@@ -165,10 +246,11 @@ fn build_session_info(
     let last_user_message = codex_conversation::extract_last_user_message(&tail);
     let last_activity = codex_conversation::extract_last_activity(&tail);
     // The latest model lives in the newest `turn_context` (tail); `cli_version`
-    // lives in `session_meta` (head). Fall back to the head's first turn_context
-    // for a session whose only turn is still within the head window.
+    // and the git branch live in `session_meta` (head). Fall back to the head's
+    // first turn_context for a session whose only turn is still within the head
+    // window.
     let (_, model_tail, _) = codex_conversation::extract_metadata(&tail);
-    let (_, model_head, version) = codex_conversation::extract_metadata(&head);
+    let (git_branch, model_head, version) = codex_conversation::extract_metadata(&head);
     let model = model_tail.or(model_head);
 
     let tool_uses_count = crate::tool_use_count::count_codex(&path);
@@ -187,7 +269,7 @@ fn build_session_info(
         title: None,
         titling: false,
         model,
-        git_branch: None,
+        git_branch,
         version,
         jsonl_path: Some(path),
         tmux_session,
@@ -243,18 +325,18 @@ pub fn scan(agents: &[AgentConfig], titles: &HashMap<String, String>) -> Vec<Ses
         return Vec::new();
     };
     let cfg = &config::get().inactive;
-    let by_cwd = index_recent_by_cwd(&root, cfg.window_secs);
+    let rollouts = walk_rollouts(&root);
+    let by_cwd = index_recent_by_cwd(&rollouts, cfg.window_secs);
 
     let mut sessions = Vec::new();
-    let mut claimed: HashSet<PathBuf> = HashSet::new();
 
-    // Live phase: pair each running interactive `codex` process to the newest
-    // unclaimed rollout in its cwd. Descending pid order gives a stable pairing
-    // when two codex processes share a cwd (the platform layer exposes no start
-    // time) — same determinism argument as the Pi external scan.
+    // Discover the live process set before resolving ownership. Several Codex
+    // sessions commonly share one cwd, so cwd is only a validation constraint,
+    // never an identity signal.
     let tmux_panes = send::tmux_panes();
     let mut pids = process::list_pids();
     pids.sort_unstable_by(|a, b| b.cmp(a));
+    let mut live = Vec::new();
     for pid in pids {
         if !process::is_agent_process(AgentKind::Codex, pid) {
             continue;
@@ -262,19 +344,35 @@ pub fn scan(agents: &[AgentConfig], titles: &HashMap<String, String>) -> Vec<Ses
         let Some(cwd) = process::current_dir(pid) else {
             continue;
         };
-        let tmux = send::tmux_session_for_pid_in(pid, &tmux_panes);
-        let paired = by_cwd
-            .get(&cwd)
-            .and_then(|files| files.iter().find(|(p, _)| !claimed.contains(p)).cloned());
-        match paired {
-            Some((path, _)) => {
-                claimed.insert(path.clone());
+        live.push(LiveProcess {
+            pid,
+            cwd,
+            tmux_session: send::tmux_session_for_pid_in(pid, &tmux_panes),
+            resume_session_id: process::codex_resume_session_arg(pid),
+        });
+    }
+
+    let candidate_paths: Vec<PathBuf> = rollouts.iter().map(|(path, _)| path.clone()).collect();
+    let all_rollouts: HashSet<PathBuf> = candidate_paths.iter().cloned().collect();
+    let live_pids: Vec<u32> = live.iter().map(|process| process.pid).collect();
+    let open_files = process::open_codex_rollouts(&live_pids, &candidate_paths);
+    let previous = rollout_bindings()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let resolved = resolve_live_rollouts(&live, &all_rollouts, &open_files, &previous);
+    *rollout_bindings().lock().unwrap_or_else(|e| e.into_inner()) = resolved.clone();
+    let claimed: HashSet<PathBuf> = resolved.values().cloned().collect();
+
+    for process in live {
+        match resolved.get(&process.pid) {
+            Some(path) => {
                 if let Some(info) = build_session_info(
                     default_agent.id.clone(),
-                    pid,
-                    tmux,
+                    process.pid,
+                    process.tmux_session,
                     SessionState::Idle,
-                    path,
+                    path.clone(),
                 ) {
                     sessions.push(info);
                 }
@@ -285,7 +383,12 @@ pub fn scan(agents: &[AgentConfig], titles: &HashMap<String, String>) -> Vec<Ses
             // card) so it appears immediately and the spawn watchdog clears; a
             // later tick upgrades it to the transcript-derived card once the
             // rollout lands.
-            None => sessions.push(process_only_card(&default_agent.id, pid, tmux, cwd)),
+            None => sessions.push(process_only_card(
+                &default_agent.id,
+                process.pid,
+                process.tmux_session,
+                process.cwd,
+            )),
         }
     }
 
@@ -314,7 +417,10 @@ pub fn scan(agents: &[AgentConfig], titles: &HashMap<String, String>) -> Vec<Ses
     }
 
     for session in sessions.iter_mut() {
-        if session.title.is_none() {
+        // PID-backed process-only cards are temporary identities. Never read a
+        // persisted title for them: an old `codex-<pid>` cache entry could be
+        // inherited by an unrelated process after PID reuse.
+        if session.title.is_none() && session.jsonl_path.is_some() {
             session.title = titles.get(&session.session_id).cloned();
         }
     }
@@ -507,5 +613,66 @@ mod tests {
             };
             assert!(scan(&[agent], &HashMap::new()).is_empty());
         });
+    }
+
+    #[test]
+    fn live_rollouts_follow_open_files_not_pid_or_mtime_order() {
+        let cwd = "/tmp/shared".to_string();
+        let older = PathBuf::from(
+            "/x/rollout-2026-07-24T18-00-00-019f94b1-ab14-7b92-acfe-094b7c66d830.jsonl",
+        );
+        let newer = PathBuf::from(
+            "/x/rollout-2026-07-25T00-00-00-019f95ff-234b-7541-8673-53a534e26254.jsonl",
+        );
+        let live = vec![
+            LiveProcess {
+                pid: 900,
+                cwd: cwd.clone(),
+                tmux_session: None,
+                resume_session_id: None,
+            },
+            LiveProcess {
+                pid: 100,
+                cwd,
+                tmux_session: None,
+                resume_session_id: None,
+            },
+        ];
+        let open = HashMap::from([(900, older.clone()), (100, newer.clone())]);
+        let all = HashSet::from([older.clone(), newer.clone()]);
+
+        let resolved = resolve_live_rollouts(&live, &all, &open, &HashMap::new());
+
+        assert_eq!(resolved.get(&900), Some(&older));
+        assert_eq!(resolved.get(&100), Some(&newer));
+    }
+
+    #[test]
+    fn unresolved_same_cwd_process_is_not_given_someone_elses_rollout() {
+        let cwd = "/tmp/shared".to_string();
+        let path = PathBuf::from(
+            "/x/rollout-2026-07-25T00-00-00-019f95ff-234b-7541-8673-53a534e26254.jsonl",
+        );
+        let live = vec![
+            LiveProcess {
+                pid: 900,
+                cwd: cwd.clone(),
+                tmux_session: None,
+                resume_session_id: None,
+            },
+            LiveProcess {
+                pid: 100,
+                cwd,
+                tmux_session: None,
+                resume_session_id: None,
+            },
+        ];
+        let open = HashMap::from([(100, path.clone())]);
+        let all = HashSet::from([path.clone()]);
+
+        let resolved = resolve_live_rollouts(&live, &all, &open, &HashMap::new());
+
+        assert_eq!(resolved.get(&100), Some(&path));
+        assert!(!resolved.contains_key(&900));
     }
 }

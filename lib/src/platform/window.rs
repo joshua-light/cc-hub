@@ -507,8 +507,8 @@ mod macos {
             // not — in that case raise is a no-op and we still get correct
             // app-level focus from osascript below).
             let app = unsafe { AXUIElementCreateApplication(owner) };
-            if !app.is_null() {
-                with_ax_window(app, win_id, |window| {
+            let raised = if !app.is_null() {
+                let raised = with_ax_window(app, win_id, |window| {
                     let raise = CfString::new("AXRaise");
                     let pe = unsafe { AXUIElementPerformAction(window, raise.as_ref()) };
                     if pe != K_AX_ERROR_SUCCESS {
@@ -519,16 +519,19 @@ mod macos {
                     }
                 });
                 unsafe { CFRelease(app) };
+                raised
             } else {
                 warn!("macos focus: AXUIElementCreateApplication returned null");
-            }
+                false
+            };
 
             // Cross-process app activation. `AXFrontmost`, `open -a <bundle>`,
             // and `System Events set frontmost by pid` all silently no-op for
             // some apps (kitty being the motivating example). `tell
             // application "<name>" to activate` is the canonical AppleEvent
             // path and every cocoa app honors it.
-            activate_via_osascript(owner)
+            let activated = activate_via_osascript(owner);
+            raised && activated
         }
 
         fn close(&self, pids: &[u32]) -> bool {

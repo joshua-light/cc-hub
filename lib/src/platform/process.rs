@@ -6,6 +6,10 @@
 //! compile time.
 
 use crate::agent::AgentKind;
+use std::collections::HashMap;
+#[cfg(target_os = "linux")]
+use std::collections::HashSet;
+use std::path::PathBuf;
 
 pub trait ProcessInfo {
     fn parent_pid(pid: u32) -> Option<u32>;
@@ -381,6 +385,12 @@ pub fn codex_model_arg(pid: u32) -> Option<String> {
     codex_model_from_cmd(&command_line(pid))
 }
 
+/// Session UUID passed to `codex resume`, when this process was launched by
+/// resuming an existing conversation.
+pub fn codex_resume_session_arg(pid: u32) -> Option<String> {
+    codex_resume_session_from_cmd(&command_line(pid))
+}
+
 fn codex_model_from_cmd(cmd: &str) -> Option<String> {
     let toks: Vec<&str> = cmd.split_whitespace().collect();
     for (i, t) in toks.iter().enumerate() {
@@ -392,6 +402,14 @@ fn codex_model_from_cmd(cmd: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn codex_resume_session_from_cmd(cmd: &str) -> Option<String> {
+    let toks: Vec<&str> = cmd.split_whitespace().collect();
+    let resume = toks.iter().position(|t| *t == "resume")?;
+    toks.get(resume + 1)
+        .filter(|sid| !sid.starts_with('-'))
+        .map(|sid| sid.trim_matches(['\'', '"']).to_string())
 }
 
 pub fn is_agent_process(kind: AgentKind, pid: u32) -> bool {
@@ -415,6 +433,39 @@ pub fn is_agent_process(kind: AgentKind, pid: u32) -> bool {
             let cmd = command_line(pid).to_ascii_lowercase();
             codex_is_interactive(&cmd)
         }
+    }
+}
+
+/// Ask one agent process to terminate gracefully.
+///
+/// This deliberately signals only `pid`, not its process group: old
+/// non-tmux sessions share a terminal with their parent shell, and "remove
+/// session" must never close or signal that shell when window automation is
+/// unavailable.
+#[cfg(unix)]
+pub fn terminate(pid: u32) -> bool {
+    if pid <= 1 || pid == std::process::id() {
+        return false;
+    }
+    unsafe { libc::kill(pid as i32, libc::SIGTERM) == 0 }
+}
+
+#[cfg(target_os = "windows")]
+pub fn terminate(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+
+    if pid <= 1 || pid == std::process::id() {
+        return false;
+    }
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if handle == 0 {
+            return false;
+        }
+        let ok = TerminateProcess(handle, 0) != 0;
+        CloseHandle(handle);
+        ok
     }
 }
 
@@ -606,6 +657,108 @@ pub fn list_pids() -> Vec<u32> {
     pids_by_type(ProcFilter::All).unwrap_or_default()
 }
 
+/// Resolve candidate Codex rollout files to the live processes that currently
+/// hold them open. Codex keeps its active rollout descriptor open for the
+/// lifetime of an interactive session, making this stronger than cwd/mtime
+/// inference when several sessions run in one project.
+#[cfg(target_os = "macos")]
+pub fn open_codex_rollouts(pids: &[u32], candidates: &[PathBuf]) -> HashMap<u32, PathBuf> {
+    use libproc::bsd_info::BSDInfo;
+    use libproc::file_info::{pidfdinfo, ListFDs, PIDFDInfo, PIDFDInfoFlavor, ProcFDType};
+    use libproc::proc_pid::{listpidinfo, pidinfo};
+    use std::ffi::CStr;
+
+    // Darwin's vnode_fdinfowithpath is:
+    // proc_fileinfo (24) + vnode_info (152) + MAXPATHLEN (1024).
+    // libproc exposes the generic pidfdinfo API but not this concrete binding,
+    // so keep the unused ABI prefixes opaque and read only the path field.
+    #[repr(C)]
+    struct VnodeFdInfoWithPath {
+        proc_fileinfo: [u8; 24],
+        vnode_info: [u8; 152],
+        path: [libc::c_char; 1024],
+    }
+
+    impl Default for VnodeFdInfoWithPath {
+        fn default() -> Self {
+            Self {
+                proc_fileinfo: [0; 24],
+                vnode_info: [0; 152],
+                path: [0; 1024],
+            }
+        }
+    }
+
+    impl PIDFDInfo for VnodeFdInfoWithPath {
+        fn flavor() -> PIDFDInfoFlavor {
+            PIDFDInfoFlavor::VNodePathInfo
+        }
+    }
+
+    debug_assert_eq!(std::mem::size_of::<VnodeFdInfoWithPath>(), 1200);
+    debug_assert_eq!(std::mem::offset_of!(VnodeFdInfoWithPath, path), 176);
+
+    let wanted: HashMap<PathBuf, &PathBuf> = candidates
+        .iter()
+        .map(|path| {
+            (
+                std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()),
+                path,
+            )
+        })
+        .collect();
+    let mut out = HashMap::new();
+    for &pid in pids {
+        let Ok(info) = pidinfo::<BSDInfo>(pid as i32, 0) else {
+            continue;
+        };
+        let Ok(fds) = listpidinfo::<ListFDs>(pid as i32, info.pbi_nfiles as usize) else {
+            continue;
+        };
+        for fd in fds {
+            if !matches!(ProcFDType::from(fd.proc_fdtype), ProcFDType::VNode) {
+                continue;
+            }
+            let Ok(vnode) = pidfdinfo::<VnodeFdInfoWithPath>(pid as i32, fd.proc_fd) else {
+                continue;
+            };
+            let path = unsafe { CStr::from_ptr(vnode.path.as_ptr()) };
+            let path = PathBuf::from(path.to_string_lossy().as_ref());
+            if let Some(original) = wanted.get(&path) {
+                out.insert(pid, (*original).clone());
+                break;
+            }
+        }
+    }
+    out
+}
+
+#[cfg(target_os = "linux")]
+pub fn open_codex_rollouts(pids: &[u32], candidates: &[PathBuf]) -> HashMap<u32, PathBuf> {
+    let wanted: HashSet<&PathBuf> = candidates.iter().collect();
+    let mut out = HashMap::new();
+    for &pid in pids {
+        let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            let Ok(path) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
+            if wanted.contains(&path) {
+                out.insert(pid, path);
+                break;
+            }
+        }
+    }
+    out
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn open_codex_rollouts(_pids: &[u32], _candidates: &[PathBuf]) -> HashMap<u32, PathBuf> {
+    HashMap::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,6 +768,24 @@ mod tests {
         let pid = std::process::id();
         assert!(Process::parent_pid(pid).is_some());
         assert!(!Process::name(pid).is_empty());
+    }
+
+    #[test]
+    fn terminate_rejects_current_process() {
+        assert!(!terminate(std::process::id()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminate_stops_only_target_child() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn child");
+
+        assert!(terminate(child.id()));
+        let status = child.wait().expect("wait for terminated child");
+        assert!(!status.success());
     }
 
     #[test]
@@ -710,6 +881,34 @@ mod tests {
             Some("o3")
         );
         assert_eq!(codex_model_from_cmd("codex resume 019f-uuid"), None);
+    }
+
+    #[test]
+    fn codex_resume_arg_parsing() {
+        assert_eq!(
+            codex_resume_session_from_cmd(
+                "/opt/homebrew/bin/codex -c model_reasoning_effort=high resume 019f94b1-ab14"
+            )
+            .as_deref(),
+            Some("019f94b1-ab14")
+        );
+        assert_eq!(
+            codex_resume_session_from_cmd("codex --yolo resume --last"),
+            None
+        );
+        assert_eq!(codex_resume_session_from_cmd("codex --yolo"), None);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn open_rollout_discovery_finds_held_file() {
+        let file = tempfile::NamedTempFile::new().expect("temp rollout");
+        let path = file.path().to_path_buf();
+        let pid = std::process::id();
+
+        let owners = open_codex_rollouts(&[pid], std::slice::from_ref(&path));
+
+        assert_eq!(owners.get(&pid), Some(&path));
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
