@@ -2406,10 +2406,12 @@ impl App {
         };
         self.view = View::Grid;
         let sid = picker.session_id;
+        let mut linked = false;
         let status = match action {
             TaskLinkAction::Unlink => match crate::session_tasks::unlink(&sid) {
                 Ok(()) => {
                     self.session_task_links.remove(&sid);
+                    linked = true;
                     "task link removed".to_string()
                 }
                 Err(e) => {
@@ -2430,6 +2432,7 @@ impl App {
                 match crate::session_tasks::link(&sid, link.clone()) {
                     Ok(()) => {
                         self.session_task_links.insert(sid.clone(), link);
+                        linked = true;
                         format!("linked to “{}”", title)
                     }
                     Err(e) => {
@@ -2439,8 +2442,15 @@ impl App {
                 }
             }
         };
-        // No group rebuild: links don't shape the grid's groups — the card
-        // badge resolves live from `session_task_links` on the next draw.
+        // Links *do* shape card order — `cluster_by_task` groups same-task
+        // cards together and ranks the clusters by task priority — so the
+        // grid has to regroup here. Without it the card only moves on the
+        // next scan tick, a visible ~1s lag between the keypress and the
+        // reorder. `adopt_groups` re-anchors the selection on the same
+        // session id, so the cursor rides along with the card it moved.
+        if linked {
+            self.rebuild_groups();
+        }
         self.set_status(status);
     }
 
@@ -4445,6 +4455,49 @@ mod tests {
         });
     }
 
+    // Linking must reorder the grid on the same keypress. Regression: the
+    // confirm handler skipped the regroup, so the card only moved on the
+    // next scan tick — a visible ~1s lag after pressing Enter.
+    #[test]
+    fn confirm_task_link_regroups_without_a_scan() {
+        crate::test_util::with_temp_home(|| {
+            let mut app = App::new();
+            app.tasks.board.add("ship it").unwrap().unwrap();
+            let a = fake_session("s-a", SessionState::Processing);
+            let b = fake_session("s-b", SessionState::Processing);
+            assert!(app.update_sessions(vec![a, b]));
+
+            // Link the trailing card; its cluster has to jump the unlinked one.
+            app.sessions.sel_group = 0;
+            app.sessions.sel_in_group = 1;
+            assert_eq!(app.selected_session_id().as_deref(), Some("s-b"));
+            assert!(app.enter_task_link_picker());
+            app.confirm_task_link_picker();
+
+            let order: Vec<&str> = app.sessions.groups[0]
+                .sessions
+                .iter()
+                .map(|s| s.session_id.as_str())
+                .collect();
+            assert_eq!(order, vec!["s-b", "s-a"]);
+            // The cursor rides along with the card it moved.
+            assert_eq!(app.selected_session_id().as_deref(), Some("s-b"));
+
+            // Unlinking regroups on the same keypress too. The picker opens
+            // with the linked task highlighted, so walk up to "✕ unlink".
+            assert!(app.enter_task_link_picker());
+            app.task_link_picker_move(-10);
+            app.confirm_task_link_picker();
+            let order: Vec<&str> = app.sessions.groups[0]
+                .sessions
+                .iter()
+                .map(|s| s.session_id.as_str())
+                .collect();
+            assert_eq!(order, vec!["s-a", "s-b"]);
+            assert_eq!(app.selected_session_id().as_deref(), Some("s-b"));
+        });
+    }
+
     #[test]
     fn task_link_candidates_band_in_tasks_board_column_order() {
         crate::test_util::with_temp_home(|| {
@@ -4585,15 +4638,17 @@ mod tests {
     #[test]
     fn toggle_sessions_layout_cycles_and_resets_scroll() {
         let mut app = App::new();
+        // The app opens on the compact table, not the card wall.
+        assert_eq!(app.sessions.layout, SessionsLayout::List);
         app.render.grid_scroll = 7;
         app.toggle_sessions_layout();
-        assert_eq!(app.sessions.layout, SessionsLayout::List);
+        assert_eq!(app.sessions.layout, SessionsLayout::Grid);
         assert_eq!(
             app.render.grid_scroll, 0,
-            "a grid scroll offset can strand the shorter list viewport"
+            "a carried-over offset can strand the other layout's viewport"
         );
         app.toggle_sessions_layout();
-        assert_eq!(app.sessions.layout, SessionsLayout::Grid);
+        assert_eq!(app.sessions.layout, SessionsLayout::List);
     }
 
     #[test]

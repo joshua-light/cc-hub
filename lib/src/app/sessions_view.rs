@@ -2,14 +2,15 @@ use crate::acks::Acks;
 use crate::models::{ProjectGroup, SessionInfo};
 use std::collections::HashSet;
 
-/// How the Sessions tab lays out its sessions. `Grid` is the classic card
-/// wall; `List` renders one compact row per session, table-style. Runtime
-/// toggle (`v`), in-memory only — resets to `Grid` on relaunch, same
-/// lifetime as the `show_*` filters on [`SessionsView`].
+/// How the Sessions tab lays out its sessions. `List` renders one compact
+/// row per session, table-style, and is what the app opens on — it fits far
+/// more sessions on screen than the cards do; `Grid` is the classic card
+/// wall. Runtime toggle (`v`), in-memory only — resets to `List` on
+/// relaunch, same lifetime as the `show_*` filters on [`SessionsView`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SessionsLayout {
-    #[default]
     Grid,
+    #[default]
     List,
 }
 
