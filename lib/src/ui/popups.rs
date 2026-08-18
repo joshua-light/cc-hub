@@ -842,6 +842,163 @@ pub(crate) fn render_task_link_picker(frame: &mut Frame, area: Rect, app: &App) 
     frame.render_widget(Paragraph::new(lines), list_area);
 }
 
+/// `/` on the Sessions tab: fuzzy-search the whole session archive. Same
+/// chrome and interaction as the task-link picker; each row is the session's
+/// saved title (or first message), its project · short id, and a dim age.
+pub(crate) fn render_session_finder(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(finder) = app.session_finder.as_ref() else {
+        return;
+    };
+    let choices = &finder.choices;
+    let now = crate::ui::now_ms();
+
+    let desired_w = 96u16.min(area.width);
+    let desired_h = area.height.saturating_sub(4).max(12).min(area.height);
+    let popup = centered_fixed(area, desired_w, desired_h);
+    frame.render_widget(Clear, popup);
+
+    let block = popup_block(Span::styled(
+        " Find session ",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .title_bottom(Span::styled(
+        " title · first message · project · session id ",
+        Style::default().fg(DIM_TEXT),
+    ));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if inner.height < 3 || inner.width == 0 {
+        return;
+    }
+
+    let filter_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    let mut filter_line = finder.filter.clone();
+    filter_line.push('▎');
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                " ❯ ",
+                Style::default()
+                    .fg(ACCENT_BLUE)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                filter_line,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        filter_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            if finder.loading {
+                "indexing… ".to_string()
+            } else {
+                format!("{}/{} ", finder.rows.len(), choices.len())
+            },
+            Style::default().fg(DIM_TEXT),
+        )))
+        .alignment(Alignment::Right),
+        filter_area,
+    );
+
+    let list_area = Rect::new(inner.x, inner.y + 2, inner.width, inner.height - 2);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if finder.rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            if finder.loading {
+                "  (indexing the session archive…)"
+            } else {
+                "  (no matches — backspace to widen)"
+            },
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        let visible = list_area.height as usize;
+        let start = finder.selected.saturating_sub(visible.saturating_sub(1));
+        // Pad labels only as wide as the rows on screen need — the archive
+        // holds outliers that would otherwise push every detail off-edge.
+        let label_width = finder
+            .rows
+            .iter()
+            .skip(start)
+            .take(visible)
+            .filter_map(|row| choices.get(row.choice))
+            .map(|choice| choice.label.chars().count())
+            .max()
+            .unwrap_or(0);
+        for (i, row) in finder.rows.iter().enumerate().skip(start).take(visible) {
+            let Some(choice) = choices.get(row.choice) else {
+                continue;
+            };
+            let label = &choice.label;
+            let detail = &choice.detail;
+            let selected = i == finder.selected;
+            let bar = if selected {
+                Style::default().bg(Color::White)
+            } else {
+                Style::default()
+            };
+            let (label_base, label_hl, detail_base, detail_hl) = if selected {
+                (
+                    bar.fg(Color::Black).add_modifier(Modifier::BOLD),
+                    bar.fg(Color::Blue).add_modifier(Modifier::BOLD),
+                    bar.fg(Color::Rgb(90, 90, 100)),
+                    bar.fg(Color::Blue),
+                )
+            } else {
+                (
+                    Style::default().fg(Color::Gray),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Color::Cyan),
+                )
+            };
+            let mut spans = vec![Span::styled(
+                if selected { "▶ " } else { "  " },
+                bar.fg(Color::Black).add_modifier(Modifier::BOLD),
+            )];
+            spans.extend(highlight_spans(
+                label,
+                &row.label_indices,
+                label_base,
+                label_hl,
+            ));
+            spans.push(Span::styled(
+                " ".repeat(label_width.saturating_sub(label.chars().count()) + 2),
+                bar,
+            ));
+            spans.extend(highlight_spans(
+                detail,
+                &row.detail_indices,
+                detail_base,
+                detail_hl,
+            ));
+            // Age is visual metadata only — the fuzzy filter never sees it.
+            let age_secs = now.saturating_sub(choice.mtime_ms) / 1000;
+            spans.push(Span::styled(
+                format!("  {}", crate::models::relative_age_short(age_secs)),
+                if selected {
+                    bar.fg(Color::Rgb(90, 90, 100))
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ));
+            lines.push(Line::from(spans));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines), list_area);
+}
+
 /// Word-wrap `text` to `width` columns for the to-do panel: break on
 /// whitespace, hard-split any single word longer than `width`, and count each
 /// char as one column (matching the add-input's `chars().count()` budget).

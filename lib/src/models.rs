@@ -156,12 +156,33 @@ pub struct SessionInfo {
     pub tool_uses_count: u64,
 }
 
+/// Anthropic's prompt cache expires after about an hour of silence, so a
+/// session quiet for longer re-ingests its whole context on the next turn
+/// anyway — a full restart costs nothing extra at that point.
+pub const CACHE_COLD_AFTER_MS: u64 = 60 * 60 * 1000;
+
 impl SessionInfo {
     pub fn needs_attention(&self) -> bool {
         matches!(
             self.state,
             SessionState::WaitingForInput | SessionState::Question
         )
+    }
+
+    /// True when the session has sat quiet past the prompt-cache TTL. Never
+    /// true while Processing or Starting — those are touching the cache
+    /// right now, whatever the transcript's last timestamp says. Sessions
+    /// with no transcript yet fall back to their start time; treating a
+    /// missing timestamp as cold would frost every fresh spawn.
+    pub fn cache_cold(&self, now: u64) -> bool {
+        if matches!(
+            self.state,
+            SessionState::Processing | SessionState::Starting
+        ) {
+            return false;
+        }
+        let last = self.last_activity.unwrap_or(self.started_at);
+        now.saturating_sub(last) > CACHE_COLD_AFTER_MS
     }
 
     pub fn agent_badge(&self) -> String {
@@ -274,6 +295,50 @@ mod tests {
     fn first_line_truncated_tiny_budgets() {
         assert_eq!(first_line_truncated("abcdef", 0), "");
         assert_eq!(first_line_truncated("abcdef", 1), "…");
+    }
+
+    fn session(state: SessionState, started_at: u64, last_activity: Option<u64>) -> SessionInfo {
+        SessionInfo {
+            agent_id: "claude".into(),
+            agent_kind: AgentKind::Claude,
+            pid: 1,
+            session_id: "s".into(),
+            cwd: "/tmp/p".into(),
+            project_name: "p".into(),
+            started_at,
+            last_activity,
+            state,
+            last_user_message: None,
+            summary: None,
+            title: None,
+            titling: false,
+            model: None,
+            git_branch: None,
+            version: None,
+            jsonl_path: None,
+            tmux_session: None,
+            current_tool: None,
+            is_thinking: false,
+            context_tokens: None,
+            tool_uses_count: 0,
+        }
+    }
+
+    #[test]
+    fn cache_cold_after_an_hour_of_silence() {
+        const NOW: u64 = 10_000_000_000;
+        let ttl = CACHE_COLD_AFTER_MS;
+        // Exactly at the TTL is still warm; one ms past it is cold.
+        assert!(!session(SessionState::Idle, 0, Some(NOW - ttl)).cache_cold(NOW));
+        assert!(session(SessionState::Idle, 0, Some(NOW - ttl - 1)).cache_cold(NOW));
+        assert!(session(SessionState::Inactive, 0, Some(NOW - 2 * ttl)).cache_cold(NOW));
+        assert!(session(SessionState::WaitingForInput, 0, Some(NOW - 2 * ttl)).cache_cold(NOW));
+        // Processing/Starting are touching the cache right now.
+        assert!(!session(SessionState::Processing, 0, Some(NOW - 2 * ttl)).cache_cold(NOW));
+        assert!(!session(SessionState::Starting, 0, Some(NOW - 2 * ttl)).cache_cold(NOW));
+        // No transcript yet — age from the start time, not "cold by default".
+        assert!(session(SessionState::Idle, NOW - 2 * ttl, None).cache_cold(NOW));
+        assert!(!session(SessionState::Idle, NOW - ttl / 2, None).cache_cold(NOW));
     }
 
     #[test]

@@ -89,6 +89,8 @@ fn map_sessions_command(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<
         // land on the same arm.
         (View::Grid, KeyCode::Char('p')) if on_sessions => Command::Sessions(S::OpenPlacesPicker),
         (View::Grid, KeyCode::Char('L')) if on_sessions => Command::Sessions(S::OpenTaskLinkPicker),
+        (View::Grid, KeyCode::Char('/')) if on_sessions => Command::Sessions(S::OpenSessionFinder),
+        (View::SessionFinder, KeyCode::Enter) => Command::Sessions(S::ConfirmSessionFinder),
         (View::Grid, KeyCode::Char('t')) if on_sessions => Command::Sessions(S::OpenTodoPanel),
         (View::Grid, KeyCode::Char('r')) if on_sessions => Command::Sessions(S::OpenRenameSession),
         (View::RenameSession, KeyCode::Enter) => Command::Sessions(S::SubmitRename),
@@ -121,6 +123,7 @@ pub(crate) async fn handle_key(
                 app,
                 effect,
                 terminal,
+                scan_tx_main,
                 detail_tx,
                 state_debug_tx,
                 spawn_metrics,
@@ -921,6 +924,33 @@ pub(crate) async fn handle_key(
             }
             _ => {}
         },
+        // Session finder: printable keys (space included — titles and first
+        // messages are prose) belong to the fuzzy filter; navigation is
+        // arrows plus ctrl-j/k and ctrl-n/p. Enter is a command above.
+        (View::SessionFinder, KeyCode::Esc) => {
+            app.close_session_finder();
+        }
+        (View::SessionFinder, KeyCode::Down) => app.session_finder_move(1),
+        (View::SessionFinder, KeyCode::Up) => app.session_finder_move(-1),
+        (View::SessionFinder, KeyCode::Backspace) => {
+            if let Some(finder) = app.session_finder.as_mut() {
+                finder.pop_filter();
+            }
+        }
+        (View::SessionFinder, KeyCode::Char(c))
+            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            match c {
+                'j' | 'n' => app.session_finder_move(1),
+                'k' | 'p' => app.session_finder_move(-1),
+                _ => {}
+            }
+        }
+        (View::SessionFinder, KeyCode::Char(c)) => {
+            if let Some(finder) = app.session_finder.as_mut() {
+                finder.push_filter(c);
+            }
+        }
         (View::RenameSession, KeyCode::Esc) => {
             app.close_rename_session();
         }

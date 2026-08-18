@@ -25,9 +25,10 @@ use crate::app::App;
 use crate::models::{first_line_truncated, SessionInfo, SessionState};
 use crate::ui::common::{
     context_window_size, ctx_color, format_elapsed, short_model, state_indicator, task_color,
+    COLD_CACHE_ICON,
 };
 use crate::ui::now_ms;
-use crate::ui::palette::{CONTEXT_GRAY, MUTED_TEXT};
+use crate::ui::palette::{CONTEXT_GRAY, ICE_BLUE, MUTED_TEXT};
 use crate::ui::sessions::{
     render_group_header, render_no_sessions, role_prefix, spinner_frame, starting_frame, GROUP_GAP,
     GROUP_HEADER_HEIGHT,
@@ -325,14 +326,21 @@ fn render_row(
         });
     }
     {
+        // Same swap as the card footer: past the prompt-cache TTL the clock
+        // becomes the ice-blue snowflake — restarting beats resuming.
+        let (icon, color) = if session.cache_cold(now) {
+            (COLD_CACHE_ICON, ICE_BLUE)
+        } else {
+            ("󰔟", Color::DarkGray)
+        };
         let text = match session.last_activity {
-            Some(ts) => format!("󰔟 {}", format_elapsed(now, ts)),
+            Some(ts) => format!("{} {}", icon, format_elapsed(now, ts)),
             None => String::new(),
         };
         cluster.push(Cell {
             text,
             target: ELAPSED_W,
-            style: Style::default().fg(Color::DarkGray),
+            style: Style::default().fg(color),
             right_align: true,
         });
     }

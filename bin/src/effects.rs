@@ -12,10 +12,12 @@ use cc_hub_lib::app::{App, Effect};
 use cc_hub_lib::{focus, spawn, tmux_pane};
 use tokio::sync::mpsc;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_effect(
     app: &mut App,
     effect: Effect,
     terminal: &crate::Term,
+    scan_tx: &mpsc::Sender<crate::ScanMsg>,
     detail_tx: &mpsc::Sender<String>,
     state_debug_tx: &mpsc::Sender<String>,
     spawn_metrics: &impl Fn(),
@@ -28,6 +30,15 @@ pub(crate) async fn apply_effect(
             let _ = state_debug_tx.send(session_id).await;
         }
         Effect::SpawnMetricsScan => spawn_metrics(),
+        Effect::BuildSessionIndex => {
+            let tx = scan_tx.clone();
+            tokio::spawn(async move {
+                let index = tokio::task::spawn_blocking(cc_hub_lib::session_index::scan)
+                    .await
+                    .unwrap_or_default();
+                let _ = tx.send(crate::ScanMsg::SessionIndex(index)).await;
+            });
+        }
         Effect::OpenTmuxPane { tmux, owned } => {
             let (cols, rows) = crate::popup_pane_size(terminal);
             let pane = if owned {

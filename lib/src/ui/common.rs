@@ -181,6 +181,12 @@ pub(crate) fn state_color(state: &SessionState) -> Color {
     state_indicator(state).1
 }
 
+/// Snowflake marking a cold prompt cache (see
+/// [`crate::models::SessionInfo::cache_cold`]): the session's next turn
+/// re-ingests everything anyway, so restarting it is free. Rendered in
+/// [`crate::ui::palette::ICE_BLUE`] wherever the surrounding style allows.
+pub(crate) const COLD_CACHE_ICON: &str = "󰜗";
+
 pub(crate) fn short_model(model: &str) -> &str {
     model.strip_prefix("claude-").unwrap_or(model)
 }

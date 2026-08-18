@@ -5,9 +5,9 @@ use crate::models::{first_line_truncated, short_sid, SessionDetail, SessionInfo,
 use crate::ui::common::{
     centered_rect, context_window_size, ctx_bar, ctx_color, format_datetime, format_elapsed,
     format_time, format_tokens, format_tool_label, popup_block, priority_color, short_model,
-    state_color, state_indicator, task_color,
+    state_color, state_indicator, task_color, COLD_CACHE_ICON,
 };
-use crate::ui::palette::{CONTEXT_GRAY, MUTED_TEXT, PURPLE, SEP_GRAY};
+use crate::ui::palette::{CONTEXT_GRAY, ICE_BLUE, MUTED_TEXT, PURPLE, SEP_GRAY};
 use crate::ui::popups::wrapped_total_rows;
 use crate::ui::{cell_height, now_ms};
 use ratatui::layout::{Alignment, Rect};
@@ -290,10 +290,22 @@ pub(crate) fn render_card(
     // glyph is a Nerd Font icon that renders two columns wide but measures as
     // one, so without a trailing cell its second column collides with the
     // border (the bare no-title case `󰂞` is where this bit).
+    //
+    // A snowflake after the state icon marks a cold prompt cache: the
+    // session sat quiet past the cache TTL, so restarting it beats resuming.
+    // It rides the title (the primary skim surface) in the title's own
+    // color; the ice-blue version lives in the footer clock.
+    let cold_mark = if session.cache_cold(now) {
+        format!("{} ", COLD_CACHE_ICON)
+    } else {
+        String::new()
+    };
     let title = match session.title.as_deref() {
-        Some(t) if !t.is_empty() => format!("{}{}{} {}", prefix, agent_badge, indicator, t),
-        _ if session.titling => format!("{}{}{} ✎ …", prefix, agent_badge, indicator),
-        _ => format!("{}{}{} ", prefix, agent_badge, indicator),
+        Some(t) if !t.is_empty() => {
+            format!("{}{}{} {}{}", prefix, agent_badge, indicator, cold_mark, t)
+        }
+        _ if session.titling => format!("{}{}{} {}✎ …", prefix, agent_badge, indicator, cold_mark),
+        _ => format!("{}{}{} {}", prefix, agent_badge, indicator, cold_mark),
     };
     // Attention cards get a solid chip title (black on the state color) —
     // background fill is reserved exclusively for "needs you", so it can't
@@ -594,10 +606,17 @@ fn footer_line(session: &SessionInfo, now: u64, inner_w: usize) -> Line<'static>
         let elapsed = format_elapsed(now, ts);
         // On attention cards this clock doubles as the wait age — how long
         // the agent has been blocked on the user — but it stays metadata
-        // gray: state color lives in the chip and border only.
+        // gray: state color lives in the chip and border only. Past the
+        // prompt-cache TTL the clock becomes an ice-blue snowflake: the one
+        // exception, because "cold" is exactly what this number measures.
+        let (icon, color) = if session.cache_cold(now) {
+            (COLD_CACHE_ICON, ICE_BLUE)
+        } else {
+            ("󰔟", Color::DarkGray)
+        };
         spans.push(Span::styled(
-            format!("󰔟 {}", elapsed),
-            Style::default().fg(Color::DarkGray),
+            format!("{} {}", icon, elapsed),
+            Style::default().fg(color),
         ));
         left_cols += 3 + elapsed.chars().count();
     }
@@ -907,6 +926,18 @@ mod tests {
         (0..buf.area().width)
             .map(|x| buf[(x, y)].symbol().to_string())
             .collect()
+    }
+
+    #[test]
+    fn card_marks_cold_cache_with_snowflake() {
+        let mut s = fake_session();
+        let warm: String = (0..7).map(|y| row(&render(&s, 42, 7), y)).collect();
+        assert!(!warm.contains('󰜗'), "12m-old session must not be frosted");
+
+        s.last_activity = Some(NOW - 2 * 3_600_000); // 2h — past the cache TTL
+        let cold: String = (0..7).map(|y| row(&render(&s, 42, 7), y)).collect();
+        // Once in the title (skim surface), once as the footer clock.
+        assert_eq!(cold.matches('󰜗').count(), 2, "card:\n{}", cold);
     }
 
     #[test]

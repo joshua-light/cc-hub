@@ -325,6 +325,9 @@ fn queue_missing_task_titles(
 
 pub(crate) enum ScanMsg {
     SessionList(Vec<models::SessionInfo>),
+    /// The full transcript archive for the session finder, built off the
+    /// event loop by [`Effect::BuildSessionIndex`].
+    SessionIndex(Vec<cc_hub_lib::session_index::IndexedSession>),
     Detail(models::SessionDetail),
     StateDebug(models::SessionInfo, conversation::StateExplanation),
     Usage(usage::UsageInfo),
@@ -683,6 +686,7 @@ fn apply_scan_msg(
             queue_missing_titles(&mut sessions, inflight_titles, active_titles, title_gate);
             return app.update_sessions(sessions);
         }
+        ScanMsg::SessionIndex(index) => app.update_session_index(index),
         ScanMsg::Detail(detail) => app.update_detail(detail),
         ScanMsg::StateDebug(info, exp) => {
             let lines = ui::build_state_debug_content(&info, &exp);

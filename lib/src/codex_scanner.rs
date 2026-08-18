@@ -55,14 +55,14 @@ fn mtime_age_secs(path: &Path) -> Option<u64> {
         .map(|d| d.as_secs())
 }
 
-fn read_head(path: &Path) -> Vec<Value> {
+pub(crate) fn read_head(path: &Path) -> Vec<Value> {
     conversation::read_jsonl_head(path, HEAD_BYTES)
 }
 
 /// Recover a session id from a `rollout-<ts>-<uuid>.jsonl` filename when the
 /// `session_meta` record is unreadable. The uuid is the trailing five
 /// dash-groups (`8-4-4-4-12`).
-fn session_id_from_filename(path: &Path) -> Option<String> {
+pub(crate) fn session_id_from_filename(path: &Path) -> Option<String> {
     let stem = path.file_stem().and_then(|s| s.to_str())?;
     let parts: Vec<&str> = stem.split('-').collect();
     if parts.len() < 5 {
@@ -74,7 +74,7 @@ fn session_id_from_filename(path: &Path) -> Option<String> {
 /// Recursively collect `rollout-*.jsonl` files under `root` with their mtimes.
 /// Codex nests them three levels deep by date (`YYYY/MM/DD/`), so a flat
 /// `read_dir` (as the Pi scanner uses) would miss them.
-fn walk_rollouts(root: &Path) -> Vec<(PathBuf, SystemTime)> {
+pub(crate) fn walk_rollouts(root: &Path) -> Vec<(PathBuf, SystemTime)> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {

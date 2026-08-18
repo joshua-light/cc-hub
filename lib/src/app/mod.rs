@@ -22,6 +22,7 @@ mod command;
 mod metrics_view;
 mod projects_view;
 mod render_state;
+mod session_finder;
 mod sessions_view;
 mod task_link_picker;
 mod tasks_view;
@@ -31,6 +32,7 @@ pub use command::{Command, Effect, GlobalCommand, SessionsCommand, TasksCommand}
 pub use metrics_view::MetricsView;
 pub use projects_view::ProjectsView;
 pub use render_state::RenderState;
+pub use session_finder::{SessionFinderChoice, SessionFinderRow, SessionFinderState};
 pub use sessions_view::{SessionsLayout, SessionsView};
 pub use task_link_picker::{TaskLinkAction, TaskLinkChoice, TaskLinkPickerState, TaskLinkRow};
 pub use tasks_view::{column_statuses, visible_task_columns, TasksView, TASK_COLUMNS};
@@ -201,6 +203,10 @@ pub enum View {
     /// the selected session to a personal-board or project task so the grid
     /// groups it under `project ▸ task`.
     TaskLinkPicker,
+    /// Archive-wide session finder for `/` on the Sessions tab: fuzzy-search
+    /// every transcript on disk (saved title, id, project, first message)
+    /// and reopen the pick — attach when live, resume when not.
+    SessionFinder,
     GhCreateInput,
     ProjectsResult,
     Backlog,
@@ -606,6 +612,8 @@ pub struct App {
     default_session_agent_id: String,
     /// State behind [`View::TaskLinkPicker`] (`L` on the Sessions tab).
     pub task_link_picker: Option<TaskLinkPickerState>,
+    /// State behind [`View::SessionFinder`] (`/` on the Sessions tab).
+    pub session_finder: Option<SessionFinderState>,
     /// `session_id → TaskLink` sidecar snapshot driving the `project ▸ task`
     /// grouping in [`Self::build_groups`]. Reloaded from disk on every scan
     /// tick (mirroring how the scanner re-reads the title sidecar) so links
@@ -790,6 +798,7 @@ impl App {
             agent_picker: None,
             default_session_agent_id: config::get().default_session_agent_id(),
             task_link_picker: None,
+            session_finder: None,
             session_task_links: crate::session_tasks::load(),
             tmux_pane: None,
             folder_picker: None,
@@ -2452,6 +2461,101 @@ impl App {
             self.rebuild_groups();
         }
         self.set_status(status);
+    }
+
+    /// `/` on the Sessions tab: open the archive-wide session finder. It
+    /// opens empty and typing-ready; the archive itself arrives via
+    /// [`Effect::BuildSessionIndex`] → [`Self::update_session_index`].
+    pub fn enter_session_finder(&mut self) {
+        self.session_finder = Some(SessionFinderState::loading());
+        self.view = View::SessionFinder;
+    }
+
+    pub fn close_session_finder(&mut self) {
+        self.session_finder = None;
+        self.view = View::Grid;
+    }
+
+    /// Move the finder highlight by `delta` rows, clamped to the live
+    /// filtered result list.
+    pub fn session_finder_move(&mut self, delta: isize) {
+        if let Some(finder) = self.session_finder.as_mut() {
+            finder.move_selection(delta);
+        }
+    }
+
+    /// Adopt a finished archive scan. Ignored when the finder was closed
+    /// while the scan ran — the list is rebuilt fresh on every open.
+    pub fn update_session_index(&mut self, index: Vec<crate::session_index::IndexedSession>) {
+        if let Some(finder) = self.session_finder.as_mut() {
+            finder.set_index(index);
+        }
+    }
+
+    /// Enter on the session finder: reopen the highlighted session. A
+    /// still-live session is attached (tmux pane) or window-focused — never
+    /// resumed into a duplicate process; a dead one is resumed in its cwd
+    /// and its fresh pane attached. An empty match list keeps the finder
+    /// open, mirroring the model picker.
+    pub fn confirm_session_finder(&mut self) -> Vec<Effect> {
+        let Some(choice) = self
+            .session_finder
+            .as_ref()
+            .and_then(SessionFinderState::selected_choice)
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        self.session_finder = None;
+        self.view = View::Grid;
+        // Live already? Match by session id or by transcript path — a Pi/
+        // Codex resume runs on the same file, so a second spawn would put
+        // two processes on one JSONL (see `focus_selected_session`).
+        let live = self.sessions.last_sessions.iter().find(|s| {
+            s.state != SessionState::Inactive
+                && (s.session_id == choice.session_id
+                    || s.jsonl_path.as_deref() == Some(choice.jsonl_path.as_path()))
+        });
+        if let Some(live) = live {
+            let sid = crate::models::short_sid(&live.session_id).to_string();
+            if let Some(tmux) = live.tmux_session.clone() {
+                self.set_status(format!("attached live {} [{}]", sid, tmux));
+                return vec![Effect::OpenTmuxPane { tmux, owned: false }];
+            }
+            let (pid, cwd) = (live.pid, live.cwd.clone());
+            self.set_status(format!("focused live {}", sid));
+            return vec![Effect::FocusWindow { pid, cwd }];
+        }
+        let resume = match choice.agent_kind {
+            // Claude and Codex resume by session id; Pi by transcript path.
+            crate::agent::AgentKind::Claude | crate::agent::AgentKind::Codex => {
+                crate::spawn::ResumeTarget::SessionId(choice.session_id.clone())
+            }
+            crate::agent::AgentKind::Pi => {
+                crate::spawn::ResumeTarget::SessionFile(choice.jsonl_path.clone())
+            }
+        };
+        match self.runtime.spawn_session(
+            &choice.agent_id,
+            &choice.cwd,
+            Some(resume),
+            None,
+            None,
+            false,
+        ) {
+            Ok(tmux) => {
+                self.set_status(format!(
+                    "resumed {} [{}]",
+                    crate::models::short_sid(&choice.session_id),
+                    tmux
+                ));
+                vec![Effect::OpenTmuxPane { tmux, owned: false }]
+            }
+            Err(e) => {
+                self.set_status(format!("resume failed: {}", e));
+                Vec::new()
+            }
+        }
     }
 
     /// Open the picker pre-loaded with the user's bookmarked folders.

@@ -75,6 +75,11 @@ pub enum SessionsCommand {
     OpenBookmarksPicker,
     /// `L` — task-link picker: group the selected session under a task.
     OpenTaskLinkPicker,
+    /// `/` — archive-wide session finder: fuzzy-search every transcript on
+    /// disk and reopen the pick.
+    OpenSessionFinder,
+    /// SessionFinder Enter.
+    ConfirmSessionFinder,
     /// `t` — todo side panel.
     OpenTodoPanel,
     /// `r` — rename input.
@@ -157,6 +162,9 @@ pub enum Effect {
     RequestStateDebug { session_id: String },
     /// Kick the background metrics analysis.
     SpawnMetricsScan,
+    /// Walk the transcript stores off the event loop and deliver the archive
+    /// to the session finder ([`crate::session_index::scan`]).
+    BuildSessionIndex,
     /// Attach a tmux session as the embedded pane. `owned` panes are killed
     /// with the pane (shell panes); un-owned panes outlive it (agents).
     OpenTmuxPane { tmux: String, owned: bool },
@@ -318,6 +326,11 @@ impl App {
                 }
                 Vec::new()
             }
+            OpenSessionFinder => {
+                self.enter_session_finder();
+                vec![Effect::BuildSessionIndex]
+            }
+            ConfirmSessionFinder => self.confirm_session_finder(),
             OpenTaskLinkPicker => {
                 if !self.enter_task_link_picker() {
                     let msg = if self.selected_session_info().is_none() {
@@ -1170,6 +1183,100 @@ mod tests {
                 "got: {}",
                 status(&app)
             );
+        });
+    }
+
+    fn indexed(sid: &str) -> crate::session_index::IndexedSession {
+        crate::session_index::IndexedSession {
+            agent_id: "claude".into(),
+            agent_kind: AgentKind::Claude,
+            session_id: sid.into(),
+            cwd: "/tmp/proj".into(),
+            project_name: "proj".into(),
+            jsonl_path: std::path::PathBuf::from(format!("/x/{sid}.jsonl")),
+            mtime_ms: 0,
+            title: Some("Old refactor".into()),
+            first_message: None,
+        }
+    }
+
+    #[test]
+    fn session_finder_opens_loading_and_requests_the_index() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt) = app_with(vec![]);
+            let effects = app.execute(Command::Sessions(SessionsCommand::OpenSessionFinder));
+            assert_eq!(effects, vec![Effect::BuildSessionIndex]);
+            assert_eq!(app.view, crate::app::View::SessionFinder);
+            assert!(app.session_finder.as_ref().is_some_and(|f| f.loading));
+        });
+    }
+
+    #[test]
+    fn session_finder_confirm_resumes_a_dead_session_and_attaches() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, runtime) = app_with(vec![]);
+            app.execute(Command::Sessions(SessionsCommand::OpenSessionFinder));
+            app.update_session_index(vec![indexed("sid-old")]);
+
+            let effects = app.execute(Command::Sessions(SessionsCommand::ConfirmSessionFinder));
+            assert_eq!(
+                effects,
+                vec![Effect::OpenTmuxPane {
+                    tmux: "mock-spawn".into(),
+                    owned: false
+                }]
+            );
+            assert_eq!(app.view, crate::app::View::Grid);
+            assert!(app.session_finder.is_none());
+            let spawns = runtime.spawns.lock().unwrap();
+            assert_eq!(spawns.len(), 1);
+            assert_eq!(spawns[0].cwd, "/tmp/proj");
+            assert_eq!(spawns[0].resume.as_deref(), Some("SessionId(\"sid-old\")"));
+            assert!(status(&app).starts_with("resumed"), "got: {}", status(&app));
+        });
+    }
+
+    #[test]
+    fn session_finder_confirm_attaches_a_live_session_instead_of_respawning() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, runtime) = app_with(vec![session(
+                "sid-old",
+                SessionState::Processing,
+                Some("cc-agent-live"),
+            )]);
+            app.execute(Command::Sessions(SessionsCommand::OpenSessionFinder));
+            app.update_session_index(vec![indexed("sid-old")]);
+
+            let effects = app.execute(Command::Sessions(SessionsCommand::ConfirmSessionFinder));
+            assert_eq!(
+                effects,
+                vec![Effect::OpenTmuxPane {
+                    tmux: "cc-agent-live".into(),
+                    owned: false
+                }]
+            );
+            assert!(
+                runtime.spawns.lock().unwrap().is_empty(),
+                "a live session must be attached, never resumed into a duplicate"
+            );
+        });
+    }
+
+    #[test]
+    fn session_finder_confirm_with_no_match_keeps_the_finder_open() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, runtime) = app_with(vec![]);
+            app.execute(Command::Sessions(SessionsCommand::OpenSessionFinder));
+            app.update_session_index(vec![indexed("sid-old")]);
+            for c in "zzz".chars() {
+                app.session_finder.as_mut().unwrap().push_filter(c);
+            }
+
+            let effects = app.execute(Command::Sessions(SessionsCommand::ConfirmSessionFinder));
+            assert!(effects.is_empty());
+            assert_eq!(app.view, crate::app::View::SessionFinder);
+            assert!(app.session_finder.is_some());
+            assert!(runtime.spawns.lock().unwrap().is_empty());
         });
     }
 

@@ -1,7 +1,7 @@
-//! Named colour constants for literal `Color::Rgb` values that recur across
-//! the UI. Consolidating only *exact* duplicate values keeps the palette a
-//! pure de-duplication of what the code already used — no RGB value is
-//! altered. Names describe the role where one is obvious, otherwise the value.
+//! Named colour constants for literal `Color::Rgb` values shared across the
+//! UI. The file started as a pure de-duplication of values the code already
+//! used; role colours introduced since also live here. Names describe the
+//! role where one is obvious, otherwise the value.
 
 use ratatui::style::Color;
 
@@ -47,3 +47,7 @@ pub(crate) const BACKLOG_BLUE: Color = Color::Rgb(120, 140, 200);
 /// Muted slate for task `#tag` badges — distinct from the priority hues and
 /// column accents, reads as secondary metadata on the card border.
 pub(crate) const TAG_SLATE: Color = Color::Rgb(150, 170, 200);
+
+/// Ice blue for the cold-cache snowflake (session quiet past the prompt-cache
+/// TTL — see [`crate::models::SessionInfo::cache_cold`]).
+pub(crate) const ICE_BLUE: Color = Color::Rgb(130, 190, 220);
