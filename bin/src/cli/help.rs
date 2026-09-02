@@ -12,6 +12,7 @@ pub(crate) fn print_cli_help(topic: &[String]) -> Result<(), CliError> {
         Some("pr") => print!("{}", PR_HELP),
         Some("worker") => print!("{}", WORKER_HELP),
         Some("project") => print!("{}", PROJECT_HELP),
+        Some("open") => print!("{}", OPEN_HELP),
         Some(other) => {
             return Err(CliError::Usage(format!(
                 "unknown help topic: {} (try `cc-hub help`)",
@@ -38,11 +39,35 @@ Orchestrator-facing topics:
   worker            Wait for worker sessions to finish
   project           List registered projects
 
+Desktop-facing topics:
+  open              Act on a cc-hub:// deep link (start a PR review session)
+
 Examples:
   cc-hub task create --backlog --prompt "Fix the flaky test"
   cc-hub task start --task t-123 --agent claude
   cc-hub spawn-worker --task t-123 --worktree fix --prompt "Implement the fix"
   cc-hub pr show --task t-123
+"#;
+
+const OPEN_HELP: &str = r#"cc-hub open
+
+Usage:
+  cc-hub open <cc-hub://url> [options]
+
+Links:
+  cc-hub://review?depth=<light|full>&pr=<pull request url>[&title=<text>]
+      Spawn a session in the local checkout of the pull request's repository,
+      name it "PR: <title>" (or "PR: <repo>#<n>"), and open it with "Let's do
+      <depth> review of this PR: <url>". The checkout is found by repo name
+      among registered projects, bookmarks, and the cwds of known sessions.
+
+Options:
+  --agent AGENT        Backend (default: [projects].default_session_agent)
+  --wait-secs N        Prompt-dispatch readiness timeout (default: 120)
+  --dry-run            Resolve cwd/prompt/agent, spawn nothing
+
+Emits one JSON line with kind/tmux/cwd/agent_id/prompt/prompt_status.
+Install the macOS URL-scheme handler with contrib/macos/install-link-handler.sh.
 "#;
 
 const SPAWN_WORKER_HELP: &str = r#"cc-hub spawn-worker

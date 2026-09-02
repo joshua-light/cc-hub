@@ -4,7 +4,7 @@
 //! be exercised without shelling out and prevents UI state methods from being
 //! permanently coupled to the platform implementation.
 
-use crate::spawn::ResumeTarget;
+use crate::spawn::SessionTarget;
 use std::io;
 
 pub trait AgentRuntime: Send + Sync {
@@ -16,7 +16,7 @@ pub trait AgentRuntime: Send + Sync {
         &self,
         agent_id: &str,
         cwd: &str,
-        resume: Option<ResumeTarget>,
+        target: Option<SessionTarget>,
         initial_prompt: Option<&str>,
         model: Option<&str>,
         readonly_tools: bool,
@@ -28,13 +28,13 @@ pub trait AgentRuntime: Send + Sync {
 #[cfg(test)]
 pub(crate) mod testing {
     use super::AgentRuntime;
-    use crate::spawn::ResumeTarget;
+    use crate::spawn::SessionTarget;
     use std::io;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
 
     /// One recorded [`AgentRuntime::spawn_session`] call. `resume` is kept as
-    /// a rendered string because [`ResumeTarget`] is what tests assert on
+    /// a rendered string because [`SessionTarget`] is what tests assert on
     /// textually; `initial_prompt` distinguishes inline-vs-queued dispatch.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct SpawnCall {
@@ -94,7 +94,7 @@ pub(crate) mod testing {
             &self,
             agent_id: &str,
             cwd: &str,
-            resume: Option<ResumeTarget>,
+            target: Option<SessionTarget>,
             initial_prompt: Option<&str>,
             model: Option<&str>,
             readonly_tools: bool,
@@ -102,7 +102,7 @@ pub(crate) mod testing {
             self.spawns.lock().unwrap().push(SpawnCall {
                 agent_id: agent_id.to_string(),
                 cwd: cwd.to_string(),
-                resume: resume.map(|r| format!("{:?}", r)),
+                resume: target.map(|r| format!("{:?}", r)),
                 initial_prompt: initial_prompt.map(str::to_string),
                 model: model.map(str::to_string),
                 readonly_tools,
@@ -139,7 +139,7 @@ impl AgentRuntime for SystemAgentRuntime {
         &self,
         agent_id: &str,
         cwd: &str,
-        resume: Option<ResumeTarget>,
+        target: Option<SessionTarget>,
         initial_prompt: Option<&str>,
         model: Option<&str>,
         readonly_tools: bool,
@@ -147,7 +147,7 @@ impl AgentRuntime for SystemAgentRuntime {
         crate::spawn::spawn_agent_session(
             agent_id,
             cwd,
-            resume,
+            target,
             initial_prompt,
             model,
             readonly_tools,

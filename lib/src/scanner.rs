@@ -6,7 +6,7 @@ use crate::models::{short_sid, RawSession, SessionDetail, SessionInfo, SessionSt
 use crate::pi_scanner;
 use crate::platform::paths;
 use crate::platform::process::{Process, ProcessInfo};
-use crate::spawn::ResumeTarget;
+use crate::spawn::SessionTarget;
 use log::{debug, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1054,7 +1054,7 @@ fn sort_stable(sessions: &mut [SessionInfo]) {
 #[derive(Clone, Debug)]
 pub struct ResumableSession {
     pub session_id: String,
-    pub resume: ResumeTarget,
+    pub resume: SessionTarget,
 }
 
 pub fn find_orchestrator_session(
@@ -1068,20 +1068,20 @@ pub fn find_orchestrator_session(
             find_orchestrator_session_id(project_root, task_id, stored_sid).map(|sid| {
                 ResumableSession {
                     session_id: sid.clone(),
-                    resume: ResumeTarget::SessionId(sid),
+                    resume: SessionTarget::Resume(sid),
                 }
             })
         }
         AgentKind::Pi => pi_scanner::find_orchestrator_session(project_root, task_id, stored_sid)
             .map(|(sid, path)| ResumableSession {
                 session_id: sid,
-                resume: ResumeTarget::SessionFile(path),
+                resume: SessionTarget::ResumeFile(path),
             }),
         AgentKind::Codex => {
             codex_scanner::find_orchestrator_session(project_root, task_id, stored_sid).map(|sid| {
                 ResumableSession {
                     session_id: sid.clone(),
-                    resume: ResumeTarget::SessionId(sid),
+                    resume: SessionTarget::Resume(sid),
                 }
             })
         }

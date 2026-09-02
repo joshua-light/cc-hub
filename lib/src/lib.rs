@@ -14,6 +14,7 @@ pub mod focus;
 pub mod folder_picker;
 pub mod fuzzy;
 pub mod gh;
+pub mod link;
 pub mod live_view;
 pub mod merge_lock;
 pub mod metrics;

@@ -58,6 +58,27 @@ Project state lives at `~/.cc-hub/projects.toml` and
 `~/.cc-hub/projects/<id>/tasks/<id>/state.json`. Worktrees go under
 `<project-root>/.cc-hub-wt/` — add that to `.gitignore`.
 
+## Deep links
+
+cc-hub owns the `cc-hub://` URL scheme, so a browser button or a shell `open`
+can start a session. One link kind exists today:
+
+```
+cc-hub://review?depth=<light|full>&pr=<pull request url>
+```
+
+`cc-hub open <url>` spawns the default session agent in the local checkout of
+the pull request's repository, names the session `PR: <title>` (from the
+optional `title` parameter, else `PR: <repo>#<n>`) before it starts, and opens
+it with `Let's do <depth> review of this PR: <url>`. The checkout is found by repo name among registered projects,
+bookmarks, and the cwds of known sessions; `--dry-run` shows where a link
+would land without spawning anything.
+
+On macOS, `contrib/macos/install-link-handler.sh` builds a tiny
+`~/Applications/cc-hub Link.app` that owns the scheme and forwards every URL
+to `cc-hub open`. The Chrome extension that puts **Light Review** / **Full
+Review** buttons on Bitbucket pull requests lives in the `tps-chrome` repo.
+
 ## Requirements
 
 | | Linux / macOS | Windows |

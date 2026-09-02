@@ -6,7 +6,8 @@
 //!
 //! Argument parsing is hand-rolled to avoid a clap dep. The orchestrator-facing
 //! verbs include `spawn-worker`, `merge-worktree`, `task ...`, `orchestrate ...`,
-//! `pr ...`, `worker ...`, and `project ...`.
+//! `pr ...`, `worker ...`, and `project ...`; `open <url>` acts on a `cc-hub://`
+//! deep link (the OS URL-scheme handler calls it).
 //!
 //! Most verbs derive `project-id` from the current working directory by default;
 //! `--project-id ID` overrides for the rare case of operating cross-project.
@@ -19,6 +20,7 @@
 //! to spawn one and when to merge is the orchestrator's job.
 
 mod help;
+mod link;
 mod merge_worktree;
 mod orchestrate;
 mod pr;
@@ -48,6 +50,7 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
         "pr" => Some(handle(pr::pr_subcommand(rest))),
         "worker" => Some(handle(worker::worker_subcommand(rest))),
         "project" => Some(handle(project::project_subcommand(rest))),
+        "open" => Some(handle(link::open(rest))),
         _ => None,
     }
 }

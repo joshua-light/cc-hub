@@ -22,15 +22,23 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug)]
-pub enum ResumeTarget {
-    SessionId(String),
-    SessionFile(PathBuf),
+/// Which session a spawned agent process is: an existing one to continue, or
+/// a new one the hub has already given an id.
+pub enum SessionTarget {
+    /// Continue an existing session by id (`claude --resume`, `codex resume`,
+    /// `pi --session`).
+    Resume(String),
+    /// Continue an existing session by transcript path (Pi only).
+    ResumeFile(PathBuf),
+    /// Start a new session under an id chosen up front (`claude --session-id`),
+    /// so the hub can attach state — a title — before the agent even starts.
+    Fresh(String),
 }
 
 pub fn spawn_agent_session(
     agent_id: &str,
     cwd: &str,
-    resume: Option<ResumeTarget>,
+    target: Option<SessionTarget>,
     initial_prompt: Option<&str>,
     model: Option<&str>,
     readonly_tools: bool,
@@ -38,14 +46,14 @@ pub fn spawn_agent_session(
     let agent = config::get()
         .agent(agent_id)
         .ok_or_else(|| io::Error::other(format!("unknown agent id: {}", agent_id)))?;
-    spawn_agent_session_with_config(&agent, cwd, resume, initial_prompt, model, readonly_tools)
+    spawn_agent_session_with_config(&agent, cwd, target, initial_prompt, model, readonly_tools)
 }
 
 pub fn spawn_claude_session(cwd: &str, resume_id: Option<&str>) -> io::Result<String> {
     spawn_agent_session(
         "claude",
         cwd,
-        resume_id.map(|sid| ResumeTarget::SessionId(sid.to_string())),
+        resume_id.map(|sid| SessionTarget::Resume(sid.to_string())),
         None,
         None,
         false,
@@ -55,7 +63,7 @@ pub fn spawn_claude_session(cwd: &str, resume_id: Option<&str>) -> io::Result<St
 pub fn spawn_agent_session_with_config(
     agent: &AgentConfig,
     cwd: &str,
-    resume: Option<ResumeTarget>,
+    target: Option<SessionTarget>,
     initial_prompt: Option<&str>,
     model: Option<&str>,
     readonly_tools: bool,
@@ -65,7 +73,7 @@ pub fn spawn_agent_session_with_config(
         agent,
         cwd,
         &name,
-        resume,
+        target,
         initial_prompt,
         model,
         readonly_tools,
@@ -101,7 +109,7 @@ fn build_agent_command(
     agent: &AgentConfig,
     cwd: &str,
     tmux_name: &str,
-    resume: Option<ResumeTarget>,
+    target: Option<SessionTarget>,
     initial_prompt: Option<&str>,
     model: Option<&str>,
     readonly_tools: bool,
@@ -114,16 +122,20 @@ fn build_agent_command(
                 cmd.push_str(" --model ");
                 cmd.push_str(&shell_quote(model));
             }
-            match resume {
-                Some(ResumeTarget::SessionId(sid)) => {
+            match target {
+                Some(SessionTarget::Resume(sid)) => {
                     cmd.push_str(" --resume ");
                     cmd.push_str(&shell_quote(&sid));
                 }
-                Some(ResumeTarget::SessionFile(path)) => {
+                Some(SessionTarget::ResumeFile(path)) => {
                     return Err(io::Error::other(format!(
                         "claude backend cannot resume by session file: {}",
                         path.display()
                     )));
+                }
+                Some(SessionTarget::Fresh(sid)) => {
+                    cmd.push_str(" --session-id ");
+                    cmd.push_str(&shell_quote(&sid));
                 }
                 None => {}
             }
@@ -153,14 +165,20 @@ fn build_agent_command(
             if readonly_tools {
                 cmd.push_str(" --tools read,grep,find,ls");
             }
-            match resume {
-                Some(ResumeTarget::SessionId(sid)) => {
+            match target {
+                Some(SessionTarget::Resume(sid)) => {
                     cmd.push_str(" --session ");
                     cmd.push_str(&shell_quote(&sid));
                 }
-                Some(ResumeTarget::SessionFile(path)) => {
+                Some(SessionTarget::ResumeFile(path)) => {
                     cmd.push_str(" --session ");
                     cmd.push_str(&shell_quote(&path.to_string_lossy()));
+                }
+                Some(SessionTarget::Fresh(sid)) => {
+                    return Err(io::Error::other(format!(
+                        "pi backend cannot start under a chosen session id: {}",
+                        sid
+                    )));
                 }
                 None => {}
             }
@@ -187,15 +205,21 @@ fn build_agent_command(
             // and a resumed session restores its own model — so `-m` applies to
             // fresh sessions only. Any fixed flags (e.g. reasoning effort) live
             // in `agent.command` from config and are already in `cmd`.
-            match resume {
-                Some(ResumeTarget::SessionId(sid)) => {
+            match target {
+                Some(SessionTarget::Resume(sid)) => {
                     cmd.push_str(" resume ");
                     cmd.push_str(&shell_quote(&sid));
                 }
-                Some(ResumeTarget::SessionFile(path)) => {
+                Some(SessionTarget::ResumeFile(path)) => {
                     return Err(io::Error::other(format!(
                         "codex backend resumes by session id, not file: {}",
                         path.display()
+                    )));
+                }
+                Some(SessionTarget::Fresh(sid)) => {
+                    return Err(io::Error::other(format!(
+                        "codex backend cannot start under a chosen session id: {}",
+                        sid
                     )));
                 }
                 None => {
@@ -478,6 +502,53 @@ mod tests {
     }
 
     #[test]
+    fn claude_fresh_target_pins_the_session_id() {
+        let agent = AgentConfig {
+            id: "claude".into(),
+            kind: AgentKind::Claude,
+            command: "claude".into(),
+            use_bridge: false,
+            models: Vec::new(),
+        };
+        let cmd = build_agent_command(
+            &agent,
+            "/tmp",
+            "cchub-1-2",
+            Some(super::SessionTarget::Fresh("0000-fresh-uuid".into())),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(
+            cmd.ends_with("claude --session-id '0000-fresh-uuid'"),
+            "got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn codex_fresh_target_is_refused() {
+        let agent = AgentConfig {
+            id: "codex".into(),
+            kind: AgentKind::Codex,
+            command: "codex".into(),
+            use_bridge: false,
+            models: Vec::new(),
+        };
+        let err = build_agent_command(
+            &agent,
+            "/tmp",
+            "cchub-1-2",
+            Some(super::SessionTarget::Fresh("0000-fresh-uuid".into())),
+            None,
+            None,
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("chosen session id"), "got: {err}");
+    }
+
+    #[test]
     fn codex_resume_uses_session_id_subcommand_not_model() {
         let agent = AgentConfig {
             id: "codex".into(),
@@ -491,7 +562,7 @@ mod tests {
             &agent,
             "/tmp",
             "cchub-1-2",
-            Some(super::ResumeTarget::SessionId("019f60ca-uuid".into())),
+            Some(super::SessionTarget::Resume("019f60ca-uuid".into())),
             None,
             Some("gpt-5.6-luna"),
             false,
@@ -513,7 +584,7 @@ mod tests {
             &agent,
             "/tmp",
             "cchub-1-2",
-            Some(super::ResumeTarget::SessionFile("/x/s.jsonl".into())),
+            Some(super::SessionTarget::ResumeFile("/x/s.jsonl".into())),
             None,
             None,
             false,

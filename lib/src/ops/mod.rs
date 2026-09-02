@@ -18,6 +18,7 @@
 //!     `merge_lock::*` — the per-task lock and transition validation live
 //!     inside those helpers.
 
+pub mod link;
 pub mod pr;
 pub mod task;
 pub mod worker;

@@ -1313,7 +1313,7 @@ impl App {
         match self.runtime.spawn_session(
             &agent_id,
             &cwd,
-            Some(crate::spawn::ResumeTarget::SessionId(sid)),
+            Some(crate::spawn::SessionTarget::Resume(sid)),
             None,
             None,
             false,
@@ -1685,7 +1685,7 @@ impl App {
             .spawn_session(
                 agent_id,
                 cwd,
-                Some(crate::spawn::ResumeTarget::SessionId(sid)),
+                Some(crate::spawn::SessionTarget::Resume(sid)),
                 None,
                 None,
                 false,
@@ -2529,10 +2529,10 @@ impl App {
         let resume = match choice.agent_kind {
             // Claude and Codex resume by session id; Pi by transcript path.
             crate::agent::AgentKind::Claude | crate::agent::AgentKind::Codex => {
-                crate::spawn::ResumeTarget::SessionId(choice.session_id.clone())
+                crate::spawn::SessionTarget::Resume(choice.session_id.clone())
             }
             crate::agent::AgentKind::Pi => {
-                crate::spawn::ResumeTarget::SessionFile(choice.jsonl_path.clone())
+                crate::spawn::SessionTarget::ResumeFile(choice.jsonl_path.clone())
             }
         };
         match self.runtime.spawn_session(

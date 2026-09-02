@@ -415,12 +415,12 @@ impl App {
                 // Claude and Codex both resume by session id (`codex resume
                 // <uuid>`); Pi resumes by transcript file path.
                 AgentKind::Claude | AgentKind::Codex => {
-                    Some(spawn::ResumeTarget::SessionId(session.session_id.clone()))
+                    Some(spawn::SessionTarget::Resume(session.session_id.clone()))
                 }
                 AgentKind::Pi => session
                     .jsonl_path
                     .clone()
-                    .map(spawn::ResumeTarget::SessionFile),
+                    .map(spawn::SessionTarget::ResumeFile),
             };
             let status = match resume {
                 Some(target) => match self.runtime.spawn_session(
@@ -806,7 +806,7 @@ mod tests {
             assert_eq!(spawns.len(), 1);
             assert_eq!(spawns[0].agent_id, "claude");
             assert_eq!(spawns[0].cwd, "/tmp/proj");
-            assert_eq!(spawns[0].resume.as_deref(), Some("SessionId(\"sid-abc\")"));
+            assert_eq!(spawns[0].resume.as_deref(), Some("Resume(\"sid-abc\")"));
             assert!(status(&app).starts_with("resumed"), "got: {}", status(&app));
         });
     }
@@ -1231,7 +1231,7 @@ mod tests {
             let spawns = runtime.spawns.lock().unwrap();
             assert_eq!(spawns.len(), 1);
             assert_eq!(spawns[0].cwd, "/tmp/proj");
-            assert_eq!(spawns[0].resume.as_deref(), Some("SessionId(\"sid-old\")"));
+            assert_eq!(spawns[0].resume.as_deref(), Some("Resume(\"sid-old\")"));
             assert!(status(&app).starts_with("resumed"), "got: {}", status(&app));
         });
     }
@@ -1518,7 +1518,7 @@ mod tests {
             assert_eq!(spawns.len(), 1);
             assert_eq!(
                 spawns[0].resume.as_deref(),
-                Some("SessionId(\"sid-resume\")")
+                Some("Resume(\"sid-resume\")")
             );
             // The binding now points at the freshly-spawned session.
             assert_eq!(
