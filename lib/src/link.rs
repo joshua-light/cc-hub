@@ -11,6 +11,10 @@
 //! The OS routes the scheme to `cc-hub open <url>` (see `contrib/macos/`),
 //! which parses the string here and acts on it in [`crate::ops::link`].
 //!
+//! A caller with nobody watching — a persistent agent that starts reviews on
+//! its own — adds `&post=80` to let the review post findings it is at least
+//! that confident about instead of asking a human who is not there.
+//!
 //! This module is pure: a string becomes a [`Link`], a [`ReviewLink`] renders
 //! the prompt it stands for. Nothing here reads disk or spawns a process.
 
@@ -54,20 +58,27 @@ impl FromStr for Link {
                 depth: query.required("depth")?.parse()?,
                 pr: query.required("pr")?.parse()?,
                 title: query.optional("title").map(str::to_string),
+                post: query
+                    .optional("post")
+                    .map(PostThreshold::from_str)
+                    .transpose()?,
             })),
             other => Err(LinkError::UnknownKind(other.to_string())),
         }
     }
 }
 
-/// `cc-hub://review?depth=<light|full>&pr=<url>[&title=<text>]`: review a
-/// pull request in a fresh agent session. `title` is the pull request's own
-/// title, as the page shows it; it names the session.
+/// `cc-hub://review?depth=<light|full>&pr=<url>[&title=<text>][&post=<n>]`:
+/// review a pull request in a fresh agent session. `title` is the pull
+/// request's own title, as the page shows it; it names the session. `post`
+/// lets the review post its confident findings on its own — without it the
+/// review asks before posting anything.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewLink {
     pub depth: ReviewDepth,
     pub pr: PullRequestUrl,
     pub title: Option<String>,
+    pub post: Option<PostThreshold>,
 }
 
 impl ReviewLink {
@@ -75,7 +86,14 @@ impl ReviewLink {
     /// `pr-review` skill triggers on, so "light review" / "full review" stay
     /// verbatim.
     pub fn prompt(&self) -> String {
-        format!("Let's do {} review of this PR: {}", self.depth, self.pr)
+        let review = format!("Let's do {} review of this PR: {}", self.depth, self.pr);
+        match self.post {
+            Some(post) => format!(
+                "{} Post automatically all comments and questions with confidence >= {}.",
+                review, post
+            ),
+            None => review,
+        }
     }
 
     /// The name the session is born with: `PR: <title>`, or `PR: <repo>#<n>`
@@ -97,6 +115,36 @@ impl ReviewLink {
             Some((cut, _)) => format!("{}…", title[..cut].trim_end()),
             None => title,
         }
+    }
+}
+
+/// The confidence at or above which a review posts a finding without asking
+/// first — a percentage, so 1–100. It is a number in the prompt, nothing
+/// more: the review skill decides what its own confidence means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PostThreshold(u8);
+
+impl PostThreshold {
+    pub fn percent(self) -> u8 {
+        self.0
+    }
+}
+
+impl fmt::Display for PostThreshold {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl FromStr for PostThreshold {
+    type Err = LinkError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse::<u8>()
+            .ok()
+            .filter(|percent| (1..=100).contains(percent))
+            .map(PostThreshold)
+            .ok_or_else(|| LinkError::BadPostThreshold(s.to_string()))
     }
 }
 
@@ -213,6 +261,7 @@ pub enum LinkError {
     UnknownKind(String),
     MissingParam(&'static str),
     BadDepth(String),
+    BadPostThreshold(String),
     BadPullRequest(String),
 }
 
@@ -223,6 +272,9 @@ impl fmt::Display for LinkError {
             LinkError::UnknownKind(k) => write!(f, "unknown link kind: {} (try `review`)", k),
             LinkError::MissingParam(p) => write!(f, "missing `{}` parameter", p),
             LinkError::BadDepth(d) => write!(f, "depth must be `light` or `full`, got: {}", d),
+            LinkError::BadPostThreshold(p) => {
+                write!(f, "post must be a confidence percentage 1–100, got: {}", p)
+            }
             LinkError::BadPullRequest(u) => write!(
                 f,
                 "not a pull request URL I can place (need `…/repos/<repo>/pull-requests/<n>` or `…/<owner>/<repo>/pull/<n>`): {}",
@@ -330,6 +382,50 @@ mod tests {
     }
 
     #[test]
+    fn post_threshold_licenses_the_review_to_post() {
+        let r: Link = format!("cc-hub://review?depth=light&pr={}&post=80", PR)
+            .parse()
+            .unwrap();
+        let Link::Review(r) = r;
+        assert_eq!(r.post.map(PostThreshold::percent), Some(80));
+        assert_eq!(
+            r.prompt(),
+            format!(
+                "Let's do light review of this PR: {} Post automatically all comments and questions with confidence >= 80.",
+                PR
+            )
+        );
+    }
+
+    #[test]
+    fn without_post_the_prompt_is_unchanged() {
+        assert_eq!(review("light").post, None);
+        assert!(!review("light").prompt().contains("Post automatically"));
+    }
+
+    #[test]
+    fn post_must_be_a_percentage() {
+        for bad in ["0", "101", "80%", "high", "-1", ">=80", ""] {
+            let raw = format!("cc-hub://review?depth=light&pr={}&post={}", PR, bad);
+            // An empty value reads as absent, like every other parameter.
+            if bad.is_empty() {
+                let Ok(Link::Review(r)) = raw.parse::<Link>() else {
+                    panic!("{}: expected a link", raw);
+                };
+                assert_eq!(r.post, None);
+                continue;
+            }
+            assert!(
+                matches!(raw.parse::<Link>(), Err(LinkError::BadPostThreshold(p)) if p == bad),
+                "{}: expected a threshold error",
+                raw
+            );
+        }
+        assert_eq!("100".parse::<PostThreshold>().unwrap().percent(), 100);
+        assert_eq!("1".parse::<PostThreshold>().unwrap().percent(), 1);
+    }
+
+    #[test]
     fn depth_is_case_insensitive_and_scheme_too() {
         let r: Link = format!("CC-HUB://review?depth=Full&pr={}", PR)
             .parse()
@@ -340,6 +436,7 @@ mod tests {
                 depth: ReviewDepth::Full,
                 pr: PR.parse().unwrap(),
                 title: None,
+                post: None,
             })
         );
     }

@@ -64,7 +64,7 @@ cc-hub owns the `cc-hub://` URL scheme, so a browser button or a shell `open`
 can start a session. One link kind exists today:
 
 ```
-cc-hub://review?depth=<light|full>&pr=<pull request url>
+cc-hub://review?depth=<light|full>&pr=<pull request url>[&post=<confidence>]
 ```
 
 `cc-hub open <url>` spawns the default session agent in the local checkout of
@@ -72,7 +72,14 @@ the pull request's repository, names the session `PR: <title>` (from the
 optional `title` parameter, else `PR: <repo>#<n>`) before it starts, and opens
 it with `Let's do <depth> review of this PR: <url>`. The checkout is found by repo name among registered projects,
 bookmarks, and the cwds of known sessions; `--dry-run` shows where a link
-would land without spawning anything.
+would land without spawning anything. `--agent <id>` runs the review under a
+backend other than the default one.
+
+The optional `post` parameter is a confidence percentage. It adds `Post
+automatically all comments and questions with confidence >= <n>.` to the
+prompt. A person clicking a browser button needs no such licence, because the
+review can just ask them. A caller with nobody watching does need it, which is
+why a persistent agent that starts its own reviews sends `post=80`.
 
 On macOS, `contrib/macos/install-link-handler.sh` builds a tiny
 `~/Applications/cc-hub Link.app` that owns the scheme and forwards every URL
