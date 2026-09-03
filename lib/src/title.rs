@@ -141,7 +141,10 @@ fn detach_from_tty(_cmd: &mut Command) {}
 /// killing on timeout. Stdin/stdout/stderr configuration is the caller's
 /// responsibility — this helper just owns the deadline loop so resolution
 /// and generation don't duplicate it.
-fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
+/// Run `cmd` detached from our tty, killing it past `timeout` or on
+/// shutdown. Shared with the persistent-agent harness, which drives the
+/// same spawn command in `-p` mode.
+pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
     detach_from_tty(&mut cmd);
     let mut child: Child = cmd
         .spawn()
@@ -187,6 +190,12 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
 /// Recognizes either a path (from `command -v`) or an alias body (from
 /// `alias <name>`, whose output is roughly `<name>='claude …'` in zsh /
 /// `alias <name>='claude …'` in bash).
+/// The configured spawn command resolved to a direct argv (alias bodies
+/// expanded), cached. `None` when the shell couldn't resolve it.
+pub fn spawn_argv() -> Option<Vec<String>> {
+    resolve_spawn_command()
+}
+
 fn resolve_spawn_command() -> Option<Vec<String>> {
     // Successful resolutions are stable enough to cache for an hour; failures
     // re-attempt every minute so a transient shell hiccup doesn't disable

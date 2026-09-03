@@ -15,6 +15,7 @@ use cc_hub_lib::{focus, live_view, models, platform, send, spawn, tmux_pane};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 
+mod harness;
 mod tasks;
 
 /// Historically: whether `run()` should skip the rest of its loop iteration
@@ -33,8 +34,17 @@ pub(crate) enum KeyOutcome {
 /// falls through to the legacy match below. PromptInput submission stays
 /// legacy entirely — the orchestrator-spawn path is out of the Sessions
 /// command scope.
-fn map_command(app: &App, key: &KeyEvent, on_sessions: bool, on_tasks: bool) -> Option<Command> {
+fn map_command(
+    app: &App,
+    key: &KeyEvent,
+    on_sessions: bool,
+    on_tasks: bool,
+    on_agents: bool,
+) -> Option<Command> {
     if let Some(cmd) = tasks::map_tasks_command(app, key, on_tasks) {
+        return Some(cmd);
+    }
+    if let Some(cmd) = harness::map_harness_command(app, key, on_agents) {
         return Some(cmd);
     }
     map_sessions_command(app, key, on_sessions)
@@ -116,8 +126,9 @@ pub(crate) async fn handle_key(
     on_metrics: bool,
     on_projects: bool,
     on_tasks: bool,
+    on_agents: bool,
 ) -> KeyOutcome {
-    if let Some(cmd) = map_command(app, &key, on_sessions, on_tasks) {
+    if let Some(cmd) = map_command(app, &key, on_sessions, on_tasks, on_agents) {
         for effect in app.execute(cmd) {
             crate::effects::apply_effect(
                 app,

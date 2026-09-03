@@ -1,8 +1,8 @@
 #![allow(clippy::collapsible_match)]
 
 use cc_hub_lib::{
-    app, auto_review, config, conversation, metrics, models, platform, projects_scan, scanner,
-    send, session_count, spawn, title, triage, ui, usage, watcher,
+    app, auto_review, config, conversation, harness, metrics, models, platform, projects_scan,
+    scanner, send, session_count, spawn, title, triage, ui, usage, watcher,
 };
 
 use app::{App, Tab, View};
@@ -350,6 +350,10 @@ pub(crate) enum ScanMsg {
         spawn: Option<auto_review::Spawn>,
         status: Option<String>,
     },
+    /// Fresh on-disk snapshot of every persistent agent (Agents tab).
+    Harness(Vec<harness::AgentSnapshot>),
+    /// A persistent agent finished a tick; carries its status-bar line.
+    HarnessTick(harness::supervisor::TickReport),
     /// Result of a `send::send_prompt` run off the event-loop thread (see
     /// [`spawn_dispatch`]). `send_prompt` forks+execs tmux twice and sleeps
     /// ~80ms; running it inline froze render+input. `ok` carries the status
@@ -756,6 +760,14 @@ fn apply_scan_msg(
                 app.set_status(s);
             }
         }
+        ScanMsg::Harness(agents) => app.update_harness(agents),
+        ScanMsg::HarnessTick(report) => {
+            if !report.ok {
+                app.set_status(report.status);
+            } else {
+                log::info!("harness: {}", report.status);
+            }
+        }
         ScanMsg::DispatchResult { ok } => {
             // Success and failure both already hold the rendered
             // status line; either way it goes straight to the bar.
@@ -891,6 +903,47 @@ async fn run(
                         status: outcome.status,
                     })
                     .await;
+            }
+        });
+    }
+
+    // Persistent agents. The supervisor loops live in this process (one
+    // tokio task per agent dir); the TUI reads their state back from disk on
+    // a short timer and right after every tick report, so CLI-side changes
+    // (poke, pause, notes) show up too.
+    {
+        let (tick_tx, mut tick_rx) = mpsc::channel::<harness::supervisor::TickReport>(16);
+        let supervisor_on = config::get().harness.enabled;
+        if supervisor_on {
+            let _manager = harness::supervisor::spawn(tick_tx);
+        }
+        app.harness.supervisor_on = supervisor_on;
+        let harness_tx = scan_tx.clone();
+        tokio::spawn(async move {
+            let mut refresh = tokio::time::interval(config::get().harness.refresh());
+            refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = refresh.tick() => {}
+                    report = tick_rx.recv() => {
+                        match report {
+                            Some(r) => {
+                                let _ = harness_tx.send(ScanMsg::HarnessTick(r)).await;
+                            }
+                            None => {
+                                // Supervisor off: keep refreshing for CLI-driven agents.
+                                refresh.tick().await;
+                            }
+                        }
+                    }
+                }
+                if !harness::root_exists() {
+                    continue;
+                }
+                let agents = tokio::task::spawn_blocking(harness::scan)
+                    .await
+                    .unwrap_or_default();
+                let _ = harness_tx.send(ScanMsg::Harness(agents)).await;
             }
         });
     }
@@ -1292,6 +1345,8 @@ async fn run(
                             let on_projects =
                                 app.view == View::Grid && app.current_tab == Tab::Projects;
                             let on_tasks = app.view == View::Grid && app.current_tab == Tab::Tasks;
+                            let on_agents =
+                                app.view == View::Grid && app.current_tab == Tab::Agents;
 
                             let sel_before = (app.sessions.sel_group, app.sessions.sel_in_group);
                             // KeyOutcome::Continue used to skip this pass's
@@ -1310,6 +1365,7 @@ async fn run(
                                 on_metrics,
                                 on_projects,
                                 on_tasks,
+                                on_agents,
                             )
                             .await;
                             let sel_after = (app.sessions.sel_group, app.sessions.sel_in_group);

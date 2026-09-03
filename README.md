@@ -79,6 +79,27 @@ On macOS, `contrib/macos/install-link-handler.sh` builds a tiny
 to `cc-hub open`. The Chrome extension that puts **Light Review** / **Full
 Review** buttons on Bitbucket pull requests lives in the `tps-chrome` repo.
 
+## Agents
+
+Persistent agents watch something for you and react without a session open:
+open pull requests, a Jira queue, Slack mentions, a nightly digest. Each is a
+directory under `~/.cc-hub/agents/<name>/` with one `agent.toml`. The hub
+supervises every enabled agent while it runs: an event (a file dropped in the
+agent's `inbox/`, a poll command's stdout, or an interval) becomes one bounded
+`claude -p` tick with a replaced system prompt, a scoped tool list, and a
+per-tick budget. Between events the agent costs nothing.
+
+```
+cc-hub agent new hello --from contrib/agents/hello   # scaffold a spec
+cc-hub agent once hello --event "hi"                 # one tick, prints the outcome
+cc-hub agent poke hello --event "hi"                 # queue an event for the running hub
+```
+
+Agents talk back through `cc-hub agent note`, which the Agents tab shows on
+the card and in the detail popup. Halted agents (budget reached, five failed
+ticks in a row) get the same "needs you" chip as a waiting session. Example
+specs live in `contrib/agents/`; the field reference is `cc-hub help agent`.
+
 ## Requirements
 
 | | Linux / macOS | Windows |
@@ -193,6 +214,13 @@ models = [
   { label = "Sonnet 5", id = "claude-sonnet-5" },
   { label = "Fable 5", id = "claude-fable-5" },
 ]
+
+[harness]
+# Persistent agents (Agents tab). The supervisor runs inside the TUI and only
+# ticks agents that exist under ~/.cc-hub/agents/ and are enabled.
+enabled = true
+show_tab = true
+refresh_secs = 3
 
 [agents.pi-codex]
 kind = "pi"
@@ -429,6 +457,21 @@ the plan, so the plan-first workflow works with one fewer column.
 | `m` | Jump to Metrics tab |
 | `q` | Quit |
 | `F1` (in embedded pane) | Close the pane, return to grid |
+
+### Agents tab
+
+Shown once `~/.cc-hub/agents/` exists. One card per agent: the border and
+title chip carry the state (green ticking, yellow chip halted, red chip
+broken spec, purple paused), the body carries the trigger, the latest note or
+halt reason, the last tick, and today's spend.
+
+| Key | Action |
+|---|---|
+| `h` / `j` / `k` / `l` (or arrows) | Move between cards |
+| `Enter` / `i` | Detail popup: tick timeline, notes, spec summary (`j`/`k` scroll) |
+| `p` | Poke: drop an empty event into the agent's inbox |
+| `Space` | Pause a running agent; resume a paused or halted one |
+| `R` | Reset the harness bookkeeping (ticks, spend); the workdir is untouched |
 
 ### Projects tab
 

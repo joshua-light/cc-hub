@@ -162,6 +162,16 @@ the Tasks status bar instead of silently overwriting or resetting state.
   on each dormant backlog task and decides whether it's ready to be
   promoted to Running. Off by default.
 
+- **`harness/`** — persistent agents (the Agents tab). `spec.rs` loads
+  `~/.cc-hub/agents/<name>/agent.toml`; `tools.rs` turns a tool allow-list
+  into the deny-everything-else rules that keep the prompt prefix small;
+  `trigger.rs` is the at-least-once inbox plus poll/interval sources;
+  `runner.rs` builds the `claude -p` argv and folds stream-json into a
+  `Tick`; `supervisor.rs` is the per-agent tokio loop spawned from
+  `main.rs::run`; `mod.rs` owns `state.json`, `notes.jsonl`, the snapshot
+  the TUI renders, and `tick_once` (shared with `cc-hub agent once`).
+  Not to be confused with `agent.rs`, the backend registry.
+
 ### Spawning + dispatching
 
 - **`agent.rs`** — `AgentKind` (`Claude | Pi`) and `AgentConfig` (resolved
@@ -245,6 +255,7 @@ session running under bash) can drive the same state from its tools.
 | Per-task PR | `~/.cc-hub/projects/<pid>/tasks/<tid>/pr.json` | `lib/src/pr.rs` |
 | Per-project PR counter | `~/.cc-hub/projects/<pid>/pr-counter` | `lib/src/pr.rs` |
 | Per-project merge lock | `~/.cc-hub/projects/<pid>/merge.lock` (+ `.json`) | `lib/src/merge_lock.rs` |
+| Persistent agent spec / state | `~/.cc-hub/agents/<name>/{agent.toml,state.json,notes.jsonl,inbox/,log/,work/}` | `lib/src/harness/` (`state.lock` guards `state.json`) |
 | Pi bridge heartbeats | `~/.cc-hub/pi-heartbeats/<sid>.json` | `lib/src/pi_bridge.rs` |
 | Orchestrator log per task | `~/.cc-hub/projects/<pid>/tasks/<tid>/orchestrator.log` | `orchestrator::task_orchestrator_log_path` |
 | Claude sessions | `~/.claude/sessions/*.json` | (Claude Code, read-only) |
@@ -286,6 +297,12 @@ committed to feature branches.
   on-disk task store). Renderer-computed layout state lives on
   `App::render` (`lib/src/app/render_state.rs`): `ui/` is its only
   render-time writer.
+- **Adding a persistent-agent verb.** Body in `lib/src/harness/mod.rs`
+  (it must work from both the TUI supervisor and the CLI, so it takes the
+  agent dir and writes through `update_state`), a `HarnessCommand` variant
+  in `lib/src/app/command.rs` for the key, and a thin arm in
+  `bin/src/cli/agent.rs`. Anything the agent itself calls from a tick must
+  resolve the agent from `CC_HUB_AGENT`.
 - **Adding a new background tick.** Spawn a tokio task in
   `bin/src/main.rs:run`; emit a `ScanMsg` variant for results; drain it in
   the same big `select!`. The fs-watcher fallback timer is the reference

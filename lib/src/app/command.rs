@@ -24,6 +24,27 @@ pub enum Command {
     Global(GlobalCommand),
     Sessions(SessionsCommand),
     Tasks(TasksCommand),
+    Harness(HarnessCommand),
+}
+
+/// Agents-tab commands (persistent agents, `lib/src/harness/`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HarnessCommand {
+    NavUp,
+    NavDown,
+    NavLeft,
+    NavRight,
+    /// Enter — the detail popup.
+    OpenDetail,
+    CloseDetail,
+    DetailScrollDown,
+    DetailScrollUp,
+    /// `p` — drop an empty event into the focused agent's inbox.
+    Poke,
+    /// Space — pause a running agent, or resume a paused/halted one.
+    TogglePause,
+    /// `R` — clear harness bookkeeping (workdir untouched).
+    Reset,
 }
 
 /// Commands available on any tab.
@@ -184,7 +205,78 @@ impl App {
             Command::Global(c) => self.execute_global(c),
             Command::Sessions(c) => self.execute_sessions(c),
             Command::Tasks(c) => self.execute_tasks(c),
+            Command::Harness(c) => self.execute_harness(c),
         }
+    }
+
+    fn execute_harness(&mut self, cmd: HarnessCommand) -> Vec<Effect> {
+        use crate::harness;
+        let cols = self.render.agents_cols.max(1) as isize;
+        match cmd {
+            HarnessCommand::NavUp => self.harness.nav(-cols),
+            HarnessCommand::NavDown => self.harness.nav(cols),
+            HarnessCommand::NavLeft => self.harness.nav(-1),
+            HarnessCommand::NavRight => self.harness.nav(1),
+            HarnessCommand::OpenDetail => {
+                if self.harness.selected().is_some() {
+                    self.render.agent_detail_scroll = 0;
+                    self.view = crate::app::View::AgentDetail;
+                }
+            }
+            HarnessCommand::CloseDetail => self.view = crate::app::View::Grid,
+            HarnessCommand::DetailScrollDown => {
+                self.render.agent_detail_scroll = self.render.agent_detail_scroll.saturating_add(1)
+            }
+            HarnessCommand::DetailScrollUp => {
+                self.render.agent_detail_scroll = self.render.agent_detail_scroll.saturating_sub(1)
+            }
+            HarnessCommand::Poke => {
+                let Some(agent) = self.harness.selected() else {
+                    return Vec::new();
+                };
+                let (name, dir) = (agent.name.clone(), agent.dir.clone());
+                let msg = match harness::poke(&dir, "") {
+                    Ok(id) => format!("{}: queued {}", name, id),
+                    Err(e) => format!("{}: poke failed: {}", name, e),
+                };
+                self.set_status(msg);
+            }
+            HarnessCommand::TogglePause => {
+                let Some(agent) = self.harness.selected() else {
+                    return Vec::new();
+                };
+                let (name, dir) = (agent.name.clone(), agent.dir.clone());
+                let pause = !(agent.state.paused || agent.state.stopped_reason.is_some());
+                let msg = match harness::set_paused(&dir, pause) {
+                    Ok(_) if pause => format!("{}: paused", name),
+                    Ok(_) => format!("{}: resumed", name),
+                    Err(e) => format!("{}: {}", name, e),
+                };
+                // Reflect it immediately; the disk rescan confirms it.
+                if let Some(a) = self.harness.agents.get_mut(self.harness.selected) {
+                    a.state.paused = pause;
+                    if !pause {
+                        a.state.stopped_reason = None;
+                    }
+                }
+                self.set_status(msg);
+            }
+            HarnessCommand::Reset => {
+                let Some(agent) = self.harness.selected() else {
+                    return Vec::new();
+                };
+                let (name, dir) = (agent.name.clone(), agent.dir.clone());
+                let msg = match harness::reset(&dir) {
+                    Ok(()) => format!("{}: state reset (workdir untouched)", name),
+                    Err(e) => format!("{}: reset failed: {}", name, e),
+                };
+                if let Some(a) = self.harness.agents.get_mut(self.harness.selected) {
+                    a.state = Default::default();
+                }
+                self.set_status(msg);
+            }
+        }
+        Vec::new()
     }
 
     fn execute_global(&mut self, cmd: GlobalCommand) -> Vec<Effect> {

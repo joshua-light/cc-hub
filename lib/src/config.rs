@@ -27,6 +27,7 @@ pub struct Config {
     pub metrics: MetricsConfig,
     pub backlog: BacklogConfig,
     pub auto_review: AutoReviewConfig,
+    pub harness: HarnessConfig,
 }
 
 impl Config {
@@ -399,6 +400,37 @@ impl Default for AutoReviewConfig {
             ttl_secs: 600,
             run_timeout_secs: 1800,
             max_comments_in_prompt: 8,
+        }
+    }
+}
+
+/// Persistent agents (the Agents tab, `lib/src/harness/`). The supervisor
+/// runs inside the TUI and only spends money on agents that exist under
+/// `~/.cc-hub/agents/` and are enabled, so it is on by default.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HarnessConfig {
+    /// Run the supervisor loop inside the TUI.
+    pub enabled: bool,
+    /// Show the Agents tab. It is also hidden while `~/.cc-hub/agents/`
+    /// does not exist.
+    pub show_tab: bool,
+    /// How often the TUI re-reads agent state from disk.
+    pub refresh_secs: u64,
+}
+
+impl HarnessConfig {
+    pub fn refresh(&self) -> Duration {
+        Duration::from_secs(self.refresh_secs.max(1))
+    }
+}
+
+impl Default for HarnessConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            show_tab: true,
+            refresh_secs: 3,
         }
     }
 }

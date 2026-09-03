@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod command;
+mod harness_view;
 mod metrics_view;
 mod projects_view;
 mod render_state;
@@ -28,7 +29,8 @@ mod task_link_picker;
 mod tasks_view;
 mod todo_panel;
 
-pub use command::{Command, Effect, GlobalCommand, SessionsCommand, TasksCommand};
+pub use command::{Command, Effect, GlobalCommand, HarnessCommand, SessionsCommand, TasksCommand};
+pub use harness_view::HarnessView;
 pub use metrics_view::MetricsView;
 pub use projects_view::ProjectsView;
 pub use render_state::RenderState;
@@ -226,6 +228,8 @@ pub enum View {
     /// Typing edits the Tasks-board filter live; the board renders
     /// underneath, already narrowed. Enter keeps the filter, Esc clears it.
     TaskFilter,
+    /// Agents tab: tick timeline + notes + spec for the focused agent.
+    AgentDetail,
 }
 
 /// Outcome of pressing Space on a focused Projects-tab task. The caller
@@ -276,6 +280,7 @@ pub enum Tab {
     Tasks,
     Projects,
     Sessions,
+    Agents,
     Metrics,
 }
 
@@ -285,12 +290,19 @@ impl Tab {
             Tab::Tasks => "Tasks",
             Tab::Projects => "Projects",
             Tab::Sessions => "Sessions",
+            Tab::Agents => "Agents",
             Tab::Metrics => "Metrics",
         }
     }
 }
 
-pub const TABS: &[Tab] = &[Tab::Tasks, Tab::Projects, Tab::Sessions, Tab::Metrics];
+pub const TABS: &[Tab] = &[
+    Tab::Tasks,
+    Tab::Projects,
+    Tab::Sessions,
+    Tab::Agents,
+    Tab::Metrics,
+];
 
 /// Tabs shown in the strip and reachable via ⇥, in [`TABS`] order. The
 /// Projects tab is WIP-gated behind `[ui] show_projects_tab` (its scan and
@@ -299,6 +311,11 @@ pub fn visible_tabs() -> Vec<Tab> {
     TABS.iter()
         .copied()
         .filter(|t| *t != Tab::Projects || config::get().ui.show_projects_tab)
+        // Agents shows once `~/.cc-hub/agents/` exists (at startup) unless
+        // config hides it; `cc-hub agent new` creates the dir.
+        .filter(|t| {
+            *t != Tab::Agents || (config::get().harness.show_tab && crate::harness::root_exists())
+        })
         .collect()
 }
 
@@ -574,6 +591,7 @@ pub struct App {
     pub sessions: SessionsView,
     pub projects: ProjectsView,
     pub metrics: MetricsView,
+    pub harness: HarnessView,
     pub tasks: TasksView,
     pub todo: TodoPanelState,
     pub view: View,
@@ -775,6 +793,7 @@ impl App {
             sessions: SessionsView::new(),
             projects: ProjectsView::new(),
             metrics: MetricsView::new(),
+            harness: HarnessView::default(),
             tasks: TasksView::new(),
             todo: TodoPanelState::new(),
             view: View::Grid,
@@ -3863,7 +3882,12 @@ impl App {
     }
 
     pub fn attention_count(&self) -> usize {
-        self.sessions.attention_count()
+        self.sessions.attention_count() + self.harness.attention_count()
+    }
+
+    /// Replace the Agents-tab snapshot (from the periodic disk scan).
+    pub fn update_harness(&mut self, agents: Vec<crate::harness::AgentSnapshot>) {
+        self.harness.update(agents);
     }
 
     pub fn log_state_dump(&self) {

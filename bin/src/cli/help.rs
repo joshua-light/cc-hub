@@ -13,6 +13,7 @@ pub(crate) fn print_cli_help(topic: &[String]) -> Result<(), CliError> {
         Some("worker") => print!("{}", WORKER_HELP),
         Some("project") => print!("{}", PROJECT_HELP),
         Some("open") => print!("{}", OPEN_HELP),
+        Some("agent") => print!("{}", AGENT_HELP),
         Some(other) => {
             return Err(CliError::Usage(format!(
                 "unknown help topic: {} (try `cc-hub help`)",
@@ -41,6 +42,9 @@ Orchestrator-facing topics:
 
 Desktop-facing topics:
   open              Act on a cc-hub:// deep link (start a PR review session)
+
+Persistent agents (Agents tab):
+  agent             Scaffold, run, poke, pause and inspect persistent agents
 
 Examples:
   cc-hub task create --backlog --prompt "Fix the flaky test"
@@ -172,4 +176,31 @@ Usage:
 Lists registered projects. Plain output is tab-separated:
   <id>\t<name>\t<root>
 With --json, includes per-status task counts.
+"#;
+
+const AGENT_HELP: &str = r#"cc-hub agent
+
+Persistent agents: a directory under ~/.cc-hub/agents/<name>/ with one
+agent.toml. The TUI supervises every enabled agent: an event (a file in its
+inbox, a poll command's stdout, or an interval) becomes one bounded
+`claude -p` tick. Agents report back with `cc-hub agent note`.
+
+Usage:
+  cc-hub agent list [--json]
+  cc-hub agent new <name> [--from DIR]        Scaffold <name>/agent.toml (+ work/, inbox/)
+  cc-hub agent once <name> [--event TEXT | --event-file F] [--force]
+                                              Run one tick now, print the outcome
+  cc-hub agent poke <name> [--event TEXT | --event-file F]
+                                              Drop an event into the inbox (any trigger kind)
+  cc-hub agent pause <name>                   Skip this agent until resumed
+  cc-hub agent resume <name>                  Resume; also clears a budget/failure halt
+  cc-hub agent reset <name>                   Clear ticks/spend bookkeeping (workdir untouched)
+  cc-hub agent show <name>                    Full state as JSON (history, notes)
+
+Agent-facing (inside a tick, CC_HUB_AGENT is set):
+  cc-hub agent note --text TEXT [--level info|warn] [--ref URL]
+
+Layout of ~/.cc-hub/agents/<name>/:
+  agent.toml   spec        work/   the agent's world     state.json  bookkeeping
+  inbox/       events      notes.jsonl  outbox           log/        stream-json per tick
 "#;

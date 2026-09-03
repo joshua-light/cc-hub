@@ -19,6 +19,7 @@
 //! <path> main`. cc-hub does **only** the mechanical git ops; deciding when
 //! to spawn one and when to merge is the orchestrator's job.
 
+mod agent;
 mod help;
 mod link;
 mod merge_worktree;
@@ -51,6 +52,7 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
         "worker" => Some(handle(worker::worker_subcommand(rest))),
         "project" => Some(handle(project::project_subcommand(rest))),
         "open" => Some(handle(link::open(rest))),
+        "agent" => Some(handle(agent::agent_subcommand(rest))),
         _ => None,
     }
 }

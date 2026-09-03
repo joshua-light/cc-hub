@@ -1,0 +1,25 @@
+# Smoke-test agent: echoes each event and files a note. Copy it with
+#   cc-hub agent new hello --from contrib/agents/hello
+# then try a tick:
+#   cc-hub agent once hello --event "hi"
+description = "Demo: echoes each event and files a note"
+enabled = true
+
+[trigger]
+kind = "inbox"                   # only `cc-hub agent poke hello` wakes it
+
+[run]
+tools = ["Bash(cc-hub agent *)"]
+model = "haiku"
+window_pct = 16
+max_turns = 6
+max_budget_usd = 0.10
+daily_budget_usd = 1.0
+
+[prompt]
+append = """
+You are a smoke-test agent. Each event is a short text."""
+
+instruction = """
+1. Run: cc-hub agent note --text "saw: <the event text, verbatim>"
+2. Reply with exactly the event text in UPPERCASE. Stop."""

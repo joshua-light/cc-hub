@@ -4,6 +4,7 @@
 //! modules; the band background and layout split are defined here so the tab
 //! strip, project chip strip, and to-do panel all share one source of truth.
 
+pub mod agents;
 pub mod common;
 pub mod metrics;
 pub mod palette;
@@ -70,6 +71,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Tab::Tasks => tasks::render_tasks_body(frame, chunks[2], app),
         Tab::Projects => projects::render_projects_body(frame, chunks[2], app),
         Tab::Sessions => sessions::render_sessions_body(frame, chunks[2], app),
+        Tab::Agents => agents::render_agents_body(frame, chunks[2], app),
         Tab::Metrics => metrics::render_metrics_body(frame, chunks[2], app),
     }
     render_status_bar(frame, chunks[3], app);
@@ -101,6 +103,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         // The filter bar lives inside the tasks body (already rendered
         // above), so filter-editing needs no overlay.
         View::TaskFilter => {}
+        View::AgentDetail => agents::render_agent_detail(frame, frame.area(), app),
         View::Grid => {}
     }
 }
@@ -261,7 +264,9 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 Tab::Projects => "enter:focus orch  n:new task  r:result  f:agent terminal/resurrect  R:restart  b:backlog  h/l:col  j/k:task  H/L:project  N:register project  c:copy id  x:delete task  X:remove project  tab:next  q:quit",
                 Tab::Sessions => "enter/f:focus/resume  /:find any  n:new  A:default agent  N:new+model  p:new in…  i:info  r:rename  L:link task  t:to-do  o:shell  M:bookmarks  D:why?  h/j/k/l:nav  v:layout  x:close  H:inactive  W:workers  tab:next  q:quit",
                 Tab::Metrics => "enter:view transcript  j/k:select  r:refresh  tab:next  q:quit",
+                Tab::Agents => agents::hints(&View::Grid),
             },
+            View::AgentDetail => agents::hints(&View::AgentDetail),
             View::Popup => "j/k:scroll  esc:close  q:close",
             View::LiveTail => "j/k:scroll  G:bottom  esc:close",
             View::ConfirmClose => "y:confirm  n/esc:cancel",
