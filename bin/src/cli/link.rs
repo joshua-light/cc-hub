@@ -1,7 +1,11 @@
 //! `cc-hub open <url>` — act on a `cc-hub://` deep link.
 //!
-//! This is the verb the OS URL-scheme handler calls (see `contrib/macos/`),
-//! so a browser button can start a hub session. It is also handy by hand:
+//! This is the verb a locally configured OS URL-scheme handler calls,
+//! so a browser button can start a hub session — and the verb a persistent
+//! agent calls to hand a board card to a real session. A task link whose
+//! card already has a live session in that directory reaches that session
+//! (`"reused": true`) rather than starting a second one. It is also handy by
+//! hand:
 //! `cc-hub open 'cc-hub://review?depth=light&pr=…' --dry-run` shows where a
 //! link would land without spawning anything.
 
@@ -45,6 +49,7 @@ pub(crate) fn open(args: &[String]) -> Result<(), CliError> {
         "ok": true,
         "kind": link.kind(),
         "tmux": opened.tmux,
+        "reused": opened.reused,
         "session_id": opened.session_id,
         "cwd": opened.target.cwd,
         "agent_id": opened.target.agent_id,

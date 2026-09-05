@@ -1447,7 +1447,7 @@ mod tests {
             encode_path("C:\\Users\\MykytaTaushanov\\.local\\bin"),
             "C--Users-MykytaTaushanov--local-bin"
         );
-        assert_eq!(encode_path("C:\\Projects\\TPS"), "C--Projects-TPS");
+        assert_eq!(encode_path("C:\\Projects\\Sample"), "C--Projects-Sample");
     }
 
     // The history read is memoized on the file's (mtime, len): a second scan

@@ -60,11 +60,12 @@ Project state lives at `~/.cc-hub/projects.toml` and
 
 ## Deep links
 
-cc-hub owns the `cc-hub://` URL scheme, so a browser button or a shell `open`
-can start a session. One link kind exists today:
+cc-hub owns the `cc-hub://` URL scheme, so a browser button, a shell `open`
+or a persistent agent can start a session. Two link kinds exist today:
 
 ```
 cc-hub://review?depth=<light|full>&pr=<pull request url>[&post=<confidence>]
+cc-hub://task?id=<task id>[&dir=<path>][&kind=<word>]
 ```
 
 `cc-hub open <url>` spawns the default session agent in the local checkout of
@@ -81,31 +82,43 @@ prompt. A person clicking a browser button needs no such licence, because the
 review can just ask them. A caller with nobody watching does need it, which is
 why a persistent agent that starts its own reviews sends `post=80`.
 
-On macOS, `contrib/macos/install-link-handler.sh` builds a tiny
-`~/Applications/cc-hub Link.app` that owns the scheme and forwards every URL
-to `cc-hub open`. The Chrome extension that puts **Light Review** / **Full
-Review** buttons on Bitbucket pull requests lives in the `tps-chrome` repo.
+A `task` link works one card of the Tasks board: it spawns a session in
+`dir` (default: the card's own cwd), names it `Task: <card>`, opens it with
+`/task --task <id> <card text>`, and binds the card to that session, so `f`
+attaches to it exactly as if the board had assigned it. The card's status is
+left alone — a link starts work, it never moves a card. `kind` is a word
+passed through to the prompt; the `task` skill decides what its kinds mean.
+Local agents can use these links to hand tasks to interactive sessions.
+An OS URL-scheme handler or browser integration can forward links to
+`cc-hub open`; platform integrations are configured separately.
 
 ## Agents
 
-Persistent agents watch something for you and react without a session open:
-open pull requests, a Jira queue, Slack mentions, a nightly digest. Each is a
-directory under `~/.cc-hub/agents/<name>/` with one `agent.toml`. The hub
-supervises every enabled agent while it runs: an event (a file dropped in the
-agent's `inbox/`, a poll command's stdout, or an interval) becomes one bounded
-`claude -p` tick with a replaced system prompt, a scoped tool list, and a
-per-tick budget. Between events the agent costs nothing.
+Persistent agents watch for events and react without an interactive session
+open. Each is a directory under `~/.cc-hub/agents/<name>/` with an
+`agent.toml`. The Hub supervises enabled agents: an inbox file, poll command's
+output, or timer becomes a bounded `claude -p` tick with configured tools,
+permissions, and budgets. Between events the agent costs nothing.
 
 ```
-cc-hub agent new hello --from contrib/agents/hello   # scaffold a spec
-cc-hub agent once hello --event "hi"                 # one tick, prints the outcome
-cc-hub agent poke hello --event "hi"                 # queue an event for the running hub
+cc-hub agent new hello                             # scaffold a spec
+cc-hub agent once hello --event "hi"                # run one tick
+cc-hub agent poke hello --event "hi"                # queue an event
 ```
 
-Agents talk back through `cc-hub agent note`, which the Agents tab shows on
-the card and in the detail popup. Halted agents (budget reached, five failed
-ticks in a row) get the same "needs you" chip as a waiting session. Example
-specs live in `contrib/agents/`; the field reference is `cc-hub help agent`.
+Agents report through `cc-hub agent note`, shown on the Agents tab and detail
+popup. Press `f` to view a running or recent tick's transcript. Halted agents
+show a "needs you" indicator. See `cc-hub help agent` for configuration fields,
+or copy a local spec with `cc-hub agent new <name> --from <directory>`.
+
+Custom agents and skills remain local: `contrib/` is ignored, and installed
+agents live under `~/.cc-hub/agents/`. The repository contains the shared
+agent runtime and interfaces.
+
+A local watcher can open `cc-hub://task` links when cards become ready.
+Opening a link for a card with a live session in that directory delivers the
+prompt to it (`"reused": true`) instead of starting another session. A link
+naming a different directory starts a new session there.
 
 ## Requirements
 
@@ -415,9 +428,15 @@ first, so the most urgent cards float to the top.
 
 The add popup understands a quick syntax: `#tag` tokens become tags and
 `!1`–`!4` sets the priority, so `fix the parser #bug !1` lands a tagged P1
-card in one round-trip (rename leaves such tokens as literal text). `/`
-filters the board — the query fuzzy-matches card text and `#tag`s across all
-columns; Enter keeps it applied, Esc clears it.
+card in one round-trip (rename leaves such tokens as literal text). Under the
+task line sits a context box: `Tab` moves into it, and a paste that carries
+newlines lands there whichever field has the cursor. Whatever it holds is
+saved as the new card's first note attachment — the same thing `p` pastes
+onto an existing card — so the agent later assigned with `s` reads it before
+it plans.
+
+`/` filters the board — the query fuzzy-matches card text and `#tag`s across
+all columns; Enter keeps it applied, Esc clears it.
 
 Deletions are recoverable: `u` restores the last `x`/`c` removal, and every
 removed task is also appended to `~/.cc-hub/tasks-archive-v2.json`.
@@ -432,7 +451,7 @@ the plan, so the plan-first workflow works with one fewer column.
 | `h` / `l` (or arrows) | Switch column |
 | `j` / `k` (or arrows) | Move within the column |
 | `H` / `L` | Move the focused card one column left/right by hand. Planning is agent-owned, so manual moves skip it (To-Do ↔ In Progress ↔ Done); moving a Planning card right lands in In Progress *without* telling the agent to proceed. Into Done closes the live agent session like `Space`; out of Done reopens |
-| `a` / `n` | Add a task (lands in To-Do; `#tag` and `!1`–`!4` tokens set tags/priority inline) |
+| `a` / `n` | Add a task (lands in To-Do; `#tag` and `!1`–`!4` tokens set tags/priority inline; `Tab` — or a multi-line paste — fills the context box, saved as the card's first note) |
 | `/` | Filter the board (fuzzy over text and `#tag`s; Enter keeps it applied, Esc clears — also from the board) |
 | `1` – `4` | Set priority P1–P4 (sorts the column P1-first; P1 red · P2 yellow · P3 green · P4 blue) |
 | `s` | Assign an agent: project picker (registered projects · bookmarks · recent dirs, fuzzy-filtered by typing — `Tab` flips to a plain folder browser; the last-assigned folder is preselected) → spawn session there prompted to plan first → card moves to Planning |
@@ -467,15 +486,23 @@ the plan, so the plan-first workflow works with one fewer column.
 
 ### Agents tab
 
-Shown once `~/.cc-hub/agents/` exists. One card per agent: the border and
-title chip carry the state (green ticking, yellow chip halted, red chip
-broken spec, purple paused), the body carries the trigger, the latest note or
-halt reason, the last tick, and today's spend.
+Shown once `~/.cc-hub/agents/` exists. One row per agent, in the same table
+grammar as the Sessions list: the status icon carries the state (green
+ticking, yellow halted, red broken spec, purple paused), then the name, the
+agent's latest word (halt reason, newest note, last tick result, or the spec
+description), and the columns — trigger, queued events, last tick, context,
+today's spend, age.
+
+A tick is a headless `claude -p` run with no terminal behind it, so its
+session never appears on the Sessions tab — there would be nothing for `f` to
+attach to. It lives here instead: `f` opens the transcript of the tick in
+flight (or the last one), tailing live while it runs.
 
 | Key | Action |
 |---|---|
-| `h` / `j` / `k` / `l` (or arrows) | Move between cards |
+| `j` / `k` (or arrows) | Move between agents |
 | `Enter` / `i` | Detail popup: tick timeline, notes, spec summary (`j`/`k` scroll) |
+| `f` | Open the tick's transcript, tailing live |
 | `p` | Poke: drop an empty event into the agent's inbox |
 | `Space` | Pause a running agent; resume a paused or halted one |
 | `R` | Reset the harness bookkeeping (ticks, spend); the workdir is untouched |

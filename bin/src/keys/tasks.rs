@@ -60,10 +60,11 @@ pub(super) fn map_tasks_command(app: &App, key: &KeyEvent, on_tasks: bool) -> Op
 pub(super) fn handle(app: &mut App, key: KeyEvent) -> bool {
     match (&app.view, key.code) {
         (View::TaskInput, KeyCode::Esc) => app.close_task_input(),
+        (View::TaskInput, KeyCode::Tab) => app.toggle_task_input_field(),
         (View::TaskInput, KeyCode::Backspace) => {
-            app.tasks.input.pop();
+            app.task_input_buffer().pop();
         }
-        (View::TaskInput, KeyCode::Char(c)) => app.tasks.input.push(c),
+        (View::TaskInput, KeyCode::Char(c)) => app.task_input_buffer().push(c),
         (View::TaskTags, KeyCode::Esc) => app.close_task_tags(),
         (View::TaskTags, KeyCode::Backspace) => {
             app.tasks.input.pop();

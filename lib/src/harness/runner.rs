@@ -9,9 +9,11 @@ use super::spec::{Spec, AUTOCOMPACT_FLOOR};
 use super::tools;
 use log::warn;
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Default)]
@@ -64,11 +66,9 @@ pub fn build_args(
         prompt_file.display().to_string(),
         "--autocompact".into(),
         AUTOCOMPACT_FLOOR.to_string(),
-        // Unlisted tools are denied, never prompted into the void.
+        // Never a prompt: an unattended tick has nobody to ask.
         "--permission-mode".into(),
-        "dontAsk".into(),
-        // Don't inherit ambient MCP servers.
-        "--strict-mcp-config".into(),
+        spec.run.permission_mode.clone(),
         "--setting-sources".into(),
         spec.run.setting_sources.clone(),
         "--output-format".into(),
@@ -77,6 +77,10 @@ pub fn build_args(
         "--max-budget-usd".into(),
         spec.run.max_budget_usd.to_string(),
     ];
+    if !spec.run.mcp {
+        // Don't inherit ambient MCP servers.
+        argv.push("--strict-mcp-config".into());
+    }
     if !allow.is_empty() {
         argv.push("--allowed-tools".into());
         argv.extend(allow);
@@ -106,13 +110,16 @@ pub fn build_args(
 
 /// Run one tick to completion. `log_path` receives the raw stream-json,
 /// prefixed by a `cc-hub-tick` header line so ticks in one day file can be
-/// told apart.
+/// told apart. `session_started` is called once, as soon as the CLI
+/// announces the session id — long before the tick ends, so the Agents tab
+/// can tail a tick in flight.
 pub fn run(
     spec: &Spec,
     prompt: &str,
     resume: Option<&str>,
     log_path: Option<&Path>,
     header: &str,
+    session_started: &dyn Fn(&str),
 ) -> Tick {
     let started = Instant::now();
 
@@ -157,9 +164,13 @@ pub fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let output = crate::title::run_with_timeout(cmd, Duration::from_secs(spec.run.timeout_s));
+    let streamed = stream(
+        cmd,
+        Duration::from_secs(spec.run.timeout_s),
+        session_started,
+    );
     let duration_s = started.elapsed().as_secs();
-    let Some(output) = output else {
+    let Some(streamed) = streamed else {
         return Tick {
             subtype: Some("timeout".into()),
             result: format!("tick exceeded {}s or failed to spawn", spec.run.timeout_s),
@@ -169,19 +180,101 @@ pub fn run(
         };
     };
 
-    let raw = String::from_utf8_lossy(&output.stdout);
     if let Some(p) = log_path {
-        if let Err(e) = append_log(p, header, &raw) {
+        if let Err(e) = append_log(p, header, &streamed.raw) {
             warn!("harness[{}]: log write failed: {}", spec.name, e);
         }
     }
-    let mut tick = parse(
-        &raw,
-        output.status.code().unwrap_or(-1),
-        &String::from_utf8_lossy(&output.stderr),
-    );
+    let mut tick = parse(&streamed.raw, streamed.code, &streamed.stderr);
     tick.duration_s = duration_s;
     tick
+}
+
+/// What a finished tick left on its pipes.
+struct Streamed {
+    raw: String,
+    stderr: String,
+    code: i32,
+}
+
+/// Spawn the tick and drain its pipes while it runs.
+///
+/// Draining as it goes is not a nicety: a tick's stream-json outgrows the
+/// 64KB pipe buffer within a few turns, and a child blocked writing into a
+/// full pipe never exits — it dies at the timeout with nothing to show. It
+/// also means the `init` line, the first thing the CLI prints, hands us the
+/// session id while the tick is still running.
+fn stream(mut cmd: Command, timeout: Duration, session_started: &dyn Fn(&str)) -> Option<Streamed> {
+    crate::title::detach_from_tty(&mut cmd);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| warn!("harness: spawn failed: {}", e))
+        .ok()?;
+    let (stdout, stderr) = (child.stdout.take()?, child.stderr.take()?);
+
+    let (tx, rx) = mpsc::channel::<String>();
+    let out = thread::spawn(move || {
+        let mut raw = String::new();
+        let mut announced = false;
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if !announced {
+                if let Some(id) = session_id_of(&line) {
+                    announced = tx.send(id).is_ok();
+                }
+            }
+            raw.push_str(&line);
+            raw.push('\n');
+        }
+        raw
+    });
+    let err = thread::spawn(move || {
+        let mut s = String::new();
+        let _ = BufReader::new(stderr).read_to_string(&mut s);
+        s
+    });
+
+    let deadline = Instant::now() + timeout;
+    let code = loop {
+        for id in rx.try_iter() {
+            session_started(&id);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status.code().unwrap_or(-1),
+            Ok(None) => {
+                if crate::title::shutting_down() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                if Instant::now() >= deadline {
+                    warn!("harness: tick timed out after {:?}, killing", timeout);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                warn!("harness: try_wait failed: {}", e);
+                return None;
+            }
+        }
+    };
+    for id in rx.try_iter() {
+        session_started(&id);
+    }
+    Some(Streamed {
+        raw: out.join().unwrap_or_default(),
+        stderr: err.join().unwrap_or_default(),
+        code,
+    })
+}
+
+/// The session id off one stream-json line, if it carries one. The `init`
+/// line does, so the first hit is the session the tick runs in.
+fn session_id_of(line: &str) -> Option<String> {
+    let msg: serde_json::Value = serde_json::from_str(line).ok()?;
+    msg.get("session_id")?.as_str().map(str::to_string)
 }
 
 /// PATH for the child: our own binary's directory first, then the
@@ -337,12 +430,22 @@ mod tests {
         );
         let args = build_args(&s, "hello", Some("sid"), Path::new("/p/sys.txt"));
         let joined = args.join(" ");
-        assert!(joined.starts_with("-p hello --system-prompt-file /p/sys.txt --autocompact 100000 --permission-mode dontAsk --strict-mcp-config --setting-sources  --output-format stream-json --verbose --max-budget-usd 1"));
+        assert!(joined.starts_with("-p hello --system-prompt-file /p/sys.txt --autocompact 100000 --permission-mode dontAsk --setting-sources  --output-format stream-json --verbose --max-budget-usd 1 --strict-mcp-config"));
         assert!(joined.contains("--allowed-tools Read Bash(git *)"));
         assert!(joined.contains("--disallowed-tools"));
         assert!(joined.contains(" Write "));
         assert!(!joined.contains(" Read Write"), "Read must not be denied");
         assert!(joined.ends_with("--resume sid --max-turns 7 --model sonnet"));
+    }
+
+    #[test]
+    fn mcp_opt_in_drops_the_strict_flag() {
+        let s = spec_with("[run]\nmcp=true\ntools=[\"*\"]\n[prompt]\ninstruction=\"go\"");
+        let joined = build_args(&s, "hi", None, Path::new("/p/sys.txt")).join(" ");
+        assert!(!joined.contains("--strict-mcp-config"));
+        assert!(joined.contains("--allowed-tools "));
+        assert!(joined.contains(" Bash "));
+        assert!(!joined.contains("--disallowed-tools"));
     }
 
     #[test]

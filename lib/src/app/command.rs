@@ -211,12 +211,10 @@ impl App {
 
     fn execute_harness(&mut self, cmd: HarnessCommand) -> Vec<Effect> {
         use crate::harness;
-        let cols = self.render.agents_cols.max(1) as isize;
         match cmd {
-            HarnessCommand::NavUp => self.harness.nav(-cols),
-            HarnessCommand::NavDown => self.harness.nav(cols),
-            HarnessCommand::NavLeft => self.harness.nav(-1),
-            HarnessCommand::NavRight => self.harness.nav(1),
+            // One agent per row, so h/l move the same way j/k do.
+            HarnessCommand::NavUp | HarnessCommand::NavLeft => self.harness.nav(-1),
+            HarnessCommand::NavDown | HarnessCommand::NavRight => self.harness.nav(1),
             HarnessCommand::OpenDetail => {
                 if self.harness.selected().is_some() {
                     self.render.agent_detail_scroll = 0;
@@ -1608,10 +1606,7 @@ mod tests {
             );
             let spawns = runtime.spawns.lock().unwrap();
             assert_eq!(spawns.len(), 1);
-            assert_eq!(
-                spawns[0].resume.as_deref(),
-                Some("Resume(\"sid-resume\")")
-            );
+            assert_eq!(spawns[0].resume.as_deref(), Some("Resume(\"sid-resume\")"));
             // The binding now points at the freshly-spawned session.
             assert_eq!(
                 app.tasks.board.get(&id).unwrap().tmux.as_deref(),

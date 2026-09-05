@@ -55,9 +55,22 @@ pub const REGISTRY: &[&str] = &[
 /// `mcp__*` entry explicitly.
 const MCP_GLOB: &str = "mcp__*";
 
+/// Everything the CLI offers: the whole registry allowed, nothing denied.
+/// For an agent standing in for an interactive session, paying the full
+/// prefix on purpose. It is the entire list or nothing — `["*", "Read"]`
+/// would only mean the first one. MCP tools take no wildcard allow rule, so
+/// reaching those needs `permission_mode = "bypassPermissions"` too.
+pub const EVERYTHING: &str = "*";
+
 /// `(allow_rules, deny_rules)` for a spec's tool list. Scoped rules like
 /// `Bash(git *)` keep their base tool out of the deny list.
 pub fn scope(allowed: &[String]) -> Result<(Vec<String>, Vec<String>), String> {
+    if allowed.iter().any(|t| t == EVERYTHING) {
+        if allowed.len() > 1 {
+            return Err(format!("tools = [{:?}] takes no other entries", EVERYTHING));
+        }
+        return Ok((REGISTRY.iter().map(|t| t.to_string()).collect(), Vec::new()));
+    }
     let mut bases: Vec<&str> = Vec::new();
     let mut mcp_allowed = false;
     for entry in allowed {
@@ -108,6 +121,15 @@ mod tests {
         let (_, deny) = scope(&s(&["mcp__github__*"])).unwrap();
         assert!(!deny.contains(&"mcp__*".to_string()));
         assert_eq!(deny.len(), REGISTRY.len());
+    }
+
+    #[test]
+    fn star_allows_everything_and_denies_nothing() {
+        let (allow, deny) = scope(&s(&["*"])).unwrap();
+        assert!(deny.is_empty());
+        assert_eq!(allow.len(), REGISTRY.len());
+        assert!(allow.contains(&"Bash".to_string()));
+        assert!(scope(&s(&["*", "Read"])).is_err());
     }
 
     #[test]

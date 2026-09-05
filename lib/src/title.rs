@@ -28,6 +28,12 @@ pub fn request_shutdown() {
     SHUTDOWN.store(true, Ordering::SeqCst);
 }
 
+/// Whether [`request_shutdown`] has been called. Subprocess loops poll it
+/// so a quit doesn't wait on an in-flight child.
+pub(crate) fn shutting_down() -> bool {
+    SHUTDOWN.load(Ordering::Relaxed)
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct TitleCacheFile {
     titles: HashMap<String, String>,
@@ -122,7 +128,7 @@ struct ResolveCache {
 /// from any controlling terminal; a later `open("/dev/tty")` then fails
 /// cleanly instead of hijacking ours.
 #[cfg(unix)]
-fn detach_from_tty(cmd: &mut Command) {
+pub(crate) fn detach_from_tty(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
     unsafe {
         cmd.pre_exec(|| {
@@ -135,7 +141,7 @@ fn detach_from_tty(cmd: &mut Command) {
 }
 
 #[cfg(not(unix))]
-fn detach_from_tty(_cmd: &mut Command) {}
+pub(crate) fn detach_from_tty(_cmd: &mut Command) {}
 
 /// Spawn `cmd` and poll `try_wait` until it finishes or `timeout` expires,
 /// killing on timeout. Stdin/stdout/stderr configuration is the caller's

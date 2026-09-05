@@ -1,19 +1,18 @@
-//! Agents tab: a card per persistent agent, and the detail popup with the
-//! tick timeline and notes. Follows the Sessions card grammar: border says
-//! the state, a filled chip title means "needs you", body rows add what the
-//! border cannot say.
+//! Agents tab: a row per persistent agent, and the detail popup with the
+//! tick timeline and notes. Follows the Sessions list grammar: the status
+//! icon says the state, the name reads as a name, and the columns to the
+//! right line up so a glance down the tab compares agents, not layouts.
 
 use crate::app::{App, View};
 use crate::harness::{AgentSnapshot, AgentStatus, TickRecord};
-use crate::ui::common::{centered_rect, fmt_cost, format_tokens, popup_block};
+use crate::models::first_line_truncated;
+use crate::ui::common::{centered_rect, fmt_cost, format_tokens, popup_block, Cell, COL_SEP};
 use crate::ui::palette::{DIM_TEXT, FAINT_TEXT, LABEL_GRAY, MUTED_TEXT, PURPLE, SEP_GRAY};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
-
-const CARD_H: u16 = 7;
 
 pub(crate) fn status_indicator(status: AgentStatus) -> (&'static str, Color) {
     match status {
@@ -39,13 +38,74 @@ pub(crate) fn age(now: i64, at: i64) -> String {
     }
 }
 
+// ---- table ----------------------------------------------------------------
+//
+// One row per agent, in the Sessions list's grammar: a flexible left region
+// (name, then the agent's latest word) and a right cluster of fixed-width
+// columns, so values line up vertically. Columns that don't fit the
+// terminal are dropped for every row at once, lowest-value first, to keep
+// that alignment.
+
+/// Agent name; longer ones truncate.
+const NAME_W: usize = 18;
+/// "poll 30s", "every 5m", "inbox".
+const TRIGGER_W: usize = 12;
+/// Queued inbox events: "+12".
+const QUEUE_W: usize = 4;
+/// Last tick: "#128 ✓".
+const TICK_W: usize = 8;
+/// Context at the end of that tick: "󰍛 128k".
+const CTX_W: usize = 8;
+/// Spent today: "$12.34".
+const COST_W: usize = 7;
+/// Since the last tick, or since this one started: "󰔟 12m".
+const AGE_W: usize = 7;
+/// Selection marker(1) + status icon(1) + space(1).
+const LEFT_FIXED: usize = 3;
+/// The agent's latest word never shrinks below this; columns drop first.
+const MIN_SAY: usize = 20;
+
+/// Which optional columns fit the current terminal width. Decided once per
+/// frame so every row shows the same ones. The queue column also needs at
+/// least one agent with events waiting — a column of blanks earns nothing.
+struct Columns {
+    trigger: bool,
+    queue: bool,
+    tick: bool,
+    ctx: bool,
+}
+
+fn plan_columns(width: usize, any_queued: bool) -> Columns {
+    let mut avail =
+        width.saturating_sub(LEFT_FIXED + NAME_W + MIN_SAY + COST_W + AGE_W + 3 * COL_SEP);
+    let mut cols = Columns {
+        trigger: false,
+        queue: false,
+        tick: false,
+        ctx: false,
+    };
+    if avail >= TRIGGER_W + COL_SEP {
+        cols.trigger = true;
+        avail -= TRIGGER_W + COL_SEP;
+    }
+    if avail >= TICK_W + COL_SEP {
+        cols.tick = true;
+        avail -= TICK_W + COL_SEP;
+    }
+    if any_queued && avail >= QUEUE_W + COL_SEP {
+        cols.queue = true;
+        avail -= QUEUE_W + COL_SEP;
+    }
+    if avail >= CTX_W + COL_SEP {
+        cols.ctx = true;
+    }
+    cols
+}
+
 pub(crate) fn render_agents_body(frame: &mut Frame, area: Rect, app: &mut App) {
-    if area.height < 2 || area.width < 10 {
+    if area.height < 1 || area.width < 10 {
         return;
     }
-    let cell_w = crate::config::get().ui.cell_width.max(20);
-    let cols = (area.width / cell_w).max(1) as usize;
-    app.render.agents_cols = cols;
 
     if app.harness.agents.is_empty() {
         let msg = if !app.harness.loaded {
@@ -67,189 +127,204 @@ pub(crate) fn render_agents_body(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    let now = crate::harness::now_unix();
-    let rows = app.harness.agents.len().div_ceil(cols);
-    let visible_rows = (area.height / CARD_H).max(1) as usize;
     // Keep the selected row on screen.
-    let sel_row = app.harness.selected / cols;
-    let first_row = sel_row.saturating_sub(visible_rows.saturating_sub(1));
-    let mut y = area.y;
-    for row in first_row..rows.min(first_row + visible_rows) {
-        let mut x = area.x;
-        for col in 0..cols {
-            let idx = row * cols + col;
-            let Some(agent) = app.harness.agents.get(idx) else {
-                break;
-            };
-            let rect = Rect::new(x, y, cell_w.min(area.right().saturating_sub(x)), CARD_H);
-            render_card(frame, rect, agent, idx == app.harness.selected, now);
-            x += cell_w;
-        }
-        y += CARD_H;
+    let selected = app.harness.selected as u16;
+    if selected < app.render.agents_scroll {
+        app.render.agents_scroll = selected;
+    } else if selected >= app.render.agents_scroll + area.height {
+        app.render.agents_scroll = selected + 1 - area.height;
+    }
+
+    let now = crate::harness::now_unix();
+    let any_queued = app.harness.agents.iter().any(|a| a.inbox_pending > 0);
+    let cols = plan_columns(area.width as usize, any_queued);
+    let first = app.render.agents_scroll as usize;
+    for (row, agent) in app
+        .harness
+        .agents
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(area.height as usize)
+    {
+        let y = area.y + (row - first) as u16;
+        let rect = Rect::new(area.x, y, area.width, 1);
+        render_row(frame, rect, agent, &cols, row == app.harness.selected, now);
     }
 }
 
-fn render_card(frame: &mut Frame, area: Rect, agent: &AgentSnapshot, selected: bool, now: i64) {
+/// What the agent has to say for itself, most useful first: why it halted,
+/// what it last reported, what its last tick returned, what it is for.
+fn say(agent: &AgentSnapshot) -> (String, Style) {
+    if let Err(e) = &agent.spec {
+        return (format!("spec: {}", e), Style::default().fg(Color::Red));
+    }
+    if let Some(reason) = &agent.state.stopped_reason {
+        return (reason.clone(), Style::default().fg(Color::Yellow));
+    }
+    if let Some(note) = agent.notes.first() {
+        let color = if note.level == "warn" {
+            Color::Yellow
+        } else {
+            FAINT_TEXT
+        };
+        return (note.text.clone(), Style::default().fg(color));
+    }
+    if !agent.state.last_result.is_empty() {
+        return (
+            agent.state.last_result.clone(),
+            Style::default().fg(FAINT_TEXT),
+        );
+    }
+    (
+        agent.description().to_string(),
+        Style::default().fg(DIM_TEXT),
+    )
+}
+
+fn render_row(
+    frame: &mut Frame,
+    area: Rect,
+    agent: &AgentSnapshot,
+    cols: &Columns,
+    selected: bool,
+    now: i64,
+) {
+    let width = area.width as usize;
     let status = agent.status();
     let (glyph, color) = status_indicator(status);
-    let attention = status.needs_attention();
-
-    let border_color = if selected {
-        Color::White
-    } else if attention || status == AgentStatus::Ticking {
-        color
+    let glyph = if status == AgentStatus::Ticking {
+        crate::ui::sessions::spinner_frame(crate::ui::now_ms())
     } else {
-        SEP_GRAY
+        glyph
     };
-    let border_type = if selected {
-        BorderType::Double
-    } else if attention {
-        BorderType::Thick
-    } else if status == AgentStatus::Disabled {
-        BorderType::LightDoubleDashed
-    } else {
-        BorderType::Rounded
-    };
-    let title_text = format!("{} {}", glyph, agent.name);
-    let title = if attention {
-        Span::styled(
-            format!(" {} ", title_text),
-            Style::default()
-                .fg(Color::Black)
-                .bg(color)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        Span::styled(
-            title_text,
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        )
-    };
-    let meta = match status {
-        AgentStatus::Ticking => agent
-            .state
-            .ticking
-            .as_ref()
-            .map(|t| format!("ticking · {}", age(now, t.since)))
-            .unwrap_or_else(|| "ticking".into()),
-        _ => match agent.state.last_tick_at {
-            Some(at) => format!("{} · {}", status.label(), age(now, at)),
-            None => status.label().to_string(),
-        },
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(border_type)
-        .border_style(Style::default().fg(border_color))
-        .title(title)
-        .title_bottom(
-            Line::from(Span::styled(
-                format!(" {} ", meta),
-                Style::default().fg(DIM_TEXT),
-            ))
-            .right_aligned(),
-        );
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
 
-    let label = Style::default().fg(LABEL_GRAY);
-    let text = Style::default().fg(FAINT_TEXT);
-    let dim = Style::default().fg(DIM_TEXT);
-    let mut lines: Vec<Line> = Vec::new();
-
-    match &agent.spec {
-        Ok(spec) => {
-            let mut trig = vec![
-                Span::styled("trigger ", label),
-                Span::styled(spec.trigger_label(), text),
-            ];
-            if let Some(cmd) = &spec.trigger.command {
-                trig.push(Span::styled(format!("  {}", cmd), dim));
-            }
-            if agent.inbox_pending > 0 {
-                trig.push(Span::styled(
-                    format!("  +{} queued", agent.inbox_pending),
-                    Style::default().fg(Color::Yellow),
-                ));
-            }
-            lines.push(Line::from(trig));
-        }
-        Err(e) => {
-            lines.push(Line::from(Span::styled(
-                format!("spec: {}", e),
-                Style::default().fg(Color::Red),
-            )));
-        }
-    }
-
-    // What the border can't say: why it halted, or what it last did.
-    if let Some(reason) = &agent.state.stopped_reason {
-        lines.push(Line::from(vec![
-            Span::styled("halted  ", label),
-            Span::styled(reason.clone(), Style::default().fg(Color::Yellow)),
-        ]));
-    } else if let Some(note) = agent.notes.first() {
-        lines.push(Line::from(vec![
-            Span::styled("note    ", label),
-            Span::styled(note.text.clone(), text),
-        ]));
-    } else if !agent.state.last_result.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("last    ", label),
-            Span::styled(agent.state.last_result.clone(), dim),
-        ]));
-    } else if !agent.description().is_empty() {
-        lines.push(Line::from(Span::styled(
-            agent.description().to_string(),
-            dim,
-        )));
-    }
-
-    if let Some(last) = agent.state.history.last() {
-        let mark = if last.ok {
-            Span::styled("✓", Style::default().fg(Color::Green))
-        } else {
-            Span::styled("✗", Style::default().fg(Color::Red))
+    let mut cluster: Vec<Cell> = Vec::new();
+    if cols.trigger {
+        let text = match &agent.spec {
+            Ok(spec) => spec.trigger_label().to_string(),
+            Err(_) => String::new(),
         };
-        lines.push(Line::from(vec![
-            Span::styled("tick    ", label),
-            Span::styled(format!("#{} ", agent.state.ticks), text),
-            mark,
-            Span::styled(
-                format!(
-                    " {} turns · {} · {}",
-                    last.turns,
-                    fmt_cost(last.cost_usd),
-                    format_tokens(last.context_end)
-                ),
-                dim,
-            ),
-        ]));
+        cluster.push(Cell {
+            text: first_line_truncated(&text, TRIGGER_W),
+            target: TRIGGER_W,
+            style: Style::default().fg(MUTED_TEXT),
+            right_align: false,
+        });
     }
-
-    let mut today = vec![
-        Span::styled("today   ", label),
-        Span::styled(
-            format!(
-                "{} · {} ticks",
-                fmt_cost(agent.state.today_cost()),
-                agent.state.today_ticks()
-            ),
+    if cols.queue {
+        let text = if agent.inbox_pending > 0 {
+            format!("+{}", agent.inbox_pending)
+        } else {
+            String::new()
+        };
+        cluster.push(Cell {
             text,
-        ),
-    ];
-    if let Ok(spec) = &agent.spec {
-        if let Some(daily) = spec.run.daily_budget_usd {
-            today.push(Span::styled(format!(" / ${:.0}", daily), dim));
-        }
+            target: QUEUE_W,
+            style: Style::default().fg(Color::Yellow),
+            right_align: true,
+        });
     }
-    lines.push(Line::from(today));
+    if cols.tick {
+        let last = agent.state.history.last();
+        let (text, style) = match last {
+            Some(rec) => (
+                format!("#{} {}", agent.state.ticks, if rec.ok { "✓" } else { "✗" }),
+                Style::default().fg(if rec.ok { Color::Green } else { Color::Red }),
+            ),
+            None => (String::new(), Style::default()),
+        };
+        cluster.push(Cell {
+            text,
+            target: TICK_W,
+            style,
+            right_align: true,
+        });
+    }
+    if cols.ctx {
+        let text = match agent.state.history.last().map(|r| r.context_end) {
+            Some(ctx) if ctx > 0 => format!("󰍛 {}", format_tokens(ctx)),
+            _ => String::new(),
+        };
+        cluster.push(Cell {
+            text,
+            target: CTX_W,
+            style: Style::default().fg(Color::DarkGray),
+            right_align: true,
+        });
+    }
+    {
+        let spent = agent.state.today_cost();
+        let text = if spent > 0.0 {
+            fmt_cost(spent)
+        } else {
+            String::new()
+        };
+        cluster.push(Cell {
+            text,
+            target: COST_W,
+            style: Style::default().fg(DIM_TEXT),
+            right_align: true,
+        });
+    }
+    {
+        let at = match &agent.state.ticking {
+            Some(t) => Some(t.since),
+            None => agent.state.last_tick_at,
+        };
+        let text = match at {
+            Some(at) => format!("󰔟 {}", age(now, at)),
+            None => String::new(),
+        };
+        cluster.push(Cell {
+            text,
+            target: AGE_W,
+            style: Style::default().fg(Color::DarkGray),
+            right_align: true,
+        });
+    }
+    let cluster_width: usize = cluster.iter().map(|c| c.target + COL_SEP).sum();
 
-    let mut out: Vec<Line> = Vec::new();
-    for l in lines.into_iter().take(inner.height as usize) {
-        out.push(truncate_line(l, inner.width as usize));
+    let name_style = if status.needs_attention() {
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    } else if status == AgentStatus::Disabled {
+        Style::default().fg(SEP_GRAY)
+    } else {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    };
+    let name = first_line_truncated(&agent.name, NAME_W);
+    let (say_text, say_style) = say(agent);
+    let say_budget = width.saturating_sub(LEFT_FIXED + NAME_W + COL_SEP + cluster_width);
+    let say_text = first_line_truncated(&say_text.replace('\n', " "), say_budget);
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    spans.push(if selected {
+        Span::styled("▌", Style::default().fg(Color::White))
+    } else {
+        Span::raw(" ")
+    });
+    spans.push(Span::styled(
+        format!("{} ", glyph),
+        Style::default().fg(color),
+    ));
+    let name_pad = NAME_W.saturating_sub(name.chars().count()) + COL_SEP;
+    spans.push(Span::styled(name, name_style));
+    spans.push(Span::raw(" ".repeat(name_pad)));
+    let say_pad = say_budget.saturating_sub(say_text.chars().count());
+    spans.push(Span::styled(say_text, say_style));
+    spans.push(Span::raw(" ".repeat(say_pad)));
+
+    for cell in cluster {
+        cell.push_spans(&mut spans);
     }
-    frame.render_widget(Paragraph::new(out), inner);
+
+    let mut row = Paragraph::new(Line::from(spans));
+    if selected {
+        row = row.style(Style::default().bg(Color::Rgb(40, 40, 52)));
+    }
+    frame.render_widget(row, area);
 }
 
 /// One row only: cut the spans so the line never wraps.
@@ -512,8 +587,8 @@ fn render_spec_summary(frame: &mut Frame, area: Rect, agent: &AgentSnapshot) {
 /// Key hints for the Agents tab and its popup.
 pub(crate) fn hints(view: &View) -> &'static str {
     match view {
-        View::AgentDetail => "j/k:scroll  p:poke  space:pause/resume  R:reset  esc/enter:close",
-        _ => "enter:detail  p:poke  space:pause/resume  R:reset  h/j/k/l:nav  r:refresh  tab:next  q:quit",
+        View::AgentDetail => "j/k:scroll  f:transcript  p:poke  space:pause/resume  R:reset  esc/enter:close",
+        _ => "enter:detail  f:transcript  p:poke  space:pause/resume  R:reset  j/k:nav  r:refresh  tab:next  q:quit",
     }
 }
 
@@ -567,38 +642,39 @@ mod tests {
                 context_start: 4000,
                 context_end: 13_000,
                 duration_s: 12,
+                session_id: Some("sid-1".into()),
                 result: "NOCHANGE".into(),
             }],
             ..Default::default()
         }
     }
 
-    fn render_card_to_string(agent: &AgentSnapshot, selected: bool, w: u16, h: u16) -> String {
-        let backend = TestBackend::new(w, h);
+    fn render_row_to_string(agent: &AgentSnapshot, selected: bool, w: u16) -> String {
+        let backend = TestBackend::new(w, 1);
         let mut terminal = Terminal::new(backend).expect("terminal");
+        let cols = plan_columns(w as usize, agent.inbox_pending > 0);
         terminal
-            .draw(|f| render_card(f, f.area(), agent, selected, NOW))
+            .draw(|f| render_row(f, f.area(), agent, &cols, selected, NOW))
             .expect("render");
         buffer_to_string(terminal.backend().buffer())
     }
 
     #[test]
-    fn card_shows_trigger_note_tick_and_spend() {
-        let out = render_card_to_string(&snap("bb-prs", ticked()), false, 42, CARD_H);
+    fn row_shows_name_note_trigger_tick_and_spend() {
+        let out = render_row_to_string(&snap("bb-prs", ticked()), false, 120);
         assert!(out.contains("bb-prs"), "{out}");
         assert!(out.contains("poll 5m"), "{out}");
-        assert!(out.contains("+2 queued"), "{out}");
+        assert!(out.contains("+2"), "{out}");
         assert!(out.contains("PR #418 lint fails"), "{out}");
-        assert!(out.contains("#3"), "{out}");
-        assert!(out.contains("sleeping"), "{out}");
+        assert!(out.contains("#3 ✓"), "{out}");
+        assert!(out.contains("13.0k"), "{out}");
     }
 
     #[test]
-    fn halted_card_leads_with_the_reason() {
+    fn halted_row_leads_with_the_reason() {
         let mut st = ticked();
         st.stopped_reason = Some("5 consecutive failed ticks".into());
-        let out = render_card_to_string(&snap("jira", st), false, 42, CARD_H);
-        assert!(out.contains("halted"), "{out}");
+        let out = render_row_to_string(&snap("jira", st), false, 100);
         assert!(out.contains("5 consecutive failed ticks"), "{out}");
     }
 
@@ -606,14 +682,19 @@ mod tests {
     fn broken_spec_is_visible_not_hidden() {
         let mut s = snap("broken", AgentState::default());
         s.spec = Err("agent.toml: expected `=`".into());
-        let out = render_card_to_string(&s, true, 42, CARD_H);
+        let out = render_row_to_string(&s, true, 100);
         assert!(out.contains("spec: agent.toml"), "{out}");
     }
 
     #[test]
-    fn tiny_card_does_not_panic() {
-        let _ = render_card_to_string(&snap("x", ticked()), false, 12, 3);
-        let _ = render_card_to_string(&snap("x", ticked()), false, 42, 1);
+    fn narrow_rows_drop_columns_and_do_not_panic() {
+        // Everything fits at 120 columns; at 40 only the essentials remain.
+        let wide = plan_columns(120, true);
+        assert!(wide.trigger && wide.tick && wide.queue && wide.ctx);
+        let narrow = plan_columns(40, true);
+        assert!(!narrow.ctx && !narrow.queue);
+        let _ = render_row_to_string(&snap("x", ticked()), false, 40);
+        let _ = render_row_to_string(&snap("x", ticked()), false, 12);
     }
 
     #[test]

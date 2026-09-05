@@ -2,7 +2,7 @@
 //! dialogs, the to-do side panel, the embedded tmux pane, the state-debug
 //! popup, and the live transcript tail.
 
-use crate::app::{App, PendingConfirm};
+use crate::app::{App, PendingConfirm, TaskField};
 use crate::config;
 use crate::conversation::{StateExplanation, Verdict};
 use crate::folder_picker::{FolderPicker, PickerMode, PlaceSource};
@@ -1225,31 +1225,50 @@ pub(crate) fn render_todo_panel(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// Centered single-line input for a new Tasks-tab task. Same shape as the
-/// rename popup: type, enter commits, esc cancels.
+/// The add/rename-task popup. Renaming is the one-line editor it always was;
+/// adding shows a second field under it — the context box, where a pasted
+/// spec, stack trace or ticket lands (see [`App::paste_into_input`]). Tab
+/// moves between the two, enter commits both, esc cancels.
 pub(crate) fn render_task_input(frame: &mut Frame, area: Rect, app: &App) {
-    let mut input_line = app.tasks.input.clone();
-    input_line.push('▎');
     let renaming = app.tasks.renaming.is_some();
+    let on_context = !renaming && app.tasks.field == TaskField::Context;
 
     let desired_w = 70u16.min(area.width);
     // Borders (2) plus the "  + " prefix (4) leave this much for the text, so
     // the height estimate matches what the wrapped Paragraph will occupy.
     let wrap_width = desired_w.saturating_sub(6) as usize;
-    let input_rows: u16 = if wrap_width == 0 {
-        1
+    let mut input_line = app.tasks.input.clone();
+    if !on_context {
+        input_line.push(CURSOR);
+    }
+    let input_rows = wrapped_rows(&input_line, wrap_width);
+
+    // Context rows are capped: a 400-line paste is a fine thing to attach and
+    // a terrible thing to render, so the box shows its head and says how much
+    // more it holds.
+    let context_body = context_lines(&app.tasks.context, on_context, wrap_width);
+    let context_rows: u16 = if renaming {
+        0
     } else {
-        let w = input_line.chars().count();
-        w.div_ceil(wrap_width).max(1).try_into().unwrap_or(u16::MAX)
+        // Header + body + the blank line separating it from the task line.
+        (context_body.len() as u16).saturating_add(2)
     };
-    let desired_h = 5u16.saturating_add(input_rows).max(9).min(area.height);
+
+    let desired_h = 5u16
+        .saturating_add(input_rows)
+        .saturating_add(context_rows)
+        .max(9)
+        .min(area.height);
     let popup = centered_fixed(area, desired_w, desired_h);
     frame.render_widget(Clear, popup);
 
     let (title, hint) = if renaming {
         (" Rename task ", " edits the text in place ")
     } else {
-        (" New task ", " lands in To-Do · #tag !1–!4 inline ")
+        (
+            " New task ",
+            " lands in To-Do · #tag !1–!4 inline · pasted text becomes context ",
+        )
     };
     let block = popup_block(Span::styled(
         title,
@@ -1271,7 +1290,7 @@ pub(crate) fn render_task_input(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let footer_spans = vec![
+    let mut footer_spans = vec![
         Span::raw("  "),
         Span::styled(
             "[enter]",
@@ -1283,30 +1302,120 @@ pub(crate) fn render_task_input(frame: &mut Frame, area: Rect, app: &App) {
             if renaming { " rename   " } else { " add   " },
             Style::default().fg(Color::DarkGray),
         ),
-        Span::styled(
-            "[esc]",
+    ];
+    if !renaming {
+        footer_spans.push(Span::styled(
+            "[tab]",
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
-    ];
-    let lines = vec![
+        ));
+        footer_spans.push(Span::styled(
+            if on_context {
+                " task   "
+            } else {
+                " context   "
+            },
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    footer_spans.push(Span::styled(
+        "[esc]",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ));
+    footer_spans.push(Span::styled(
+        " cancel",
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    let mut lines = vec![
         Line::raw(""),
         Line::from(vec![
             Span::styled("  + ", Style::default().fg(Color::Green)),
             Span::styled(
                 input_line,
                 Style::default()
-                    .fg(Color::White)
+                    .fg(if on_context {
+                        Color::Gray
+                    } else {
+                        Color::White
+                    })
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
-        Line::raw(""),
-        Line::from(footer_spans),
     ];
+    if !renaming {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            format!("  context ({} chars)", app.tasks.context.chars().count()),
+            Style::default()
+                .fg(if on_context { ACCENT_BLUE } else { DIM_TEXT })
+                .add_modifier(Modifier::ITALIC),
+        )));
+        lines.extend(context_body);
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(footer_spans));
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// The cursor block both task-popup fields draw at their end.
+const CURSOR: char = '▎';
+
+/// Rows a string occupies once the popup's Paragraph wraps it at `width`.
+fn wrapped_rows(text: &str, width: usize) -> u16 {
+    if width == 0 {
+        return 1;
+    }
+    text.chars()
+        .count()
+        .div_ceil(width)
+        .max(1)
+        .try_into()
+        .unwrap_or(u16::MAX)
+}
+
+/// Most context rows the add popup renders before it stops and counts the
+/// rest — big pastes are the point of the field, not something to display.
+const CONTEXT_PREVIEW_ROWS: usize = 6;
+
+/// The context box's body: the paste's first [`CONTEXT_PREVIEW_ROWS`] lines
+/// (cursor on the last one when focused), then a count of what is not shown.
+/// Empty context renders the hint that says what the field is for.
+fn context_lines(context: &str, focused: bool, width: usize) -> Vec<Line<'static>> {
+    if context.is_empty() {
+        return vec![Line::from(Span::styled(
+            format!(
+                "  {}paste or type anything the agent should know",
+                if focused { CURSOR } else { ' ' }
+            ),
+            Style::default().fg(Color::DarkGray),
+        ))];
+    }
+    let all: Vec<&str> = context.lines().collect();
+    let shown = all.len().min(CONTEXT_PREVIEW_ROWS);
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(shown + 1);
+    for (i, raw) in all.iter().take(shown).enumerate() {
+        let last = i + 1 == all.len();
+        let mut text: String = raw.chars().take(width.max(1)).collect();
+        if focused && last {
+            text.push(CURSOR);
+        }
+        lines.push(Line::from(Span::styled(
+            format!("  {}", text),
+            Style::default().fg(Color::Rgb(200, 200, 210)),
+        )));
+    }
+    if all.len() > shown {
+        lines.push(Line::from(Span::styled(
+            format!("  … {} more lines", all.len() - shown),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines
 }
 
 /// Centered single-line input for attaching to the focused board card. Same
@@ -2536,7 +2645,7 @@ mod model_picker_tests {
 // same as the todo-panel suite below.
 #[cfg(all(test, unix))]
 mod task_input_tests {
-    use crate::app::{App, View};
+    use crate::app::{App, TaskField, View};
     use crate::test_util::with_temp_home;
     use crate::ui::common::buffer_to_string;
     use ratatui::backend::TestBackend;
@@ -2583,6 +2692,85 @@ mod task_input_tests {
                     rendered
                 );
             }
+        });
+    }
+
+    fn render(app: &App) -> String {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| super::render_task_input(f, f.area(), app))
+            .expect("render");
+        buffer_to_string(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn add_popup_shows_the_context_box_and_where_the_cursor_is() {
+        with_temp_home(|| {
+            let mut app = App::new();
+            app.enter_task_input();
+            app.tasks.input = "fix the parser".into();
+            assert_eq!(app.view, View::TaskInput);
+
+            // Empty context: the hint says what the field is for, and the
+            // cursor is still on the task line.
+            let empty = render(&app);
+            assert!(empty.contains("fix the parser▎"), "task line:\n{}", empty);
+            assert!(empty.contains("paste or type anything"), "hint:\n{}", empty);
+
+            // A multi-line paste fills the box and takes the cursor with it.
+            app.paste_into_input("first line\nsecond line");
+            assert_eq!(app.tasks.field, TaskField::Context);
+            let pasted = render(&app);
+            assert!(pasted.contains("first line"), "context:\n{}", pasted);
+            assert!(pasted.contains("second line▎"), "cursor:\n{}", pasted);
+            assert!(
+                !pasted.contains("fix the parser▎"),
+                "cursor moved:\n{}",
+                pasted
+            );
+        });
+    }
+
+    #[test]
+    fn a_long_paste_is_previewed_and_counted() {
+        with_temp_home(|| {
+            let mut app = App::new();
+            app.enter_task_input();
+            app.tasks.input = "big one".into();
+            let paste: String = (1..=20).map(|n| format!("line {}\n", n)).collect();
+            app.paste_into_input(&paste);
+
+            let rendered = render(&app);
+            assert!(rendered.contains("line 1"), "head:\n{}", rendered);
+            assert!(
+                !rendered.contains("line 20"),
+                "tail is not drawn:\n{}",
+                rendered
+            );
+            assert!(
+                rendered.contains("more lines"),
+                "overflow marker:\n{}",
+                rendered
+            );
+        });
+    }
+
+    #[test]
+    fn rename_popup_has_no_context_field() {
+        with_temp_home(|| {
+            let mut app = App::new();
+            let id = app.tasks.board.add("plain").unwrap().unwrap();
+            app.focus_task(&id);
+            assert!(app.enter_task_rename());
+
+            let rendered = render(&app);
+            assert!(rendered.contains("plain▎"), "task line:\n{}", rendered);
+            assert!(
+                !rendered.contains("context"),
+                "no context box:\n{}",
+                rendered
+            );
         });
     }
 }

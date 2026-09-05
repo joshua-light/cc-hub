@@ -37,7 +37,7 @@ pub use render_state::RenderState;
 pub use session_finder::{SessionFinderChoice, SessionFinderRow, SessionFinderState};
 pub use sessions_view::{SessionsLayout, SessionsView};
 pub use task_link_picker::{TaskLinkAction, TaskLinkChoice, TaskLinkPickerState, TaskLinkRow};
-pub use tasks_view::{column_statuses, visible_task_columns, TasksView, TASK_COLUMNS};
+pub use tasks_view::{column_statuses, visible_task_columns, TaskField, TasksView, TASK_COLUMNS};
 pub use todo_panel::TodoPanelState;
 
 pub fn status_msg_ttl() -> Duration {
@@ -53,13 +53,52 @@ pub const PROCEED_PROMPT: &str = "Proceed with the implementation.";
 /// and presents a plan, then holds until the user approves (Space sends
 /// [`PROCEED_PROMPT`]). This is what makes the Planning column honest — the
 /// agent genuinely isn't implementing while the card sits there.
-fn planning_prompt(text: &str) -> String {
-    format!(
-        "{text}\n\nFirst investigate the codebase and figure out what this task needs, \
+fn planning_prompt(task: &TaskState) -> String {
+    let mut prompt = task.prompt.clone();
+    for note in task_notes(task) {
+        prompt.push_str("\n\n");
+        prompt.push_str(&note);
+    }
+    prompt.push_str(
+        "\n\nFirst investigate the codebase and figure out what this task needs, \
          then present a short implementation plan: approach, files you'll touch, open \
          questions. Do NOT implement yet — stop after the plan and wait for me to say \
-         \"proceed\"."
-    )
+         \"proceed\".",
+    );
+    prompt
+}
+
+/// Longest a note is quoted into the planning prompt before the agent is
+/// pointed at the file instead. A pasted spec or stack trace belongs in the
+/// prompt; a pasted logfile belongs on disk, one Read away.
+const NOTE_PROMPT_BUDGET: usize = 2000;
+
+/// The task's `note` attachments (context pasted in the add popup, or `p`
+/// pasted onto the card later) as prompt sections, in attach order. Each is
+/// labelled with the file it came from, so the agent can read the rest of a
+/// note that was too long to quote — and unreadable notes are skipped rather
+/// than failing the spawn.
+fn task_notes(task: &TaskState) -> Vec<String> {
+    task.artifacts
+        .iter()
+        .filter(|a| a.kind == "note")
+        .filter_map(|a| {
+            let text = std::fs::read_to_string(&a.path).ok()?;
+            let text = text.trim();
+            if text.is_empty() {
+                return None;
+            }
+            Some(match text.char_indices().nth(NOTE_PROMPT_BUDGET) {
+                None => format!("Context ({}):\n{}", a.path, text),
+                Some((cut, _)) => format!(
+                    "Context (first {} chars of {} — read the file for the rest):\n{}",
+                    NOTE_PROMPT_BUDGET,
+                    a.path,
+                    &text[..cut]
+                ),
+            })
+        })
+        .collect()
 }
 
 /// A task's display label: its Haiku title when present, else the first
@@ -866,6 +905,8 @@ impl App {
     /// Open the add-task popup on the Tasks tab.
     pub fn enter_task_input(&mut self) {
         self.tasks.input.clear();
+        self.tasks.context.clear();
+        self.tasks.field = TaskField::Text;
         self.tasks.renaming = None;
         self.view = View::TaskInput;
     }
@@ -880,14 +921,41 @@ impl App {
         let (id, text) = (t.task_id.clone(), t.prompt.clone());
         self.tasks.renaming = Some(id);
         self.tasks.input = text;
+        // Rename edits the one line it opened on; existing context lives in
+        // the card's notes, added and removed from the Task Info popup.
+        self.tasks.context.clear();
+        self.tasks.field = TaskField::Text;
         self.view = View::TaskInput;
         true
     }
 
     pub fn close_task_input(&mut self) {
         self.tasks.input.clear();
+        self.tasks.context.clear();
+        self.tasks.field = TaskField::Text;
         self.tasks.renaming = None;
         self.view = View::Grid;
+    }
+
+    /// Tab in the add popup: move between the task line and the context box.
+    /// A no-op while renaming, which has no context field.
+    pub fn toggle_task_input_field(&mut self) {
+        if self.tasks.renaming.is_some() {
+            return;
+        }
+        self.tasks.field = match self.tasks.field {
+            TaskField::Text => TaskField::Context,
+            TaskField::Context => TaskField::Text,
+        };
+    }
+
+    /// The add popup's buffer for the focused field, for the key handler to
+    /// push into and pop from.
+    pub fn task_input_buffer(&mut self) -> &mut String {
+        match self.tasks.field {
+            TaskField::Text => &mut self.tasks.input,
+            TaskField::Context => &mut self.tasks.context,
+        }
     }
 
     /// Commit the task popup: append to To-Do and move the cursor to the
@@ -899,6 +967,8 @@ impl App {
     /// changed.
     pub fn submit_task_input(&mut self) -> bool {
         let text = std::mem::take(&mut self.tasks.input);
+        let context = std::mem::take(&mut self.tasks.context);
+        self.tasks.field = TaskField::Text;
         self.view = View::Grid;
         if let Some(id) = self.tasks.renaming.take() {
             return match self.tasks.board.rename(&id, &text) {
@@ -916,6 +986,7 @@ impl App {
             quick.priority.unwrap_or_default(),
         ) {
             Ok(Some(id)) => {
+                self.attach_task_context(&id, &context);
                 self.focus_task(&id);
                 true
             }
@@ -924,6 +995,21 @@ impl App {
                 self.tasks.record_persistence_error("add", e);
                 false
             }
+        }
+    }
+
+    /// Store the add popup's context box on the freshly created task as its
+    /// first `note` attachment — the same shape `p` and the attach popup
+    /// produce, so there is one kind of extra text on a card and the agent
+    /// spawned by `s` reads it (see [`task_notes`]). Empty context attaches
+    /// nothing.
+    fn attach_task_context(&mut self, id: &str, context: &str) {
+        if context.trim().is_empty() {
+            return;
+        }
+        match crate::ops::task::task_artifact_add_text(None, id, context, "typed") {
+            Ok(state) => self.tasks.board.adopt(state),
+            Err(e) => self.tasks.record_persistence_error("context attach", e),
         }
     }
 
@@ -1152,15 +1238,35 @@ impl App {
         }
     }
 
-    /// Route a bracketed-paste burst into whichever single-line task input is
-    /// active (add/rename, tags, attach — they share one buffer). Newlines
-    /// fold into spaces, other control characters are dropped. Returns false
-    /// when the active view has no such input, so the caller ignores the
-    /// paste like before.
+    /// Route a bracketed-paste burst into whichever task input is active
+    /// (add/rename, tags, attach — they share one buffer). Newlines fold into
+    /// spaces, other control characters are dropped. Returns false when the
+    /// active view has no such input, so the caller ignores the paste like
+    /// before.
+    ///
+    /// The add popup is the exception: a paste that carries newlines is
+    /// context, not a task line, so it lands verbatim in the context box and
+    /// takes the cursor with it. A single-line paste goes to whichever field
+    /// is focused.
     pub fn paste_into_input(&mut self, text: &str) -> bool {
         match self.view {
             View::TaskInput | View::TaskTags | View::TaskAttachInput => {}
             _ => return false,
+        }
+        let multiline = text.contains('\n') || text.contains('\r');
+        if self.view == View::TaskInput && self.tasks.renaming.is_none() {
+            if multiline {
+                self.tasks.field = TaskField::Context;
+            }
+            let buf = self.task_input_buffer();
+            let keep = |c: &char| !c.is_control() || (multiline && matches!(c, '\n' | '\t'));
+            buf.extend(
+                text.replace("\r\n", "\n")
+                    .replace('\r', "\n")
+                    .chars()
+                    .filter(keep),
+            );
+            return true;
         }
         for ch in text.chars() {
             if ch == '\n' || ch == '\r' {
@@ -1648,7 +1754,7 @@ impl App {
         let Some(task) = self.tasks.board.get(&id) else {
             return "task vanished before assignment".into();
         };
-        let prompt = planning_prompt(&task.prompt);
+        let prompt = planning_prompt(task);
         let agent_id = config::get().default_session_agent_id();
         let supports_initial_prompt = config::get()
             .agent(&agent_id)
@@ -3421,6 +3527,17 @@ impl App {
     /// - membership changed → full rebuild with restore-selection-by-id and
     ///   the new-session focus jump.
     pub fn update_sessions(&mut self, mut sessions: Vec<SessionInfo>) -> bool {
+        // Tick transcripts belong to the Agents tab. They are headless
+        // `claude -p` runs, so a card here could never be attached — `f`
+        // would have nothing to open.
+        let agent_sessions = crate::harness::AgentSessions::of(&self.harness.agents);
+        if !agent_sessions.is_empty() {
+            sessions.retain(|s| {
+                agent_sessions
+                    .owner(&s.session_id, std::path::Path::new(&s.cwd))
+                    .is_none()
+            });
+        }
         // Refresh the session→task sidecar so links written by another
         // instance (or the CLI) regroup the grid without a restart — the
         // same per-tick re-read the scanner does for the title sidecar.
@@ -6088,6 +6205,111 @@ mod tests {
                 let t = app.tasks.board.get(&id).unwrap();
                 assert_eq!(t.prompt, "now with #hash !1");
                 assert!(t.tags.is_empty());
+            });
+        }
+    }
+
+    #[cfg(unix)]
+    mod task_context {
+        use super::*;
+        use crate::test_util::with_temp_home;
+
+        #[test]
+        fn multiline_paste_lands_in_the_context_field() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                app.enter_task_input();
+                app.tasks.input = "fix the parser".into();
+                assert!(app.paste_into_input("line one\r\nline two"));
+                // The task line is untouched and the cursor moved with the
+                // paste, so the next keystroke keeps editing the context.
+                assert_eq!(app.tasks.input, "fix the parser");
+                assert_eq!(app.tasks.context, "line one\nline two");
+                assert_eq!(app.tasks.field, TaskField::Context);
+
+                // A single-line paste follows the focus instead.
+                assert!(app.paste_into_input(" tail"));
+                assert_eq!(app.tasks.context, "line one\nline two tail");
+                app.toggle_task_input_field();
+                assert!(app.paste_into_input(" now"));
+                assert_eq!(app.tasks.input, "fix the parser now");
+            });
+        }
+
+        #[test]
+        fn renaming_still_flattens_a_multiline_paste() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                let id = app.tasks.board.add("plain").unwrap().unwrap();
+                app.focus_task(&id);
+                assert!(app.enter_task_rename());
+                app.tasks.input.clear();
+                assert!(app.paste_into_input("one\ntwo"));
+                assert_eq!(app.tasks.input, "one two");
+                assert!(app.tasks.context.is_empty());
+            });
+        }
+
+        #[test]
+        fn submitted_context_becomes_the_task_first_note() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                app.enter_task_input();
+                app.tasks.input = "fix the parser #bug".into();
+                app.tasks.context = "repro:\n  cc-hub task create".into();
+                assert!(app.submit_task_input());
+
+                let t = app.selected_board_task().unwrap().clone();
+                assert_eq!(t.prompt, "fix the parser");
+                assert_eq!(t.artifacts.len(), 1);
+                assert_eq!(t.artifacts[0].kind, "note");
+                assert_eq!(t.artifacts[0].original, "typed");
+                let stored = std::fs::read_to_string(&t.artifacts[0].path).unwrap();
+                assert_eq!(stored, "repro:\n  cc-hub task create");
+
+                // The note reaches the agent the card is later assigned to.
+                let prompt = planning_prompt(&t);
+                assert!(prompt.contains("cc-hub task create"), "prompt: {prompt}");
+
+                // And the popup opens clean next time.
+                app.enter_task_input();
+                assert!(app.tasks.context.is_empty());
+                assert_eq!(app.tasks.field, TaskField::Text);
+            });
+        }
+
+        #[test]
+        fn empty_context_attaches_nothing() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                app.enter_task_input();
+                app.tasks.input = "no extras".into();
+                app.tasks.context = "   \n".into();
+                assert!(app.submit_task_input());
+                assert!(app.selected_board_task().unwrap().artifacts.is_empty());
+            });
+        }
+
+        #[test]
+        fn an_oversized_note_is_quoted_up_to_the_budget() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                app.enter_task_input();
+                app.tasks.input = "big one".into();
+                app.tasks.context = "x".repeat(NOTE_PROMPT_BUDGET + 500);
+                assert!(app.submit_task_input());
+
+                let t = app.selected_board_task().unwrap().clone();
+                let prompt = planning_prompt(&t);
+                assert!(prompt.contains("read the file for the rest"));
+                // Exactly the budget is quoted — the temp-dir path in the
+                // header can carry an `x` of its own, so bound the run
+                // rather than counting characters across the whole prompt.
+                assert!(prompt.contains(&"x".repeat(NOTE_PROMPT_BUDGET)));
+                assert!(!prompt.contains(&"x".repeat(NOTE_PROMPT_BUDGET + 1)));
+                // The full text is still on disk for the agent to open.
+                let stored = std::fs::read_to_string(&t.artifacts[0].path).unwrap();
+                assert_eq!(stored.len(), NOTE_PROMPT_BUDGET + 500);
             });
         }
     }

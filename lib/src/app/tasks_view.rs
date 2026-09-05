@@ -51,6 +51,16 @@ fn statuses_for(col: TaskStatus, show_planning: bool) -> Vec<TaskStatus> {
     }
 }
 
+/// Which field of the add-task popup keystrokes land in. The popup is two
+/// fields — the one-line task text and the free-form context under it — and
+/// Tab moves between them. Rename mode only ever uses [`TaskField::Text`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TaskField {
+    #[default]
+    Text,
+    Context,
+}
+
 pub struct TasksView {
     pub board: PersonalBoard,
     /// Most recent repository failure, consumed by `App` and shown in the
@@ -63,6 +73,13 @@ pub struct TasksView {
     /// In-progress text for the add/rename-task popup
     /// ([`crate::app::View::TaskInput`]).
     pub input: String,
+    /// Free-form context typed or pasted under the task line in the add
+    /// popup. Committed as the new task's first `note` attachment, so the
+    /// agent that later picks the card up reads it (see
+    /// [`crate::app::App::submit_task_input`]). Unused while renaming.
+    pub context: String,
+    /// Which of the two add-popup fields keystrokes land in.
+    pub field: TaskField,
     /// Task id being renamed: set when `r` opens the popup, consumed on
     /// submit, cleared if the popup is cancelled. None means the popup
     /// adds a new task.
@@ -129,6 +146,8 @@ impl TasksView {
             col: 0,
             row: 0,
             input: String::new(),
+            context: String::new(),
+            field: TaskField::default(),
             renaming: None,
             tagging: None,
             pending_assign: None,

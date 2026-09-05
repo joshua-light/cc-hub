@@ -24,8 +24,8 @@
 use crate::app::App;
 use crate::models::{first_line_truncated, SessionInfo, SessionState};
 use crate::ui::common::{
-    context_window_size, ctx_color, format_elapsed, short_model, state_indicator, task_color,
-    COLD_CACHE_ICON,
+    context_window_size, ctx_color, format_elapsed, short_model, state_indicator, task_color, Cell,
+    COLD_CACHE_ICON, COL_SEP,
 };
 use crate::ui::now_ms;
 use crate::ui::palette::{CONTEXT_GRAY, ICE_BLUE, MUTED_TEXT};
@@ -56,7 +56,6 @@ const TOOLS_W: usize = 7;
 const ELAPSED_W: usize = 10;
 /// Context bar: "100%" at the widest.
 const CTX_W: usize = 6;
-const COL_SEP: usize = 2;
 /// Selection marker(1) + state icon(1) + space(1).
 const LEFT_FIXED: usize = 3;
 /// The title region never shrinks below this; metadata columns drop first.
@@ -219,29 +218,6 @@ pub(crate) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
                 selected,
                 now,
             );
-        }
-    }
-}
-
-/// A right-cluster cell, padded to `target` advance columns. Blank cells
-/// (`text.is_empty()`) still occupy the full column so rows stay aligned.
-struct Cell {
-    text: String,
-    target: usize,
-    style: Style,
-    right_align: bool,
-}
-
-impl Cell {
-    fn push_spans(self, spans: &mut Vec<Span<'static>>) {
-        spans.push(Span::raw(" ".repeat(COL_SEP)));
-        let pad = self.target.saturating_sub(self.text.chars().count());
-        if self.right_align {
-            spans.push(Span::raw(" ".repeat(pad)));
-            spans.push(Span::styled(self.text, self.style));
-        } else {
-            spans.push(Span::styled(self.text, self.style));
-            spans.push(Span::raw(" ".repeat(pad)));
         }
     }
 }

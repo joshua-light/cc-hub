@@ -311,7 +311,7 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 if app.tasks.renaming.is_some() {
                     "edit task  enter:rename  esc:cancel"
                 } else {
-                    "type task  enter:add  esc:cancel"
+                    "type task  tab:context  paste lands in context  enter:add  esc:cancel"
                 }
             }
             View::TaskTags => "edit tags  space/comma separates  enter:save  esc:cancel",

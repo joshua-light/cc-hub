@@ -67,6 +67,9 @@ pub fn valid_name(name: &str) -> bool {
 pub struct TickRecord {
     pub at: i64,
     pub event: Option<String>,
+    /// The session this tick ran in, so its transcript can be reopened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub ok: bool,
     pub subtype: Option<String>,
     pub turns: u32,
@@ -109,6 +112,10 @@ pub struct AgentState {
 pub struct Ticking {
     pub since: i64,
     pub event: Option<String>,
+    /// Filled the moment the CLI announces it, so the tab can tail a tick
+    /// while it is still running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 fn today_utc() -> String {
@@ -248,9 +255,13 @@ pub fn tick_once(spec: &Spec, event: Option<&Event>) -> io::Result<(Tick, AgentS
     let event_id = event.map(|e| e.id.clone());
     let state = update_state(&spec.dir, |s| {
         s.roll_day();
+        // A persistent agent resumes a session we already know; a fresh one
+        // gets its id from the CLI a moment later (see `session_started`).
+        let resumed = spec.run.persistent_session.then(|| s.session_id.clone());
         s.ticking = Some(Ticking {
             since: started,
             event: event_id.clone(),
+            session_id: resumed.flatten(),
         });
     })?;
     let resume = if spec.run.persistent_session {
@@ -273,6 +284,13 @@ pub fn tick_once(spec: &Spec, event: Option<&Event>) -> io::Result<(Tick, AgentS
         resume.as_deref(),
         Some(&log_path(&spec.dir)),
         &header,
+        &|sid| {
+            let _ = update_state(&spec.dir, |s| {
+                if let Some(t) = &mut s.ticking {
+                    t.session_id = Some(sid.to_string());
+                }
+            });
+        },
     );
 
     let state = update_state(&spec.dir, |s| {
@@ -313,6 +331,7 @@ pub fn tick_once(spec: &Spec, event: Option<&Event>) -> io::Result<(Tick, AgentS
             context_start: tick.context_start,
             context_end: tick.context_end,
             duration_s: tick.duration_s,
+            session_id: tick.session_id.clone(),
             result: truncate(&tick.result, 200),
         });
         if s.history.len() > MAX_HISTORY {
@@ -458,6 +477,98 @@ impl AgentSnapshot {
             .map(|s| s.description.as_str())
             .unwrap_or("")
     }
+
+    pub fn workdir(&self) -> &Path {
+        self.spec
+            .as_ref()
+            .map(|s| s.workdir.as_path())
+            .unwrap_or(&self.dir)
+    }
+
+    /// The session the agent is in right now, or last ran in — the tick in
+    /// flight first, then the persistent session, then the newest tick that
+    /// recorded one.
+    pub fn session_id(&self) -> Option<&str> {
+        self.state
+            .ticking
+            .as_ref()
+            .and_then(|t| t.session_id.as_deref())
+            .or(self.state.session_id.as_deref())
+            .or_else(|| {
+                self.state
+                    .history
+                    .iter()
+                    .rev()
+                    .find_map(|r| r.session_id.as_deref())
+            })
+    }
+
+    /// Every session id this agent is known to have run in.
+    pub fn session_ids(&self) -> impl Iterator<Item = &str> {
+        self.state
+            .ticking
+            .as_ref()
+            .and_then(|t| t.session_id.as_deref())
+            .into_iter()
+            .chain(self.state.session_id.as_deref())
+            .chain(
+                self.state
+                    .history
+                    .iter()
+                    .filter_map(|r| r.session_id.as_deref()),
+            )
+    }
+
+    /// Transcript of [`Self::session_id`], if Claude Code has written one.
+    pub fn transcript(&self) -> Option<PathBuf> {
+        let sid = self.session_id()?;
+        crate::scanner::find_jsonl(&self.workdir().to_string_lossy(), sid)
+            .or_else(|| crate::scanner::find_jsonl_anywhere(sid))
+    }
+}
+
+/// The sessions agents run in, so the Sessions tab can leave them to the
+/// Agents tab. A tick is a headless `claude -p` with no terminal behind it:
+/// its card could never be attached, only stared at.
+///
+/// Two ways to belong to an agent, both of them the agent's own doing: the
+/// tick recorded the session id it ran in, or the session runs inside the
+/// agent's directory (where the default workdir lives). A spec pointing its
+/// `workdir` at one of your repos owns only the sessions it recorded —
+/// yours in that repo stay yours.
+#[derive(Debug, Default, Clone)]
+pub struct AgentSessions {
+    by_id: std::collections::HashMap<String, String>,
+    dirs: Vec<(PathBuf, String)>,
+}
+
+impl AgentSessions {
+    pub fn of(agents: &[AgentSnapshot]) -> Self {
+        let mut by_id = std::collections::HashMap::new();
+        let mut dirs = Vec::new();
+        for agent in agents {
+            for sid in agent.session_ids() {
+                by_id.insert(sid.to_string(), agent.name.clone());
+            }
+            dirs.push((agent.dir.clone(), agent.name.clone()));
+        }
+        Self { by_id, dirs }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_id.is_empty() && self.dirs.is_empty()
+    }
+
+    /// The agent this session belongs to, if any.
+    pub fn owner(&self, session_id: &str, cwd: &Path) -> Option<&str> {
+        if let Some(name) = self.by_id.get(session_id) {
+            return Some(name);
+        }
+        self.dirs
+            .iter()
+            .find(|(dir, _)| cwd.starts_with(dir))
+            .map(|(_, name)| name.as_str())
+    }
 }
 
 pub fn snapshot(dir: &Path) -> AgentSnapshot {
@@ -582,6 +693,74 @@ mod tests {
         assert_eq!(load_state(tmp.path()), s);
         let s2 = set_paused(tmp.path(), false).unwrap();
         assert!(!s2.paused);
+    }
+
+    fn agent_at(dir: &Path, name: &str, state: AgentState) -> AgentSnapshot {
+        AgentSnapshot {
+            name: name.into(),
+            dir: dir.to_path_buf(),
+            spec: Err("not loaded".into()),
+            state,
+            notes: Vec::new(),
+            inbox_pending: 0,
+        }
+    }
+
+    #[test]
+    fn an_agent_owns_the_sessions_it_ran_and_its_own_directory() {
+        let dir = Path::new("/home/me/.cc-hub/agents/bb-prs");
+        let mut state = AgentState {
+            session_id: Some("persistent".into()),
+            ..Default::default()
+        };
+        state.history.push(TickRecord {
+            at: 0,
+            event: None,
+            session_id: Some("tick-7".into()),
+            ok: true,
+            subtype: None,
+            turns: 1,
+            compactions: 0,
+            cost_usd: 0.0,
+            context_start: 0,
+            context_end: 0,
+            duration_s: 1,
+            result: String::new(),
+        });
+        let owned = AgentSessions::of(&[agent_at(dir, "bb-prs", state)]);
+
+        // Recorded ids belong to the agent wherever they ran …
+        assert_eq!(
+            owned.owner("tick-7", Path::new("/home/me/code")),
+            Some("bb-prs")
+        );
+        assert_eq!(
+            owned.owner("persistent", Path::new("/home/me/code")),
+            Some("bb-prs")
+        );
+        // … as does anything running inside the agent's own directory.
+        assert_eq!(owned.owner("unknown", &dir.join("work")), Some("bb-prs"));
+        // A session of yours in your own repo stays yours.
+        assert_eq!(owned.owner("mine", Path::new("/home/me/code")), None);
+    }
+
+    #[test]
+    fn the_newest_known_session_wins() {
+        let dir = Path::new("/home/me/.cc-hub/agents/a");
+        let mut state = AgentState {
+            session_id: Some("persistent".into()),
+            ..Default::default()
+        };
+        let agent = agent_at(dir, "a", state.clone());
+        assert_eq!(agent.session_id(), Some("persistent"));
+
+        state.ticking = Some(Ticking {
+            since: 0,
+            event: None,
+            session_id: Some("in-flight".into()),
+        });
+        let agent = agent_at(dir, "a", state);
+        assert_eq!(agent.session_id(), Some("in-flight"));
     }
 
     #[test]

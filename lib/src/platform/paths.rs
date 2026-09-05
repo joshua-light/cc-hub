@@ -38,6 +38,15 @@ pub fn cache_dir() -> PathBuf {
         .join("cc-hub")
 }
 
+/// `~/x` → `<home>/x`; anything else is taken as given. Config and links
+/// are written by hand, so a leading `~` is a path the user expects to work.
+pub fn expand_home(p: &str) -> PathBuf {
+    match p.strip_prefix("~/").zip(dirs::home_dir()) {
+        Some((rest, home)) => home.join(rest),
+        None => PathBuf::from(p),
+    }
+}
+
 pub fn cc_hub_home() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".cc-hub"))
 }

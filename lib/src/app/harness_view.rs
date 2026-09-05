@@ -1,6 +1,5 @@
 //! Agents-tab state: the latest on-disk snapshot of every persistent agent
-//! and the selection cursor over the card grid. The column count is
-//! renderer-derived (`RenderState::agents_cols`); nav here only reads it.
+//! and the selection cursor over the table (one row per agent).
 
 use crate::harness::AgentSnapshot;
 

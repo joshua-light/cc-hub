@@ -7,6 +7,8 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::platform::paths::expand_home;
+
 /// `--autocompact` accepts 100k–1M; `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` scales
 /// it down and can only lower the trigger, never raise it. A small window is
 /// therefore a percentage of this floor.
@@ -33,6 +35,19 @@ Do not work around a restriction.
 - Report outcomes truthfully, including failures and work you skipped.";
 
 pub const SPEC_FILE: &str = "agent.toml";
+
+/// `--permission-mode` values. The default, `dontAsk`, denies whatever the
+/// tool list did not allow instead of prompting into the void;
+/// `bypassPermissions` is the only one that leaves nothing to allow, and it
+/// is the only way to reach MCP tools, which take no wildcard allow rule.
+pub const PERMISSION_MODES: &[&str] = &[
+    "acceptEdits",
+    "auto",
+    "bypassPermissions",
+    "dontAsk",
+    "manual",
+    "plan",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -75,7 +90,8 @@ impl Default for TriggerCfg {
 pub struct RunCfg {
     /// Only these tools exist for the agent; everything else is denied,
     /// which removes its schema from the request. Bare names, scoped rules
-    /// (`Bash(git *)`) and MCP patterns (`mcp__srv__*`) all work.
+    /// (`Bash(git *)`) and MCP patterns (`mcp__srv__*`) all work; a lone
+    /// `"*"` asks for everything the CLI offers.
     pub tools: Vec<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -93,6 +109,13 @@ pub struct RunCfg {
     pub persistent_session: bool,
     /// `--setting-sources` value. Empty isolates from user/project settings.
     pub setting_sources: String,
+    /// One of [`PERMISSION_MODES`]. Anything but `bypassPermissions` needs
+    /// every action covered by `tools` or by the loaded settings.
+    pub permission_mode: String,
+    /// Give the agent the machine's MCP servers, as an interactive session
+    /// has them. Off by default: a watcher pays for every server it never
+    /// calls, in startup time and in tool schemas.
+    pub mcp: bool,
     /// Wall-clock cap for one tick.
     pub timeout_s: u64,
     pub env: BTreeMap<String, String>,
@@ -111,6 +134,8 @@ impl Default for RunCfg {
             budget_usd_total: None,
             persistent_session: false,
             setting_sources: String::new(),
+            permission_mode: "dontAsk".into(),
+            mcp: false,
             timeout_s: 3600,
             env: BTreeMap::new(),
         }
@@ -236,6 +261,12 @@ pub fn parse(dir: &Path, raw: &str) -> Result<Spec, String> {
     if !(1..=100).contains(&file.run.window_pct) {
         return Err("run.window_pct must be 1–100".into());
     }
+    if !PERMISSION_MODES.contains(&file.run.permission_mode.as_str()) {
+        return Err(format!(
+            "run.permission_mode must be one of {}",
+            PERMISSION_MODES.join(", ")
+        ));
+    }
     if file.trigger.kind == TriggerKind::Poll && file.trigger.command.is_none() {
         return Err("trigger.kind = \"poll\" needs trigger.command".into());
     }
@@ -275,15 +306,6 @@ pub fn parse(dir: &Path, raw: &str) -> Result<Spec, String> {
     })
 }
 
-fn expand_home(p: &str) -> PathBuf {
-    if let Some(rest) = p.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
-    }
-    PathBuf::from(p)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,6 +314,17 @@ mod tests {
 [prompt]
 instruction = "Do the thing."
 "#;
+
+    #[test]
+    fn spec_loads_from_disk() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("example");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join(SPEC_FILE), MINIMAL).unwrap();
+        let spec = load(&dir).expect("load spec");
+        assert_eq!(spec.name, "example");
+        assert_eq!(spec.instruction, "Do the thing.");
+    }
 
     #[test]
     fn minimal_spec_gets_defaults() {
@@ -322,6 +355,16 @@ instruction = "Go."
     fn instruction_required() {
         let err = parse(Path::new("/tmp/x"), "enabled = true").unwrap_err();
         assert!(err.contains("instruction"), "{err}");
+    }
+
+    #[test]
+    fn permission_mode_is_checked() {
+        let raw = "[run]\npermission_mode=\"yolo\"\n[prompt]\ninstruction=\"x\"";
+        assert!(parse(Path::new("/tmp/x"), raw)
+            .unwrap_err()
+            .contains("permission_mode"));
+        let raw = "[run]\npermission_mode=\"bypassPermissions\"\n[prompt]\ninstruction=\"x\"";
+        assert!(parse(Path::new("/tmp/x"), raw).is_ok());
     }
 
     #[test]

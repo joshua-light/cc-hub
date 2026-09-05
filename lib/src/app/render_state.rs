@@ -54,9 +54,9 @@ pub struct RenderState {
     /// by the renderer (`ui/tasks.rs`) to keep the selected attachment
     /// visible.
     pub task_info_scroll: u16,
-    /// Agents-tab card columns, derived from the terminal width by the
-    /// renderer each frame; nav reads it for h/l.
-    pub agents_cols: usize,
+    /// Scroll offset (rows) of the Agents-tab table, written by the
+    /// renderer to keep the selected row on screen.
+    pub agents_scroll: u16,
     /// Scroll offset of the agent-detail popup's tick timeline.
     pub agent_detail_scroll: u16,
     /// Per-artifact decoded image cache, keyed by `Artifact::path`. Populated
@@ -82,7 +82,7 @@ impl Default for RenderState {
             result_artifact_expanded: false,
             state_debug_scroll: 0,
             task_info_scroll: 0,
-            agents_cols: 1,
+            agents_scroll: 0,
             agent_detail_scroll: 0,
             artifact_images: HashMap::new(),
             artifact_image_failed: HashSet::new(),

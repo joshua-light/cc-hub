@@ -1,24 +1,37 @@
 //! The `cc-hub://` deep link — the URL an outside tool opens to make the hub
 //! start something.
 //!
-//! One kind exists today: `review`. A browser extension puts "Light Review"
-//! and "Full Review" buttons on a pull request page; each is a link like
+//! Two kinds exist today: `review` and `task`.
+//!
+//! A browser extension puts "Light Review" and "Full Review" buttons on a
+//! pull request page; each is a link like
 //!
 //! ```text
-//! cc-hub://review?depth=light&pr=https%3A%2F%2Fbitbucket.example.com%2Fprojects%2FTPS%2Frepos%2Ftps-project%2Fpull-requests%2F11280
+//! cc-hub://review?depth=light&pr=https%3A%2F%2Fbitbucket.example.com%2Fprojects%2FAPP%2Frepos%2Fsample-project%2Fpull-requests%2F11280
 //! ```
 //!
-//! The OS routes the scheme to `cc-hub open <url>` (see `contrib/macos/`),
+//! A locally configured OS handler routes the scheme to `cc-hub open <url>`,
 //! which parses the string here and acts on it in [`crate::ops::link`].
 //!
 //! A caller with nobody watching — a persistent agent that starts reviews on
 //! its own — adds `&post=80` to let the review post findings it is at least
 //! that confident about instead of asking a human who is not there.
 //!
+//! A `task` link hands a Tasks-board card to a session:
+//!
+//! ```text
+//! cc-hub://task?id=tk-1788509616255974000&dir=%2FUsers%2Fme%2Fgit%2Fself%2Fcc-hub
+//! ```
+//!
+//! The `task-runner` agent opens one for every card that reaches In Progress
+//! without a session of its own: it decides where the work belongs, and the
+//! hub starts a session there, bound to the card, running the `task` skill.
+//!
 //! This module is pure: a string becomes a [`Link`], a [`ReviewLink`] renders
 //! the prompt it stands for. Nothing here reads disk or spawns a process.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 pub const SCHEME: &str = "cc-hub";
@@ -28,6 +41,7 @@ pub const SCHEME: &str = "cc-hub";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Link {
     Review(ReviewLink),
+    Task(TaskLink),
 }
 
 impl Link {
@@ -35,6 +49,7 @@ impl Link {
     pub fn kind(&self) -> &'static str {
         match self {
             Link::Review(_) => "review",
+            Link::Task(_) => "task",
         }
     }
 }
@@ -62,6 +77,11 @@ impl FromStr for Link {
                     .optional("post")
                     .map(PostThreshold::from_str)
                     .transpose()?,
+            })),
+            "task" => Ok(Link::Task(TaskLink {
+                id: query.required("id")?.parse()?,
+                dir: query.optional("dir").map(PathBuf::from),
+                kind: query.optional("kind").map(str::to_string),
             })),
             other => Err(LinkError::UnknownKind(other.to_string())),
         }
@@ -97,24 +117,18 @@ impl ReviewLink {
     }
 
     /// The name the session is born with: `PR: <title>`, or `PR: <repo>#<n>`
-    /// when the link carried no title. Whitespace is collapsed and the whole
-    /// thing capped so a novel of a PR title still fits a session card.
+    /// when the link carried no title.
     pub fn session_title(&self) -> String {
-        const MAX_CHARS: usize = 60;
         let subject = self
             .title
             .as_deref()
-            .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
-            .filter(|t| !t.is_empty())
+            .filter(|t| !t.trim().is_empty())
+            .map(str::to_string)
             .unwrap_or_else(|| match self.pr.number() {
                 Some(n) => format!("{}#{}", self.pr.repo(), n),
                 None => self.pr.repo().to_string(),
             });
-        let title = format!("PR: {}", subject);
-        match title.char_indices().nth(MAX_CHARS) {
-            Some((cut, _)) => format!("{}…", title[..cut].trim_end()),
-            None => title,
-        }
+        titled("PR", &subject)
     }
 }
 
@@ -255,6 +269,84 @@ impl FromStr for PullRequestUrl {
     }
 }
 
+/// `cc-hub://task?id=<tk-…>[&dir=<path>][&kind=<word>]`: work a Tasks-board
+/// card in an agent session bound to that card — the card's live session in
+/// `dir` if it has one, else a fresh one. `dir` is where the session runs —
+/// the caller decides that, because only it knows what kind of task this
+/// is; without one the card's own recorded cwd is used. `kind`
+/// is a word in the prompt and nothing more: the `task` skill owns what its
+/// kinds mean, exactly as the review skill owns what `light` and `full` mean.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskLink {
+    pub id: BoardTaskId,
+    pub dir: Option<PathBuf>,
+    pub kind: Option<String>,
+}
+
+impl TaskLink {
+    /// The opening prompt: the `task` skill, told which card it is working.
+    /// `brief` is the card's own text — the hub reads it from the board,
+    /// since the link carries an id rather than a copy of it.
+    pub fn prompt(&self, brief: &str) -> String {
+        let mut prompt = format!("/task --task {} {}", self.id, brief.trim());
+        if let Some(kind) = &self.kind {
+            prompt.push_str(&format!(
+                "\n\nRouted here as kind `{}` — confirm or correct that in phase 0.",
+                kind
+            ));
+        }
+        prompt
+    }
+
+    /// The name the session is born with: `Task: <card text>`.
+    pub fn session_title(&self, brief: &str) -> String {
+        titled("Task", brief)
+    }
+}
+
+/// A personal-board task id. The board mints `tk-<nanos>`; requiring the
+/// prefix here means a link can only ever address a board card, never an
+/// orchestrated `t-…` task that lives under a project and plays by other
+/// rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardTaskId(String);
+
+impl BoardTaskId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for BoardTaskId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl FromStr for BoardTaskId {
+    type Err = LinkError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let ok = s
+            .strip_prefix("tk-")
+            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()));
+        ok.then(|| BoardTaskId(s.to_string()))
+            .ok_or_else(|| LinkError::BadTaskId(s.to_string()))
+    }
+}
+
+/// `<prefix>: <subject>`, whitespace collapsed and the whole thing capped so
+/// a novel of a title still fits a session card.
+fn titled(prefix: &str, subject: &str) -> String {
+    const MAX_CHARS: usize = 60;
+    let subject = subject.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = format!("{}: {}", prefix, subject);
+    match title.char_indices().nth(MAX_CHARS) {
+        Some((cut, _)) => format!("{}…", title[..cut].trim_end()),
+        None => title,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkError {
     NotCcHub(String),
@@ -263,13 +355,16 @@ pub enum LinkError {
     BadDepth(String),
     BadPostThreshold(String),
     BadPullRequest(String),
+    BadTaskId(String),
 }
 
 impl fmt::Display for LinkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LinkError::NotCcHub(s) => write!(f, "not a {}:// link: {}", SCHEME, s),
-            LinkError::UnknownKind(k) => write!(f, "unknown link kind: {} (try `review`)", k),
+            LinkError::UnknownKind(k) => {
+                write!(f, "unknown link kind: {} (try `review` or `task`)", k)
+            }
             LinkError::MissingParam(p) => write!(f, "missing `{}` parameter", p),
             LinkError::BadDepth(d) => write!(f, "depth must be `light` or `full`, got: {}", d),
             LinkError::BadPostThreshold(p) => {
@@ -279,6 +374,11 @@ impl fmt::Display for LinkError {
                 f,
                 "not a pull request URL I can place (need `…/repos/<repo>/pull-requests/<n>` or `…/<owner>/<repo>/pull/<n>`): {}",
                 u
+            ),
+            LinkError::BadTaskId(id) => write!(
+                f,
+                "not a Tasks-board id (expected `tk-<digits>`, as the board mints them): {}",
+                id
             ),
         }
     }
@@ -348,17 +448,82 @@ mod tests {
     use super::*;
 
     const PR: &str =
-        "https://bitbucket.x-plarium.com/projects/TPS/repos/tps-project/pull-requests/11280";
+        "https://bitbucket.example.com/projects/APP/repos/sample-project/pull-requests/11280";
 
     fn review(depth: &str) -> ReviewLink {
         let raw = format!(
-            "cc-hub://review?depth={}&pr=https%3A%2F%2Fbitbucket.x-plarium.com%2Fprojects%2FTPS%2Frepos%2Ftps-project%2Fpull-requests%2F11280",
+            "cc-hub://review?depth={}&pr=https%3A%2F%2Fbitbucket.example.com%2Fprojects%2FAPP%2Frepos%2Fsample-project%2Fpull-requests%2F11280",
             depth
         );
         match raw.parse::<Link>() {
             Ok(Link::Review(r)) => r,
+            Ok(other) => panic!("{}: parsed as {}", raw, other.kind()),
             Err(e) => panic!("{}: {}", raw, e),
         }
+    }
+
+    fn task(query: &str) -> TaskLink {
+        let raw = format!("cc-hub://task?{}", query);
+        match raw.parse::<Link>() {
+            Ok(Link::Task(t)) => t,
+            Ok(other) => panic!("{}: parsed as {}", raw, other.kind()),
+            Err(e) => panic!("{}: {}", raw, e),
+        }
+    }
+
+    #[test]
+    fn parses_task_with_dir_and_kind() {
+        let t = task("id=tk-1788509616255974000&dir=%2FUsers%2Fme%2Fgit%2Fself%2Fcc-hub&kind=hub");
+        assert_eq!(t.id.as_str(), "tk-1788509616255974000");
+        assert_eq!(t.dir, Some(PathBuf::from("/Users/me/git/self/cc-hub")));
+        assert_eq!(t.kind.as_deref(), Some("hub"));
+    }
+
+    #[test]
+    fn task_needs_only_an_id() {
+        let t = task("id=tk-42");
+        assert_eq!(t.dir, None);
+        assert_eq!(t.kind, None);
+        assert!(matches!(
+            "cc-hub://task?dir=%2Ftmp".parse::<Link>(),
+            Err(LinkError::MissingParam("id"))
+        ));
+    }
+
+    #[test]
+    fn only_a_board_id_can_be_addressed() {
+        for bad in ["t-42", "tk-", "tk-abc", "42"] {
+            let raw = format!("cc-hub://task?id={}", bad);
+            assert!(
+                matches!(raw.parse::<Link>(), Err(LinkError::BadTaskId(_))),
+                "{} should not parse as a board id",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn task_prompt_invokes_the_skill_with_the_card() {
+        assert_eq!(
+            task("id=tk-42").prompt("  Semantic Linter  "),
+            "/task --task tk-42 Semantic Linter"
+        );
+        assert_eq!(
+            task("id=tk-42&kind=ai-plugin").prompt("Semantic Linter"),
+            "/task --task tk-42 Semantic Linter\n\nRouted here as kind `ai-plugin` \
+— confirm or correct that in phase 0."
+        );
+    }
+
+    #[test]
+    fn titles_are_prefixed_and_capped() {
+        assert_eq!(
+            task("id=tk-42").session_title("Add a\n  commit  skill"),
+            "Task: Add a commit skill"
+        );
+        let long = task("id=tk-42").session_title(&"word ".repeat(30));
+        assert_eq!(long.chars().count(), 61);
+        assert!(long.ends_with('…'), "{}", long);
     }
 
     #[test]
@@ -366,7 +531,7 @@ mod tests {
         let r = review("light");
         assert_eq!(r.depth, ReviewDepth::Light);
         assert_eq!(r.pr.as_str(), PR);
-        assert_eq!(r.pr.repo(), "tps-project");
+        assert_eq!(r.pr.repo(), "sample-project");
     }
 
     #[test]
@@ -386,7 +551,9 @@ mod tests {
         let r: Link = format!("cc-hub://review?depth=light&pr={}&post=80", PR)
             .parse()
             .unwrap();
-        let Link::Review(r) = r;
+        let Link::Review(r) = r else {
+            panic!("expected a review link")
+        };
         assert_eq!(r.post.map(PostThreshold::percent), Some(80));
         assert_eq!(
             r.prompt(),
@@ -444,24 +611,28 @@ mod tests {
     #[test]
     fn title_param_names_the_session() {
         let r: Link = format!(
-            "cc-hub://review?depth=light&pr={}&title=TPS-15883%20Fix%20%20the%0Aflaky%20test",
+            "cc-hub://review?depth=light&pr={}&title=APP-15883%20Fix%20%20the%0Aflaky%20test",
             PR
         )
         .parse()
         .unwrap();
-        let Link::Review(r) = r;
-        assert_eq!(r.title.as_deref(), Some("TPS-15883 Fix  the\nflaky test"));
-        assert_eq!(r.session_title(), "PR: TPS-15883 Fix the flaky test");
+        let Link::Review(r) = r else {
+            panic!("expected a review link")
+        };
+        assert_eq!(r.title.as_deref(), Some("APP-15883 Fix  the\nflaky test"));
+        assert_eq!(r.session_title(), "PR: APP-15883 Fix the flaky test");
     }
 
     #[test]
     fn session_title_falls_back_to_repo_and_number() {
-        assert_eq!(review("light").session_title(), "PR: tps-project#11280");
+        assert_eq!(review("light").session_title(), "PR: sample-project#11280");
         let r: Link = format!("cc-hub://review?depth=light&pr={}&title=%20%20", PR)
             .parse()
             .unwrap();
-        let Link::Review(r) = r;
-        assert_eq!(r.session_title(), "PR: tps-project#11280");
+        let Link::Review(r) = r else {
+            panic!("expected a review link")
+        };
+        assert_eq!(r.session_title(), "PR: sample-project#11280");
     }
 
     #[test]
@@ -470,7 +641,9 @@ mod tests {
         let r: Link = format!("cc-hub://review?depth=light&pr={}&title={}", PR, long)
             .parse()
             .unwrap();
-        let Link::Review(r) = r;
+        let Link::Review(r) = r else {
+            panic!("expected a review link")
+        };
         let title = r.session_title();
         assert!(title.starts_with("PR: xxx"));
         assert!(title.ends_with('…'));
@@ -479,7 +652,9 @@ mod tests {
 
     #[test]
     fn unencoded_pr_is_fine_too() {
-        let r: Link = format!("cc-hub://review?pr={}&depth=light", PR).parse().unwrap();
+        let r: Link = format!("cc-hub://review?pr={}&depth=light", PR)
+            .parse()
+            .unwrap();
         assert_eq!(r.kind(), "review");
     }
 
@@ -518,13 +693,17 @@ mod tests {
     #[test]
     fn pull_request_url_names_its_repo() {
         let bb: PullRequestUrl = format!("{}/overview?commentId=1", PR).parse().unwrap();
-        assert_eq!(bb.repo(), "tps-project");
+        assert_eq!(bb.repo(), "sample-project");
         assert_eq!(bb.number(), Some(11280));
-        let gh: PullRequestUrl = "https://github.com/octo/cc-hub/pull/7/files".parse().unwrap();
+        let gh: PullRequestUrl = "https://github.com/octo/cc-hub/pull/7/files"
+            .parse()
+            .unwrap();
         assert_eq!(gh.repo(), "cc-hub");
         assert_eq!(gh.number(), Some(7));
         let unnumbered: PullRequestUrl =
-            "https://bitbucket.example.com/projects/X/repos/thing/pull-requests/".parse().unwrap();
+            "https://bitbucket.example.com/projects/X/repos/thing/pull-requests/"
+                .parse()
+                .unwrap();
         assert_eq!(unnumbered.number(), None);
         assert!(matches!(
             "https://example.com/nothing/here".parse::<PullRequestUrl>(),

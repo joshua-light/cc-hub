@@ -50,6 +50,27 @@ fn map_command(
     map_sessions_command(app, key, on_sessions)
 }
 
+/// `f` on the Agents tab: open the transcript of the agent's tick — the one
+/// in flight, or the last one it ran. A tick is headless, so there is no
+/// pane to attach; the transcript is the whole of what there is to see, and
+/// it tails live while the tick runs.
+fn open_agent_transcript(app: &mut App) {
+    let Some(agent) = app.harness.selected() else {
+        return;
+    };
+    let name = agent.name.clone();
+    let Some(path) = agent.transcript() else {
+        app.set_status(format!("{}: no tick transcript yet", name));
+        return;
+    };
+    let lv = live_view::LiveView::new(path.clone(), cc_hub_lib::agent::AgentKind::Claude);
+    if lv.messages.is_empty() {
+        app.set_status(format!("{}: {} is empty", name, path.display()));
+    } else {
+        app.enter_live_tail(lv);
+    }
+}
+
 /// Sessions- and Global-tab command mapping (Tasks lives in
 /// [`tasks::map_tasks_command`]).
 fn map_sessions_command(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<Command> {
@@ -554,6 +575,9 @@ pub(crate) async fn handle_key(
                     app.enter_live_tail(lv);
                 }
             }
+        }
+        (View::Grid | View::AgentDetail, KeyCode::Char('f')) if on_agents => {
+            open_agent_transcript(app);
         }
         (View::Grid, KeyCode::Char('r')) if on_metrics => {
             app.metrics.analysis = None;

@@ -333,6 +333,34 @@ pub(crate) fn fmt_cost(c: f64) -> String {
     }
 }
 
+/// Gap between two columns of a table row's right-hand cluster.
+pub(crate) const COL_SEP: usize = 2;
+
+/// One column of a table row's right-hand cluster, padded to `target`
+/// advance columns so values line up vertically across rows. A blank cell
+/// (`text.is_empty()`) still occupies its column — that is what keeps the
+/// rows a table rather than a ragged list.
+pub(crate) struct Cell {
+    pub text: String,
+    pub target: usize,
+    pub style: Style,
+    pub right_align: bool,
+}
+
+impl Cell {
+    pub fn push_spans(self, spans: &mut Vec<Span<'static>>) {
+        spans.push(Span::raw(" ".repeat(COL_SEP)));
+        let pad = self.target.saturating_sub(self.text.chars().count());
+        if self.right_align {
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.push(Span::styled(self.text, self.style));
+        } else {
+            spans.push(Span::styled(self.text, self.style));
+            spans.push(Span::raw(" ".repeat(pad)));
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
     let mut out = String::new();

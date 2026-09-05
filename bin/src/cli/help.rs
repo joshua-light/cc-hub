@@ -41,7 +41,7 @@ Orchestrator-facing topics:
   project           List registered projects
 
 Desktop-facing topics:
-  open              Act on a cc-hub:// deep link (start a PR review session)
+  open              Act on a cc-hub:// deep link (a PR review, a board task)
 
 Persistent agents (Agents tab):
   agent             Scaffold, run, poke, pause and inspect persistent agents
@@ -64,6 +64,12 @@ Links:
       name it "PR: <title>" (or "PR: <repo>#<n>"), and open it with "Let's do
       <depth> review of this PR: <url>". The checkout is found by repo name
       among registered projects, bookmarks, and the cwds of known sessions.
+
+  cc-hub://task?id=<tk-…>[&dir=<path>][&kind=<word>]
+      Spawn a session for one Tasks-board card in <dir> (default: the card's
+      own recorded cwd), name it "Task: <card>", open it with "/task --task
+      <id> <card text>", and bind the card to that session so `f` attaches to
+      it. The card's status is left alone.
 
 Options:
   --agent AGENT        Backend (default: [projects].default_session_agent)
