@@ -75,6 +75,9 @@ fn open_agent_transcript(app: &mut App) {
 /// [`tasks::map_tasks_command`]).
 fn map_sessions_command(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<Command> {
     use cc_hub_lib::app::{GlobalCommand as G, SessionsCommand as S};
+    if let Some(cmd) = map_agent_hotkey(app, key, on_sessions) {
+        return Some(cmd);
+    }
     let cmd = match (&app.view, key.code) {
         (View::Grid, KeyCode::Char('q')) => Command::Global(G::Quit),
         (View::Grid, KeyCode::Tab | KeyCode::Char('K')) => {
@@ -128,6 +131,28 @@ fn map_sessions_command(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<
         _ => return None,
     };
     Some(cmd)
+}
+
+/// `[agents.<id>].hotkey` bindings on the Sessions grid. Checked before the
+/// built-in table so a user who binds `N` to Claude gets Claude, not the
+/// model picker — the config doc says custom hotkeys shadow built-ins.
+/// Ctrl/Alt chords are left alone; Shift is what makes an uppercase char.
+fn map_agent_hotkey(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<Command> {
+    use cc_hub_lib::app::SessionsCommand as S;
+    if !on_sessions || app.view != View::Grid {
+        return None;
+    }
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return None;
+    }
+    let KeyCode::Char(c) = key.code else {
+        return None;
+    };
+    let agent_id = cc_hub_lib::config::get().agent_for_hotkey(c)?;
+    Some(Command::Sessions(S::SpawnAgentHereWith { agent_id }))
 }
 
 /// Dispatch a single key press. `spawn_metrics` is the run()-local closure

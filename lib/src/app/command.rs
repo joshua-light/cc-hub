@@ -86,6 +86,12 @@ pub enum SessionsCommand {
     AckSelected,
     /// `n` — new agent session in the selected session's cwd.
     SpawnAgentHere,
+    /// `[agents.<id>].hotkey` — new session with that specific agent in the
+    /// selected session's cwd, ignoring the runtime default agent. The id
+    /// borrows from the process-wide config so the command stays `Copy`.
+    SpawnAgentHereWith {
+        agent_id: &'static str,
+    },
     /// `N` — model picker for a new session in the selected session's cwd.
     OpenModelPicker,
     /// `A` — choose the default agent used by subsequent new sessions.
@@ -395,7 +401,12 @@ impl App {
                 Vec::new()
             }
             SpawnAgentHere => {
-                self.spawn_agent_here();
+                let agent_id = self.default_session_agent_id.clone();
+                self.spawn_agent_here(agent_id);
+                Vec::new()
+            }
+            SpawnAgentHereWith { agent_id } => {
+                self.spawn_agent_here(agent_id.to_string());
                 Vec::new()
             }
             OpenModelPicker => {
@@ -544,11 +555,10 @@ impl App {
 
     /// `n`: fresh session using the current default agent in the selected
     /// session's cwd, with the spawn watchdog armed.
-    fn spawn_agent_here(&mut self) {
+    fn spawn_agent_here(&mut self, agent_id: String) {
         let Some(sess) = self.selected_session_info().cloned() else {
             return;
         };
-        let agent_id = self.default_session_agent_id.clone();
         let status = match self
             .runtime
             .spawn_session(&agent_id, &sess.cwd, None, None, None, false)
@@ -1384,6 +1394,24 @@ mod tests {
             assert_eq!(spawns.len(), 1);
             assert_eq!(spawns[0].resume, None);
             assert_eq!(spawns[0].initial_prompt, None);
+            assert!(status(&app).starts_with("started"), "got: {}", status(&app));
+        });
+    }
+
+    #[test]
+    fn spawn_agent_here_with_uses_named_agent_not_default() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, runtime) = app_with(vec![session(
+                "sid-1",
+                SessionState::Processing,
+                Some("cc-agent-1"),
+            )]);
+            app.execute(Command::Sessions(SessionsCommand::SpawnAgentHereWith {
+                agent_id: "claude",
+            }));
+            let spawns = runtime.spawns.lock().unwrap();
+            assert_eq!(spawns.len(), 1);
+            assert_eq!(spawns[0].agent_id, "claude");
             assert!(status(&app).starts_with("started"), "got: {}", status(&app));
         });
     }

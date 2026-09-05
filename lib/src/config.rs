@@ -86,6 +86,44 @@ impl Config {
             .clone()
             .unwrap_or_else(|| "claude".into())
     }
+
+    /// Sessions-tab hotkeys from `[agents.<id>].hotkey`, keyed by the bound
+    /// character. A hotkey must be exactly one character; malformed or
+    /// duplicate bindings are dropped with a warning (first agent id in sort
+    /// order keeps a contested key) so one typo can't disable the tab.
+    pub fn agent_hotkeys(&self) -> BTreeMap<char, &str> {
+        let mut out: BTreeMap<char, &str> = BTreeMap::new();
+        for (id, cfg) in &self.agents {
+            let Some(raw) = cfg.hotkey.as_deref() else {
+                continue;
+            };
+            let mut chars = raw.chars();
+            let key = match (chars.next(), chars.next()) {
+                (Some(c), None) if !c.is_whitespace() => c,
+                _ => {
+                    log::warn!(
+                        "config: [agents.{id}].hotkey = {raw:?} is not a single character — ignored"
+                    );
+                    continue;
+                }
+            };
+            if let Some(prev) = out.get(&key) {
+                log::warn!(
+                    "config: [agents.{id}].hotkey = {raw:?} already bound to agent {prev} — ignored"
+                );
+                continue;
+            }
+            out.insert(key, id.as_str());
+        }
+        out
+    }
+
+    /// Agent id bound to `key` via `[agents.<id>].hotkey`, if any. Borrowed
+    /// from the config, so via [`get`] it is `&'static` and fits in the
+    /// `Copy` [`crate::app::SessionsCommand`].
+    pub fn agent_for_hotkey(&self, key: char) -> Option<&str> {
+        self.agent_hotkeys().remove(&key)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -112,6 +150,10 @@ pub struct ConfiguredAgent {
     pub command: String,
     pub use_bridge: bool,
     pub models: Vec<ConfiguredModel>,
+    /// Single character that, on the Sessions grid, spawns this agent in the
+    /// selected session's cwd — a fixed-agent twin of `n`. Shadows any
+    /// built-in Sessions-tab key it collides with.
+    pub hotkey: Option<String>,
 }
 
 impl Default for ConfiguredAgent {
@@ -121,6 +163,7 @@ impl Default for ConfiguredAgent {
             command: "cc-hub-new".into(),
             use_bridge: false,
             models: Vec::new(),
+            hotkey: None,
         }
     }
 }
@@ -574,6 +617,49 @@ mod tests {
         assert_eq!(pi.models[1].id, "sol");
         assert_eq!(cfg.default_orchestrator_agent_id(), "claude");
         assert_eq!(cfg.default_session_agent_id(), "pi-codex");
+    }
+
+    #[test]
+    fn agent_hotkeys_map_keys_to_agent_ids() {
+        let src = r#"
+            [agents.claude]
+            hotkey = "N"
+
+            [agents.codex]
+            kind = "codex"
+            command = "codex --yolo"
+            hotkey = "C"
+
+            [agents.pi]
+            kind = "pi"
+            command = "pi"
+        "#;
+        let cfg: Config = toml::from_str(src).unwrap();
+        assert_eq!(cfg.agent_for_hotkey('N'), Some("claude"));
+        assert_eq!(cfg.agent_for_hotkey('C'), Some("codex"));
+        assert_eq!(cfg.agent_for_hotkey('n'), None);
+        assert_eq!(cfg.agent_hotkeys().len(), 2);
+    }
+
+    #[test]
+    fn agent_hotkeys_drop_malformed_and_duplicate_bindings() {
+        let src = r#"
+            [agents.a-first]
+            hotkey = "x"
+
+            [agents.b-second]
+            hotkey = "x"
+
+            [agents.multi]
+            hotkey = "xy"
+
+            [agents.blank]
+            hotkey = " "
+        "#;
+        let cfg: Config = toml::from_str(src).unwrap();
+        let keys = cfg.agent_hotkeys();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[&'x'], "a-first");
     }
 
     #[test]

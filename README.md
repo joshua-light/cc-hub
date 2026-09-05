@@ -226,6 +226,12 @@ command = "cc-hub-new"
 [agents.claude]
 kind = "claude"
 command = "cc-hub-new"
+# Optional Sessions-tab hotkey: one character that spawns this agent in the
+# selected session's cwd, like `n` but with a fixed agent. Custom hotkeys
+# shadow built-in Sessions keys, so binding `N` here replaces the model
+# picker for this run. Duplicate or multi-character bindings are dropped
+# with a warning in the log.
+hotkey = "N"
 # Optional picker entries. A label/id table gives a friendly display name;
 # a bare string uses the model id as its label. The selected id is passed as
 # `--model`. Claude keeps these three defaults when `models` is omitted.
@@ -259,6 +265,7 @@ models = ["gpt-5.6", "sol"]
 kind = "codex"
 command = "codex -c model_reasoning_effort=medium --yolo"
 models = [{ label = "GPT 5.6 Sol", id = "gpt-5.6-sol" }]
+hotkey = "C"
 
 [projects]
 default_orchestrator_agent = "claude"
@@ -473,6 +480,7 @@ the plan, so the plan-first workflow works with one fewer column.
 | `o` | Open an embedded shell pane in the selected session's cwd |
 | `n` | Spawn a new session with the current default agent in the selected session's cwd |
 | `A` | Choose the default agent used by subsequent `n` and folder-picker session spawns (for the current run) |
+| `[agents.<id>].hotkey` | User-defined per-agent keys (e.g. `C` → Codex): spawn that agent in the selected session's cwd regardless of the `A` default. Shadows the built-in key it collides with |
 | `N` | Fuzzy model/agent picker → choose a model, use `Tab` to cycle configured coding agents/providers, and spawn in the selected session's cwd |
 | `p` | Project/folder picker → spawn the current default agent there (`c` / `C` in the picker creates a public/private GitHub repo via `gh`) |
 | `M` | Bookmarks picker → spawn the current default agent in a bookmarked folder (add one with `m` on a folder in the `p` picker) |
