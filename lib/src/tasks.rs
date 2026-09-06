@@ -187,6 +187,15 @@ impl PersonalBoard {
         &self.tasks
     }
 
+    /// Apply background usage snapshots without replacing newer task edits.
+    pub fn update_stats(&mut self, stats: Vec<(String, crate::task_stats::TaskStats)>) {
+        for (id, stats) in stats {
+            if let Some(task) = self.tasks.iter_mut().find(|t| t.task_id == id) {
+                task.stats = Some(stats);
+            }
+        }
+    }
+
     pub fn get(&self, id: &str) -> Option<&TaskState> {
         self.tasks.iter().find(|t| t.task_id == id)
     }
@@ -314,6 +323,28 @@ impl PersonalBoard {
             return Ok(false);
         }
         let updated = update_personal_task(id, |s| s.tmux = Some(tmux.to_string()))?;
+        self.apply(updated);
+        Ok(true)
+    }
+
+    /// A managed role changed account. Preserve the user's board status.
+    pub fn bind_resource(
+        &mut self,
+        id: &str,
+        cwd: &str,
+        agent: &str,
+        tmux: &str,
+        sid: Option<&str>,
+    ) -> io::Result<bool> {
+        if self.get(id).is_none() {
+            return Ok(false);
+        }
+        let updated = update_personal_task(id, |s| {
+            s.cwd = Some(cwd.into());
+            s.agent_id = Some(agent.into());
+            s.tmux = Some(tmux.into());
+            s.session_id = sid.map(str::to_string);
+        })?;
         self.apply(updated);
         Ok(true)
     }
@@ -752,6 +783,27 @@ mod tests {
                 PersonalBoard::load().get(&id).unwrap().tmux.as_deref(),
                 Some("cchub-1-43")
             );
+        });
+    }
+
+    #[test]
+    fn resource_replacement_changes_session_without_changing_board_status() {
+        with_temp_home(|| {
+            let mut board = PersonalBoard::load();
+            let id = board.add("managed task").unwrap().unwrap();
+            let status = board.get(&id).unwrap().status;
+            board
+                .bind_resource(&id, "/tmp/project", "cc-1", "old", Some("old-session"))
+                .unwrap();
+            board
+                .bind_resource(&id, "/tmp/project", "codex-2", "new", None)
+                .unwrap();
+            let reloaded = PersonalBoard::load();
+            let task = reloaded.get(&id).unwrap();
+            assert_eq!(task.status, status);
+            assert_eq!(task.agent_id.as_deref(), Some("codex-2"));
+            assert_eq!(task.tmux.as_deref(), Some("new"));
+            assert_eq!(task.session_id, None);
         });
     }
 

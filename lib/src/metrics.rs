@@ -449,7 +449,8 @@ fn parse_codex_session_file(path: &Path) -> Option<ParsedSession> {
     let cached = f("cached_input_tokens");
     let tokens = Tokens {
         input: f("input_tokens").saturating_sub(cached),
-        output: f("output_tokens") + f("reasoning_output_tokens"),
+        // Reasoning is a subset of output_tokens, not additional usage.
+        output: f("output_tokens"),
         cache_read: cached,
         cache_creation: 0,
     };
@@ -973,6 +974,93 @@ fn discover_session_files() -> Vec<(PathBuf, bool, AgentKind)> {
     }
 
     out
+}
+
+pub(crate) fn task_usage_files() -> Vec<(PathBuf, bool, AgentKind)> {
+    let mut files = discover_session_files();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
+}
+
+pub(crate) fn task_usage(
+    ids: &std::collections::BTreeSet<String>,
+    files: &[(PathBuf, bool, AgentKind)],
+) -> Option<crate::task_stats::TaskStats> {
+    let mut stats = crate::task_stats::TaskStats {
+        cost_nano_usd: Some(0),
+        ..Default::default()
+    };
+    let mut seen = HashSet::new();
+    let mut found = HashSet::new();
+    for (path, subagent, kind) in files {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let parent_id = path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .and_then(|s| s.to_str());
+        let matched = ids.iter().find(|id| {
+            if *subagent {
+                parent_id == Some(id.as_str())
+            } else {
+                stem == id.as_str()
+                    || stem
+                        .strip_suffix(id.as_str())
+                        .is_some_and(|prefix| prefix.ends_with('-') || prefix.ends_with('_'))
+            }
+        });
+        let Some(id) = matched else { continue };
+        let Some(session) = parse_session_file(path, *subagent, *kind) else {
+            continue;
+        };
+        if !*subagent {
+            found.insert(id.clone());
+        }
+        stats.sources.insert(path.to_string_lossy().into_owned());
+        stats.sessions += 1;
+        for call in session.calls {
+            if !call.dedup_key.is_empty() && !seen.insert(call.dedup_key) {
+                continue;
+            }
+            stats.input_tokens += call.tokens.input;
+            stats.output_tokens += call.tokens.output;
+            stats.cache_read_tokens += call.tokens.cache_read;
+            stats.cache_creation_tokens += call.tokens.cache_creation;
+            let cost = call
+                .cost_override
+                .filter(|c| c.is_finite() && *c >= 0.0)
+                .or_else(|| {
+                    // Never apply Claude fallback prices to Codex or unknown models.
+                    let model = strip_date_suffix(&call.model);
+                    if matches!(
+                        model,
+                        "claude-opus-4-7"
+                            | "claude-opus-4-6"
+                            | "claude-opus-4-5"
+                            | "claude-sonnet-4-7"
+                            | "claude-sonnet-4-6"
+                            | "claude-sonnet-4-5"
+                            | "claude-haiku-4-5"
+                            | "claude-haiku-4-6"
+                    ) {
+                        stats.estimated = true;
+                        Some(cost_of(&call.tokens, &pricing_for(model)))
+                    } else {
+                        None
+                    }
+                });
+            stats.cost_nano_usd = stats
+                .cost_nano_usd
+                .zip(cost)
+                .map(|(total, cost)| total.saturating_add((cost * 1_000_000_000.0).round() as u64));
+        }
+    }
+    // A partial total would understate the task's spend.
+    if found.len() != ids.len() || stats.sources.is_empty() {
+        None
+    } else {
+        Some(stats)
+    }
 }
 
 pub fn analyze() -> MetricsAnalysis {

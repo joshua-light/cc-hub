@@ -14,6 +14,8 @@ pub(crate) fn print_cli_help(topic: &[String]) -> Result<(), CliError> {
         Some("project") => print!("{}", PROJECT_HELP),
         Some("open") => print!("{}", OPEN_HELP),
         Some("agent") => print!("{}", AGENT_HELP),
+        Some("board") => print!("{}", BOARD_HELP),
+        Some("resource") => print!("{}", RESOURCE_HELP),
         Some(other) => {
             return Err(CliError::Usage(format!(
                 "unknown help topic: {} (try `cc-hub help`)",
@@ -46,11 +48,36 @@ Desktop-facing topics:
 Persistent agents (Agents tab):
   agent             Scaffold, run, poke, pause and inspect persistent agents
 
+Tasks board:
+  board             Add a card to the personal Tasks board
+  resource          Account capacity, role workers and checkpointed handoffs
+
 Examples:
   cc-hub task create --backlog --prompt "Fix the flaky test"
   cc-hub task start --task t-123 --agent claude
   cc-hub spawn-worker --task t-123 --worktree fix --prompt "Implement the fix"
   cc-hub pr show --task t-123
+"#;
+
+const RESOURCE_HELP: &str = r#"cc-hub resource
+
+  accounts [--refresh]                      Show account health and quota windows
+  select --kind KIND --role ROLE            Preview a capacity-aware allocation
+  start --task ID --kind KIND --role ROLE --cwd DIR --prompt TEXT
+  status [--worker ID]                      Worker attempts, account and checkpoint
+  retry --worker ID                        Requeue an inspected, stopped worker
+  checkpoint --file PATH                   Save progress for the current worker
+  handoff --file PATH [--reason TEXT]       Checkpoint and request a replacement
+  message --worker ID --text TEXT          Durable message to another role worker
+  inbox [--ack ID]                         Read/acknowledge this worker's messages
+  complete                                Mark this role complete
+  supervise                               Refresh quota and reconcile workers once
+  hook                                    PreToolUse guard for managed workers
+
+Configuration: ~/.cc-hub/resources.toml. Python 3.11+ and tmux required.
+Worker identity/generation come from CC_HUB_RESOURCE_WORKER/GENERATION.
+Use --worker ID for operator status; handoff/checkpoint use the worker's lease.
+Default warning/start ceilings are 80%/85%, leaving a reserve before exhaustion.
 "#;
 
 const OPEN_HELP: &str = r#"cc-hub open
@@ -209,4 +236,19 @@ Agent-facing (inside a tick, CC_HUB_AGENT is set):
 Layout of ~/.cc-hub/agents/<name>/:
   agent.toml   spec        work/   the agent's world     state.json  bookkeeping
   inbox/       events      notes.jsonl  outbox           log/        stream-json per tick
+"#;
+
+const BOARD_HELP: &str = r#"cc-hub board
+
+The personal Tasks board (To-Do · In Progress · Done), one card per
+directory under ~/.cc-hub/tasks/.
+
+Usage:
+  cc-hub board add --text TEXT [--title TEXT] [--tags "a b"] [--priority p1|p2|p3|p4]
+      Mint a card in To-Do, exactly as the `a` key does in the TUI. Nothing
+      is spawned and no status changes. Emits {"ok":true,"task_id":"tk-…"}.
+
+A card is how a script hands the user something to look at: mint it here,
+then open it with `cc-hub open "cc-hub://task?id=<tk-…>&dir=<path>"`, which
+only ever addresses a card that already exists (see `cc-hub help open`).
 "#;

@@ -13,7 +13,6 @@ use crate::codex_conversation;
 use crate::config;
 use crate::conversation;
 use crate::models::{SessionDetail, SessionInfo, SessionState};
-use crate::platform::paths;
 use crate::platform::process;
 use crate::send;
 use serde_json::Value;
@@ -35,10 +34,6 @@ fn project_name(cwd: &str) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or("unknown")
         .to_string()
-}
-
-fn session_root() -> Option<PathBuf> {
-    paths::codex_sessions_dir()
 }
 
 fn default_codex_agent(agents: &[AgentConfig]) -> Option<AgentConfig> {
@@ -321,11 +316,11 @@ pub fn scan(agents: &[AgentConfig], titles: &HashMap<String, String>) -> Vec<Ses
     let Some(default_agent) = default_codex_agent(agents) else {
         return Vec::new();
     };
-    let Some(root) = session_root() else {
-        return Vec::new();
-    };
     let cfg = &config::get().inactive;
-    let rollouts = walk_rollouts(&root);
+    let rollouts: Vec<_> = crate::resources::codex_roots()
+        .iter()
+        .flat_map(|root| walk_rollouts(root))
+        .collect();
     let by_cwd = index_recent_by_cwd(&rollouts, cfg.window_secs);
 
     let mut sessions = Vec::new();
@@ -468,13 +463,15 @@ pub fn find_orchestrator_session(
         return Some(sid.to_string());
     }
 
-    let root = session_root()?;
     let root_cwd = project_root.to_string_lossy().to_string();
     let needle = crate::orchestrator::orchestrator_prompt_prefix(task_id);
     let mut best: Option<(SystemTime, String)> = None;
 
     use std::io::Read;
-    for (path, mtime) in walk_rollouts(&root) {
+    for (path, mtime) in crate::resources::codex_roots()
+        .iter()
+        .flat_map(|root| walk_rollouts(root))
+    {
         if best.as_ref().is_some_and(|(t, _)| mtime <= *t) {
             continue;
         }
@@ -502,24 +499,18 @@ pub fn find_orchestrator_session(
     best.map(|(_, sid)| sid)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::test_util::HOME_TEST_LOCK;
     use std::fs;
     use std::io::Write;
 
     fn with_temp_home<T>(f: impl FnOnce(&Path) -> T) -> T {
-        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().expect("tempdir");
-        let prev = std::env::var_os("HOME");
-        std::env::set_var("HOME", home.path());
-        let out = f(home.path());
-        match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        out
+        let mut out = None;
+        crate::test_util::with_temp_home(|| {
+            out = Some(f(&dirs::home_dir().unwrap()));
+        });
+        out.unwrap()
     }
 
     fn write_rollout(dir: &Path, name: &str, lines: &[&str]) -> PathBuf {

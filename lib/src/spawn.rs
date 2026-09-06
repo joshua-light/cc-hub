@@ -79,7 +79,18 @@ pub fn spawn_agent_session_with_config(
         readonly_tools,
     )?;
     if agent.kind == AgentKind::Claude {
-        ensure_path_trusted(cwd)?;
+        if let Some(account) = crate::resources::for_agent(&agent.id) {
+            let path = if account.home_mode.as_deref() == Some("default") {
+                dirs::home_dir().map(|h| h.join(".claude.json"))
+            } else {
+                account.home().map(|h| h.join(".claude.json"))
+            };
+            if let Some(path) = path {
+                ensure_path_trusted_at(cwd, path)?;
+            }
+        } else {
+            ensure_path_trusted(cwd)?;
+        }
     }
     mux::spawn_detached(&name, cwd, Some(&cmd))?;
     Ok(name)
@@ -115,6 +126,31 @@ fn build_agent_command(
     readonly_tools: bool,
 ) -> io::Result<String> {
     let mut cmd = agent.command.clone();
+    let account = crate::resources::for_agent(&agent.id);
+    let configured = config::get().agents.get(&agent.id);
+    if configured.and_then(|a| a.account.as_ref()).is_some() && account.is_none() {
+        return Err(io::Error::other(
+            "configured account does not exist in resources.toml",
+        ));
+    }
+    if let Some(account) = &account {
+        if account.provider != agent.kind {
+            return Err(io::Error::other("account/provider mismatch"));
+        }
+    }
+    if let Some(effort) = configured.and_then(|a| a.effort.as_deref()) {
+        match agent.kind {
+            AgentKind::Claude => {
+                cmd.push_str(" --effort ");
+                cmd.push_str(&shell_quote(effort));
+            }
+            AgentKind::Codex => {
+                cmd.push_str(" -c ");
+                cmd.push_str(&shell_quote(&format!("model_reasoning_effort={effort:?}")));
+            }
+            AgentKind::Pi => {}
+        }
+    }
 
     match agent.kind {
         AgentKind::Claude => {
@@ -143,7 +179,7 @@ fn build_agent_command(
             // process already has CLAUDE_CONFIG_DIR set, but a detached mux
             // session attaches to a possibly-pre-existing tmux server whose
             // captured environment may not include it — so set it explicitly.
-            if let Some(dir) = paths::claude_config_dir() {
+            if let Some(dir) = paths::claude_config_dir().filter(|_| account.is_none()) {
                 cmd = prefix_env(
                     "CLAUDE_CONFIG_DIR",
                     &dir.to_string_lossy(),
@@ -238,6 +274,31 @@ fn build_agent_command(
         }
     }
 
+    if let Some(account) = account {
+        if cfg!(windows) {
+            return Err(io::Error::other(
+                "named subscription accounts currently require Unix",
+            ));
+        }
+        let mut env = std::process::Command::new("env");
+        account.apply(&mut env);
+        let mut prefix = String::from("env");
+        for (key, _) in env.get_envs().filter(|(_, value)| value.is_none()) {
+            prefix.push_str(" -u ");
+            prefix.push_str(&shell_quote(&key.to_string_lossy()));
+        }
+        for (key, value) in env.get_envs() {
+            if let Some(value) = value {
+                prefix.push(' ');
+                prefix.push_str(&shell_quote(&format!(
+                    "{}={}",
+                    key.to_string_lossy(),
+                    value.to_string_lossy()
+                )));
+            }
+        }
+        cmd = format!("{prefix} /bin/sh -c {}", shell_quote(&cmd));
+    }
     let _ = cwd;
     Ok(cmd)
 }
@@ -251,6 +312,10 @@ fn ensure_path_trusted(cwd: &str) -> io::Result<()> {
     let Some(config_path) = paths::claude_config_json() else {
         return Ok(());
     };
+    ensure_path_trusted_at(cwd, config_path)
+}
+
+fn ensure_path_trusted_at(cwd: &str, config_path: PathBuf) -> io::Result<()> {
     // Nothing to trust-mark until claude has written its config at least once
     // (the original read short-circuits on NotFound). Bailing here also avoids
     // creating a sidecar lock in a config dir that may not exist yet.

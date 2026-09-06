@@ -205,8 +205,24 @@ pub(crate) fn render_task_info(frame: &mut Frame, area: Rect, app: &mut App) {
     }
     let mut lines: Vec<Line<'static>> = vec![Line::from(header_spans), Line::raw("")];
 
-    // Prompt, wrapped and capped — the popup is about the attachments, the
-    // full text is one `r` (rename) away.
+    let stats_text = match &t.stats {
+        Some(stats) => format!(
+            "Task Stats · {} tokens · {} · {} sessions\nInput {} · Output {} · Cache read {} · Cache write {}",
+            stats.total_tokens(), stats.cost_label(), stats.sessions, stats.input_tokens, stats.output_tokens,
+            stats.cache_read_tokens, stats.cache_creation_tokens,
+        ),
+        None => "Task Stats · usage unavailable (awaiting session transcripts)".into(),
+    };
+    for line in stats_text.lines() {
+        for segment in wrap_text(line, inner.width as usize) {
+            lines.push(Line::from(Span::styled(
+                segment,
+                Style::default().fg(META_GRAY),
+            )));
+        }
+    }
+    lines.push(Line::raw(""));
+    // Keep room for attachments below the task prompt.
     let prompt_lines = wrap_text(&t.prompt, inner.width as usize);
     let capped = prompt_lines.len() > 8;
     for seg in prompt_lines.into_iter().take(8) {
@@ -366,9 +382,8 @@ fn render_task_column(
     let tasks = app.task_display_column(status);
     let count = tasks.len();
     let col_focused = app.tasks.col == col_idx;
-    // Live columns carry a meta row under two text rows; Done cards are
-    // compact (the column already says everything but the when).
-    let card_height: u16 = if status == TaskStatus::Done { 4 } else { 5 };
+    // Done cards use their second content row for usage stats.
+    let card_height: u16 = 5;
     let gap: u16 = 0;
     let inner = Block::default().borders(Borders::ALL).inner(area);
     let max_cards =
@@ -533,7 +548,10 @@ fn render_task_card(
         Style::default().fg(Color::Rgb(200, 200, 210))
     };
 
-    let text_rows = (inner.height as usize).saturating_sub(1).max(1);
+    let stats_rows = usize::from(done);
+    let text_rows = (inner.height as usize)
+        .saturating_sub(1 + stats_rows)
+        .max(1);
     let mut lines: Vec<Line> = wrap_text(&t.prompt, inner.width as usize)
         .into_iter()
         .take(text_rows)
@@ -544,6 +562,17 @@ fn render_task_card(
     // produce the same silhouette.
     while lines.len() < text_rows {
         lines.push(Line::raw(""));
+    }
+    if done {
+        let label = t
+            .stats
+            .as_ref()
+            .map(|stats| stats.compact())
+            .unwrap_or_else(|| "Stats unavailable".into());
+        lines.push(Line::from(Span::styled(
+            label,
+            Style::default().fg(META_GRAY),
+        )));
     }
     lines.push(meta_line(t, status, sessions_by_tmux, now_secs));
     frame.render_widget(Paragraph::new(lines), inner);
@@ -612,12 +641,10 @@ fn meta_line(
                 SessionState::Idle if t.status == TaskStatus::Planning => {
                     ("●", "plan ready", Color::LightGreen)
                 }
-                // The implementation counterpart of "plan ready": an
-                // approved agent that went idle has finished (or stalled) —
-                // either way the work waits for the user's review. LightCyan
-                // matches the Projects board's Review accent.
+                // An idle implementation agent may be stalled; explicit
+                // activity records below identify completed work.
                 SessionState::Idle if t.status == TaskStatus::Running => {
-                    ("●", "review ready", Color::LightCyan)
+                    ("●", "idle — check progress", Color::LightCyan)
                 }
                 SessionState::Idle => ("●", "idle", Color::LightGreen),
                 // App-synthesized spawn placeholder; task-linked sessions come
@@ -631,7 +658,13 @@ fn meta_line(
             None => ("○", "starting…", DOT_IDLE),
         };
         spans.push(Span::styled(
-            format!("{} {}", glyph, label),
+            format!(
+                "{} {}",
+                glyph,
+                crate::task_activity::label(&t.task_id)
+                    .as_deref()
+                    .unwrap_or(label)
+            ),
             Style::default().fg(color),
         ));
         if let Some(dir) = t.cwd.as_deref().map(dir_basename) {
@@ -831,6 +864,42 @@ mod tests {
         assert_eq!(tags_title_text(&tags, 2), None);
     }
 
+    #[test]
+    fn completed_card_renders_usage_and_cost() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut task = card(TaskPriority::P3);
+        task.status = TaskStatus::Done;
+        task.stats = Some(crate::task_stats::TaskStats {
+            input_tokens: 123_000,
+            cost_nano_usd: Some(250_000_000),
+            estimated: true,
+            ..Default::default()
+        });
+        let mut terminal = Terminal::new(TestBackend::new(44, 5)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_task_card(
+                    frame,
+                    frame.area(),
+                    &task,
+                    false,
+                    TaskStatus::Done,
+                    Color::Green,
+                    &HashMap::new(),
+                    1_000,
+                )
+            })
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("123.0K tokens · ~$0.2500"), "{text}");
+    }
+
     fn idle_session(tmux: &str) -> SessionInfo {
         SessionInfo {
             agent_id: "claude".into(),
@@ -873,7 +942,7 @@ mod tests {
 
         t.status = TaskStatus::Running;
         let line = meta_line(&t, t.status, &sessions, 1_000).to_string();
-        assert!(line.contains("review ready"), "line: {line}");
+        assert!(line.contains("idle — check progress"), "line: {line}");
     }
 
     #[test]

@@ -47,28 +47,36 @@ pub(crate) mod test_util {
     /// anything there — gate callers behind `cfg(unix)`.
     #[cfg(unix)]
     pub fn with_temp_home<F: FnOnce()>(f: F) {
-        struct RestoreHome(Option<std::ffi::OsString>);
+        struct RestoreHome(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
         impl Drop for RestoreHome {
             fn drop(&mut self) {
                 match self.0.take() {
                     Some(v) => std::env::set_var("HOME", v),
                     None => std::env::remove_var("HOME"),
                 }
+                match self.1.take() {
+                    Some(v) => std::env::set_var("CODEX_HOME", v),
+                    None => std::env::remove_var("CODEX_HOME"),
+                }
             }
         }
         let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        let _restore = RestoreHome(std::env::var_os("HOME"));
+        let _restore = RestoreHome(std::env::var_os("HOME"), std::env::var_os("CODEX_HOME"));
         std::env::set_var("HOME", tmp.path());
+        std::env::remove_var("CODEX_HOME");
         f();
     }
 }
+pub mod resources;
 pub mod scanner;
 pub mod send;
 pub mod session_count;
 pub mod session_index;
 pub mod session_tasks;
 pub mod spawn;
+pub mod task_activity;
+pub mod task_stats;
 pub mod tasks;
 pub mod title;
 pub mod tmux_pane;

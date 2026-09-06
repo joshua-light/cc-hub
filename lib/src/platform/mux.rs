@@ -380,7 +380,7 @@ mod tests {
     const COLD_READY_PANE: &str = concat!(
         "╭─── Claude Code v2.1.119 ─────────────────────────────────────────────────────╮\n",
         "│                                                    │ Tips for getting        │\n",
-        "│                Welcome back j-light!               │ started                 │\n",
+        "│                Welcome back example-user!               │ started                 │\n",
         "│                       ▐▛███▜▌                      │                         │\n",
         "│                 /tmp/cchub-e2e-E4I                 │                         │\n",
         "╰──────────────────────────────────────────────────────────────────────────────╯\n",
@@ -408,7 +408,7 @@ mod tests {
     /// just the welcome banner. Common for the first ~1s after spawn.
     const PRE_INPUT_BANNER_PANE: &str = concat!(
         "╭─── Claude Code v2.1.119 ─────────────────────────────────────────────────────╮\n",
-        "│                Welcome back j-light!               │\n",
+        "│                Welcome back example-user!               │\n",
         "│                       ▐▛███▜▌                      │\n",
         "╰──────────────────────────────────────────────────────────────────────────────╯\n",
     );

@@ -105,7 +105,10 @@ pub fn pi_sessions_dir() -> Option<PathBuf> {
 /// Codex CLI's user data directory (`~/.codex`). None when home is
 /// unresolvable.
 pub fn codex_home() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".codex"))
+    std::env::var_os("CODEX_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))
 }
 
 /// Codex rollout transcripts live under `~/.codex/sessions/YYYY/MM/DD/` as

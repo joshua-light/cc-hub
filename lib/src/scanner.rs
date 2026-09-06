@@ -25,7 +25,7 @@ fn mtime_age_secs(path: &Path) -> Option<u64> {
 }
 
 fn claude_dir() -> Option<PathBuf> {
-    paths::claude_home()
+    crate::resources::claude_scan_home().or_else(paths::claude_home)
 }
 
 fn sessions_dir() -> Option<PathBuf> {
@@ -64,12 +64,22 @@ pub fn find_jsonl(cwd: &str, session_id: &str) -> Option<PathBuf> {
 /// the cwd Claude encoded at spawn time (symlinks, trailing slash, the
 /// directory was renamed, etc.) so the direct `find_jsonl` lookup misses.
 pub fn find_jsonl_anywhere(session_id: &str) -> Option<PathBuf> {
-    let projects = projects_dir()?;
     let target = format!("{}.jsonl", session_id);
-    for entry in std::fs::read_dir(&projects).ok()?.flatten() {
-        let candidate = entry.path().join(&target);
-        if candidate.exists() {
-            return Some(candidate);
+    let mut roots: Vec<_> = projects_dir().into_iter().collect();
+    roots.extend(
+        crate::resources::accounts()
+            .values()
+            .filter(|a| a.provider == AgentKind::Claude)
+            .filter_map(|a| a.home().map(|h| h.join("projects"))),
+    );
+    for projects in roots {
+        if let Ok(entries) = std::fs::read_dir(&projects) {
+            for entry in entries.flatten() {
+                let candidate = entry.path().join(&target);
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
         }
     }
     None
@@ -190,7 +200,7 @@ type ClearMap = HashMap<String, u64>;
 
 /// The history file's cache key: its `(mtime, len)`. A change in either forces
 /// a re-read.
-type ClearsKey = (SystemTime, u64);
+type ClearsKey = (PathBuf, SystemTime, u64);
 
 /// Cache slot: the key the map was parsed at, plus the shared map itself.
 type ClearsSlot = Option<(ClearsKey, Arc<ClearMap>)>;
@@ -232,7 +242,7 @@ fn read_clears_from_history() -> Arc<ClearMap> {
     // Stat every tick (cheap); only the read+parse below is gated on the key.
     let key = std::fs::metadata(&path)
         .ok()
-        .and_then(|m| Some((m.modified().ok()?, m.len())));
+        .and_then(|m| Some((path.clone(), m.modified().ok()?, m.len())));
 
     let Some(key) = key else {
         // Missing/unstattable file: empty map. Cheap to rebuild if it appears.
@@ -1096,6 +1106,20 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
     let titles = crate::title::load();
     if enabled.contains(&AgentKind::Claude) {
         sessions.extend(scan_claude_sessions(&titles));
+        let default_home = claude_dir();
+        let mut seen = HashSet::new();
+        for account in crate::resources::accounts()
+            .values()
+            .filter(|a| a.provider == AgentKind::Claude)
+        {
+            if let Some(home) = account.home() {
+                if Some(&home) != default_home.as_ref() && seen.insert(home.clone()) {
+                    sessions.extend(crate::resources::with_claude_home(home, || {
+                        scan_claude_sessions(&titles)
+                    }));
+                }
+            }
+        }
     }
     if enabled.contains(&AgentKind::Pi) {
         let pi_agents: Vec<_> = config::get()
@@ -1125,6 +1149,7 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
         .collect();
     crate::tool_use_count::retain_cached(&live_paths);
 
+    crate::resources::label_sessions(&mut sessions);
     sort_stable(&mut sessions);
     sessions
 }
@@ -1440,12 +1465,12 @@ mod tests {
         assert_eq!(encode_path("/home/me/.config"), "-home-me--config");
         // Windows: drive colon + backslashes, e.g. observed real dirs.
         assert_eq!(
-            encode_path("C:\\Users\\MykytaTaushanov"),
-            "C--Users-MykytaTaushanov"
+            encode_path("C:\\Users\\ExampleUser"),
+            "C--Users-ExampleUser"
         );
         assert_eq!(
-            encode_path("C:\\Users\\MykytaTaushanov\\.local\\bin"),
-            "C--Users-MykytaTaushanov--local-bin"
+            encode_path("C:\\Users\\ExampleUser\\.local\\bin"),
+            "C--Users-ExampleUser--local-bin"
         );
         assert_eq!(encode_path("C:\\Projects\\Sample"), "C--Projects-Sample");
     }

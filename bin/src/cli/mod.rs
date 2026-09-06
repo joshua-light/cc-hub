@@ -20,12 +20,14 @@
 //! to spawn one and when to merge is the orchestrator's job.
 
 mod agent;
+mod board;
 mod help;
 mod link;
 mod merge_worktree;
 mod orchestrate;
 mod pr;
 mod project;
+mod resource;
 mod spawn_worker;
 mod task;
 #[cfg(test)]
@@ -52,7 +54,9 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
         "worker" => Some(handle(worker::worker_subcommand(rest))),
         "project" => Some(handle(project::project_subcommand(rest))),
         "open" => Some(handle(link::open(rest))),
+        "resource" => Some(handle(resource::resource(rest))),
         "agent" => Some(handle(agent::agent_subcommand(rest))),
+        "board" => Some(handle(board::board_subcommand(rest))),
         _ => None,
     }
 }
@@ -196,6 +200,11 @@ struct Flags {
     /// `task create --name NAME` — project display name when registering a
     /// fresh project from the cwd. Ignored when `--project-id` is given.
     name: Option<String>,
+    /// `board add` flags: the card's text, its tags (one string, split like
+    /// the TUI's quick-capture field) and its priority (`p1`..`p4`).
+    text: Option<String>,
+    tags: Option<String>,
+    priority: Option<String>,
     /// PR-flow flags. `--title` / `--description` for `pr create`,
     /// `--comment` + `--author` for `pr request-changes` / `pr comment`.
     title: Option<String>,
@@ -324,6 +333,15 @@ fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
             "--title" => {
                 f.title = Some(next_value(args, &mut i, "--title")?);
             }
+            "--text" => {
+                f.text = Some(next_value(args, &mut i, "--text")?);
+            }
+            "--tags" => {
+                f.tags = Some(next_value(args, &mut i, "--tags")?);
+            }
+            "--priority" => {
+                f.priority = Some(next_value(args, &mut i, "--priority")?);
+            }
             "--description" => {
                 f.description = Some(next_value(args, &mut i, "--description")?);
             }
@@ -407,6 +425,7 @@ const FREE_TEXT_FLAGS: &[&str] = &[
     "--note",
     "--summary",
     "--title",
+    "--text",
     "--description",
     "--comment",
     "--build-cmd",

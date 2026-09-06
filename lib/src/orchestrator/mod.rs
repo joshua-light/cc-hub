@@ -386,6 +386,11 @@ pub struct TaskState {
     /// tmux. Outlives the tmux session, so `f` can resume after it dies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// All sessions assigned over this task's lifetime, including reassignments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub usage_session_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<crate::task_stats::TaskStats>,
     /// Filled in by the orchestrator the first time it reports — cc-hub
     /// can't know its session id at spawn time.
     #[serde(default)]
@@ -478,6 +483,8 @@ impl TaskState {
             agent_id: None,
             tmux: None,
             session_id: None,
+            usage_session_ids: Vec::new(),
+            stats: None,
             orchestrator_session_id: None,
             orchestrator_agent_id: default_claude_agent_id(),
             orchestrator_agent_kind: default_claude_agent_kind(),
@@ -513,6 +520,8 @@ impl TaskState {
             agent_id: None,
             tmux: None,
             session_id: None,
+            usage_session_ids: Vec::new(),
+            stats: None,
             orchestrator_session_id: None,
             orchestrator_agent_id: default_claude_agent_id(),
             orchestrator_agent_kind: default_claude_agent_kind(),
@@ -752,7 +761,13 @@ where
     F: FnOnce(&mut TaskState),
 {
     try_update_task_state_inner(project_id, task_id, touch, |s| {
+        let previous_session = s.session_id.clone();
         f(s);
+        for sid in previous_session.iter().chain(s.session_id.iter()) {
+            if !s.usage_session_ids.contains(sid) {
+                s.usage_session_ids.push(sid.clone());
+            }
+        }
         true
     })
     .map(|(state, _)| state)
@@ -1013,6 +1028,11 @@ where
     F: FnOnce(&mut TaskState),
 {
     update_task_state_inner(None, task_id, true, f)
+}
+
+/// Save usage without changing the task's activity timestamp.
+pub fn set_task_stats(task_id: &str, stats: crate::task_stats::TaskStats) -> io::Result<TaskState> {
+    update_task_state_inner(None, task_id, false, |s| s.stats = Some(stats))
 }
 
 /// [`update_task_state`] without the trailing `touch()`. For background
@@ -1582,8 +1602,8 @@ mod tests {
 
     #[test]
     fn project_id_is_stable_and_sanitised() {
-        let a = project_id_for_path(Path::new("/home/j-light/git/self/cc-hub"));
-        assert_eq!(a, "home-j-light-git-self-cc-hub");
+        let a = project_id_for_path(Path::new("/home/example-user/git/self/cc-hub"));
+        assert_eq!(a, "home-example-user-git-self-cc-hub");
 
         // collapses runs of separators
         let b = project_id_for_path(Path::new("/foo//bar/_baz_"));

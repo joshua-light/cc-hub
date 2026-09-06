@@ -28,6 +28,11 @@ pub struct TickReport {
 const DISCOVER_EVERY: Duration = Duration::from_secs(5);
 const IDLE_POLL: Duration = Duration::from_secs(1);
 const PARKED_POLL: Duration = Duration::from_secs(3);
+/// Grace period past `run.timeout_s` before a `ticking` marker is treated as
+/// stale. The owning tick's own timeout already killed its child by then, so
+/// a marker still standing after this means the process that set it — not
+/// just the child — is gone (killed, crashed, machine slept).
+const STALE_TICK_GRACE_S: i64 = 60;
 
 /// Start the manager. Aborting the returned handle stops discovery; running
 /// agent loops are aborted with it via the map it owns.
@@ -84,7 +89,7 @@ async fn agent_loop(dir: PathBuf, tx: mpsc::Sender<TickReport>) {
                 continue;
             }
         };
-        let state = super::load_state(&dir);
+        let state = reclaim_stale_tick(&dir, &spec).await;
         if !spec.enabled || state.paused || state.stopped_reason.is_some() {
             tokio::time::sleep(PARKED_POLL).await;
             continue;
@@ -165,6 +170,59 @@ async fn agent_loop(dir: PathBuf, tx: mpsc::Sender<TickReport>) {
             let penalty = spec.trigger.interval_s.max(5) * ((1u64 << n) - 1);
             tokio::time::sleep(Duration::from_secs(penalty.min(3600))).await;
         }
+    }
+}
+
+/// A `ticking` marker outlives the process that set it if that process is
+/// killed mid-tick — machine sleep, a forced quit, a crash — since only the
+/// tick's own return path clears it. `age` is old enough once the tick's own
+/// timeout (plus a grace period for it to notice and write the kill) has
+/// passed: at that point either the owning process is still alive and about
+/// to clear the marker itself, or it's gone and nothing else ever will.
+fn tick_is_stale(since: i64, now: i64, timeout_s: u64) -> bool {
+    now - since > timeout_s as i64 + STALE_TICK_GRACE_S
+}
+
+/// Called once per loop iteration: cheap, and self-resolving after the
+/// first clear.
+async fn reclaim_stale_tick(dir: &std::path::Path, spec: &Spec) -> super::AgentState {
+    let state = super::load_state(dir);
+    let Some(t) = &state.ticking else {
+        return state;
+    };
+    if !tick_is_stale(t.since, super::now_unix(), spec.run.timeout_s) {
+        return state;
+    }
+    warn!(
+        "harness[{}]: clearing stale ticking state ({}s old, no owning process — supervisor likely restarted mid-tick)",
+        spec.name,
+        super::now_unix() - t.since
+    );
+    let dir = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || super::update_state(&dir, |s| s.ticking = None))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tick_is_stale;
+
+    #[test]
+    fn fresh_tick_is_not_stale() {
+        assert!(!tick_is_stale(1000, 1000 + 3600, 3600));
+    }
+
+    #[test]
+    fn tick_within_grace_past_timeout_is_not_stale() {
+        assert!(!tick_is_stale(1000, 1000 + 3600 + 60, 3600));
+    }
+
+    #[test]
+    fn tick_past_timeout_and_grace_is_stale() {
+        assert!(tick_is_stale(1000, 1000 + 3600 + 61, 3600));
     }
 }
 

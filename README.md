@@ -33,6 +33,10 @@ them off by hand, or hand one to an agent:
 3. `f` / `Enter` attaches the agent's pane, exactly like the Sessions tab,
    including resume after the tmux session dies.
 
+A script mints a card with `cc-hub board add --text "…" [--title T] [--tags
+"a b"] [--priority p1..p4]`; it lands in To-Do with no session, and a
+`cc-hub://task` link (below) opens it.
+
 ## Projects layer (WIP)
 
 Hidden by default; enable with `[ui] show_projects_tab = true`. This is the
@@ -429,6 +433,16 @@ update a card's badge in place, never its row. Done cards keep their agent
 binding: `󰚩 claude · <dir>` marks a task an agent ran, and `f` still reopens
 its transcript.
 
+Completed cards show **Task Stats**: tokens consumed and USD cost. Press `v` for
+exact input, output, cache-read, and cache-write totals. Stats refresh in the
+background every 30 seconds and persist with the task, including earlier agent
+assignments, explicitly linked sessions, and Claude subagents. Existing tasks
+are backfilled when their transcripts are available. `~$` means an estimate at
+the Metrics tab's model rates; Pi's reported costs are used when available.
+Unsupported model pricing (including Codex) shows `cost unavailable`; missing
+transcripts show unavailable usage or retain the last complete saved snapshot.
+These are session usage costs, not subscription charges or an invoice.
+
 Every card carries a priority badge on its top-right (`P1` red · `P2` yellow
 · `P3` green · `P4` blue; press `1`–`4` to set). Columns sort by priority
 first, so the most urgent cards float to the top.
@@ -571,3 +585,5 @@ queued backlog tasks, so pending work is visible at chip level.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+Account profiles, capacity-aware Task Agent roles and proactive handoff are described in [Resource management](docs/resource-management.md).

@@ -88,6 +88,8 @@ impl Default for TriggerCfg {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RunCfg {
+    /// Hard subscription pin for capability-bound scheduled agents.
+    pub account: Option<String>,
     /// Only these tools exist for the agent; everything else is denied,
     /// which removes its schema from the request. Bare names, scoped rules
     /// (`Bash(git *)`) and MCP patterns (`mcp__srv__*`) all work; a lone
@@ -124,6 +126,7 @@ pub struct RunCfg {
 impl Default for RunCfg {
     fn default() -> Self {
         Self {
+            account: None,
             tools: vec!["Read".into()],
             model: None,
             effort: None,

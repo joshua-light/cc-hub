@@ -59,6 +59,9 @@ impl Config {
                 },
             );
         }
+        for (id, account) in crate::resources::accounts() {
+            out.entry(id.clone()).or_insert_with(|| account.agent(&id));
+        }
         out
     }
 
@@ -146,6 +149,8 @@ impl Default for SpawnConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConfiguredAgent {
+    pub account: Option<String>,
+    pub effort: Option<String>,
     pub kind: AgentKind,
     pub command: String,
     pub use_bridge: bool,
@@ -159,6 +164,8 @@ pub struct ConfiguredAgent {
 impl Default for ConfiguredAgent {
     fn default() -> Self {
         Self {
+            account: None,
+            effort: None,
             kind: AgentKind::Claude,
             command: "cc-hub-new".into(),
             use_bridge: false,

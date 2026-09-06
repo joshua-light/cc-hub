@@ -164,6 +164,28 @@ pub fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    if let Some(name) = spec
+        .run
+        .account
+        .as_ref()
+        .or_else(|| spec.run.env.get("CC_HUB_ACCOUNT"))
+    {
+        match crate::resources::accounts().remove(name) {
+            Some(account) if account.provider == crate::agent::AgentKind::Claude => {
+                account.apply(&mut cmd)
+            }
+            _ => {
+                return Tick {
+                    subtype: Some("account_unavailable".into()),
+                    result: format!(
+                        "scheduled Claude agent requires a valid Claude account: {name}"
+                    ),
+                    returncode: -1,
+                    ..Default::default()
+                }
+            }
+        }
+    }
     let streamed = stream(
         cmd,
         Duration::from_secs(spec.run.timeout_s),

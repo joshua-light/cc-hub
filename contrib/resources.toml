@@ -1,0 +1,71 @@
+# Subscription accounts; authentication and tools stay profile-local.
+[settings]
+warn_percent = 80
+start_percent = 85
+stop_percent = 95
+refresh_seconds = 60
+max_attempts = 20
+
+[accounts.cc-1]
+provider = "claude"
+home_mode = "default"
+start_percent = 75 # Reserve for meetings.
+args = ["--dangerously-skip-permissions"]
+max_workers = 2
+capabilities = ["task-workflow"]
+[accounts.cc-1.models]
+claude-sonnet-5 = ["medium"]
+
+[accounts.cc-2]
+provider = "claude"
+home = "~/.claude-personal"
+args = ["--dangerously-skip-permissions"]
+max_workers = 2
+capabilities = ["task-workflow"]
+[accounts.cc-2.models]
+claude-sonnet-5 = ["medium"]
+
+[accounts.codex-1]
+provider = "codex"
+home = "~/.codex"
+args = ["--yolo"]
+max_workers = 2
+capabilities = ["task-workflow"]
+
+[accounts.codex-2]
+provider = "codex"
+home = "~/.codex-personal"
+args = ["--yolo"]
+max_workers = 2
+capabilities = ["task-workflow"]
+
+[profiles.sonnet-medium]
+provider = "claude"
+model = "claude-sonnet-5"
+effort = "medium"
+accounts = ["cc-1", "cc-2"]
+[profiles.luna-medium]
+provider = "codex"
+model = "gpt-5.6-luna"
+effort = "medium"
+accounts = ["codex-1", "codex-2"]
+
+[routing.default.dev]
+profiles = ["sonnet-medium", "luna-medium"]
+requires = ["task-workflow"]
+
+[routing.default.qa]
+profiles = ["sonnet-medium", "luna-medium"]
+requires = ["task-workflow"]
+
+[routing.default.worker]
+profiles = ["sonnet-medium", "luna-medium"]
+requires = ["task-workflow"]
+
+[routing.project.dev]
+profiles = ["sonnet-medium", "luna-medium"]
+requires = ["task-workflow"]
+
+[routing.project.qa]
+profiles = ["sonnet-medium", "luna-medium"]
+requires = ["task-workflow"]

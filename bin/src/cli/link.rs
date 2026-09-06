@@ -36,6 +36,33 @@ pub(crate) fn open(args: &[String]) -> Result<(), CliError> {
         return Ok(());
     }
 
+    if f.agent.is_none() && !cc_hub_lib::resources::accounts().is_empty() {
+        if let Link::Task(task) = &link {
+            if let Some(kind) = task
+                .kind
+                .clone()
+                .or_else(|| cc_hub_lib::resources::task_kind(task.id.as_str()))
+            {
+                let target = ops::link::target(&link, None)?;
+                return super::resource::resource(&[
+                    "start".into(),
+                    "--task".into(),
+                    task.id.to_string(),
+                    "--kind".into(),
+                    kind,
+                    "--role".into(),
+                    "dev".into(),
+                    "--cwd".into(),
+                    target.cwd.to_string_lossy().into(),
+                    "--prompt".into(),
+                    format!(
+                        "Read ~/.claude/skills/task/SKILL.md. Continue this assignment:\n{}",
+                        target.prompt
+                    ),
+                ]);
+            }
+        }
+    }
     let opened = ops::link::open(
         &link,
         ops::link::OpenOpts {

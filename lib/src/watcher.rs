@@ -70,6 +70,15 @@ pub fn spawn_fs_watcher(tx: mpsc::Sender<WatchBatch>) {
             targets.push((cc_hub.join("projects.toml"), RecursiveMode::NonRecursive));
         }
 
+        for account in crate::resources::accounts().values() {
+            if let Some(home) = account.home() {
+                targets.push((home.join("sessions"), RecursiveMode::Recursive));
+                if account.provider == crate::agent::AgentKind::Claude {
+                    targets.push((home.join("projects"), RecursiveMode::Recursive));
+                    targets.push((home.join("history.jsonl"), RecursiveMode::NonRecursive));
+                }
+            }
+        }
         for (path, mode) in &targets {
             match watcher.watch(path, *mode) {
                 Ok(()) => debug!("fs watcher: watching {}", path.display()),

@@ -333,6 +333,7 @@ pub(crate) enum ScanMsg {
     Usage(usage::UsageInfo),
     SessionCounts(session_count::SessionCounts),
     Metrics(metrics::MetricsAnalysis),
+    TaskStats(Vec<(String, cc_hub_lib::task_stats::TaskStats)>),
     MetricsProgress {
         scanned: usize,
         total: usize,
@@ -690,6 +691,7 @@ fn apply_scan_msg(
             queue_missing_titles(&mut sessions, inflight_titles, active_titles, title_gate);
             return app.update_sessions(sessions);
         }
+        ScanMsg::TaskStats(stats) => app.tasks.board.update_stats(stats),
         ScanMsg::SessionIndex(index) => app.update_session_index(index),
         ScanMsg::Detail(detail) => app.update_detail(detail),
         ScanMsg::StateDebug(info, exp) => {
@@ -912,6 +914,7 @@ async fn run(
     // a short timer and right after every tick report, so CLI-side changes
     // (poke, pause, notes) show up too.
     {
+        let _task_jobs = cc_hub_lib::task_activity::spawn_supervisor();
         let (tick_tx, mut tick_rx) = mpsc::channel::<harness::supervisor::TickReport>(16);
         let supervisor_on = config::get().harness.enabled;
         if supervisor_on {
@@ -1057,6 +1060,20 @@ async fn run(
                 .await
                 .unwrap_or_else(|_| projects_scan::ProjectsSnapshot::empty());
             let _ = project_scan_tx.send(ScanMsg::Projects(snap)).await;
+        }
+    });
+
+    let task_stats_tx = scan_tx_main.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Ok(stats) = tokio::task::spawn_blocking(cc_hub_lib::task_stats::refresh).await {
+                if task_stats_tx.send(ScanMsg::TaskStats(stats)).await.is_err() {
+                    break;
+                }
+            }
         }
     });
 
@@ -1538,11 +1555,11 @@ mod tests {
     #[test]
     fn expands_leading_tilde() {
         with_clean_env(|| {
-            std::env::set_var("HOME", "/home/josh");
+            std::env::set_var("HOME", "/home/example");
             extract_claude_config_dir(argv(&["--claude-config-dir", "~/.claude-personal"]));
             assert_eq!(
                 std::env::var("CLAUDE_CONFIG_DIR").unwrap(),
-                "/home/josh/.claude-personal"
+                "/home/example/.claude-personal"
             );
         });
     }
