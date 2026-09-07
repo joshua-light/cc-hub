@@ -41,9 +41,9 @@ class ResourceTests(unittest.TestCase):
     def choose(self, **kwargs):
         return broker.select(self.cfg, self.usage, self.db, 'project', 'implementation', **kwargs)
 
-    def start(self, role='implementation', task='tk-test'):
+    def start(self, role='implementation', task='tk-test', cwd=None):
         args = broker.parser().parse_args(['start', '--task', task, '--kind', 'project', '--role', role,
-                                           '--cwd', str(self.directory), '--prompt', 'Implement fixture'])
+                                           '--cwd', str(cwd or self.directory), '--prompt', 'Implement fixture'])
         with patch.object(broker, 'launch'), patch.object(broker, 'bind_board'):
             return broker.start_worker(args, self.cfg, self.usage)
 
@@ -159,6 +159,25 @@ PROJECT="keep-project"
         self.assertEqual(after[first['id']]['status'], 'stopped')
         self.assertEqual(after[second['id']]['status'], 'starting')
         self.assertEqual(broker.live_worker(broker.state(), 'tk-test')['id'], second['id'])
+
+    def test_start_in_another_directory_hands_the_task_over(self):
+        repository = self.directory / 'repository'
+        repository.mkdir()
+        scratch = self.start()
+        moved = self.start(cwd=repository)
+        self.assertNotEqual(moved['id'], scratch['id'])
+        self.assertEqual(moved['cwd'], str(repository.resolve()))
+        self.assertEqual(moved['predecessor'], scratch['id'])
+        self.assertFalse(moved.get('reused'))
+        workers = broker.state()['workers']
+        self.assertEqual(workers[scratch['id']]['status'], 'stopping')
+        self.assertEqual(workers[scratch['id']]['stop_reason'], 'moved to ' + str(repository.resolve()))
+
+    def test_start_in_the_same_place_reuses_the_worker(self):
+        first = self.start()
+        again = self.start()
+        self.assertEqual(again['id'], first['id'])
+        self.assertTrue(again['reused'])
 
     def test_a_task_that_changed_hands_can_change_back(self):
         implementation = self.start('implementation')

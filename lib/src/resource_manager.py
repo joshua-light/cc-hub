@@ -2,8 +2,9 @@
 """Account-aware task sessions. Standard library only; shipped in cc-hub.
 
 A task has one worker at a time. `start` for a task that already has a live
-worker in another role is a hand-over: the new worker is launched and the old
-one is stopped. The broker owns which account a worker runs on and its tmux
+worker in another role, or in another directory, is a hand-over: the new
+worker is launched and the old one is stopped. A session cannot change its
+own cwd, so moving a task to its repository is a hand-over like any other. The broker owns which account a worker runs on and its tmux
 lifetime. When an account runs dry the worker is replaced on another account
 and continues from its own transcript; no LLM call is needed to notice, stop,
 select or restart. Provider credentials stay in their own homes.
@@ -559,6 +560,10 @@ def reserve(worker, choice, cfg):
     record(worker, 'allocated', generation=worker['generation'], model=worker['model'], effort=worker['effort'], **choice)
 
 
+def handover_reason(current, role, cwd):
+    return 'handed to ' + role if current['role'] != role else 'moved to ' + cwd
+
+
 def start_worker(args, cfg, usage):
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', args.task):
         raise ValueError('task ID must be a filesystem-safe identifier')
@@ -569,11 +574,11 @@ def start_worker(args, cfg, usage):
     with lock():
         db = state()
         current = live_worker(db, args.task)
-        if current and current['role'] == args.role:
+        if current and current['role'] == args.role and current['cwd'] == cwd:
             return dict(current, reused=True)
         if current:
-            # A hand-over: the task changes hands, and the old session ends.
-            stop(current, 'handed to ' + args.role)
+            # A hand-over: the task changes hands or place, and the old session ends.
+            stop(current, handover_reason(current, args.role, cwd))
         worker = {'id': uuid.uuid4().hex, 'task': args.task, 'kind': args.kind, 'role': args.role, 'cwd': cwd,
                   'prompt': args.prompt, 'generation': 0, 'status': 'waiting_for_capacity', 'events': [],
                   'created_at': time.time(), 'predecessor': current['id'] if current else None}

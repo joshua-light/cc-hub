@@ -5,9 +5,10 @@
 //! agent calls to hand a board card to a real session. A task link whose
 //! card already has a live session in that directory reaches that session
 //! (`"reused": true`) rather than starting a second one — unless the link
-//! names a `role`: that is a hand-over, which starts a fresh session and closes
-//! the card's old one after this command has reported. It is also handy by
-//! hand:
+//! names a `role` or another directory: that is a hand-over, which starts a
+//! fresh session and closes the card's old one after this command has
+//! reported. With accounts configured the broker applies the same rule and
+//! stops the old worker itself. It is also handy by hand:
 //! `cc-hub open 'cc-hub://review?depth=light&pr=…' --dry-run` shows where a
 //! link would land without spawning anything.
 
