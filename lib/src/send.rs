@@ -27,6 +27,17 @@ pub fn send_prompt(session: &str, text: &str) -> io::Result<()> {
     mux::send_prompt(session, text)
 }
 
+/// Opens every prompt cc-hub injects on its own behalf rather than the
+/// user's. A pane paste has no channel of its own — whatever we type lands
+/// in the agent's transcript as a user turn — so the marker is what tells
+/// the agent, and [`crate::conversation`], that nobody said this.
+pub const AUTOMATION_MARKER: &str = "[cc-hub automation notice — not from the user]";
+
+/// Inject `text` as an automation notice: the marker line, then the body.
+pub fn send_notice(session: &str, text: &str) -> io::Result<()> {
+    send_prompt(session, &format!("{}\n{}", AUTOMATION_MARKER, text))
+}
+
 /// Best-effort check that `session`'s pane is showing claude's input
 /// prompt and is ready to accept a paste. See [`mux::pane_ready_for_input`]
 /// for the rationale.

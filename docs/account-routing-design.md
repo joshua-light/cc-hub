@@ -1,5 +1,10 @@
 # Account routing and task continuity
 
+> **2026-09-08:** the checkpoint/handoff, notice and child-role parts of this
+> design were removed. A worker is now replaced from its own transcript, and a
+> task has one worker at a time. See [resource-management.md](resource-management.md).
+
+
 Original design proposal, 2026-09-06. See [the implemented interface and its
 boundaries](resource-management.md); the illustrative schema below is historical.
 

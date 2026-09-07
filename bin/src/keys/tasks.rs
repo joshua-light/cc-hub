@@ -25,6 +25,7 @@ pub(super) fn map_tasks_command(app: &App, key: &KeyEvent, on_tasks: bool) -> Op
         (View::Grid, KeyCode::Char('S')) if on_tasks => T::AssignAtHome,
         (View::Grid, KeyCode::Char('r')) if on_tasks => T::OpenRename,
         (View::Grid, KeyCode::Char('t')) if on_tasks => T::OpenTags,
+        (View::Grid, KeyCode::Char('T')) if on_tasks => T::OpenKindPicker,
         (View::Grid, KeyCode::Char(c @ ('1' | '2' | '3' | '4'))) if on_tasks => {
             use cc_hub_lib::orchestrator::TaskPriority;
             let priority = match c {
@@ -127,5 +128,40 @@ fn paste_note(app: &mut App) {
             None => app.set_status("no task focused".into()),
         },
         Err(e) => app.set_status(format!("clipboard read failed: {}", e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keys::map_command;
+    use cc_hub_lib::app::GlobalCommand;
+
+    fn press(app: &App, c: char) -> Option<Command> {
+        map_tasks_command(app, &KeyEvent::from(KeyCode::Char(c)), true)
+    }
+
+    /// The board mapper runs before the global one, so every key it claims is
+    /// a key the rest of the hub loses on this tab. `J`/`K` cycle tabs
+    /// everywhere; the board must let them through.
+    #[test]
+    fn the_board_leaves_the_tab_cycle_keys_alone() {
+        let app = App::new();
+        for c in ['J', 'K'] {
+            assert!(
+                press(&app, c).is_none(),
+                "{} belongs to the tab cycle, not to the board",
+                c
+            );
+            assert!(matches!(
+                map_command(&app, &KeyEvent::from(KeyCode::Char(c)), false, true, false),
+                Some(Command::Global(GlobalCommand::CycleTab { .. }))
+            ));
+        }
+        // The kind picker took `T`, which nothing else claims.
+        assert!(matches!(
+            press(&app, 'T'),
+            Some(Command::Tasks(TasksCommand::OpenKindPicker))
+        ));
     }
 }

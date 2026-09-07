@@ -351,6 +351,7 @@ dependencies = [
  "ratatui-image",
  "serde",
  "serde_json",
+ "sha2",
  "simplelog",
  "tempfile",
  "tokio",

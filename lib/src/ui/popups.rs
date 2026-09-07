@@ -1594,6 +1594,56 @@ pub(crate) fn render_task_tags(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
+/// `T` on a focused board card: the list of deliverable kinds the card can be
+/// given. Same chrome and interaction as the agent picker; the first row is
+/// the empty pick, which hands the classification back to the task router.
+pub(crate) fn render_task_kind_picker(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(picker) = app.task_kind_picker.as_ref() else {
+        return;
+    };
+
+    let desired_w = 56u16.min(area.width);
+    let desired_h = (picker.rows() as u16 + 2).min(area.height);
+    let popup = centered_fixed(area, desired_w, desired_h);
+    frame.render_widget(Clear, popup);
+
+    let block = popup_block(Span::styled(
+        " Task kind — how the router places this card ",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .title_bottom(Span::styled(
+        " j/k:move · enter/space:select · esc:cancel ",
+        Style::default().fg(DIM_TEXT),
+    ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let lines: Vec<Line<'static>> = (0..picker.rows())
+        .map(|i| {
+            let selected = i == picker.selected;
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            let label = match picker.kinds.get(i.wrapping_sub(1)) {
+                Some(kind) => kind.as_str(),
+                None => "(none — let the router classify)",
+            };
+            Line::from(Span::styled(
+                format!("{} {}", if selected { "▶" } else { " " }, label),
+                style,
+            ))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 pub(crate) fn render_rename_session(frame: &mut Frame, area: Rect, app: &App) {
     let mut input_line = app.rename_buffer.clone();
     input_line.push('▎');
@@ -2097,13 +2147,17 @@ pub(crate) fn build_live_tail_content(
             continue;
         }
 
-        if msg.role == "user" {
+        if msg.role == "user" || msg.role == crate::conversation::AUTOMATION_ROLE {
             let content = msg.content_preview.trim();
             if is_placeholder_preview(content) {
                 continue;
             }
             separate(&mut lines);
-            render_prompt_block(&mut lines, content);
+            if msg.role == "user" {
+                render_prompt_block(&mut lines, content);
+            } else {
+                render_notice_block(&mut lines, content);
+            }
             continue;
         }
 
@@ -2259,6 +2313,23 @@ pub(crate) fn render_prompt_block(lines: &mut Vec<Line<'static>>, body: &str) {
     );
 }
 
+/// A notice cc-hub injected on its own behalf. Marked and coloured apart
+/// from [`render_prompt_block`] so the reader never mistakes it for a prompt
+/// the user wrote.
+pub(crate) fn render_notice_block(lines: &mut Vec<Line<'static>>, body: &str) {
+    push_bullet_block(
+        lines,
+        Span::styled(
+            "⚙ ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Color::Cyan,
+        body,
+    );
+}
+
 pub(crate) fn render_asst_bullet(lines: &mut Vec<Line<'static>>, body: &str) {
     push_bullet_block(
         lines,
@@ -2366,6 +2437,42 @@ mod wrap_text_tests {
     #[test]
     fn zero_width_is_clamped_to_one_column() {
         assert_eq!(wrap_text("ab", 0), vec!["a", "b"]);
+    }
+}
+
+#[cfg(test)]
+mod task_kind_picker_tests {
+    use crate::app::TaskKindPickerState;
+    use crate::ui::common::buffer_to_string;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    #[test]
+    fn picker_lists_every_kind_and_marks_the_current_one() {
+        let picker = TaskKindPickerState::new(
+            "tk-1".into(),
+            vec!["tps".into(), "ai-plugin".into(), "hub".into()],
+            Some("ai-plugin"),
+        );
+        let mut app = crate::app::App::new();
+        app.task_kind_picker = Some(picker);
+        let mut terminal = Terminal::new(TestBackend::new(60, 10)).expect("terminal");
+        terminal
+            .draw(|f| super::render_task_kind_picker(f, f.area(), &app))
+            .expect("render");
+        let painted = buffer_to_string(terminal.backend().buffer());
+        for kind in ["none", "tps", "ai-plugin", "hub"] {
+            assert!(painted.contains(kind), "{} missing:\n{}", kind, painted);
+        }
+        let marked = painted
+            .lines()
+            .find(|line| line.contains('▶'))
+            .expect("a marked row");
+        assert!(
+            marked.contains("ai-plugin"),
+            "the card's own kind should be under the cursor:\n{}",
+            painted
+        );
     }
 }
 

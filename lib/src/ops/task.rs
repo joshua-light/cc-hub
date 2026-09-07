@@ -600,6 +600,46 @@ pub fn task_artifact_add_text(
     update_task_for(project_id, task_id, |s| s.artifacts.push(artifact.clone()))
 }
 
+/// One `note` attachment of a card, with its text read back from the file
+/// `task_artifact_add_text` wrote. The notes of a card, in attach order, are
+/// its record: the brief the implementation session agreed with the user,
+/// the branch it built, what verification found. A session that takes the
+/// card over reads them before anything else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Note {
+    pub added_at: i64,
+    pub caption: Option<String>,
+    pub path: String,
+    pub text: String,
+}
+
+/// The card's notes in attach order. A note whose file is gone or unreadable
+/// is skipped rather than failing the read: the card still has its other
+/// notes, and the missing one is visible on the board as an attachment with
+/// nothing behind it.
+pub fn notes_of(task: &TaskState) -> Vec<Note> {
+    task.artifacts
+        .iter()
+        .filter(|a| a.kind == "note")
+        .filter_map(|a| {
+            let text = std::fs::read_to_string(&a.path).ok()?;
+            Some(Note {
+                added_at: a.added_at,
+                caption: a.caption.clone(),
+                path: a.path.clone(),
+                text: text.trim().to_string(),
+            })
+        })
+        .collect()
+}
+
+/// `cc-hub board notes` body: the notes of a personal-board card.
+pub fn task_notes(task_id: &str) -> Result<Vec<Note>, OpError> {
+    let state = orchestrator::read_task_state_for(None, task_id)
+        .map_err(|e| OpError::NotFound(format!("no board task {}: {}", task_id, e)))?;
+    Ok(notes_of(&state))
+}
+
 /// Remove artifact `index` from a personal-board task: drop the record (fixing
 /// `lead_artifact` if it pointed at or past the removed slot) and best-effort
 /// delete the stored copy — but only when it lives inside the task's own

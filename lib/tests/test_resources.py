@@ -1,5 +1,4 @@
 import concurrent.futures
-import contextlib
 import importlib.util
 import io
 import json
@@ -24,31 +23,41 @@ class ResourceTests(unittest.TestCase):
         self.directory = Path(self.temp.name)
         self.config_file = self.directory / 'resources.toml'
         self.config_file.write_text((REPO / 'contrib/resources.toml').read_text())
+        self.board = self.directory / 'board'
         self.env = patch.dict(os.environ, CC_HUB_RESOURCE_CONFIG=str(self.config_file),
-                              CC_HUB_RESOURCE_DIR=str(self.directory / 'state'))
+                              CC_HUB_RESOURCE_DIR=str(self.directory / 'state'),
+                              TASK_BOARD_DIR=str(self.board))
         self.env.start()
         self.addCleanup(self.env.stop)
         self.cfg = broker.load_config()
         self.usage = {}
         for name, account in self.cfg['accounts'].items():
-            models = {'claude-sonnet-5': ['medium']} if account['provider'] == 'claude' else {'gpt-5.6-luna': ['medium']}
+            models = account['models'] if account['provider'] == 'claude' else {'gpt-5.6-luna': ['medium']}
             self.usage[name] = {'health': 'ready', 'observed_at': time.time(), 'pool': name,
                                 'windows': [{'name': 'primary', 'used': 20, 'resets_at': time.time() + 3600}],
                                 'models': models}
         self.db = {'workers': {}, 'cooldowns': {}}
 
     def choose(self, **kwargs):
-        return broker.select(self.cfg, self.usage, self.db, 'project', 'dev', **kwargs)
+        return broker.select(self.cfg, self.usage, self.db, 'project', 'implementation', **kwargs)
 
-    def start(self, role='dev'):
-        args = broker.parser().parse_args(['start', '--task', 'tk-test', '--kind', 'project', '--role', role,
+    def start(self, role='implementation', task='tk-test'):
+        args = broker.parser().parse_args(['start', '--task', task, '--kind', 'project', '--role', role,
                                            '--cwd', str(self.directory), '--prompt', 'Implement fixture'])
         with patch.object(broker, 'launch'), patch.object(broker, 'bind_board'):
             return broker.start_worker(args, self.cfg, self.usage)
 
+    def supervise(self, tmux_alive=False):
+        with patch.object(broker, 'launch'), patch.object(broker, 'bind_board'), \
+                patch.object(broker, 'tmux_exists', return_value=tmux_alive), \
+                patch.object(broker, 'run', return_value=type('done', (), {'returncode': 0, 'stdout': ''})()):
+            return {w['id']: w for w in broker.supervise(self.cfg, self.usage)}
+
     def owner(self, worker, generation=None):
         return patch.dict(os.environ, CC_HUB_RESOURCE_WORKER=worker['id'],
                           CC_HUB_RESOURCE_GENERATION=str(generation or worker['generation']))
+
+    # ─── selection ───────────────────────────────────────────────────────
 
     def test_exhausted_unknown_and_stale_are_not_allocatable(self):
         self.usage['cc-2']['windows'][0]['used'] = 85
@@ -56,13 +65,6 @@ class ResourceTests(unittest.TestCase):
         self.usage['codex-1']['observed_at'] = 0
         self.usage['codex-2']['health'] = 'login_required'
         self.assertIsNone(self.choose())
-
-    def test_recovery_controls_cannot_smuggle_an_external_write(self):
-        self.assertTrue(broker.recovery_command('cc-hub resource handoff --reason quota-reserve'))
-        for command in ('cc-hub resource status; gh pr create', 'cc-hub resource status\ngh pr create',
-                        'echo "cc-hub resource handoff" && gh pr create',
-                        'cc-hub resource handoff --reason "$(gh pr create)"'):
-            self.assertFalse(broker.recovery_command(command), command)
 
     def test_transient_probe_failure_preserves_fresh_timestamp_and_backs_off(self):
         broker.atomic_json(broker.root() / 'usage.json', self.usage)
@@ -114,7 +116,7 @@ PROJECT="keep-project"
         self.assertIsNone(self.choose())
 
     def test_pin_and_capabilities_never_fall_through(self):
-        self.cfg['routing']['project']['dev'].update(account='cc-1', requires=['fathom'])
+        self.cfg['routing']['project']['implementation'].update(account='cc-1', requires=['fathom'])
         self.assertIsNone(self.choose())
         self.cfg['accounts']['cc-1']['capabilities'].append('fathom')
         self.assertEqual(self.choose()['account'], 'cc-1')
@@ -130,115 +132,137 @@ PROJECT="keep-project"
         self.db['cooldowns']['same-subscription'] = time.time() + 60
         self.assertIsNone(self.choose())
 
-    def test_no_duplicate_role_under_concurrent_starts(self):
+    def test_unknown_role_has_no_policy(self):
+        with self.assertRaises(ValueError):
+            broker.policy(self.cfg, 'project', 'qa')
+
+    # ─── one worker per task ─────────────────────────────────────────────
+
+    def test_concurrent_starts_share_one_worker(self):
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-            workers = list(pool.map(lambda _: self.start(), range(8)))
-        self.assertEqual(len({w['id'] for w in workers}), 1)
-        self.assertEqual(len(broker.state()['workers']), 1)
+            results = list(pool.map(lambda _: self.start(), range(4)))
+        self.assertEqual(len({w['id'] for w in results}), 1)
+        self.assertEqual(sum(1 for w in results if not w.get('reused')), 1)
 
-    def test_parallel_helpers_share_policy_but_have_independent_leases(self):
-        root = self.start()
-        first = self.start('worker-review-a')
-        second = self.start('worker-review-b')
+    def test_start_in_another_role_hands_the_task_over(self):
+        first = self.start('implementation')
+        second = self.start('verification')
         self.assertNotEqual(first['id'], second['id'])
-        self.assertEqual(first['root_id'], root['root_id'])
-        self.assertEqual(second['root_id'], root['root_id'])
+        self.assertEqual(second['predecessor'], first['id'])
+        self.assertEqual(second['status'], 'starting')
+        workers = broker.state()['workers']
+        self.assertEqual(workers[first['id']]['status'], 'stopping')
+        self.assertEqual(workers[first['id']]['stop_reason'], 'handed to verification')
+        # The old session is gone by the next tick; only one worker is live.
+        with patch.object(broker.time, 'time', return_value=time.time() + 10):
+            after = self.supervise()
+        self.assertEqual(after[first['id']]['status'], 'stopped')
+        self.assertEqual(after[second['id']]['status'], 'starting')
+        self.assertEqual(broker.live_worker(broker.state(), 'tk-test')['id'], second['id'])
 
-    def test_stage_qa_workers_share_policy_with_distinct_identities(self):
-        root = self.start()
-        editor = self.start('qa-editor')
-        build = self.start('qa-build')
-        self.assertNotEqual(editor['actor_id'], build['actor_id'])
-        self.assertEqual(editor['root_id'], root['root_id'])
-        self.assertEqual(build['root_id'], root['root_id'])
+    def test_a_task_that_changed_hands_can_change_back(self):
+        implementation = self.start('implementation')
+        verification = self.start('verification')
+        again = self.start('implementation')
+        self.assertNotEqual(again['id'], implementation['id'])
+        self.assertEqual(again['predecessor'], verification['id'])
 
     def test_no_capacity_persists_queue(self):
         for snapshot in self.usage.values():
-            snapshot['health'] = 'unknown'
+            snapshot['windows'][0]['used'] = 90
         worker = self.start()
         self.assertEqual(worker['status'], 'waiting_for_capacity')
-        self.assertEqual(worker['generation'], 0)
+        self.assertIn(worker['id'], broker.state()['workers'])
 
-    def test_checkpoint_is_immutable_and_stale_owner_is_fenced(self):
+    def test_stale_generation_is_fenced(self):
         worker = self.start()
-        source = self.directory / 'checkpoint.md'
-        source.write_text('Uncommitted implementation; build job 12 pending')
-        broker.checkpoint(worker, source)
-        source.write_text('overwritten')
-        self.assertIn('job 12', Path(worker['checkpoint']['path']).read_text())
-        with self.owner(worker, generation=worker['generation'] + 1):
-            with self.assertRaisesRegex(ValueError, 'stale'):
-                broker.current_worker(broker.state(), require_owner=True)
+        with self.owner(worker, generation=worker['generation'] + 1), self.assertRaises(ValueError):
+            broker.current_worker(broker.state(), require_owner=True)
+        with self.owner(worker):
+            broker.current_worker(broker.state(), require_owner=True)
 
-    def test_handoff_stops_old_owner_before_replacement(self):
+    # ─── the session ─────────────────────────────────────────────────────
+
+    def test_launch_carries_identity_and_no_api_keys(self):
         worker = self.start()
-        db = broker.state()
-        db['workers'][worker['id']].update(status='handoff_requested', handoff_at=0, handoff_reason='quota')
-        broker.save(db)
-        live = {worker['tmux']}
-        calls = []
-
-        def run(argv, **kwargs):
-            self.assertEqual(argv[:2], ['tmux', 'kill-session'])
-            calls.append('stop')
-            live.clear()
-            return type('Result', (), {'returncode': 0})()
-
-        def launch(replacement):
-            self.assertFalse(live)
-            calls.append('launch')
-            self.assertNotEqual(replacement['account'], worker['account'])
-            self.assertEqual(replacement['root_id'], worker['root_id'])
-
-        with patch.object(broker, 'tmux_exists', side_effect=lambda name: name in live), \
-             patch.object(broker, 'run', side_effect=run), patch.object(broker, 'launch', side_effect=launch), \
-             patch.object(broker, 'bind_board'):
-            broker.supervise(self.cfg, self.usage)
-        self.assertEqual(calls, ['stop', 'launch'])
-        self.assertEqual(broker.state()['workers'][worker['id']]['generation'], 2)
-
-    def test_failed_stop_never_launches_second_owner(self):
-        worker = self.start()
-        db = broker.state()
-        db['workers'][worker['id']]['status'] = 'stopping'
-        broker.save(db)
-        with patch.object(broker, 'tmux_exists', return_value=True), \
-             patch.object(broker, 'run', return_value=type('Result', (), {'returncode': 1})()), \
-             patch.object(broker, 'launch') as launch:
-            broker.supervise(self.cfg, self.usage)
-        launch.assert_not_called()
-        self.assertEqual(broker.state()['workers'][worker['id']]['status'], 'stopping')
-
-    def test_emergency_does_not_need_final_model_response(self):
-        worker = self.start()
-        db = broker.state()
-        db['workers'][worker['id']]['status'] = 'running'
-        broker.save(db)
-        self.usage[worker['account']]['windows'][0]['used'] = 100
-        live = {worker['tmux']}
-
-        def run(argv, **kwargs):
-            if argv[:2] == ['tmux', 'kill-session']:
-                live.clear()
-            return type('Result', (), {'returncode': 0, 'stdout': 'pending-job-12'})()
-
-        with patch.object(broker, 'tmux_exists', side_effect=lambda name: name in live), \
-             patch.object(broker, 'run', side_effect=run), patch.object(broker, 'launch'), patch.object(broker, 'bind_board'):
-            broker.supervise(self.cfg, self.usage)
-        current = broker.state()['workers'][worker['id']]
-        self.assertEqual(current['generation'], 2)
-        self.assertIn('pending-job-12', Path(current['checkpoint']['path']).read_text())
-
-    def test_generation_specific_launch_and_prompt_contract(self):
-        worker = self.start()
-        command, env = broker.execution(worker, self.cfg)
-        self.assertEqual(env['CC_HUB_RESOURCE_ROOT'], worker['root_id'])
-        self.assertIn('resource handoff', command[-1])
-        self.assertIn('MUST use `cc-hub resource start`', command[-1])
+        with patch.dict(os.environ, ANTHROPIC_API_KEY='must-not-leak', OPENAI_API_KEY='must-not-leak'):
+            command, env = broker.execution(worker, self.cfg)
+        self.assertEqual(env['CC_HUB_RESOURCE_WORKER'], worker['id'])
+        self.assertEqual(env['CC_HUB_RESOURCE_ROLE'], 'implementation')
+        self.assertNotIn('ANTHROPIC_API_KEY', env)
         self.assertNotIn('OPENAI_API_KEY', env)
+        self.assertIn('skills/task/SKILL.md', command[-1])
+        self.assertIn('Implement fixture', command[-1])
+        for word in ('checkpoint', 'inbox', 'qa'):
+            self.assertNotIn(word, command[-1].lower())
         if command[0] == 'codex':
             override = next(v for v in command if v.startswith('hooks.PreToolUse='))
             tomllib.loads(override)
+        else:
+            profile = self.cfg['profiles'][worker['profile']]
+            self.assertEqual(command[command.index('--model') + 1], profile['model'])
+            self.assertEqual(command[command.index('--autocompact') + 1], str(profile['autocompact']))
+            self.assertEqual(command[command.index('--session-id') + 1], worker['session_id'])
+
+    def test_hook_records_the_transcript_and_blocks_nothing(self):
+        worker = self.start()
+        broker.atomic_json(broker.root() / 'usage.json', self.usage)
+        event = {'session_id': 'native-1', 'transcript_path': str(self.directory / 't.jsonl'),
+                 'tool_name': 'Agent', 'tool_input': {}}
+        with self.owner(worker), patch.object(broker, 'bind_board'), \
+                patch('sys.stdin', io.StringIO(json.dumps(event))):
+            result = broker.hook()
+        context = json.loads(result['hookSpecificOutput']['additionalContext'])['resource']
+        self.assertEqual(context['quota_used_percent'], 20)
+        self.assertNotIn('note', context)
+        self.assertNotIn('decision', result)
+        stored = broker.state()['workers'][worker['id']]
+        self.assertEqual(stored['transcript_path'], str(self.directory / 't.jsonl'))
+        self.assertEqual(stored['provider_session_id'], 'native-1')
+        self.usage[worker['account']]['windows'][0]['used'] = 82
+        broker.atomic_json(broker.root() / 'usage.json', self.usage)
+        with self.owner(worker), patch('sys.stdin', io.StringIO(json.dumps(event))):
+            result = broker.hook()
+        self.assertIn('another account', json.loads(result['hookSpecificOutput']['additionalContext'])['resource']['note'])
+
+    def test_a_broken_hook_fails_open(self):
+        with patch.dict(os.environ, CC_HUB_RESOURCE_WORKER='nobody', CC_HUB_RESOURCE_GENERATION='1'), \
+                patch('sys.stdin', io.StringIO('{}')), patch('sys.stderr', io.StringIO()):
+            self.assertEqual(broker.main(['hook']), 1)
+
+    # ─── replacement from the transcript ─────────────────────────────────
+
+    def test_exhaustion_replaces_the_worker_and_resumes_its_transcript(self):
+        worker = self.start()
+        account = self.cfg['accounts'][worker['account']]
+        transcript = self.directory / 'homes' / worker['account'] / 'projects' / broker.encoded_cwd(worker['cwd']) / (worker['session_id'] + '.jsonl')
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text('{"type":"assistant"}\n')
+        db = broker.state()
+        db['workers'][worker['id']].update(status='running', transcript_path=str(transcript))
+        broker.save(db)
+        self.usage[worker['account']]['windows'][0]['used'] = 96
+        first = self.supervise(tmux_alive=True)[worker['id']]
+        self.assertEqual(first['status'], 'replacing')
+        self.assertEqual(first['previous_transcript'], str(transcript))
+        second = self.supervise()[worker['id']]
+        self.assertEqual(second['generation'], 2)
+        self.assertEqual(second['status'], 'starting')
+        self.assertNotEqual(second['account'], worker['account'])
+        self.assertEqual(second['session_id'], worker['session_id'])
+        self.assertIn(worker['pool'], broker.state()['cooldowns'])
+        successor = self.cfg['accounts'][second['account']]
+        if successor['provider'] == 'claude':
+            successor['home'] = str(self.directory / 'homes' / second['account'])
+            command, _ = broker.execution(second, self.cfg)
+            self.assertEqual(command[command.index('--resume') + 1], worker['session_id'])
+            carried = Path(successor['home']) / 'projects' / broker.encoded_cwd(worker['cwd']) / (worker['session_id'] + '.jsonl')
+            self.assertEqual(carried.read_text(), transcript.read_text())
+        else:
+            command, _ = broker.execution(second, self.cfg)
+            self.assertIn(str(transcript), command[-1])
+        self.assertEqual(broker.state()['workers'][worker['id']]['generation'], 2)
+        self.assertEqual(account['provider'] in ('claude', 'codex'), True)
 
     def test_native_quota_records_are_distinct_from_throttles_or_quoted_text(self):
         worker = self.start()
@@ -254,16 +278,45 @@ PROJECT="keep-project"
         transcript.write_text(json.dumps(quota) + '\n' + json.dumps({'type': 'event_msg', 'payload': {'type': 'agent_message', 'message': 'Recovered'}}) + '\n')
         self.assertFalse(broker.native_quota_error(worker, self.cfg))
 
-    def test_hook_warns_before_reserve_and_blocks_native_children(self):
+    def test_an_unexplained_exit_blocks_and_retry_requeues(self):
         worker = self.start()
-        self.usage[worker['account']]['windows'][0]['used'] = 81
-        broker.atomic_json(broker.root() / 'usage.json', self.usage)
-        with self.owner(worker), patch('sys.stdin', io.StringIO(json.dumps({'tool_name': 'Agent', 'tool_input': {}}))):
-            with self.assertRaisesRegex(ValueError, 'spawn task workers'):
-                broker.hook()
-        with self.owner(worker), patch('sys.stdin', io.StringIO(json.dumps({'tool_name': 'Bash', 'tool_input': {'command': 'cc-hub resource status'}}))):
-            result = broker.hook()
-        self.assertIn('checkpoint-and-handoff', result['hookSpecificOutput']['additionalContext'])
+        db = broker.state()
+        db['workers'][worker['id']]['status'] = 'running'
+        broker.save(db)
+        blocked = self.supervise()[worker['id']]
+        self.assertEqual(blocked['status'], 'blocked')
+        with patch.object(broker, 'tmux_exists', return_value=False), patch('sys.stdout', io.StringIO()):
+            self.assertEqual(broker.main(['retry', '--worker', worker['id']]), 0)
+        self.assertEqual(broker.state()['workers'][worker['id']]['status'], 'waiting_for_capacity')
+
+    def test_attempt_limit_blocks_instead_of_retrying_forever(self):
+        worker = self.start()
+        db = broker.state()
+        db['workers'][worker['id']].update(status='waiting_for_capacity', generation=self.cfg['settings']['max_attempts'])
+        broker.save(db)
+        self.assertEqual(self.supervise()[worker['id']]['status'], 'blocked')
+
+    def test_stop_ends_a_worker(self):
+        worker = self.start()
+        with patch('sys.stdout', io.StringIO()):
+            self.assertEqual(broker.main(['stop', '--worker', worker['id'], '--reason', 'done']), 0)
+        with patch.object(broker.time, 'time', return_value=time.time() + 10):
+            self.assertEqual(self.supervise()[worker['id']]['status'], 'stopped')
+
+    # ─── the card ────────────────────────────────────────────────────────
+
+    def test_the_card_shows_the_broker_state_and_nothing_else(self):
+        (self.board / 'tk-test').mkdir(parents=True)
+        for snapshot in self.usage.values():
+            snapshot['windows'][0]['used'] = 90
+        worker = self.start()
+        label = json.loads((self.board / 'tk-test/resources.json').read_text())
+        self.assertEqual(label['stage'], 'capacity_wait')
+        self.assertIn('implementation', label['detail'])
+        db = broker.state()
+        db['workers'][worker['id']]['status'] = 'stopped'
+        broker.save(db)
+        self.assertFalse((self.board / 'tk-test/resources.json').exists())
 
 
 if __name__ == '__main__':

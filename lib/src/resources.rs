@@ -115,8 +115,7 @@ pub fn task_kind(task: &str) -> Option<String> {
         serde_json::from_str(&std::fs::read_to_string(directory.join("state.json")).ok()?).ok()?;
     value["workers"].as_object()?.values().find(|w| {
         w["task"].as_str() == Some(task)
-            && w["role"].as_str() == Some("dev")
-            && w["status"].as_str() != Some("complete")
+            && !matches!(w["status"].as_str(), Some("stopped") | Some("blocked"))
     })?["kind"]
         .as_str()
         .map(str::to_string)

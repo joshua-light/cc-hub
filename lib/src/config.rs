@@ -20,6 +20,7 @@ pub struct Config {
     pub spawn: SpawnConfig,
     pub agents: BTreeMap<String, ConfiguredAgent>,
     pub projects: ProjectsConfig,
+    pub tasks: TasksConfig,
     pub title: TitleConfig,
     pub inactive: InactiveConfig,
     pub scan: ScanConfig,
@@ -211,6 +212,18 @@ pub struct ConfiguredModelDetails {
 pub struct ProjectsConfig {
     pub default_orchestrator_agent: Option<String>,
     pub default_session_agent: Option<String>,
+}
+
+/// `[tasks]` — the personal board's own knobs.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TasksConfig {
+    /// The deliverable kinds a card may be given on the board (`T`), in the
+    /// order the picker offers them. cc-hub never interprets a kind: it stores
+    /// the word and hands it to whoever opens the session — the task router
+    /// owns where each one lands. Empty (the default) means the board offers
+    /// nothing to pick and every card stays router-classified.
+    pub kinds: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

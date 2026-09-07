@@ -27,7 +27,11 @@
 //! change its own cwd, so a link naming a different directory is a hand-over
 //! and starts fresh there. This is what lets a queued task be woken by the
 //! same link that started it, without the two-sessions-one-journal failure
-//! of 2026-09-04.
+//! of 2026-09-04. A link that names a `role` is the exception on purpose: it
+//! is a hand-over, so it starts a fresh session and reports the card's old
+//! one as `superseded` for the caller to close once it has printed. A
+//! hand-over is refused when the card has no note: the notes are the brief
+//! the next session works from, and without one there is nothing to hand.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -70,6 +74,21 @@ pub struct Opened {
     /// The card already had a live session where the link pointed, and the
     /// prompt went there instead of to a new one.
     pub reused: bool,
+    /// The card's previous live session, when this open was a hand-over. The
+    /// caller closes it *after* reporting, because the caller may be running
+    /// inside it.
+    pub superseded: Option<String>,
+}
+
+/// The live session a hand-over for `task` would replace, if any.
+pub fn session_to_supersede(task: &crate::link::TaskLink) -> Result<Option<String>, OpError> {
+    let target = self::target(&Link::Task(task.clone()), None)?;
+    let card = board_card(task.id.as_str())?;
+    Ok(live_session_in(
+        &card,
+        &target.cwd,
+        send::tmux_session_exists,
+    ))
 }
 
 /// Resolve `link` to its [`LinkTarget`] without spawning anything.
@@ -116,6 +135,9 @@ pub fn target(link: &Link, agent: Option<&str>) -> Result<LinkTarget, OpError> {
                     cwd.display()
                 )));
             }
+            if task.is_handover() {
+                without_a_brief(&card)?;
+            }
             let brief = card.title.as_deref().unwrap_or(&card.prompt);
             Ok(LinkTarget {
                 cwd,
@@ -125,6 +147,27 @@ pub fn target(link: &Link, agent: Option<&str>) -> Result<LinkTarget, OpError> {
             })
         }
     }
+}
+
+/// No hand-over without a brief. The session that hands a card to the next
+/// role must have written down what the task is and how it is verified;
+/// that record is the card's notes, and a card with none has nothing to hand
+/// over. The `task` skill used to keep this rule in its own script; it lives
+/// here so that every role link, from any caller, passes the same gate.
+fn without_a_brief(card: &TaskState) -> Result<(), OpError> {
+    if crate::ops::task::notes_of(card).is_empty() {
+        return Err(OpError::conflict_with_recipe(
+            format!(
+                "no hand-over without a brief: card {} has no note",
+                card.task_id
+            ),
+            format!(
+                "cc-hub board note --task {} --text '<problem, solution, verification>'",
+                card.task_id
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// The board card a task link addresses. Personal-board tasks are the only
@@ -173,9 +216,13 @@ pub fn open(link: &Link, opts: OpenOpts) -> Result<Opened, OpError> {
     let cwd = target.cwd.to_string_lossy().into_owned();
     let wait = Duration::from_secs(opts.wait_secs.unwrap_or(DEFAULT_PROMPT_WAIT_SECS));
 
+    let mut superseded = None;
     if let Link::Task(task) = link {
         let card = board_card(task.id.as_str())?;
-        if let Some(tmux) = live_session_in(&card, &target.cwd, send::tmux_session_exists) {
+        let live = live_session_in(&card, &target.cwd, send::tmux_session_exists);
+        if task.is_handover() {
+            superseded = live;
+        } else if let Some(tmux) = live {
             let prompt_status = match wait_until_idle_and_send(&tmux, &target.prompt, wait) {
                 Ok(()) => PromptStatus::Sent,
                 Err(e) => {
@@ -192,6 +239,7 @@ pub fn open(link: &Link, opts: OpenOpts) -> Result<Opened, OpError> {
                 session_id: card.session_id,
                 prompt_status,
                 reused: true,
+                superseded: None,
             });
         }
     }
@@ -242,6 +290,7 @@ pub fn open(link: &Link, opts: OpenOpts) -> Result<Opened, OpError> {
         session_id,
         prompt_status,
         reused: false,
+        superseded,
     })
 }
 
@@ -349,9 +398,10 @@ mod tests {
                 .expect("parse");
             let target = target(&link, Some("claude")).expect("target");
             assert_eq!(target.cwd, dir);
-            assert!(target
-                .prompt
-                .starts_with("/task --task tk-1 Semantic Linter"));
+            assert_eq!(
+                target.prompt,
+                "/task --task tk-1 --kind basic Semantic Linter"
+            );
             assert_eq!(target.title, "Task: Semantic Linter");
         });
     }
@@ -364,6 +414,33 @@ mod tests {
             let id = card(Some(&dir.to_string_lossy()));
             let link: Link = format!("cc-hub://task?id={}", id).parse().expect("parse");
             assert_eq!(target(&link, Some("claude")).expect("target").cwd, dir);
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_role_link_needs_a_note_on_the_card() {
+        crate::test_util::with_temp_home(|| {
+            let dir = std::env::temp_dir();
+            let id = card(None);
+            let link: Link = format!(
+                "cc-hub://task?id={}&dir={}&role=verification",
+                id,
+                dir.display()
+            )
+            .parse()
+            .expect("parse");
+            assert!(matches!(
+                target(&link, Some("claude")),
+                Err(OpError::Conflict { .. })
+            ));
+
+            crate::ops::task::task_artifact_add_text(None, &id, "Problem: …", "cli").expect("note");
+            let target = target(&link, Some("claude")).expect("target");
+            assert_eq!(
+                target.prompt,
+                "/task --task tk-1 --role verification Semantic Linter"
+            );
         });
     }
 

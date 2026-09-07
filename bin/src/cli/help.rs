@@ -16,6 +16,7 @@ pub(crate) fn print_cli_help(topic: &[String]) -> Result<(), CliError> {
         Some("agent") => print!("{}", AGENT_HELP),
         Some("board") => print!("{}", BOARD_HELP),
         Some("resource") => print!("{}", RESOURCE_HELP),
+        Some("usage") => print!("{}", USAGE_HELP),
         Some(other) => {
             return Err(CliError::Usage(format!(
                 "unknown help topic: {} (try `cc-hub help`)",
@@ -50,7 +51,8 @@ Persistent agents (Agents tab):
 
 Tasks board:
   board             Add a card to the personal Tasks board
-  resource          Account capacity, role workers and checkpointed handoffs
+  resource          Account capacity and the managed session working each task
+  usage             Quota of a Claude account, from the shared store
 
 Examples:
   cc-hub task create --backlog --prompt "Fix the flaky test"
@@ -59,25 +61,40 @@ Examples:
   cc-hub pr show --task t-123
 "#;
 
+const USAGE_HELP: &str = r#"cc-hub usage [--home DIR] [--refresh]
+
+Print one JSON line with the account's quota windows and the store's health.
+Every consumer (statusline, TUI, resource broker) reads through this store, so
+the usage endpoint sees one request per account per minute from this machine.
+
+  --home DIR     Claude config dir of the account; default CLAUDE_CONFIG_DIR
+                 or ~/.claude
+  --refresh      Ask again even if the last reading is younger than the TTL.
+                 A pending retry window is still honoured.
+
+Fields: health (ready|throttled|login_required|unavailable), five_hour and
+seven_day (utilization, resets_at) from the last good reading or null, age_s
+of that reading, retry_at when the endpoint may be asked again, error.
+"#;
+
 const RESOURCE_HELP: &str = r#"cc-hub resource
 
   accounts [--refresh]                      Show account health and quota windows
   select --kind KIND --role ROLE            Preview a capacity-aware allocation
   start --task ID --kind KIND --role ROLE --cwd DIR --prompt TEXT
-  status [--worker ID]                      Worker attempts, account and checkpoint
-  retry --worker ID                        Requeue an inspected, stopped worker
-  checkpoint --file PATH                   Save progress for the current worker
-  handoff --file PATH [--reason TEXT]       Checkpoint and request a replacement
-  message --worker ID --text TEXT          Durable message to another role worker
-  inbox [--ack ID]                         Read/acknowledge this worker's messages
-  complete                                Mark this role complete
-  supervise                               Refresh quota and reconcile workers once
-  hook                                    PreToolUse guard for managed workers
+                                            Start the session working a task; a task
+                                            with a live session in another role is
+                                            handed over (new one starts, old one stops)
+  status [--worker ID]                      Workers, their accounts and generations
+  stop --worker ID [--reason TEXT]          End a worker's session
+  retry --worker ID                         Requeue a blocked worker
+  supervise                                 Refresh quota and reconcile workers once
+  hook                                      PreToolUse: records the transcript, notes quota
 
 Configuration: ~/.cc-hub/resources.toml. Python 3.11+ and tmux required.
-Worker identity/generation come from CC_HUB_RESOURCE_WORKER/GENERATION.
-Use --worker ID for operator status; handoff/checkpoint use the worker's lease.
-Default warning/start ceilings are 80%/85%, leaving a reserve before exhaustion.
+One worker holds a task at a time. When its account reaches stop_percent the
+supervisor stops it and continues it on another account from its transcript.
+Default warning/start/stop ceilings are 80%/85%/95%.
 "#;
 
 const OPEN_HELP: &str = r#"cc-hub open
@@ -92,11 +109,15 @@ Links:
       <depth> review of this PR: <url>". The checkout is found by repo name
       among registered projects, bookmarks, and the cwds of known sessions.
 
-  cc-hub://task?id=<tk-…>[&dir=<path>][&kind=<word>]
+  cc-hub://task?id=<tk-…>[&dir=<path>][&kind=<word>][&role=<word>]
       Spawn a session for one Tasks-board card in <dir> (default: the card's
       own recorded cwd), name it "Task: <card>", open it with "/task --task
-      <id> <card text>", and bind the card to that session so `f` attaches to
-      it. The card's status is left alone.
+      <id> [--kind <word>] [--role <word>] <card text>", and bind the card to
+      that session so `f` attaches to it. With a role the link is a hand-over:
+      a fresh session starts and the card's previous one is closed once this
+      command has reported. A hand-over needs a note on the card (the brief
+      the next session works from; see `cc-hub help board`) and is refused
+      without one. The card's status is left alone.
 
 Options:
   --agent AGENT        Backend (default: [projects].default_session_agent)
@@ -245,10 +266,24 @@ directory under ~/.cc-hub/tasks/.
 
 Usage:
   cc-hub board add --text TEXT [--title TEXT] [--tags "a b"] [--priority p1|p2|p3|p4]
+                   [--kind WORD]
       Mint a card in To-Do, exactly as the `a` key does in the TUI. Nothing
       is spawned and no status changes. Emits {"ok":true,"task_id":"tk-…"}.
+      --kind is the deliverable the task router places the card by, and must
+      be one of [tasks].kinds — the same list the board's `T` picker offers.
+  cc-hub board note --task ID [--text TEXT]
+      Append a note to the card: --text, or stdin when there is none (a
+      heredoc for a long brief). The same `note` attachment the `p` key
+      pastes; it shows on the card. Emits {"ok":true,"note":{…},"count":N}.
+  cc-hub board notes --task ID [--json]
+      The card's notes in attach order, each under a dated rule.
 
 A card is how a script hands the user something to look at: mint it here,
 then open it with `cc-hub open "cc-hub://task?id=<tk-…>&dir=<path>"`, which
 only ever addresses a card that already exists (see `cc-hub help open`).
+
+The notes are a task's record. The `task` skill writes the brief it agreed
+with the user as one note, the branch it built as another, and what
+verification found as a third; a session taking the card over reads them
+first. A hand-over link (`&role=…`) is refused for a card with no note.
 "#;

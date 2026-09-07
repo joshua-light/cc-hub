@@ -14,7 +14,7 @@ args = ["--dangerously-skip-permissions"]
 max_workers = 2
 capabilities = ["task-workflow"]
 [accounts.cc-1.models]
-claude-sonnet-5 = ["medium"]
+"claude-sonnet-5[1m]" = ["medium"]
 
 [accounts.cc-2]
 provider = "claude"
@@ -23,7 +23,7 @@ args = ["--dangerously-skip-permissions"]
 max_workers = 2
 capabilities = ["task-workflow"]
 [accounts.cc-2.models]
-claude-sonnet-5 = ["medium"]
+"claude-sonnet-5[1m]" = ["medium"]
 
 [accounts.codex-1]
 provider = "codex"
@@ -41,8 +41,9 @@ capabilities = ["task-workflow"]
 
 [profiles.sonnet-medium]
 provider = "claude"
-model = "claude-sonnet-5"
+model = "claude-sonnet-5[1m]"
 effort = "medium"
+autocompact = 250_000 # Compact well inside the 1M window.
 accounts = ["cc-1", "cc-2"]
 [profiles.luna-medium]
 provider = "codex"
@@ -50,22 +51,19 @@ model = "gpt-5.6-luna"
 effort = "medium"
 accounts = ["codex-1", "codex-2"]
 
-[routing.default.dev]
+[routing.default.implementation]
 profiles = ["sonnet-medium", "luna-medium"]
 requires = ["task-workflow"]
 
-[routing.default.qa]
+[routing.default.verification]
 profiles = ["sonnet-medium", "luna-medium"]
 requires = ["task-workflow"]
 
-[routing.default.worker]
+
+[routing.project.implementation]
 profiles = ["sonnet-medium", "luna-medium"]
 requires = ["task-workflow"]
 
-[routing.project.dev]
-profiles = ["sonnet-medium", "luna-medium"]
-requires = ["task-workflow"]
-
-[routing.project.qa]
+[routing.project.verification]
 profiles = ["sonnet-medium", "luna-medium"]
 requires = ["task-workflow"]

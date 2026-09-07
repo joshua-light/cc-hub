@@ -7,11 +7,42 @@ pub(crate) const NO_TEXT_CONTENT: &str = "(no text content)";
 pub(crate) const TOOL_MARKER_PREFIX: &str = "[tool: ";
 pub(crate) const THINKING_MARKER: &str = "[thinking...]";
 
+/// The raw text of a `user` entry — the string content, or its first text
+/// block. Untruncated; previewing callers truncate themselves.
+fn user_text(entry: &Value) -> Option<&str> {
+    let content = entry.get("message")?.get("content")?;
+    if let Some(text) = content.as_str() {
+        return Some(text);
+    }
+    content
+        .as_array()?
+        .iter()
+        .filter(|block| block.get("type").and_then(|t| t.as_str()) == Some("text"))
+        .find_map(|block| block.get("text").and_then(|t| t.as_str()))
+}
+
+/// The body of a notice cc-hub injected itself: the text after the
+/// [`crate::send::AUTOMATION_MARKER`] line. `None` for anything the user
+/// really typed. Read before truncation, which would keep only the marker.
+pub(crate) fn automation_body(entry: &Value) -> Option<&str> {
+    if entry.get("type").and_then(|t| t.as_str()) != Some("user") {
+        return None;
+    }
+    let text = user_text(entry)?.trim_start();
+    Some(
+        text.strip_prefix(crate::send::AUTOMATION_MARKER)?
+            .trim_start(),
+    )
+}
+
 pub(super) fn extract_text_content(entry: &Value) -> String {
     let msg_type = entry.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
     match msg_type {
         "user" => {
+            if let Some(body) = automation_body(entry) {
+                return truncate_str(body, 200);
+            }
             if let Some(content) = entry.get("message").and_then(|m| m.get("content")) {
                 if let Some(text) = content.as_str() {
                     return truncate_str(text, 200);

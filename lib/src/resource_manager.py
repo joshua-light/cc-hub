@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Account-aware interactive workers. Standard library only; shipped in cc-hub.
+"""Account-aware task sessions. Standard library only; shipped in cc-hub.
 
-The broker owns role leases and tmux lifetimes. Provider credentials stay in
-their own homes. No LLM call is necessary to checkpoint, select or restart.
+A task has one worker at a time. `start` for a task that already has a live
+worker in another role is a hand-over: the new worker is launched and the old
+one is stopped. The broker owns which account a worker runs on and its tmux
+lifetime. When an account runs dry the worker is replaced on another account
+and continues from its own transcript; no LLM call is needed to notice, stop,
+select or restart. Provider credentials stay in their own homes.
 """
 import argparse
 import contextlib
@@ -15,13 +19,12 @@ import re
 from pathlib import Path
 import selectors
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import tomllib
-import urllib.error
-import urllib.request
 import uuid
 
 
@@ -61,6 +64,9 @@ def lock(name='state'):
         yield
 
 
+# ─── configuration ───────────────────────────────────────────────────────
+
+
 def load_config():
     with config_path().open('rb') as stream:
         cfg = tomllib.load(stream)
@@ -70,10 +76,13 @@ def load_config():
     settings.setdefault('stop_percent', 95)
     settings.setdefault('refresh_seconds', 60)
     settings.setdefault('max_attempts', 20)
+    settings.setdefault('stale_seconds', 900)
     if not 0 < settings['warn_percent'] < settings['start_percent'] < settings['stop_percent'] <= 100:
         raise ValueError('require 0 < warn_percent < start_percent < stop_percent <= 100')
     if settings['refresh_seconds'] < 10 or settings['max_attempts'] < 1:
         raise ValueError('refresh_seconds must be >= 10; max_attempts must be positive')
+    if settings['stale_seconds'] < settings['refresh_seconds']:
+        raise ValueError('stale_seconds must be >= refresh_seconds')
     for name, account in cfg.get('accounts', {}).items():
         if account.get('provider') not in ('claude', 'codex'):
             raise ValueError(f'{name}: provider must be claude or codex')
@@ -84,6 +93,9 @@ def load_config():
     for name, profile in cfg.get('profiles', {}).items():
         if not profile.get('model') or not profile.get('effort') or not profile.get('accounts'):
             raise ValueError(f'{name}: model, effort and accounts are required')
+        window = profile.get('autocompact')
+        if window is not None and not (profile.get('provider') == 'claude' and 100_000 <= window <= 1_000_000):
+            raise ValueError(f'{name}: autocompact is Claude-only and must be 100000..1000000 tokens')
         for account in profile['accounts']:
             if account not in cfg.get('accounts', {}):
                 raise ValueError(f'{name}: unknown account {account}')
@@ -115,6 +127,22 @@ def account_env(account):
 
 def run(argv, **kwargs):
     return subprocess.run(argv, capture_output=True, text=True, timeout=kwargs.pop('timeout', 20), **kwargs)
+
+
+def policy(cfg, kind, role):
+    policies = cfg.get('routing', {})
+    value = policies.get(kind, {}).get(role, policies.get('default', {}).get(role))
+    if not value:
+        raise ValueError(f'no routing policy for {kind}/{role}')
+    if value.get('account') and value['account'] not in cfg.get('accounts', {}):
+        raise ValueError('policy pins an unknown account')
+    for name in value.get('profiles', []):
+        if name not in cfg.get('profiles', {}):
+            raise ValueError(f'unknown profile {name}')
+    return value
+
+
+# ─── account probes ──────────────────────────────────────────────────────
 
 
 def rpc(account, requests):
@@ -187,7 +215,7 @@ def toml_value(value):
     return json.dumps(value)
 
 
-def probe(account):
+def probe(account, stale_seconds=900):
     if not account.get('enabled', True):
         return {'health': 'disabled', 'windows': []}
     try:
@@ -217,22 +245,12 @@ def probe(account):
                     'models': {m['model']: [e['reasoningEffort'] for e in m.get('supportedReasoningEfforts', [])]
                                for m in models.get('data', [])}}
         home = account_home(account)
-        credentials = read_json(home / '.credentials.json')
-        if credentials is None and sys.platform == 'darwin':
-            service = account.get('keychain_service')
-            if not service and account.get('home_mode') == 'default':
-                service = 'Claude Code-credentials'
-            elif not service:
-                # Verified against the installed Claude CLI's separate-profile
-                # Keychain entry. Explicit keychain_service overrides future changes.
-                service = 'Claude Code-credentials-' + hashlib.sha256(str(home).encode()).hexdigest()[:8]
-            if service:
-                result = run(['security', 'find-generic-password', '-s', service, '-w'])
-                if result.returncode == 0:
-                    credentials = json.loads(result.stdout)
-        oauth = (credentials or {}).get('claudeAiOauth', {})
-        token = oauth.get('accessToken')
-        if not token:
+        # One store for every consumer on this machine; see `cc-hub usage`.
+        answer = run([os.environ.get('CC_HUB_BINARY', 'cc-hub'), 'usage', '--home', str(home)])
+        report = json.loads(answer.stdout) if answer.returncode == 0 else {}
+        if not report.get('ok'):
+            return {'health': 'unknown', 'windows': [], 'error': 'usage store unavailable'}
+        if report['health'] == 'login_required':
             return {'health': 'login_required', 'windows': []}
         identity = run([account.get('executable', 'claude'), 'auth', 'status', '--json'], env=account_env(account))
         auth = json.loads(identity.stdout) if identity.returncode == 0 else {}
@@ -241,24 +259,18 @@ def probe(account):
         key = ':'.join(str(auth.get(k) or '') for k in ('orgId', 'email'))
         if key == ':':
             raise ValueError('Claude did not return an account identity')
-        req = urllib.request.Request('https://api.anthropic.com/api/oauth/usage', headers={
-            'Authorization': 'Bearer ' + token, 'anthropic-beta': 'oauth-2025-04-20',
-            'User-Agent': 'cc-hub/1.0'})
-        with urllib.request.urlopen(req, timeout=15) as response:
-            usage = json.load(response)
-        windows = [{'name': name, 'used': float(window['utilization']), 'resets_at': epoch(window.get('resets_at'))}
-                   for name, window in usage.items() if isinstance(window, dict) and window.get('utilization') is not None]
-        return {'health': 'ready' if windows else 'unknown', 'windows': windows,
-                'pool': fingerprint('claude', str(key)), 'models': account.get('models', {})}
-    except urllib.error.HTTPError as exc:
-        if exc.code == 429:
-            try:
-                delay = max(60, int(exc.headers.get('Retry-After', '60')))
-            except (TypeError, ValueError):
-                delay = 60
-            return {'health': 'throttled', 'windows': [], 'error': 'usage HTTP 429', 'retry_at': time.time() + delay}
-        return {'health': 'login_required' if exc.code in (401, 403) else 'unknown',
-                'windows': [], 'error': f'usage HTTP {exc.code}'}
+        windows = [{'name': name, 'used': float(report[name]['utilization']), 'resets_at': epoch(report[name].get('resets_at'))}
+                   for name in ('five_hour', 'seven_day') if report.get(name)]
+        # A throttled endpoint is not an exhausted account: a reading younger
+        # than stale_seconds still says how much room there is.
+        usable = windows and report.get('age_s', float('inf')) <= stale_seconds
+        if report['health'] == 'ready' or usable:
+            return {'health': 'ready', 'windows': windows, 'error': report.get('error'),
+                    'pool': fingerprint('claude', str(key)), 'models': account.get('models', {})}
+        if report['health'] == 'throttled':
+            return {'health': 'throttled', 'windows': [], 'error': 'usage HTTP 429',
+                    'retry_at': report.get('retry_at') or time.time() + 60}
+        return {'health': 'unknown', 'windows': [], 'error': report.get('error') or 'usage unavailable'}
     except (OSError, ValueError, KeyError, TypeError, TimeoutError, subprocess.SubprocessError):
         # Raw exceptions may contain sensitive response bodies or CLI output.
         return {'health': 'unknown', 'windows': [], 'error': 'account probe unavailable; check profile login/tools'}
@@ -273,7 +285,7 @@ def refresh(cfg, force=False):
             if value.get('retry_at', 0) > now:
                 continue
             if force or now - value.get('last_probe_at', value.get('observed_at', 0)) >= cfg['settings']['refresh_seconds']:
-                result = probe(account)
+                result = probe(account, cfg['settings']['stale_seconds'])
                 if result['health'] in ('unknown', 'throttled'):
                     failures = value.get('probe_failures', 0) + 1
                     retry_at = max(result.get('retry_at', 0), time.time() + min(600, 60 * 2 ** min(failures - 1, 4)))
@@ -292,6 +304,30 @@ def refresh(cfg, force=False):
         return cache
 
 
+def applicable_windows(snapshot, model):
+    # Claude publishes model-family subwindows as well as account-wide ones.
+    return [w for w in snapshot.get('windows', [])
+            if not any(family in w['name'] and family not in model for family in ('sonnet', 'opus'))]
+
+
+def usage_of(worker, usage, cfg):
+    """(used percent, fresh) for the worker's account on the worker's model."""
+    snapshot = usage.get(worker['account'], {})
+    model = worker.get('model') or cfg['profiles'][worker['profile']]['model']
+    windows = applicable_windows(snapshot, model)
+    used = max((w['used'] for w in windows), default=0)
+    fresh = time.time() - snapshot.get('observed_at', 0) <= cfg['settings']['refresh_seconds'] * 2
+    return used, fresh
+
+
+# ─── state ───────────────────────────────────────────────────────────────
+
+LIVE = ('starting', 'running', 'replacing', 'stopping')
+# A worker that still holds its task; one on its way out no longer does.
+HOLDING = ('waiting_for_capacity', 'starting', 'running', 'replacing')
+CARD_STAGES = {'waiting_for_capacity': 'capacity_wait', 'replacing': 'resource_handoff', 'blocked': 'resource_blocked'}
+
+
 def state():
     return read_json(root() / 'state.json', {'workers': {}, 'cooldowns': {}})
 
@@ -303,42 +339,18 @@ def save(value):
     for worker in value['workers'].values():
         if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', worker['task']):
             by_task.setdefault(worker['task'], []).append(worker)
-    stages = {'waiting_for_capacity': 'capacity_wait', 'handoff_requested': 'resource_handoff',
-              'stopping': 'resource_handoff', 'blocked': 'resource_blocked'}
     for task, workers in by_task.items():
         path = board / task / 'resources.json'
         if not path.parent.is_dir():
             continue
-        worker = next((w for w in workers if w['status'] in stages), None)
-        if worker:
-            activity = {'stage': stages[worker['status']], 'detail': worker['role'] + ' / ' + worker.get('account', 'eligible accounts')}
-            if read_json(path) != activity:
-                atomic_json(path, activity)
-        else:
+        worker = next((w for w in workers if w['status'] in CARD_STAGES), None)
+        if worker is None:
             path.unlink(missing_ok=True)
-
-
-def policy(cfg, kind, role):
-    policies = cfg.get('routing', {})
-    value = policies.get(kind, {}).get(role, policies.get('default', {}).get(role))
-    if value is None and role in ('qa-editor', 'qa-build'):
-        value = policies.get(kind, {}).get('qa', policies.get('default', {}).get('qa'))
-    if value is None and role.startswith('worker-'):
-        value = policies.get(kind, {}).get('worker', policies.get('default', {}).get('worker'))
-    if not value:
-        raise ValueError(f'no routing policy for {kind}/{role}')
-    if value.get('account') and value['account'] not in cfg.get('accounts', {}):
-        raise ValueError('policy pins an unknown account')
-    for name in value.get('profiles', []):
-        if name not in cfg.get('profiles', {}):
-            raise ValueError(f'unknown profile {name}')
-    return value
-
-
-def applicable_windows(snapshot, model):
-    # Claude publishes model-family subwindows as well as account-wide ones.
-    return [w for w in snapshot.get('windows', [])
-            if not any(family in w['name'] and family not in model for family in ('sonnet', 'opus'))]
+            continue
+        activity = {'stage': CARD_STAGES[worker['status']],
+                    'detail': worker['role'] + ' / ' + worker.get('account', 'eligible accounts')}
+        if read_json(path) != activity:
+            atomic_json(path, activity)
 
 
 def select(cfg, usage, db, kind, role, exclude=None):
@@ -371,8 +383,7 @@ def select(cfg, usage, db, kind, role, exclude=None):
             ceiling = account.get('start_percent', cfg['settings']['start_percent'])
             if used >= ceiling:
                 continue
-            active = sum(w.get('pool') == pool and w['status'] in ('starting', 'running', 'handoff_requested', 'stopping')
-                         for w in db['workers'].values())
+            active = sum(w.get('pool') == pool and w['status'] in LIVE for w in db['workers'].values())
             if active >= account.get('max_workers', 2):
                 continue
             # Percentages are a heuristic, not equivalent token budgets. A
@@ -389,27 +400,17 @@ def current_worker(db, requested=None, require_owner=False):
     worker_id = requested or os.environ.get('CC_HUB_RESOURCE_WORKER')
     worker = db['workers'].get(worker_id)
     if worker is None:
-        raise ValueError('unknown worker; run inside a managed role or supply --worker')
+        raise ValueError('unknown worker; run inside a managed session or supply --worker')
     if require_owner:
         if worker_id != os.environ.get('CC_HUB_RESOURCE_WORKER') or str(worker['generation']) != os.environ.get('CC_HUB_RESOURCE_GENERATION'):
-            raise ValueError('stale worker generation; this role belongs to a replacement')
-        if worker['status'] not in ('starting', 'running', 'handoff_requested'):
+            raise ValueError('stale worker generation; this session was replaced')
+        if worker['status'] not in ('starting', 'running'):
             raise ValueError('worker lease is not active')
     return worker
 
 
-def recovery_command(command):
-    if any(value in command for value in ('\n', '\r', '`', '$(')):
-        return False
-    try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=';&|<>()')
-        lexer.whitespace_split = True
-        words = list(lexer)
-    except ValueError:
-        return False
-    return (len(words) >= 3 and Path(words[0]).name == 'cc-hub' and words[1] == 'resource'
-            and words[2] in ('checkpoint', 'handoff', 'status', 'complete')
-            and not any(word and all(c in ';&|<>()' for c in word) for word in words))
+def live_worker(db, task):
+    return next((w for w in db['workers'].values() if w['task'] == task and w['status'] in HOLDING), None)
 
 
 def tmux_exists(name):
@@ -424,38 +425,52 @@ def process_stamp(pid):
     return fields[0] if len(fields) == 2 and not fields[1].startswith('Z') else None
 
 
-def worker_dir(worker):
-    return root() / 'workers' / worker['id']
-
-
 def record(worker, event, **fields):
     worker.setdefault('events', []).append(dict(event=event, at=time.time(), **fields))
 
 
-INSTRUCTIONS = '''You are a cc-hub managed task worker. Your logical task/role identity
-survives provider/account changes. Read the task skill's references/resources.md.
-Every worker you spawn for task work MUST use `cc-hub resource start` with the
-same task and kind and its own role; do not create native Task/Agent children.
-Use distinct worker-N roles for parallel helpers; these inherit the worker policy.
-Read your durable journal and `cc-hub resource inbox` before acting. A message
-is not acknowledged until you have reconciled it and run inbox --ack ID.
-Use CC_HUB_RESOURCE_ROOT as journal root session and CC_HUB_RESOURCE_ACTOR as
-your QA agent identity when role=qa, qa-editor, or qa-build. Do not bind a replacement provider session
-as a new journal root. Preserve assignment sequences, acknowledgments, scenario
-coverage, candidate hashes, evidence and existing QA/PR gates.
-Checkpoint at milestones and BEFORE long tools: write a file with completed
-work, cwd/worktree/branch, dirty files, candidate, evidence, durable job IDs,
-device ownership, unresolved operations, blockers and exact next steps; run
-`cc-hub resource checkpoint --file PATH`. Do not repeat an external write just
-because its response was lost: inspect jobs, repository and remote result first.
-At a quota warning, finish only the current safe step, save a checkpoint and
-run `cc-hub resource handoff --file PATH --reason quota-reserve`. Then stop
-using tools and yield. Do this BEFORE quota exhaustion. The hub, not you,
-stops this process and creates the replacement; never log out or change auth.
-The hook will block ordinary tools near the emergency threshold. The broker
-can recover from the last durable checkpoint without a final model response.
-To finish this role, record delivery/results and run `cc-hub resource complete`.
-'''
+def stop(worker, reason):
+    """Ask the supervisor to end this worker's session: hand-over or operator stop."""
+    if worker['status'] in ('stopped', 'blocked'):
+        return
+    worker.update(status='stopping', stop_reason=reason, stop_at=time.time())
+    record(worker, 'stop_requested', reason=reason)
+
+
+# ─── sessions ────────────────────────────────────────────────────────────
+
+INSTRUCTIONS = '''You are running as a cc-hub managed task session. The account you run on is
+the hub's choice; never log out or change auth. If it runs dry, the hub stops
+this session and continues it on another account from this transcript; you do
+not need to prepare for that. Read ~/.claude/skills/task/SKILL.md and follow it.'''
+
+RESUMED = '''This session continues an earlier one that stopped when its account ran dry.
+Its transcript is at {path}. Re-read the card's notes before acting; do not
+repeat an external write (push, build, PR) without checking whether it landed.'''
+
+
+def encoded_cwd(cwd):
+    return re.sub(r'[/\\.:]', '-', cwd)
+
+
+def transcript_of(worker, account):
+    path = worker.get('transcript_path')
+    if not path and account['provider'] == 'claude':
+        path = str(account_home(account) / 'projects' / encoded_cwd(worker['cwd']) / (worker['session_id'] + '.jsonl'))
+    return path if path and Path(path).is_file() else None
+
+
+def carry_transcript(worker, previous, account):
+    """Put the previous generation's transcript where the new account's Claude
+    will look for it, so `--resume` continues the same session. Returns the
+    path the new session resumes from, or None when there is nothing to carry."""
+    if not previous or account['provider'] != 'claude':
+        return None
+    target = account_home(account) / 'projects' / encoded_cwd(worker['cwd']) / (worker['session_id'] + '.jsonl')
+    if target.resolve() != Path(previous).resolve():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(previous, target)
+    return str(target)
 
 
 def execution(worker, cfg):
@@ -464,27 +479,30 @@ def execution(worker, cfg):
     profile.update({key: worker[key] for key in ('model', 'effort') if key in worker})
     env = account_env(account)
     env.update(CC_HUB_RESOURCE_WORKER=worker['id'], CC_HUB_RESOURCE_GENERATION=str(worker['generation']),
-               CC_HUB_RESOURCE_ROOT=worker['root_id'], CC_HUB_RESOURCE_ACTOR=worker['actor_id'],
                CC_HUB_RESOURCE_TASK=worker['task'], CC_HUB_RESOURCE_KIND=worker['kind'],
                CC_HUB_RESOURCE_ROLE=worker['role'], CC_HUB_RESOURCE_TMUX=worker['tmux'],
                CC_HUB_RESOURCE_CONFIG=str(config_path()), CC_HUB_RESOURCE_DIR=str(root()))
     binary = os.environ.get('CC_HUB_BINARY')
     if binary and Path(binary).is_absolute():
         env['PATH'] = str(Path(binary).parent) + os.pathsep + env.get('PATH', '')
-    prompt = INSTRUCTIONS + '\n\nAssignment:\n' + worker['prompt']
-    prompt += '\n\nRole identity: ' + json.dumps({k: worker[k] for k in ('task', 'role', 'root_id', 'actor_id', 'generation')})
-    checkpoint = worker.get('checkpoint')
-    if checkpoint:
-        prompt += '\n\nRead the durable handoff file before continuing: ' + checkpoint['path']
-    if worker.get('generation', 0) > 1:
-        prompt += '\nThis is a replacement. Reconcile old jobs/operations and QA assignments before acting; no automatic replay.'
+    previous = worker.get('previous_transcript')
+    resume = carry_transcript(worker, previous, account) if previous else None
+    prompt = INSTRUCTIONS + '\n\n' + worker['prompt']
+    if previous and not resume:
+        prompt += '\n\n' + RESUMED.format(path=previous)
     # Profile args preserve the user's permission choices, independently of model/effort.
     argv = [account.get('executable', account['provider']), *account.get('args', [])]
-    hook_command = shlex.join([sys.executable, str(Path(__file__).resolve()), 'hook'])
-    hooks = {'PreToolUse': [{'matcher': '.*', 'hooks': [{'type': 'command', 'command': hook_command, 'timeout': 15}]}]}
+    gate = shlex.join([sys.executable, str(Path(__file__).resolve()), 'hook'])
+    hooks = {'PreToolUse': [{'matcher': '.*', 'hooks': [{'type': 'command', 'command': gate, 'timeout': 15}]}]}
     if account['provider'] == 'claude':
-        argv += ['--model', profile['model'], '--effort', profile['effort'], '--session-id', worker['session_id'],
-                 '--settings', json.dumps({'hooks': hooks}), prompt]
+        window = profile.get('autocompact')
+        argv += ['--model', profile['model'], '--effort', profile['effort'],
+                 *(['--autocompact', str(window)] if window else []),
+                 '--settings', json.dumps({'hooks': hooks})]
+        if resume:
+            argv += ['--resume', worker['session_id'], RESUMED.format(path=resume)]
+        else:
+            argv += ['--session-id', worker['session_id'], prompt]
     else:
         # Inline TOML overrides apply only to this worker, leaving user hooks intact.
         existing = []
@@ -523,18 +541,6 @@ def bind_board(worker, cfg):
         raise ValueError('worker started but board binding failed; supervisor will retry')
 
 
-def wake(worker):
-    binary = os.environ.get('CC_HUB_BINARY')
-    pending = any(not m.get('acknowledged_at') for m in worker.get('inbox', []))
-    if not binary or not (pending or worker.get('warning_at')) or time.time() - worker.get('notified_at', 0) < 60:
-        return
-    text = ('Quota reserve warning: checkpoint and request cc-hub resource handoff before exhaustion.'
-            if worker.get('warning_at') else 'A managed task worker sent a message. Run cc-hub resource inbox and reconcile it.')
-    result = run([binary, 'resource', '_notify', json.dumps({'tmux': worker['tmux'], 'text': text})])
-    if result.returncode == 0 and json.loads(result.stdout).get('sent'):
-        worker['notified_at'] = time.time()
-
-
 def reserve(worker, choice, cfg):
     if worker.get('tmux'):
         worker.setdefault('tmux_history', []).append(worker['tmux'])
@@ -543,8 +549,9 @@ def reserve(worker, choice, cfg):
     worker.update(model=profile['model'], effort=profile['effort'])
     worker['generation'] += 1
     worker['tmux'] = 'cchr-' + worker['id'][:12] + '-' + str(worker['generation'])
-    worker['session_id'] = str(uuid.uuid4())
-    for key in ('provider_session_id', 'transcript_path', 'pid', 'pid_stamp'):
+    # The session id is the worker's for life: a replacement resumes it.
+    worker.setdefault('session_id', str(uuid.uuid4()))
+    for key in ('provider_session_id', 'pid', 'pid_stamp'):
         worker.pop(key, None)
     worker['status'] = 'starting'
     worker['started_at'] = time.time()
@@ -561,33 +568,16 @@ def start_worker(args, cfg, usage):
         raise ValueError('worker cwd does not exist')
     with lock():
         db = state()
-        if os.environ.get('CC_HUB_RESOURCE_WORKER'):
-            parent = current_worker(db, require_owner=True)
-            if parent['task'] != args.task or parent['kind'] != args.kind:
-                raise ValueError('spawned workers must belong to the same task/kind')
-        else:
-            parent = None
-        existing = next((w for w in db['workers'].values() if w['task'] == args.task and w['role'] == args.role
-                         and w['status'] != 'complete'), None)
-        if existing:
-            if existing['kind'] != args.kind or existing['cwd'] != cwd:
-                raise ValueError('role already owns another kind/cwd; reconcile its checkpoint before changing the assignment')
-            if parent is None:
-                text = 'Task wake request: reread the journal and resume this assignment if applicable.\n' + args.prompt
-                if not any(m['text'] == text and not m.get('acknowledged_at') for m in existing['inbox']):
-                    existing['inbox'].append({'id': uuid.uuid4().hex, 'from': 'task-router', 'text': text, 'at': time.time()})
-                save(db)
-            return dict(existing, reused=True)
-        worker_id = uuid.uuid4().hex
-        roots = [w for w in db['workers'].values() if w['task'] == args.task and w['role'] == 'dev']
-        if args.role != 'dev' and not roots:
-            raise ValueError('start the dev/root role before task children')
-        worker = {'id': worker_id, 'task': args.task, 'kind': args.kind, 'role': args.role, 'cwd': cwd,
+        current = live_worker(db, args.task)
+        if current and current['role'] == args.role:
+            return dict(current, reused=True)
+        if current:
+            # A hand-over: the task changes hands, and the old session ends.
+            stop(current, 'handed to ' + args.role)
+        worker = {'id': uuid.uuid4().hex, 'task': args.task, 'kind': args.kind, 'role': args.role, 'cwd': cwd,
                   'prompt': args.prompt, 'generation': 0, 'status': 'waiting_for_capacity', 'events': [],
-                  'created_at': time.time(), 'actor_id': worker_id,
-                  'root_id': roots[0]['root_id'] if roots else worker_id,
-                  'parent_id': parent['id'] if parent else None, 'inbox': []}
-        db['workers'][worker_id] = worker
+                  'created_at': time.time(), 'predecessor': current['id'] if current else None}
+        db['workers'][worker['id']] = worker
         choice = select(cfg, usage, db, args.kind, args.role)
         if choice:
             reserve(worker, choice, cfg)
@@ -599,35 +589,10 @@ def start_worker(args, cfg, usage):
     return worker
 
 
-def checkpoint(worker, path):
-    source = Path(path).expanduser()
-    text = source.read_text()
-    if not text.strip() or len(text.encode()) > 256_000:
-        raise ValueError('checkpoint must contain 1..256000 bytes')
-    target = worker_dir(worker) / ('checkpoint-' + uuid.uuid4().hex + '.json')
-    atomic_json(target, {'at': time.time(), 'generation': worker['generation'], 'text': text})
-    worker['checkpoint'] = {'path': str(target), 'at': time.time(), 'generation': worker['generation']}
-
-
-def capture_recovery(worker):
-    """No model response required; files/journal remain in their original homes."""
-    pane = run(['tmux', 'capture-pane', '-p', '-S', '-300', '-t', worker['tmux']])
-    git = run(['git', '-C', worker['cwd'], 'status', '--short'])
-    target = worker_dir(worker) / ('recovery-' + str(worker['generation']) + '.json')
-    atomic_json(target, {'at': time.time(), 'previous_checkpoint': worker.get('checkpoint'),
-                         'transcript_path': worker.get('transcript_path'),
-                         'cwd': worker['cwd'], 'terminal_tail': pane.stdout[-48000:],
-                         'git_status': git.stdout[-16000:], 'warning': 'Inspect outstanding operations; do not replay blindly.'})
-    worker['checkpoint'] = {'path': str(target), 'at': time.time(), 'generation': worker['generation']}
-
-
 def native_quota_error(worker, cfg):
     """Only provider error records count; ordinary messages/tool output do not."""
     account = cfg['accounts'][worker['account']]
-    path = worker.get('transcript_path')
-    if not path and account['provider'] == 'claude':
-        encoded = re.sub(r'[/\\.:]', '-', worker['cwd'])
-        path = str(account_home(account) / 'projects' / encoded / (worker['session_id'] + '.jsonl'))
+    path = transcript_of(worker, account)
     if not path and account['provider'] == 'codex' and worker.get('pid'):
         executable = '/usr/sbin/lsof' if Path('/usr/sbin/lsof').is_file() else 'lsof'
         try:
@@ -670,16 +635,12 @@ def supervise(cfg, usage):
     with lock('supervisor'):
         with lock():
             db = state()
-            for worker in db['workers'].values():
+            for worker in list(db['workers'].values()):
                 status = worker['status']
-                if status in ('complete', 'blocked'):
+                if status in ('stopped', 'blocked'):
                     continue
-                if status in ('starting', 'running', 'handoff_requested'):
-                    snapshot = usage.get(worker['account'], {})
-                    model = (worker.get('model') or cfg['profiles'][worker['profile']]['model'])
-                    windows = applicable_windows(snapshot, model)
-                    used = max((w['used'] for w in windows), default=0)
-                    fresh = time.time() - snapshot.get('observed_at', 0) <= cfg['settings']['refresh_seconds'] * 2
+                if status in ('starting', 'running'):
+                    used, fresh = usage_of(worker, usage, cfg)
                     if fresh and used >= cfg['settings']['warn_percent']:
                         worker.setdefault('warning_at', time.time())
                     elif fresh:
@@ -687,29 +648,24 @@ def supervise(cfg, usage):
                     exhausted = fresh and used >= cfg['settings']['stop_percent']
                     if status == 'running' and not exhausted:
                         exhausted = native_quota_error(worker, cfg)
-                    if exhausted and status != 'handoff_requested':
-                        capture_recovery(worker)
-                        worker['status'] = 'handoff_requested'
-                        worker['handoff_reason'] = 'quota-emergency'
-                    if worker['status'] == 'starting':
+                    if exhausted:
+                        worker['previous_transcript'] = transcript_of(worker, cfg['accounts'][worker['account']])
+                        worker['status'] = 'replacing'
+                        record(worker, 'quota_exhausted', generation=worker['generation'])
+                    elif status == 'starting':
                         if tmux_exists(worker['tmux']):
                             worker['status'] = 'running'
                             bind_board(worker, cfg)
                         elif time.time() - worker['started_at'] > 30:
                             # Reconcile a crash before launch without manufacturing a new generation.
                             launch(worker)
-                    elif worker['status'] == 'running' and not tmux_exists(worker['tmux']):
+                    elif not tmux_exists(worker['tmux']):
                         worker['status'] = 'blocked'
                         record(worker, 'process_exited', reason='inspect exit before retrying; not classified as quota')
-                    if worker['status'] == 'running':
-                        wake(worker)
-                    if worker['status'] == 'handoff_requested':
-                        # Brief grace lets the requesting Bash command return to the model.
-                        if time.time() - worker.get('handoff_at', 0) < 3:
-                            continue
-                        worker['status'] = 'stopping'
-                        save(db)
-                if worker['status'] == 'stopping':
+                if worker['status'] in ('replacing', 'stopping'):
+                    # Brief grace lets the requesting command return to the caller.
+                    if time.time() - worker.get('stop_at', 0) < 3:
+                        continue
                     if tmux_exists(worker['tmux']):
                         result = run(['tmux', 'kill-session', '-t', '=' + worker['tmux']])
                         if result.returncode or tmux_exists(worker['tmux']):
@@ -719,21 +675,31 @@ def supervise(cfg, usage):
                         time.sleep(.05)
                     if worker.get('pid_stamp') and process_stamp(worker.get('pid')) == worker['pid_stamp']:
                         continue  # CLI still tearing down; reconcile again next tick.
-                    snapshot = usage.get(worker['account'], {})
-                    windows = applicable_windows(snapshot, (worker.get('model') or cfg['profiles'][worker['profile']]['model']))
-                    reset = max((w['resets_at'] for w in windows if w['used'] >= cfg['settings']['warn_percent']
-                                 and w.get('resets_at') and w['resets_at'] > time.time()),
-                                default=time.time() + 300)
-                    db['cooldowns'][worker['pool']] = reset
-                    record(worker, 'stopped', generation=worker['generation'], reason=worker.get('handoff_reason'))
-                    worker['status'] = 'waiting_for_capacity'
+                    if worker['status'] == 'stopping':
+                        worker['status'] = 'stopped'
+                        record(worker, 'stopped', generation=worker['generation'], reason=worker.get('stop_reason'))
+                    else:
+                        snapshot = usage.get(worker['account'], {})
+                        windows = applicable_windows(snapshot, worker.get('model') or cfg['profiles'][worker['profile']]['model'])
+                        reset = max((w['resets_at'] for w in windows if w['used'] >= cfg['settings']['warn_percent']
+                                     and w.get('resets_at') and w['resets_at'] > time.time()),
+                                    default=time.time() + 300)
+                        db['cooldowns'][worker['pool']] = reset
+                        record(worker, 'replaced', generation=worker['generation'])
+                        worker['status'] = 'waiting_for_capacity'
                     save(db)
                 if worker['status'] == 'waiting_for_capacity':
                     if worker['generation'] >= cfg['settings']['max_attempts']:
                         worker['status'] = 'blocked'
                         record(worker, 'attempt_limit')
                         continue
-                    choice = select(cfg, usage, db, worker['kind'], worker['role'])
+                    try:
+                        choice = select(cfg, usage, db, worker['kind'], worker['role'])
+                    except ValueError as why:
+                        # A role the configuration no longer routes cannot be relaunched.
+                        worker['status'] = 'blocked'
+                        record(worker, 'no_policy', reason=str(why))
+                        continue
                     if choice:
                         reserve(worker, choice, cfg)
                         save(db)
@@ -744,6 +710,8 @@ def supervise(cfg, usage):
 
 
 def hook():
+    """PreToolUse: remember where this session's transcript is, and say how
+    much of the account is left. Nothing here blocks a tool."""
     event = json.load(sys.stdin)
     if not os.environ.get('CC_HUB_RESOURCE_WORKER'):
         return None
@@ -758,45 +726,19 @@ def hook():
             worker['provider_session_id'] = native_id
         if event.get('transcript_path'):
             worker['transcript_path'] = event['transcript_path']
-        snapshot = read_json(root() / 'usage.json', {}).get(worker['account'], {})
-        windows = applicable_windows(snapshot, (worker.get('model') or cfg['profiles'][worker['profile']]['model']))
-        used = max((w['used'] for w in windows), default=0)
-        fresh = time.time() - snapshot.get('observed_at', 0) <= cfg['settings']['refresh_seconds'] * 2
-        args = event.get('tool_input', {})
-        command = args.get('command', args.get('cmd', ''))
-        recovery = recovery_command(command)
-        if worker['status'] == 'handoff_requested' and not recovery:
-            raise ValueError('handoff accepted; stop work and yield to the replacement')
-        if fresh and used >= cfg['settings']['start_percent'] and not recovery and event.get('tool_name') not in ('Read', 'Write', 'read_file', 'apply_patch'):
-            raise ValueError('quota reserve reached: write checkpoint, call cc-hub resource handoff --file PATH, then yield')
-        if event.get('tool_name', '').lower().rsplit('.', 1)[-1] in ('agent', 'task', 'spawn_agent', 'spawn_agents_on_csv'):
-            raise ValueError('spawn task workers with cc-hub resource start so role/account selection and recovery apply')
-        messages = [m for m in worker.get('inbox', []) if not m.get('acknowledged_at')]
-        context = {'resource': {'worker': worker['id'], 'account': worker['account'], 'generation': worker['generation'],
-                                'quota_used_percent': used if fresh else None,
-                                'action': 'checkpoint-and-handoff' if fresh and used >= cfg['settings']['warn_percent'] else 'continue',
-                                'unacknowledged_messages': messages}}
+        used, fresh = usage_of(worker, read_json(root() / 'usage.json', {}), cfg)
         save(db)
     if binding_changed:
         bind_board(worker, cfg)
-    # Use the exact same workflow gate for Claude and Codex. Map provider
-    # sessions onto stable task identities without rewriting stored journals.
-    event['session_id'] = worker['root_id']
-    if worker['role'] != 'dev':
-        event['agent_id'] = worker['actor_id']
-    else:
-        event.pop('agent_id', None)
-    guard = Path.home() / '.claude/skills/task/scripts/pr_guard.py'
-    if not guard.exists() and 'task-workflow' in cfg['accounts'][worker['account']].get('capabilities', []) and not recovery:
-        raise ValueError('install the Task workflow before running workflow tools')
-    if guard.exists() and not recovery:
-        env = dict(os.environ, CC_HUB_RESOURCE_GUARD_DELEGATED='1')
-        result = run([sys.executable, str(guard)], input=json.dumps(event), env=env, timeout=12)
-        if result.returncode:
-            raise ValueError(result.stderr.strip() or 'task workflow gate rejected tool')
-        if result.stdout.strip():
-            context['workflow'] = json.loads(result.stdout)
+    context = {'resource': {'worker': worker['id'], 'account': worker['account'], 'generation': worker['generation'],
+                            'quota_used_percent': used if fresh else None}}
+    if fresh and used >= cfg['settings']['warn_percent']:
+        context['resource']['note'] = ('this account is near its limit; the hub will continue you on another '
+                                       'account from this transcript, so finish the current step cleanly')
     return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'additionalContext': json.dumps(context)}}
+
+
+# ─── command line ────────────────────────────────────────────────────────
 
 
 def parser():
@@ -811,16 +753,9 @@ def parser():
         start.add_argument('--' + name, required=True)
     commands.add_parser('status').add_argument('--worker')
     commands.add_parser('retry').add_argument('--worker', required=True)
-    for name in ('checkpoint', 'handoff'):
-        cmd = commands.add_parser(name)
-        cmd.add_argument('--file', required=name == 'checkpoint')
-        if name == 'handoff':
-            cmd.add_argument('--reason', default='quota-reserve')
-    message = commands.add_parser('message')
-    message.add_argument('--worker', required=True)
-    message.add_argument('--text', required=True)
-    commands.add_parser('inbox').add_argument('--ack')
-    commands.add_parser('complete')
+    stop_p = commands.add_parser('stop')
+    stop_p.add_argument('--worker', required=True)
+    stop_p.add_argument('--reason', default='stopped by operator')
     commands.add_parser('supervise')
     commands.add_parser('hook')
     execute = commands.add_parser('_exec')
@@ -862,11 +797,6 @@ def main(argv=None):
                 worker['pid_stamp'] = process_stamp(worker['pid'])
                 save(db)
                 command, env = execution(worker, cfg)
-            handoff = Path.home() / '.claude/skills/task/scripts/resource_handoff.py'
-            if worker['generation'] > 1 and handoff.is_file():
-                result = run([sys.executable, str(handoff)], input=json.dumps(worker), env=env)
-                if result.returncode:
-                    raise ValueError('could not reconcile task journal for replacement: ' + result.stderr.strip())
             os.chdir(worker['cwd'])
             os.execvpe(command[0], command, env)
         else:
@@ -876,53 +806,24 @@ def main(argv=None):
                     result = current_worker(db, args.worker) if args.worker or os.environ.get('CC_HUB_RESOURCE_WORKER') else list(db['workers'].values())
                 elif args.verb == 'retry':
                     worker = current_worker(db, args.worker)
-                    if os.environ.get('CC_HUB_RESOURCE_WORKER'):
-                        caller = current_worker(db, require_owner=True)
-                        if caller['role'] != 'dev' or caller['task'] != worker['task']:
-                            raise ValueError('only the task root can retry another role')
                     if worker['status'] != 'blocked' or (worker.get('tmux') and tmux_exists(worker['tmux'])):
                         raise ValueError('retry requires a blocked worker whose previous session has stopped')
-                    capture_recovery(worker)
+                    worker['previous_transcript'] = transcript_of(worker, cfg['accounts'][worker['account']])
                     worker['status'] = 'waiting_for_capacity'
                     record(worker, 'retry_requested')
                     result = worker
-                elif args.verb == 'message':
-                    sender = current_worker(db, require_owner=True)
-                    receiver = current_worker(db, args.worker)
-                    if sender['task'] != receiver['task']:
-                        raise ValueError('messages must stay within this task')
-                    message = {'id': uuid.uuid4().hex, 'from': sender['id'], 'text': args.text, 'at': time.time()}
-                    receiver['inbox'].append(message)
-                    result = message
-                else:
-                    worker = current_worker(db, require_owner=True)
-                    if args.verb in ('checkpoint', 'handoff'):
-                        if args.file:
-                            checkpoint(worker, args.file)
-                        else:
-                            capture_recovery(worker)
-                        if args.verb == 'handoff':
-                            worker.update(status='handoff_requested', handoff_reason=args.reason, handoff_at=time.time())
-                            record(worker, 'handoff_requested', reason=args.reason)
-                        result = worker
-                    elif args.verb == 'complete':
-                        worker['status'] = 'complete'
-                        record(worker, 'completed')
-                        result = worker
-                    elif args.verb == 'inbox':
-                        if args.ack:
-                            message = next((m for m in worker['inbox'] if m['id'] == args.ack), None)
-                            if message is None:
-                                raise ValueError('unknown message ID')
-                            message['acknowledged_at'] = time.time()
-                        result = [m for m in worker['inbox'] if not m.get('acknowledged_at')]
+                elif args.verb == 'stop':
+                    worker = current_worker(db, args.worker)
+                    stop(worker, args.reason)
+                    result = worker
                 save(db)
         print(json.dumps({'ok': True, 'result': result}))
         return 0
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
         if args.verb == 'hook':
-            print('Resource gate: ' + str(exc), file=sys.stderr)
-            return 2
+            # A broken hook must never block a tool: exit 1 shows the note, exit 2 would refuse.
+            print('resource hook: ' + str(exc), file=sys.stderr)
+            return 1
         print(json.dumps({'ok': False, 'error': str(exc)}))
         return 1
 

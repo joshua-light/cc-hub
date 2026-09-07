@@ -96,9 +96,15 @@ pub fn build_usage_line(u: &UsageInfo) -> Line<'static> {
     let label_style = Style::default().fg(Color::DarkGray);
     let reset_style = Style::default().fg(Color::Rgb(90, 90, 100));
     let sep_style = Style::default().fg(SEP_GRAY);
-    let pct_style = Style::default()
-        .fg(Color::White)
-        .add_modifier(Modifier::BOLD);
+    // A reading the store could not refresh is still the best number we
+    // have; it is shown, but no longer in white.
+    let pct_style = if u.health == crate::usage::Health::Ready {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
 
     spans.push(Span::styled(" 5h", label_style));
     if let Some(fmt) = u

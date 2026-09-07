@@ -28,7 +28,7 @@ pub use io::{
 };
 pub use messages::{
     extract_first_user_message, extract_last_activity, extract_last_user_message, extract_messages,
-    extract_metadata, extract_token_totals, parse_timestamp_ms,
+    extract_metadata, extract_token_totals, parse_timestamp_ms, AUTOMATION_ROLE,
 };
 pub(crate) use render::{NO_CONTENT, NO_TEXT_CONTENT, THINKING_MARKER, TOOL_MARKER_PREFIX};
 pub use state::{

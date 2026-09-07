@@ -34,7 +34,7 @@ pub(crate) enum KeyOutcome {
 /// falls through to the legacy match below. PromptInput submission stays
 /// legacy entirely — the orchestrator-spawn path is out of the Sessions
 /// command scope.
-fn map_command(
+pub(super) fn map_command(
     app: &App,
     key: &KeyEvent,
     on_sessions: bool,
@@ -958,6 +958,15 @@ pub(crate) async fn handle_key(
             KeyCode::Enter | KeyCode::Char(' ') => app.confirm_default_session_agent(),
             KeyCode::Down | KeyCode::Char('j') => app.agent_picker_move(1),
             KeyCode::Up | KeyCode::Char('k') => app.agent_picker_move(-1),
+            _ => {}
+        },
+        (View::TaskKindPicker, code) => match code {
+            KeyCode::Esc => app.close_task_kind_picker(),
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                app.confirm_task_kind();
+            }
+            KeyCode::Down | KeyCode::Char('j') => app.task_kind_picker_move(1),
+            KeyCode::Up | KeyCode::Char('k') => app.task_kind_picker_move(-1),
             _ => {}
         },
         // Same interaction model as the model picker: printable keys belong

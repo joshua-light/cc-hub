@@ -32,7 +32,7 @@ pub fn pr_create(
     // writing pr.json. A `pr create` against a Backlog/Done task otherwise
     // burns a PR id and strands an orphan pr.json that permanently blocks every
     // future `pr create` for the task ("a PR already exists").
-    orchestrator::validate_status_transition(&state.status, &TaskStatus::Review, state.kind())
+    orchestrator::validate_status_transition(&state.status, &TaskStatus::Review, state.flow())
         .map_err(|e| OpError::Usage(format!("cannot open PR: {}", e)))?;
 
     let branch = orchestrator::worktree_branch(task_id, worktree_name);
@@ -63,7 +63,7 @@ pub fn pr_create(
     // up-front read and here is still caught before we create the PR.
     let mut fresh = orchestrator::read_task_state(project_id, task_id)
         .map_err(|e| OpError::Other(format!("load state: {}", e)))?;
-    orchestrator::validate_status_transition(&fresh.status, &TaskStatus::Review, fresh.kind())
+    orchestrator::validate_status_transition(&fresh.status, &TaskStatus::Review, fresh.flow())
         .map_err(|e| OpError::Usage(format!("cannot open PR: {}", e)))?;
 
     let pr = pr::create_pr(&fresh, branch, base, title, description)
@@ -389,7 +389,7 @@ pub fn pr_merge(
     // `pr request-changes`). Without this the merge lands, then the final
     // transition fails, stranding main mutated with no MergeRecord and a wedged
     // task that retries re-merge on every run.
-    orchestrator::validate_status_transition(&state.status, &TaskStatus::Merging, state.kind())
+    orchestrator::validate_status_transition(&state.status, &TaskStatus::Merging, state.flow())
         .map_err(|e| {
             OpError::Usage(format!(
                 "cannot merge: {} — merge only applies to an approved task in Review",
@@ -473,7 +473,7 @@ pub fn pr_merge(
         )));
     }
     if let Err(e) =
-        orchestrator::validate_status_transition(&state.status, &TaskStatus::Merging, state.kind())
+        orchestrator::validate_status_transition(&state.status, &TaskStatus::Merging, state.flow())
     {
         let _ = merge_lock::release(project_id, task_id);
         return Err(OpError::Usage(format!(

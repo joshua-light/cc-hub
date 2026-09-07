@@ -5,31 +5,6 @@
 
 use std::path::PathBuf;
 
-/// Cache file for the Anthropic usage API response. Pinned to `/tmp` because
-/// it's a cross-process contract with an external statusline helper that
-/// reads the same path. Changing this location is a breaking change — so the
-/// default-account path is left untouched, and only a non-default
-/// `CLAUDE_CONFIG_DIR` gets a per-account suffix so parallel cc-hub instances
-/// (one per account) don't clobber each other's cached usage.
-pub fn usage_cache_file() -> PathBuf {
-    match claude_config_dir() {
-        Some(dir) => {
-            let tag = config_dir_tag(&dir);
-            PathBuf::from(format!("/tmp/claude-statusline-usage.{}.json", tag))
-        }
-        None => PathBuf::from("/tmp/claude-statusline-usage.json"),
-    }
-}
-
-/// A filesystem-safe tag derived from a config-dir path, used to namespace
-/// shared `/tmp` artifacts per account.
-fn config_dir_tag(dir: &std::path::Path) -> String {
-    dir.to_string_lossy()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
-}
-
 /// Cache directory for cc-hub. Falls back to `/tmp` when `dirs::cache_dir`
 /// can't resolve a home — matches the previous log-path behaviour.
 pub fn cache_dir() -> PathBuf {
@@ -172,11 +147,6 @@ mod tests {
                 claude_credentials_file(),
                 Some(base.join(".credentials.json"))
             );
-            // /tmp usage cache is namespaced so parallel instances don't clash.
-            assert_ne!(
-                usage_cache_file(),
-                PathBuf::from("/tmp/claude-statusline-usage.json")
-            );
         });
     }
 
@@ -188,11 +158,6 @@ mod tests {
             let home = dirs::home_dir().unwrap();
             assert_eq!(claude_home(), Some(home.join(".claude")));
             assert_eq!(claude_config_json(), Some(home.join(".claude.json")));
-            // Cache path is the pinned cross-process contract.
-            assert_eq!(
-                usage_cache_file(),
-                PathBuf::from("/tmp/claude-statusline-usage.json")
-            );
         });
     }
 

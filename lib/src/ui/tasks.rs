@@ -13,7 +13,7 @@ use crate::orchestrator::{TaskState, TaskStatus};
 use crate::ui::common::{centered_rect, popup_block, priority_color};
 use crate::ui::now_ms;
 use crate::ui::palette::{
-    ACCENT_BLUE, DIM_TEXT, DOT_IDLE, FAINT_TEXT, LABEL_GRAY, META_GRAY, TAG_SLATE,
+    ACCENT_BLUE, DIM_TEXT, DOT_IDLE, FAINT_TEXT, KIND_TEAL, LABEL_GRAY, META_GRAY, TAG_SLATE,
 };
 use crate::ui::projects::{
     classify_artifact, evidence_card_header, read_text_excerpt, truncated_footer, CardKind,
@@ -193,6 +193,13 @@ pub(crate) fn render_task_info(frame: &mut Frame, area: Rect, app: &mut App) {
             Style::default().fg(Color::Rgb(150, 130, 200)),
         ),
     ];
+    if let Some(kind) = t.kind.as_deref() {
+        header_spans.push(Span::raw("  "));
+        header_spans.push(Span::styled(
+            format!("⛭ {}", kind),
+            Style::default().fg(KIND_TEAL),
+        ));
+    }
     if !t.tags.is_empty() {
         let tags = t
             .tags
@@ -519,17 +526,30 @@ fn render_task_card(
         .border_type(border_type)
         .border_style(border_style)
         .title(priority_badge);
-    // Tags ride the top-left of the border, mirroring the priority chip on the
-    // right. Budget the width against what the priority chip leaves (corners +
-    // chip + a one-column gap) so the two badges never collide; overflow folds
-    // into a `+N` marker.
+    // The kind chip and the tags ride the top-left of the border, mirroring
+    // the priority chip on the right. Budget the width against what the
+    // priority chip leaves (corners + chip + a one-column gap) so the badges
+    // never collide; the kind takes its room first (it decides where the card
+    // is worked, the tags only describe it) and tag overflow folds into a
+    // `+N` marker.
     let prio_w = t.priority.label().chars().count() + 2;
-    let tag_budget = (area.width as usize).saturating_sub(2 + prio_w + 1);
-    if let Some(text) = tags_title_text(&t.tags, tag_budget) {
-        block = block.title(
-            Line::from(Span::styled(text, Style::default().fg(TAG_SLATE)))
-                .alignment(Alignment::Left),
-        );
+    let mut budget = (area.width as usize).saturating_sub(2 + prio_w + 1);
+    let mut badges: Vec<Span> = Vec::new();
+    if let Some(chip) = kind_chip_text(t.kind.as_deref(), budget) {
+        budget -= chip.chars().count();
+        badges.push(Span::styled(
+            chip,
+            Style::default()
+                .fg(Color::Black)
+                .bg(KIND_TEAL)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if let Some(text) = tags_title_text(&t.tags, budget) {
+        badges.push(Span::styled(text, Style::default().fg(TAG_SLATE)));
+    }
+    if !badges.is_empty() {
+        block = block.title(Line::from(badges).alignment(Alignment::Left));
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -657,13 +677,18 @@ fn meta_line(
             None if t.session_id.is_some() => ("○", "gone — f resumes", DOT_IDLE),
             None => ("○", "starting…", DOT_IDLE),
         };
+        // An open question is not idle: it reads as `starting…` forever
+        // otherwise, and only the user can answer it.
+        let activity = crate::task_activity::label(&t.task_id);
+        let color = match &activity {
+            Some(item) if item.blocked_on_user => Color::Yellow,
+            _ => color,
+        };
         spans.push(Span::styled(
             format!(
                 "{} {}",
                 glyph,
-                crate::task_activity::label(&t.task_id)
-                    .as_deref()
-                    .unwrap_or(label)
+                activity.as_ref().map_or(label, |item| item.text.as_str())
             ),
             Style::default().fg(color),
         ));
@@ -679,6 +704,15 @@ fn meta_line(
     ));
     spans.extend(clip);
     Line::from(spans)
+}
+
+/// The left-border kind chip (` tps `) when the card has a kind and it fits
+/// in `budget` columns. A kind is never abbreviated — a half-written `ai-plu`
+/// would read as a different kind — so a chip that doesn't fit is dropped and
+/// the Task Info popup remains where the full word is.
+fn kind_chip_text(kind: Option<&str>, budget: usize) -> Option<String> {
+    let chip = format!(" {} ", kind?);
+    (chip.chars().count() <= budget).then_some(chip)
 }
 
 /// Build the left-border tag badge text (`#a #b`) that fits in `budget`
@@ -851,6 +885,41 @@ mod tests {
         // A card without attachments shows no chip.
         let bare = buffer_to_string(&render(TaskPriority::P3));
         assert!(!bare.contains("📎"), "no chip expected:\n{}", bare);
+    }
+
+    #[test]
+    fn card_shows_kind_chip_before_its_tags() {
+        let mut t = card(TaskPriority::P1);
+        t.kind = Some("hub".into());
+        t.tags = vec!["bug".into()];
+        let painted = buffer_to_string(&render_card(&t));
+        let top = painted.lines().next().expect("border row");
+        assert!(
+            top.find("hub")
+                .is_some_and(|kind| top.find("#bug").is_some_and(|tag| kind < tag)),
+            "kind chip should take the left corner ahead of the tags:\n{}",
+            painted
+        );
+        assert!(
+            top.contains("P1"),
+            "the kind must not displace the priority badge:\n{}",
+            painted
+        );
+        // A card with no kind shows no chip.
+        assert!(
+            !buffer_to_string(&render(TaskPriority::P1)).contains("hub"),
+            "router-classified cards carry no chip"
+        );
+    }
+
+    #[test]
+    fn kind_chip_is_dropped_rather_than_abbreviated() {
+        assert_eq!(
+            kind_chip_text(Some("ai-plugin"), 11).as_deref(),
+            Some(" ai-plugin ")
+        );
+        assert_eq!(kind_chip_text(Some("ai-plugin"), 10), None);
+        assert_eq!(kind_chip_text(None, 40), None);
     }
 
     #[test]

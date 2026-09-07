@@ -4,7 +4,9 @@
 //! so a browser button can start a hub session — and the verb a persistent
 //! agent calls to hand a board card to a real session. A task link whose
 //! card already has a live session in that directory reaches that session
-//! (`"reused": true`) rather than starting a second one. It is also handy by
+//! (`"reused": true`) rather than starting a second one — unless the link
+//! names a `role`: that is a hand-over, which starts a fresh session and closes
+//! the card's old one after this command has reported. It is also handy by
 //! hand:
 //! `cc-hub open 'cc-hub://review?depth=light&pr=…' --dry-run` shows where a
 //! link would land without spawning anything.
@@ -36,6 +38,20 @@ pub(crate) fn open(args: &[String]) -> Result<(), CliError> {
         return Ok(());
     }
 
+    // A hand-over closes the card's previous session, but only after this
+    // command has reported: the caller is usually that session.
+    let superseded = match &link {
+        Link::Task(task) if task.is_handover() => ops::link::session_to_supersede(task)?,
+        _ => None,
+    };
+    let close_superseded = || {
+        if let Some(tmux) = &superseded {
+            if let Err(e) = cc_hub_lib::send::kill_tmux_session(tmux) {
+                log::warn!("open: closing superseded session {} failed: {}", tmux, e);
+            }
+        }
+    };
+
     if f.agent.is_none() && !cc_hub_lib::resources::accounts().is_empty() {
         if let Link::Task(task) = &link {
             if let Some(kind) = task
@@ -44,22 +60,26 @@ pub(crate) fn open(args: &[String]) -> Result<(), CliError> {
                 .or_else(|| cc_hub_lib::resources::task_kind(task.id.as_str()))
             {
                 let target = ops::link::target(&link, None)?;
-                return super::resource::resource(&[
+                let started = super::resource::resource(&[
                     "start".into(),
                     "--task".into(),
                     task.id.to_string(),
                     "--kind".into(),
                     kind,
                     "--role".into(),
-                    "dev".into(),
+                    task.role.clone().unwrap_or_else(|| "implementation".into()),
                     "--cwd".into(),
                     target.cwd.to_string_lossy().into(),
                     "--prompt".into(),
                     format!(
-                        "Read ~/.claude/skills/task/SKILL.md. Continue this assignment:\n{}",
+                        "Read ~/.claude/skills/task/SKILL.md and follow it for:\n{}",
                         target.prompt
                     ),
                 ]);
+                if started.is_ok() {
+                    close_superseded();
+                }
+                return started;
             }
         }
     }
@@ -83,7 +103,9 @@ pub(crate) fn open(args: &[String]) -> Result<(), CliError> {
         "title": opened.target.title,
         "prompt": opened.target.prompt,
         "prompt_status": prompt_status,
+        "superseded": opened.superseded,
     }));
+    close_superseded();
     Ok(())
 }
 

@@ -35,7 +35,11 @@ them off by hand, or hand one to an agent:
 
 A script mints a card with `cc-hub board add --text "…" [--title T] [--tags
 "a b"] [--priority p1..p4]`; it lands in To-Do with no session, and a
-`cc-hub://task` link (below) opens it.
+`cc-hub://task` link (below) opens it. `cc-hub board note --task ID --text "…"`
+appends a note to a card (the same attachment the `p` key pastes) and
+`cc-hub board notes --task ID` reads them back in order. A task session's
+record — the brief it agreed with the user, the branch it built, what
+verification found — is those notes, on the card, where you already look.
 
 ## Projects layer (WIP)
 
@@ -88,11 +92,17 @@ why a persistent agent that starts its own reviews sends `post=80`.
 
 A `task` link works one card of the Tasks board: it spawns a session in
 `dir` (default: the card's own cwd), names it `Task: <card>`, opens it with
-`/task --task <id> <card text>`, and binds the card to that session, so `f`
-attaches to it exactly as if the board had assigned it. The card's status is
-left alone — a link starts work, it never moves a card. `kind` is a word
-passed through to the prompt; the `task` skill decides what its kinds mean.
-Local agents can use these links to hand tasks to interactive sessions.
+`/task --task <id> [--kind <kind>] [--role <role>] <card text>`, and binds the
+card to that session, so `f` attaches to it exactly as if the board had
+assigned it. The card's status is left alone — a link starts work, it never
+moves a card. `kind` and `role` are words passed through to the prompt; the
+`task` skill decides what they mean. A link with a `role` is a hand-over: it
+always starts a fresh session and closes the card's previous one once the
+command has reported, which is how the skill's implementation session passes
+a task to its verification session. A hand-over is refused for a card with
+no note: the notes are the brief the next session works from, so there is no
+hand-over without one. Local agents can use these links to hand tasks to
+interactive sessions.
 An OS URL-scheme handler or browser integration can forward links to
 `cc-hub open`; platform integrations are configured separately.
 
@@ -122,7 +132,7 @@ agent runtime and interfaces.
 A local watcher can open `cc-hub://task` links when cards become ready.
 Opening a link for a card with a live session in that directory delivers the
 prompt to it (`"reused": true`) instead of starting another session. A link
-naming a different directory starts a new session there.
+naming a different directory, or a role, starts a new session.
 
 ## Requirements
 
@@ -462,6 +472,21 @@ all columns; Enter keeps it applied, Esc clears it.
 Deletions are recoverable: `u` restores the last `x`/`c` removal, and every
 removed task is also appended to `~/.cc-hub/tasks-archive-v2.json`.
 
+A card can also carry a **kind** — the deliverable it produces, picked with
+`T` from `[tasks].kinds` and shown as a chip in the card's top-left corner:
+
+```toml
+[tasks]
+kinds = ["tps", "ai-plugin", "tool", "hub", "basic", "repair"]
+```
+
+cc-hub never interprets a kind; it stores the word and hands it to whoever
+opens the session — `cc-hub://task?...&kind=<word>`, the same query parameter
+a link already carries. For an agent that routes the board that is the
+difference between a card it classifies and one it merely places: a card with
+a kind is worked where that word says, and can't come back asking which kind
+it is. Leave a card's kind unset and routing works exactly as before.
+
 The **Planning** column is opt-in — set
 `[ui] show_planning_column = true` to show it. By default its cards fold into
 **In Progress** (still showing `● plan ready`), and `Space` still approves
@@ -475,6 +500,7 @@ the plan, so the plan-first workflow works with one fewer column.
 | `a` / `n` | Add a task (lands in To-Do; `#tag` and `!1`–`!4` tokens set tags/priority inline; `Tab` — or a multi-line paste — fills the context box, saved as the card's first note) |
 | `/` | Filter the board (fuzzy over text and `#tag`s; Enter keeps it applied, Esc clears — also from the board) |
 | `1` – `4` | Set priority P1–P4 (sorts the column P1-first; P1 red · P2 yellow · P3 green · P4 blue) |
+| `T` | Pick the card's **kind** — the deliverable it produces (`[tasks].kinds`). The task router places the card by that word instead of guessing one, and can no longer hand it back asking which kind it is; the first row clears it back to router-chosen |
 | `s` | Assign an agent: project picker (registered projects · bookmarks · recent dirs, fuzzy-filtered by typing — `Tab` flips to a plain folder browser; the last-assigned folder is preselected) → spawn session there prompted to plan first → card moves to Planning |
 | `Enter` / `f` | Attach the bound agent's pane (embedded); resumes the session if its tmux died; hints `s` when unassigned |
 | `Space` | On a Planning card: approve the plan — the agent is told to proceed and the card moves to In Progress (resumes the session first if its tmux died). Elsewhere: toggle Done / reopen (completing closes the live agent session; the transcript binding is kept) |

@@ -820,6 +820,7 @@ pub(crate) fn build_popup_content(detail: &SessionDetail, width: u16) -> Vec<Lin
             "user" => ("", "user", Color::Yellow),
             "assistant" => ("󰧑", "asst", Color::Green),
             "system" => ("", "sys ", Color::DarkGray),
+            crate::conversation::AUTOMATION_ROLE => ("", "auto", Color::Cyan),
             _ => ("", "??? ", Color::DarkGray),
         };
 

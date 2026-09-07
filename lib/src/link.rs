@@ -82,6 +82,7 @@ impl FromStr for Link {
                 id: query.required("id")?.parse()?,
                 dir: query.optional("dir").map(PathBuf::from),
                 kind: query.optional("kind").map(str::to_string),
+                role: query.optional("role").map(str::to_string),
             })),
             other => Err(LinkError::UnknownKind(other.to_string())),
         }
@@ -269,18 +270,22 @@ impl FromStr for PullRequestUrl {
     }
 }
 
-/// `cc-hub://task?id=<tk-…>[&dir=<path>][&kind=<word>]`: work a Tasks-board
+/// `cc-hub://task?id=<tk-…>[&dir=<path>][&kind=<word>][&role=<word>]`: work a Tasks-board
 /// card in an agent session bound to that card — the card's live session in
 /// `dir` if it has one, else a fresh one. `dir` is where the session runs —
 /// the caller decides that, because only it knows what kind of task this
 /// is; without one the card's own recorded cwd is used. `kind`
 /// is a word in the prompt and nothing more: the `task` skill owns what its
 /// kinds mean, exactly as the review skill owns what `light` and `full` mean.
+/// `role` is the same kind of word, with one consequence for the hub: a link
+/// that names a role is a hand-over, so it always starts a fresh session and
+/// closes the one the card had, instead of reusing it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskLink {
     pub id: BoardTaskId,
     pub dir: Option<PathBuf>,
     pub kind: Option<String>,
+    pub role: Option<String>,
 }
 
 impl TaskLink {
@@ -288,14 +293,19 @@ impl TaskLink {
     /// `brief` is the card's own text — the hub reads it from the board,
     /// since the link carries an id rather than a copy of it.
     pub fn prompt(&self, brief: &str) -> String {
-        let mut prompt = format!("/task --task {} {}", self.id, brief.trim());
+        let mut prompt = format!("/task --task {}", self.id);
         if let Some(kind) = &self.kind {
-            prompt.push_str(&format!(
-                "\n\nRouted here as kind `{}` — confirm or correct that in phase 0.",
-                kind
-            ));
+            prompt.push_str(&format!(" --kind {}", kind));
         }
-        prompt
+        if let Some(role) = &self.role {
+            prompt.push_str(&format!(" --role {}", role));
+        }
+        format!("{} {}", prompt, brief.trim())
+    }
+
+    /// A link that names a role hands the card to a new session.
+    pub fn is_handover(&self) -> bool {
+        self.role.is_some()
     }
 
     /// The name the session is born with: `Task: <card text>`.
@@ -477,6 +487,14 @@ mod tests {
         assert_eq!(t.id.as_str(), "tk-1788509616255974000");
         assert_eq!(t.dir, Some(PathBuf::from("/Users/me/git/self/cc-hub")));
         assert_eq!(t.kind.as_deref(), Some("hub"));
+        assert!(!t.is_handover());
+    }
+
+    #[test]
+    fn a_role_makes_the_link_a_handover() {
+        let t = task("id=tk-42&kind=tps&role=verification");
+        assert_eq!(t.role.as_deref(), Some("verification"));
+        assert!(t.is_handover());
     }
 
     #[test]
@@ -510,8 +528,11 @@ mod tests {
         );
         assert_eq!(
             task("id=tk-42&kind=ai-plugin").prompt("Semantic Linter"),
-            "/task --task tk-42 Semantic Linter\n\nRouted here as kind `ai-plugin` \
-— confirm or correct that in phase 0."
+            "/task --task tk-42 --kind ai-plugin Semantic Linter"
+        );
+        assert_eq!(
+            task("id=tk-42&kind=tps&role=verification").prompt("Fix it"),
+            "/task --task tk-42 --kind tps --role verification Fix it"
         );
     }
 

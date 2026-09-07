@@ -273,6 +273,18 @@ impl PersonalBoard {
         Ok(true)
     }
 
+    /// Set (or with `None` clear) a task's deliverable kind — the word the
+    /// task router places the card by. Skips the disk write when unchanged.
+    /// No-op on unknown id. Persists when it changes.
+    pub fn set_kind(&mut self, id: &str, kind: Option<String>) -> io::Result<bool> {
+        if self.get(id).is_none_or(|t| t.kind == kind) {
+            return Ok(false);
+        }
+        let updated = update_personal_task(id, |s| s.kind = kind)?;
+        self.apply(updated);
+        Ok(true)
+    }
+
     /// Move a task between columns, stamping/clearing `done_at` so the Done
     /// column can show when it landed. No-op on unknown id. Persists. The
     /// shared transition table validates the edge, so an illegal move (e.g.
@@ -728,7 +740,7 @@ mod tests {
             let t = reloaded.get(&id).unwrap();
             assert_eq!(t.prompt, "fix the flaky test");
             assert_eq!(t.status, TaskStatus::Backlog);
-            assert_eq!(t.kind(), orchestrator::TaskKind::Personal);
+            assert_eq!(t.flow(), orchestrator::TaskFlow::Personal);
             assert!(t.task_id.starts_with("tk-"));
         });
     }
@@ -854,6 +866,27 @@ mod tests {
         // Set-size cap (seven distinct tags → MAX_TAGS kept).
         let many = "t1 t2 t3 t4 t5 t6 t7";
         assert_eq!(parse_tags(many).len(), MAX_TAGS);
+    }
+
+    #[test]
+    fn set_kind_round_trips_and_clears() {
+        with_temp_home(|| {
+            let mut b = PersonalBoard::load();
+            let id = b.add("route me").unwrap().unwrap();
+            assert!(
+                b.get(&id).unwrap().kind.is_none(),
+                "router-chosen by default"
+            );
+            assert!(b.set_kind(&id, Some("ai-plugin".into())).unwrap());
+            assert_eq!(
+                PersonalBoard::load().get(&id).unwrap().kind.as_deref(),
+                Some("ai-plugin")
+            );
+            // Re-picking the same kind writes nothing; the clear row does.
+            assert!(!b.set_kind(&id, Some("ai-plugin".into())).unwrap());
+            assert!(b.set_kind(&id, None).unwrap());
+            assert!(PersonalBoard::load().get(&id).unwrap().kind.is_none());
+        });
     }
 
     #[test]

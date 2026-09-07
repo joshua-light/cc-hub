@@ -245,9 +245,10 @@ impl std::str::FromStr for TaskStatus {
 /// Which flow a task belongs to, derived from `TaskState::project_id`:
 /// `Personal` board tasks (`None`) admit the plan/reopen edges; `Orchestrated`
 /// tasks (`Some`) keep the strict PR-pipeline edges (Done terminal, Merging
-/// discipline).
+/// discipline). Distinct from [`TaskState::kind`], which is the *deliverable*
+/// a card produces and the word the task router places it by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskKind {
+pub enum TaskFlow {
     Personal,
     Orchestrated,
 }
@@ -372,6 +373,13 @@ pub struct TaskState {
     pub priority: TaskPriority,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// The deliverable this card produces — `tps`, `ai-plugin`, `hub`, … —
+    /// chosen on the board (`T`) from `[tasks].kinds`. The task router places
+    /// a card by this word instead of inferring one from the text, and a card
+    /// that carries it is never handed back unrouted. `None` leaves the
+    /// classification to the router, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     /// Where the board-assigned agent runs (personal flow only; the
     /// orchestrated flow derives cwd from `project_root`/worktrees).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -479,6 +487,7 @@ impl TaskState {
             done_at: None,
             priority: TaskPriority::default(),
             tags: Vec::new(),
+            kind: None,
             cwd: None,
             agent_id: None,
             tmux: None,
@@ -516,6 +525,7 @@ impl TaskState {
             done_at: None,
             priority: TaskPriority::default(),
             tags: Vec::new(),
+            kind: None,
             cwd: None,
             agent_id: None,
             tmux: None,
@@ -560,12 +570,12 @@ impl TaskState {
         self.updated_at = now_unix_secs();
     }
 
-    /// Which legal-edge set this task follows; see [`TaskKind`].
-    pub fn kind(&self) -> TaskKind {
+    /// Which legal-edge set this task follows; see [`TaskFlow`].
+    pub fn flow(&self) -> TaskFlow {
         if self.project_id.is_some() {
-            TaskKind::Orchestrated
+            TaskFlow::Orchestrated
         } else {
-            TaskKind::Personal
+            TaskFlow::Personal
         }
     }
 
@@ -667,7 +677,7 @@ pub(crate) fn lock_task_state(
 ///
 /// Legal edges and the flows that produce them:
 ///
-/// | from → to           | kind         | produced by                                         |
+/// | from → to           | flow         | produced by                                         |
 /// |---------------------|--------------|-----------------------------------------------------|
 /// | Backlog → Running   | both         | `task start`, triage promotion; board manual move   |
 /// | Running → Backlog   | both         | spawn-failure claim rollback; board manual move     |
@@ -694,7 +704,7 @@ pub(crate) fn lock_task_state(
 pub fn validate_status_transition(
     from: &TaskStatus,
     to: &TaskStatus,
-    kind: TaskKind,
+    flow: TaskFlow,
 ) -> Result<(), String> {
     use TaskStatus::*;
     let both = from == to
@@ -703,8 +713,8 @@ pub fn validate_status_transition(
             (Backlog, Running) | (Running, Backlog) | (Running, Done)
         );
     let legal = both
-        || match kind {
-            TaskKind::Personal => matches!(
+        || match flow {
+            TaskFlow::Personal => matches!(
                 (from, to),
                 (Backlog, Planning)
                     | (Planning, Backlog)
@@ -721,7 +731,7 @@ pub fn validate_status_transition(
                     | (Done, Backlog)
                     | (Done, Running)
             ),
-            TaskKind::Orchestrated => matches!(
+            TaskFlow::Orchestrated => matches!(
                 (from, to),
                 (Running, Review)
                     | (Review, Running)
@@ -734,19 +744,19 @@ pub fn validate_status_transition(
     if legal {
         Ok(())
     } else {
-        let flow = match kind {
-            TaskKind::Personal => {
+        let rule = match flow {
+            TaskFlow::Personal => {
                 "personal flow is Backlog → Planning → Running → Done; Done can reopen to \
                  Backlog/Running"
             }
-            TaskKind::Orchestrated => {
+            TaskFlow::Orchestrated => {
                 "orchestrated flow is Backlog → Running → Review → Merging → Done; Review can \
                  bounce to Running/Merging, Merging back to Review; Done is terminal"
             }
         };
         Err(format!(
             "illegal task status transition {:?} → {:?} ({})",
-            from, to, flow
+            from, to, rule
         ))
     }
 }
@@ -805,9 +815,9 @@ where
         return Ok((state, false));
     }
     if state.status != prev_status {
-        // The kind axis comes from the state itself: a personal task can't
+        // The flow axis comes from the state itself: a personal task can't
         // gain orchestrated edges by being routed through this path.
-        validate_status_transition(&prev_status, &state.status, state.kind())
+        validate_status_transition(&prev_status, &state.status, state.flow())
             .map_err(|msg| io::Error::new(io::ErrorKind::InvalidInput, msg))?;
     }
     if touch {
@@ -840,7 +850,7 @@ mod status_transition_tests {
             (Done, Done),
         ] {
             assert!(
-                validate_status_transition(&from, &to, TaskKind::Orchestrated).is_ok(),
+                validate_status_transition(&from, &to, TaskFlow::Orchestrated).is_ok(),
                 "orchestrated {:?} → {:?} should be legal",
                 from,
                 to
@@ -868,7 +878,7 @@ mod status_transition_tests {
             (Planning, Running),
         ] {
             assert!(
-                validate_status_transition(&from, &to, TaskKind::Orchestrated).is_err(),
+                validate_status_transition(&from, &to, TaskFlow::Orchestrated).is_err(),
                 "orchestrated {:?} → {:?} should be illegal",
                 from,
                 to
@@ -900,7 +910,7 @@ mod status_transition_tests {
             (Done, Running),
         ] {
             assert!(
-                validate_status_transition(&from, &to, TaskKind::Personal).is_ok(),
+                validate_status_transition(&from, &to, TaskFlow::Personal).is_ok(),
                 "personal {:?} → {:?} should be legal",
                 from,
                 to
@@ -922,7 +932,7 @@ mod status_transition_tests {
             (Planning, Review),
         ] {
             assert!(
-                validate_status_transition(&from, &to, TaskKind::Personal).is_err(),
+                validate_status_transition(&from, &to, TaskFlow::Personal).is_err(),
                 "personal {:?} → {:?} should be illegal",
                 from,
                 to
@@ -1021,7 +1031,7 @@ where
 
 /// Locked read-mutate-write against a personal-board task
 /// (`~/.cc-hub/tasks/<tid>/state.json`). Same lock + transition enforcement
-/// as the orchestrated wrapper; the kind axis (from the state itself)
+/// as the orchestrated wrapper; the flow axis (from the state itself)
 /// selects the personal edge set.
 pub fn update_personal_task<F>(task_id: &str, f: F) -> io::Result<TaskState>
 where

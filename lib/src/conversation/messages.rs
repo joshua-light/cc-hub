@@ -1,10 +1,14 @@
 //! Message and metadata extraction from JSONL entries.
 
-use super::render::{extract_text_content, truncate_str};
+use super::render::{automation_body, extract_text_content, truncate_str};
 use super::state::is_meaningful_entry;
 use crate::models::ConversationMessage;
 use serde_json::Value;
 use std::collections::HashSet;
+
+/// The [`crate::models::ConversationMessage::role`] cc-hub's own notices get,
+/// alongside the providers' `user` / `assistant` / `system`.
+pub const AUTOMATION_ROLE: &str = "automation";
 
 pub fn extract_last_user_message(entries: &[Value]) -> Option<String> {
     entries
@@ -12,6 +16,7 @@ pub fn extract_last_user_message(entries: &[Value]) -> Option<String> {
         .rev()
         .filter(|e| is_meaningful_entry(e))
         .filter(|e| e.get("type").and_then(|t| t.as_str()) == Some("user"))
+        .filter(|e| automation_body(e).is_none())
         .find_map(|e| extract_user_text(e, 120))
 }
 
@@ -110,13 +115,15 @@ pub fn extract_messages(entries: &[Value], count: usize) -> Vec<ConversationMess
         .filter(|e| is_meaningful_entry(e))
         .take(count)
         .map(|e| {
-            let role = e
-                .get("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-
             let content_preview = extract_text_content(e);
+            let role = match e.get("type").and_then(|t| t.as_str()) {
+                // A notice cc-hub injected itself is not the user speaking,
+                // and a transcript that says it is costs the reader an hour.
+                Some("user") if automation_body(e).is_some() => AUTOMATION_ROLE.to_string(),
+                Some(kind) => kind.to_string(),
+                None => "unknown".to_string(),
+            };
+
             let timestamp = e.get("timestamp").and_then(parse_timestamp_ms).unwrap_or(0);
 
             let model = e
@@ -205,6 +212,30 @@ pub fn extract_token_totals(entries: &[Value]) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A notice cc-hub injected is its own role, shows its body rather than
+    /// the marker line, and never answers "what did the user last say".
+    #[test]
+    fn an_injected_notice_is_not_the_user_speaking() {
+        let notice = format!(
+            "{}\n2 managed-worker notice(s) await your action",
+            crate::send::AUTOMATION_MARKER
+        );
+        let entries = vec![
+            serde_json::json!({"type": "user", "message": {"content": "build the thing"}}),
+            serde_json::json!({"type": "user", "message": {"content": notice}}),
+        ];
+        let messages = extract_messages(&entries, 10);
+        assert_eq!(messages[1].role, AUTOMATION_ROLE);
+        assert_eq!(
+            messages[1].content_preview,
+            "2 managed-worker notice(s) await your action"
+        );
+        assert_eq!(
+            extract_last_user_message(&entries).as_deref(),
+            Some("build the thing")
+        );
+    }
 
     #[test]
     fn parse_iso8601_with_millis() {

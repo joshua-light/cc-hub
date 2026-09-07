@@ -145,6 +145,8 @@ pub enum TasksCommand {
     AssignAtHome,
     /// `r` — open the rename popup for the focused card.
     OpenRename,
+    /// `T` — open the deliverable-kind picker for the focused card.
+    OpenKindPicker,
     /// `t` — open the tag editor for the focused card.
     OpenTags,
     /// `1`–`4` — set the focused card's priority.
@@ -660,6 +662,17 @@ impl App {
             OpenTags => {
                 if !self.enter_task_tags() {
                     self.set_status("no task focused".into());
+                }
+                Vec::new()
+            }
+            OpenKindPicker => {
+                if !self.enter_task_kind_picker() {
+                    let why = if crate::config::get().tasks.kinds.is_empty() {
+                        "no task kinds configured — set [tasks].kinds in ~/.cc-hub/config.toml"
+                    } else {
+                        "no task focused"
+                    };
+                    self.set_status(why.into());
                 }
                 Vec::new()
             }

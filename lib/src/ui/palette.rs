@@ -48,6 +48,10 @@ pub(crate) const BACKLOG_BLUE: Color = Color::Rgb(120, 140, 200);
 /// column accents, reads as secondary metadata on the card border.
 pub(crate) const TAG_SLATE: Color = Color::Rgb(150, 170, 200);
 
+/// Teal for the task-kind chip — a filled chip like the priority badge it
+/// mirrors on the other corner, in a hue no column accent or priority uses.
+pub(crate) const KIND_TEAL: Color = Color::Rgb(120, 200, 190);
+
 /// Ice blue for the cold-cache snowflake (session quiet past the prompt-cache
 /// TTL — see [`crate::models::SessionInfo::cache_cold`]).
 pub(crate) const ICE_BLUE: Color = Color::Rgb(130, 190, 220);

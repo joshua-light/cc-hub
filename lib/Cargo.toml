@@ -23,6 +23,7 @@ uuid = { version = "1", features = ["v4"] }
 dirs = "6"
 libc = "0.2"
 fs2 = "0.4"
+sha2 = "0.10"
 notify = "8"
 notify-debouncer-mini = "0.6"
 tui-term = { version = "0.3", features = ["unstable"] }

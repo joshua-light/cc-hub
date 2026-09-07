@@ -914,7 +914,6 @@ async fn run(
     // a short timer and right after every tick report, so CLI-side changes
     // (poke, pause, notes) show up too.
     {
-        let _task_jobs = cc_hub_lib::task_activity::spawn_supervisor();
         let (tick_tx, mut tick_rx) = mpsc::channel::<harness::supervisor::TickReport>(16);
         let supervisor_on = config::get().harness.enabled;
         if supervisor_on {

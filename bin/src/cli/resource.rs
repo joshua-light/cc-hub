@@ -19,7 +19,7 @@ pub(crate) fn resource(args: &[String]) -> Result<(), CliError> {
             .ok_or_else(|| CliError::Usage("missing text".into()))?;
         let sent = cc_hub_lib::send::pane_ready_for_input(tmux);
         if sent {
-            cc_hub_lib::send::send_prompt(tmux, text)
+            cc_hub_lib::send::send_notice(tmux, text)
                 .map_err(|e| CliError::Other(e.to_string()))?;
         }
         super::print_json(&serde_json::json!({"ok": true, "sent": sent}));
@@ -38,12 +38,12 @@ pub(crate) fn resource(args: &[String]) -> Result<(), CliError> {
         };
         let task = field("task")?;
         let sid = value["session_id"].as_str();
-        if field("role")? == "dev" {
-            cc_hub_lib::tasks::PersonalBoard::load_result()
-                .map_err(|e| CliError::Other(e.to_string()))?
-                .bind_resource(task, field("cwd")?, field("account")?, field("tmux")?, sid)
-                .map_err(|e| CliError::Other(e.to_string()))?;
-        }
+        // One worker at a time holds a task, whatever its role, so the card
+        // always points at the worker that was bound last.
+        cc_hub_lib::tasks::PersonalBoard::load_result()
+            .map_err(|e| CliError::Other(e.to_string()))?
+            .bind_resource(task, field("cwd")?, field("account")?, field("tmux")?, sid)
+            .map_err(|e| CliError::Other(e.to_string()))?;
         if let Some(sid) = sid {
             cc_hub_lib::session_tasks::link(
                 sid,
