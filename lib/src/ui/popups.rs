@@ -1243,22 +1243,22 @@ pub(crate) fn render_task_input(frame: &mut Frame, area: Rect, app: &App) {
     }
     let input_rows = wrapped_rows(&input_line, wrap_width);
 
-    // Context rows are capped: a 400-line paste is a fine thing to attach and
-    // a terrible thing to render, so the box shows its head and says how much
-    // more it holds.
-    let context_body = context_lines(&app.tasks.context, on_context, wrap_width);
-    let context_rows: u16 = if renaming {
-        0
-    } else {
-        // Header + body + the blank line separating it from the task line.
-        (context_body.len() as u16).saturating_add(2)
-    };
+    // Everything the popup holds besides the context body: borders, the
+    // blank line above the task line, the task line, the blank + header
+    // above the body, the blank + footer below it. The body takes the rows
+    // the screen has left, so the popup grows with the text instead of
+    // clipping it.
+    let fixed_rows = 7u16.saturating_add(input_rows);
+    let context_budget = area.height.saturating_sub(fixed_rows).max(1) as usize;
+    let context_body = context_lines(&app.tasks.context, on_context, wrap_width, context_budget);
 
-    let desired_h = 5u16
-        .saturating_add(input_rows)
-        .saturating_add(context_rows)
-        .max(9)
-        .min(area.height);
+    let desired_h = if renaming {
+        5u16.saturating_add(input_rows)
+    } else {
+        fixed_rows.saturating_add(context_body.len() as u16)
+    }
+    .max(9)
+    .min(area.height);
     let popup = centered_fixed(area, desired_w, desired_h);
     frame.render_widget(Clear, popup);
 
@@ -1378,14 +1378,14 @@ fn wrapped_rows(text: &str, width: usize) -> u16 {
         .unwrap_or(u16::MAX)
 }
 
-/// Most context rows the add popup renders before it stops and counts the
-/// rest — big pastes are the point of the field, not something to display.
-const CONTEXT_PREVIEW_ROWS: usize = 6;
-
-/// The context box's body: the paste's first [`CONTEXT_PREVIEW_ROWS`] lines
-/// (cursor on the last one when focused), then a count of what is not shown.
-/// Empty context renders the hint that says what the field is for.
-fn context_lines(context: &str, focused: bool, width: usize) -> Vec<Line<'static>> {
+/// The context box's body, `budget` rows at most. Lines wrap by column, not
+/// by word, so a pasted stack trace keeps its indentation and the row count
+/// matches what the popup's Paragraph will draw. Text that does not fit is
+/// summarised by one marker row: a focused box follows the cursor, so it
+/// keeps the tail and counts the rows above; an unfocused one keeps the head
+/// and counts the rows below. Empty context renders the hint that says what
+/// the field is for.
+fn context_lines(context: &str, focused: bool, width: usize, budget: usize) -> Vec<Line<'static>> {
     if context.is_empty() {
         return vec![Line::from(Span::styled(
             format!(
@@ -1395,27 +1395,64 @@ fn context_lines(context: &str, focused: bool, width: usize) -> Vec<Line<'static
             Style::default().fg(Color::DarkGray),
         ))];
     }
-    let all: Vec<&str> = context.lines().collect();
-    let shown = all.len().min(CONTEXT_PREVIEW_ROWS);
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(shown + 1);
-    for (i, raw) in all.iter().take(shown).enumerate() {
-        let last = i + 1 == all.len();
-        let mut text: String = raw.chars().take(width.max(1)).collect();
-        if focused && last {
-            text.push(CURSOR);
-        }
-        lines.push(Line::from(Span::styled(
-            format!("  {}", text),
-            Style::default().fg(Color::Rgb(200, 200, 210)),
-        )));
+    let width = width.max(1);
+    let mut rows: Vec<String> = context
+        .lines()
+        .flat_map(|raw| column_rows(raw, width))
+        .collect();
+    // A trailing newline means the next keystroke lands on a fresh row.
+    if context.ends_with('\n') {
+        rows.push(String::new());
     }
-    if all.len() > shown {
-        lines.push(Line::from(Span::styled(
-            format!("  … {} more lines", all.len() - shown),
-            Style::default().fg(Color::DarkGray),
-        )));
+    if focused {
+        match rows.last_mut() {
+            Some(last) if last.chars().count() < width => last.push(CURSOR),
+            _ => rows.push(CURSOR.to_string()),
+        }
+    }
+
+    let budget = budget.max(1);
+    let marker = if rows.len() > budget {
+        let hidden = rows.len() - (budget - 1);
+        if focused {
+            rows.drain(..hidden);
+            Some((0, format!("  … {} more rows above", hidden)))
+        } else {
+            rows.truncate(budget - 1);
+            Some((rows.len(), format!("  … {} more rows", hidden)))
+        }
+    } else {
+        None
+    };
+
+    let mut lines: Vec<Line<'static>> = rows
+        .into_iter()
+        .map(|row| {
+            Line::from(Span::styled(
+                format!("  {}", row),
+                Style::default().fg(Color::Rgb(200, 200, 210)),
+            ))
+        })
+        .collect();
+    if let Some((at, text)) = marker {
+        lines.insert(
+            at,
+            Line::from(Span::styled(text, Style::default().fg(Color::DarkGray))),
+        );
     }
     lines
+}
+
+/// `raw` cut into rows of at most `width` chars; an empty line is one row.
+fn column_rows(raw: &str, width: usize) -> Vec<String> {
+    let mut chars = raw.chars().peekable();
+    let mut rows = Vec::new();
+    loop {
+        rows.push(chars.by_ref().take(width).collect::<String>());
+        if chars.peek().is_none() {
+            return rows;
+        }
+    }
 }
 
 /// Centered single-line input for attaching to the focused board card. Same
@@ -2840,26 +2877,67 @@ mod task_input_tests {
     }
 
     #[test]
-    fn a_long_paste_is_previewed_and_counted() {
+    fn a_long_paste_follows_the_cursor_and_counts_the_rest() {
         with_temp_home(|| {
             let mut app = App::new();
             app.enter_task_input();
             app.tasks.input = "big one".into();
-            let paste: String = (1..=20).map(|n| format!("line {}\n", n)).collect();
+            // More rows than a 24-row terminal can give the box.
+            let paste: String = (1..=40).map(|n| format!("line {}\n", n)).collect();
             app.paste_into_input(&paste);
+            assert_eq!(app.tasks.field, TaskField::Context);
+
+            // Focused: the cursor is at the end, so the tail is what shows.
+            let focused = render(&app);
+            assert!(focused.contains("line 40"), "tail:\n{}", focused);
+            assert!(!focused.contains("line 1 "), "head hidden:\n{}", focused);
+            assert!(
+                focused.contains("more rows above"),
+                "overflow marker:\n{}",
+                focused
+            );
+            assert!(focused.contains("[esc]"), "footer stays:\n{}", focused);
+
+            // Back on the task line the box is a preview, so the head shows.
+            app.tasks.field = TaskField::Text;
+            let unfocused = render(&app);
+            assert!(unfocused.contains("line 1 "), "head:\n{}", unfocused);
+            assert!(
+                !unfocused.contains("line 40"),
+                "tail hidden:\n{}",
+                unfocused
+            );
+            assert!(
+                unfocused.contains("more rows") && !unfocused.contains("above"),
+                "overflow marker:\n{}",
+                unfocused
+            );
+        });
+    }
+
+    #[test]
+    fn typed_context_wraps_and_the_popup_grows_to_keep_the_cursor() {
+        with_temp_home(|| {
+            let mut app = App::new();
+            app.enter_task_input();
+            app.tasks.input = "typed".into();
+            app.tasks.field = TaskField::Context;
+            // One long line, as typing produces (enter submits, it does not
+            // break lines): far wider than the box, so it has to wrap.
+            app.tasks.context = "0123456789".repeat(20) + "END";
 
             let rendered = render(&app);
-            assert!(rendered.contains("line 1"), "head:\n{}", rendered);
             assert!(
-                !rendered.contains("line 20"),
-                "tail is not drawn:\n{}",
+                rendered.contains("END▎"),
+                "cursor on the tail:\n{}",
                 rendered
             );
             assert!(
-                rendered.contains("more lines"),
-                "overflow marker:\n{}",
+                !rendered.contains("more rows"),
+                "fits once wrapped, nothing hidden:\n{}",
                 rendered
             );
+            assert!(rendered.contains("[esc]"), "footer stays:\n{}", rendered);
         });
     }
 
