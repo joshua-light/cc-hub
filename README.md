@@ -69,10 +69,11 @@ Project state lives at `~/.cc-hub/projects.toml` and
 ## Deep links
 
 cc-hub owns the `cc-hub://` URL scheme, so a browser button, a shell `open`
-or a persistent agent can start a session. Two link kinds exist today:
+or a persistent agent can start a session. Three link kinds exist today:
 
 ```
-cc-hub://review?depth=<light|full>&pr=<pull request url>[&post=<confidence>]
+cc-hub://review?depth=<light|full>&pr=<pull request url>[&title=<text>][&post=<confidence>]
+cc-hub://fix?pr=<pull request url>[&title=<text>]
 cc-hub://task?id=<task id>[&dir=<path>][&kind=<word>]
 ```
 
@@ -89,6 +90,14 @@ automatically all comments and questions with confidence >= <n>.` to the
 prompt. A person clicking a browser button needs no such licence, because the
 review can just ask them. A caller with nobody watching does need it, which is
 why a persistent agent that starts its own reviews sends `post=80`.
+
+A `fix` link is the other side of a review. It lands in the same checkout,
+names the session `Fix: <title>`, and opens it with the standing orders for
+working through the pull request's comments: switch to its branch, address
+every comment, track each one as a Bitbucket task and mark it done once the
+fix is committed and pushed, answer questions, ask when a comment is
+ambiguous, skip what is already resolved, and sign every reply as written by
+Claude/Codex.
 
 A `task` link works one card of the Tasks board: it spawns a session in
 `dir` (default: the card's own cwd), names it `Task: <card>`, opens it with

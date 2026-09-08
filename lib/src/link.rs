@@ -1,7 +1,7 @@
 //! The `cc-hub://` deep link — the URL an outside tool opens to make the hub
 //! start something.
 //!
-//! Two kinds exist today: `review` and `task`.
+//! Three kinds exist today: `review`, `fix` and `task`.
 //!
 //! A browser extension puts "Light Review" and "Full Review" buttons on a
 //! pull request page; each is a link like
@@ -17,6 +17,14 @@
 //! its own — adds `&post=80` to let the review post findings it is at least
 //! that confident about instead of asking a human who is not there.
 //!
+//! The same extension puts a "Fix" button beside those two. It is the other
+//! side of a review: the session it starts works through the comments the
+//! pull request already has instead of writing new ones.
+//!
+//! ```text
+//! cc-hub://fix?pr=https%3A%2F%2Fbitbucket.example.com%2Fprojects%2FAPP%2Frepos%2Fsample-project%2Fpull-requests%2F11280
+//! ```
+//!
 //! A `task` link hands a Tasks-board card to a session:
 //!
 //! ```text
@@ -27,7 +35,7 @@
 //! without a session of its own: it decides where the work belongs, and the
 //! hub starts a session there, bound to the card, running the `task` skill.
 //!
-//! This module is pure: a string becomes a [`Link`], a [`ReviewLink`] renders
+//! This module is pure: a string becomes a [`Link`], and each link renders
 //! the prompt it stands for. Nothing here reads disk or spawns a process.
 
 use std::fmt;
@@ -41,6 +49,7 @@ pub const SCHEME: &str = "cc-hub";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Link {
     Review(ReviewLink),
+    Fix(FixLink),
     Task(TaskLink),
 }
 
@@ -49,6 +58,7 @@ impl Link {
     pub fn kind(&self) -> &'static str {
         match self {
             Link::Review(_) => "review",
+            Link::Fix(_) => "fix",
             Link::Task(_) => "task",
         }
     }
@@ -77,6 +87,10 @@ impl FromStr for Link {
                     .optional("post")
                     .map(PostThreshold::from_str)
                     .transpose()?,
+            })),
+            "fix" => Ok(Link::Fix(FixLink {
+                pr: query.required("pr")?.parse()?,
+                title: query.optional("title").map(str::to_string),
             })),
             "task" => Ok(Link::Task(TaskLink {
                 id: query.required("id")?.parse()?,
@@ -120,17 +134,54 @@ impl ReviewLink {
     /// The name the session is born with: `PR: <title>`, or `PR: <repo>#<n>`
     /// when the link carried no title.
     pub fn session_title(&self) -> String {
-        let subject = self
-            .title
-            .as_deref()
-            .filter(|t| !t.trim().is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| match self.pr.number() {
-                Some(n) => format!("{}#{}", self.pr.repo(), n),
-                None => self.pr.repo().to_string(),
-            });
-        titled("PR", &subject)
+        pull_request_titled("PR", &self.pr, self.title.as_deref())
     }
+}
+
+/// `cc-hub://fix?pr=<url>[&title=<text>]`: address the review comments of a
+/// pull request in a fresh agent session. `title` is the pull request's own
+/// title, as on a review link; it names the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FixLink {
+    pub pr: PullRequestUrl,
+    pub title: Option<String>,
+}
+
+impl FixLink {
+    /// The opening prompt of the fix session: the standing orders for
+    /// working through a review, and the pull request they apply to. The
+    /// comments are tracked as Bitbucket tasks so the reviewer can see what
+    /// was addressed and what was answered.
+    pub fn prompt(&self) -> String {
+        format!(
+            "Switch to the branch of this PR and address all the comments in it: {} \
+             Mark each comment as a task; once the fix is committed and pushed, mark that task as done. \
+             If a comment asks a question, answer it. \
+             If a comment is ambiguous, ask for clarification. \
+             If a comment is already resolved or done, skip it. \
+             Always add a remark that the response is written by Claude/Codex.",
+            self.pr
+        )
+    }
+
+    /// The name the session is born with: `Fix: <title>`, or `Fix: <repo>#<n>`
+    /// when the link carried no title.
+    pub fn session_title(&self) -> String {
+        pull_request_titled("Fix", &self.pr, self.title.as_deref())
+    }
+}
+
+/// `<prefix>: <title>` for a session about a pull request, falling back to
+/// `<prefix>: <repo>#<n>` when the link carried no usable title.
+fn pull_request_titled(prefix: &str, pr: &PullRequestUrl, title: Option<&str>) -> String {
+    let subject = title
+        .filter(|t| !t.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| match pr.number() {
+            Some(n) => format!("{}#{}", pr.repo(), n),
+            None => pr.repo().to_string(),
+        });
+    titled(prefix, &subject)
 }
 
 /// The confidence at or above which a review posts a finding without asking
@@ -373,7 +424,7 @@ impl fmt::Display for LinkError {
         match self {
             LinkError::NotCcHub(s) => write!(f, "not a {}:// link: {}", SCHEME, s),
             LinkError::UnknownKind(k) => {
-                write!(f, "unknown link kind: {} (try `review` or `task`)", k)
+                write!(f, "unknown link kind: {} (try `review`, `fix` or `task`)", k)
             }
             LinkError::MissingParam(p) => write!(f, "missing `{}` parameter", p),
             LinkError::BadDepth(d) => write!(f, "depth must be `light` or `full`, got: {}", d),
@@ -472,6 +523,15 @@ mod tests {
         }
     }
 
+    fn fix(query: &str) -> FixLink {
+        let raw = format!("cc-hub://fix?{}", query);
+        match raw.parse::<Link>() {
+            Ok(Link::Fix(x)) => x,
+            Ok(other) => panic!("{}: parsed as {}", raw, other.kind()),
+            Err(e) => panic!("{}: {}", raw, e),
+        }
+    }
+
     fn task(query: &str) -> TaskLink {
         let raw = format!("cc-hub://task?{}", query);
         match raw.parse::<Link>() {
@@ -545,6 +605,51 @@ mod tests {
         let long = task("id=tk-42").session_title(&"word ".repeat(30));
         assert_eq!(long.chars().count(), 61);
         assert!(long.ends_with('…'), "{}", long);
+    }
+
+    #[test]
+    fn parses_fix() {
+        let x = fix(&format!("pr={}", PR));
+        assert_eq!(x.pr.as_str(), PR);
+        assert_eq!(x.pr.repo(), "sample-project");
+        assert_eq!(x.title, None);
+        assert_eq!(
+            "cc-hub://fix?title=x".parse::<Link>(),
+            Err(LinkError::MissingParam("pr"))
+        );
+    }
+
+    #[test]
+    fn fix_prompt_names_the_pr_and_the_rules() {
+        let prompt = fix(&format!("pr={}", PR)).prompt();
+        assert!(
+            prompt.starts_with("Switch to the branch of this PR"),
+            "{}",
+            prompt
+        );
+        assert!(prompt.contains(PR), "{}", prompt);
+        for rule in [
+            "Mark each comment as a task",
+            "mark that task as done",
+            "asks a question, answer it",
+            "ambiguous, ask for clarification",
+            "already resolved or done, skip it",
+            "written by Claude/Codex",
+        ] {
+            assert!(prompt.contains(rule), "missing `{}` in: {}", rule, prompt);
+        }
+    }
+
+    #[test]
+    fn fix_session_title_mirrors_review() {
+        assert_eq!(
+            fix(&format!("pr={}", PR)).session_title(),
+            "Fix: sample-project#11280"
+        );
+        assert_eq!(
+            fix(&format!("pr={}&title=APP-1%20Flaky%20%20test", PR)).session_title(),
+            "Fix: APP-1 Flaky test"
+        );
     }
 
     #[test]

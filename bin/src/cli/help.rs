@@ -44,7 +44,7 @@ Orchestrator-facing topics:
   project           List registered projects
 
 Desktop-facing topics:
-  open              Act on a cc-hub:// deep link (a PR review, a board task)
+  open              Act on a cc-hub:// deep link (a PR review or fix, a board task)
 
 Persistent agents (Agents tab):
   agent             Scaffold, run, poke, pause and inspect persistent agents
@@ -108,6 +108,16 @@ Links:
       name it "PR: <title>" (or "PR: <repo>#<n>"), and open it with "Let's do
       <depth> review of this PR: <url>". The checkout is found by repo name
       among registered projects, bookmarks, and the cwds of known sessions.
+      An optional &post=<1-100> lets the review post findings it is at least
+      that confident about without asking.
+
+  cc-hub://fix?pr=<pull request url>[&title=<text>]
+      Spawn a session in the same checkout, name it "Fix: <title>" (or
+      "Fix: <repo>#<n>"), and open it with the standing orders for working
+      through the pull request's review comments: switch to its branch,
+      address every comment, track each as a Bitbucket task and close it once
+      the fix is pushed, answer questions, ask when a comment is ambiguous,
+      skip what is already done, and sign every reply as Claude/Codex.
 
   cc-hub://task?id=<tk-…>[&dir=<path>][&kind=<word>][&role=<word>]
       Spawn a session for one Tasks-board card in <dir> (default: the card's

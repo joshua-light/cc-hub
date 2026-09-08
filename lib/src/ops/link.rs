@@ -2,7 +2,8 @@
 //!
 //! A review link becomes a fresh agent session in the local checkout of the
 //! pull request's repository, named `PR: <title>` and opened with the link's
-//! prompt. The checkout is found by name among the folders the hub already
+//! prompt. A fix link lands in the same place under the name `Fix: <title>`;
+//! only the prompt differs. The checkout is found by name among the folders the hub already
 //! knows — registered projects, then bookmarks, then the cwds of scanned
 //! sessions — so a repo the user has ever worked in from the hub needs no
 //! extra mapping.
@@ -38,7 +39,7 @@ use std::time::{Duration, Instant};
 
 use crate::agent::AgentKind;
 use crate::bookmarks::Bookmarks;
-use crate::link::Link;
+use crate::link::{Link, PullRequestUrl};
 use crate::ops::worker::{wait_until_idle_and_send, PromptStatus, DEFAULT_PROMPT_WAIT_SECS};
 use crate::ops::OpError;
 use crate::orchestrator::{self, TaskState};
@@ -101,21 +102,13 @@ pub fn target(link: &Link, agent: Option<&str>) -> Result<LinkTarget, OpError> {
         .ok_or_else(|| OpError::Usage(format!("unknown agent id: {}", agent_id)))?;
 
     match link {
-        Link::Review(review) => {
-            let repo = review.pr.repo();
-            let cwd = folder_named(repo).ok_or_else(|| {
-                OpError::NotFound(format!(
-                    "no known folder named `{}` — bookmark the checkout in cc-hub (or register it as a project) and retry",
-                    repo
-                ))
-            })?;
-            Ok(LinkTarget {
-                cwd,
-                title: review.session_title(),
-                prompt: review.prompt(),
-                agent_id,
-            })
-        }
+        Link::Review(review) => pull_request_target(
+            &review.pr,
+            review.session_title(),
+            review.prompt(),
+            agent_id,
+        ),
+        Link::Fix(fix) => pull_request_target(&fix.pr, fix.session_title(), fix.prompt(), agent_id),
         Link::Task(task) => {
             let card = board_card(task.id.as_str())?;
             let cwd = task
@@ -147,6 +140,29 @@ pub fn target(link: &Link, agent: Option<&str>) -> Result<LinkTarget, OpError> {
             })
         }
     }
+}
+
+/// Where a link about a pull request lands: the local checkout of the
+/// repository the URL names, found among the folders the hub knows.
+fn pull_request_target(
+    pr: &PullRequestUrl,
+    title: String,
+    prompt: String,
+    agent_id: String,
+) -> Result<LinkTarget, OpError> {
+    let repo = pr.repo();
+    let cwd = folder_named(repo).ok_or_else(|| {
+        OpError::NotFound(format!(
+            "no known folder named `{}` — bookmark the checkout in cc-hub (or register it as a project) and retry",
+            repo
+        ))
+    })?;
+    Ok(LinkTarget {
+        cwd,
+        title,
+        prompt,
+        agent_id,
+    })
 }
 
 /// No hand-over without a brief. The session that hands a card to the next
