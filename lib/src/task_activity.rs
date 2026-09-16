@@ -20,14 +20,20 @@ struct Activity {
 /// host, and a host is fixed by whoever is nearest, not by answering.
 const WAITS: [&str; 2] = ["Waiting:", "Needs you:"];
 
+/// Saying you told the user is not the user answering. A `Posted:` follows
+/// nearly every wait — it is the record of the message about it — so a card
+/// whose newest note is one is still waiting on whatever came before.
+const BOOKKEEPING: &str = "Posted:";
+
 /// The wait the running session wrote on the card itself.
 ///
 /// `clarification.json` belongs to the router, which writes it before any
 /// session exists; a session that starts and then needs an answer has only
 /// the card's notes, so that is where the board has to read it. The newest
-/// note wins and the next note clears it — a `Candidate:` or a `PR:` is a
-/// session that stopped waiting. Only the note's caption is read, which is
-/// its first line as the board already stores it.
+/// note that says something about the work wins, and the next one clears it
+/// — a `Candidate:` or a `PR:` is a session that stopped waiting. Only the
+/// note's caption is read, which is its first line as the board already
+/// stores it.
 fn waiting(root: &Path, task: &str) -> Option<Activity> {
     #[derive(Deserialize)]
     struct Card {
@@ -41,11 +47,18 @@ fn waiting(root: &Path, task: &str) -> Option<Activity> {
     }
     let text = std::fs::read_to_string(root.join(task).join("state.json")).ok()?;
     let card = serde_json::from_str::<Card>(&text).ok()?;
-    let latest = card.artifacts.iter().rev().find(|a| a.kind == "note")?;
-    let caption = latest.caption.as_deref()?.trim();
+    let latest = card
+        .artifacts
+        .iter()
+        .rev()
+        .filter(|a| a.kind == "note")
+        .find_map(|a| {
+            let caption = a.caption.as_deref()?.trim();
+            (!caption.starts_with(BOOKKEEPING)).then_some(caption)
+        })?;
     let detail = WAITS
         .iter()
-        .find_map(|prefix| caption.strip_prefix(prefix))?;
+        .find_map(|prefix| latest.strip_prefix(prefix))?;
     Some(Activity {
         stage: "waiting".into(),
         detail: detail.trim().to_string(),
@@ -167,6 +180,22 @@ mod tests {
         );
 
         assert!(label_at(tmp.path(), "tk-1").is_none());
+    }
+
+    /// Telling the user is not the user answering, and `Posted:` follows
+    /// nearly every wait — clearing on it would make the pill blink out the
+    /// moment it became true.
+    #[test]
+    fn saying_you_posted_does_not_clear_the_wait() {
+        let tmp = tempfile::tempdir().unwrap();
+        card(
+            tmp.path(),
+            "tk-1",
+            &["Waiting: which base branch?", "Posted: asked in #status"],
+        );
+
+        let label = label_at(tmp.path(), "tk-1").expect("still waiting");
+        assert_eq!(label.text, "waiting on you: which base branch?");
     }
 
     #[test]
