@@ -9,6 +9,7 @@
 
 use super::spec::TriggerKind;
 use super::{trigger, Event, Spec};
+use crate::wake::{Stamp, Wake};
 use log::{info, warn};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -80,6 +81,7 @@ async fn agent_loop(dir: PathBuf, tx: mpsc::Sender<TickReport>) {
     let mut last_interval: Option<Instant> = None;
     let mut last_digest: Option<String> = None;
     let mut interval_n: u64 = 0;
+    let mut wakes: HashMap<String, Stamp> = HashMap::new();
 
     loop {
         let spec = match super::spec::load(&dir) {
@@ -97,6 +99,14 @@ async fn agent_loop(dir: PathBuf, tx: mpsc::Sender<TickReport>) {
         if let Some(reason) = super::budget_block(&spec, &state) {
             halt(&dir, &spec, &reason, &tx).await;
             continue;
+        }
+
+        // A wake says only "look now" — the poll still decides whether
+        // there is an event — so forgetting when it last ran is the whole
+        // mechanism.
+        if woken(&spec, &mut wakes) {
+            last_poll = None;
+            last_interval = None;
         }
 
         // Inbox first, for every trigger kind: a poke or an answer must not
@@ -173,6 +183,28 @@ async fn agent_loop(dir: PathBuf, tx: mpsc::Sender<TickReport>) {
     }
 }
 
+/// True when a wake the spec subscribes to has happened since the last
+/// look. The first look only records: a wake older than this loop is not
+/// news, the same reason the task watcher ignores the board it starts with.
+/// A name dropped from the spec is forgotten, so putting it back reads as
+/// new again — cheap, and only ever one extra poll.
+fn woken(spec: &Spec, seen: &mut HashMap<String, Stamp>) -> bool {
+    seen.retain(|name, _| spec.trigger.wake.contains(name));
+    let mut news = false;
+    for name in &spec.trigger.wake {
+        let Some(stamp) = Wake::named(name).and_then(|w| w.last()) else {
+            continue;
+        };
+        match seen.get(name) {
+            Some(&known) if known == stamp => {}
+            Some(_) => news = true,
+            None => {}
+        }
+        seen.insert(name.clone(), stamp);
+    }
+    news
+}
+
 /// A `ticking` marker outlives the process that set it if that process is
 /// killed mid-tick — machine sleep, a forced quit, a crash — since only the
 /// tick's own return path clears it. `age` is old enough once the tick's own
@@ -208,7 +240,46 @@ async fn reclaim_stale_tick(dir: &std::path::Path, spec: &Spec) -> super::AgentS
 
 #[cfg(test)]
 mod tests {
-    use super::tick_is_stale;
+    use super::{tick_is_stale, woken, Stamp, Wake};
+    use crate::test_util::with_temp_home;
+    use std::collections::HashMap;
+
+    fn watching(name: &str) -> crate::harness::Spec {
+        crate::harness::spec::parse(
+            std::path::Path::new("/tmp/x"),
+            &format!(
+                "[trigger]\nkind = \"interval\"\nwake = [\"{}\"]\n[prompt]\ninstruction = \"x\"",
+                name
+            ),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_first_look_records_without_waking() {
+        with_temp_home(|| {
+            Wake::named("board").unwrap().now().unwrap();
+            let spec = watching("board");
+            let mut seen: HashMap<String, Stamp> = HashMap::new();
+
+            assert!(!woken(&spec, &mut seen), "a wake older than the loop");
+            assert!(!woken(&spec, &mut seen), "nothing happened since");
+
+            Wake::named("board").unwrap().now().unwrap();
+            assert!(woken(&spec, &mut seen), "touched since the last look");
+            assert!(!woken(&spec, &mut seen), "and only once");
+        });
+    }
+
+    #[test]
+    fn a_wake_nobody_ever_touched_is_quiet() {
+        with_temp_home(|| {
+            let spec = watching("board");
+            let mut seen: HashMap<String, Stamp> = HashMap::new();
+            assert!(!woken(&spec, &mut seen));
+            assert!(seen.is_empty());
+        });
+    }
 
     #[test]
     fn fresh_tick_is_not_stale() {

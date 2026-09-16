@@ -19,10 +19,13 @@
 //!
 //! The same extension puts a "Fix" button beside those two. It is the other
 //! side of a review: the session it starts works through the comments the
-//! pull request already has instead of writing new ones.
+//! pull request already has instead of writing new ones. A fix is filed as a
+//! card on the Tasks board the moment the link is opened, and runs through
+//! the resource broker like any card; `kind` says which deliverable kind the
+//! card is filed under, so the broker can pick the subscription account.
 //!
 //! ```text
-//! cc-hub://fix?pr=https%3A%2F%2Fbitbucket.example.com%2Fprojects%2FAPP%2Frepos%2Fsample-project%2Fpull-requests%2F11280
+//! cc-hub://fix?pr=https%3A%2F%2Fbitbucket.example.com%2Fprojects%2FAPP%2Frepos%2Fsample-project%2Fpull-requests%2F11280&kind=tps
 //! ```
 //!
 //! A `task` link hands a Tasks-board card to a session:
@@ -91,6 +94,7 @@ impl FromStr for Link {
             "fix" => Ok(Link::Fix(FixLink {
                 pr: query.required("pr")?.parse()?,
                 title: query.optional("title").map(str::to_string),
+                kind: query.optional("kind").map(str::to_string),
             })),
             "task" => Ok(Link::Task(TaskLink {
                 id: query.required("id")?.parse()?,
@@ -131,6 +135,20 @@ impl ReviewLink {
         }
     }
 
+    /// The opening prompt when the machine has no checkout of the repository.
+    /// The review is the same review — the diff, the files and the comments
+    /// all come over the wire — so the only thing worth saying is that there
+    /// is no working tree, before the session spends its turns looking for
+    /// one.
+    pub fn prompt_without_checkout(&self) -> String {
+        format!(
+            "{} There is no local checkout of `{}` on this machine: read the diff, the files \
+             and the comments over Bitbucket, and skip the steps that need a working tree.",
+            self.prompt(),
+            self.pr.repo()
+        )
+    }
+
     /// The name the session is born with: `PR: <title>`, or `PR: <repo>#<n>`
     /// when the link carried no title.
     pub fn session_title(&self) -> String {
@@ -138,13 +156,17 @@ impl ReviewLink {
     }
 }
 
-/// `cc-hub://fix?pr=<url>[&title=<text>]`: address the review comments of a
-/// pull request in a fresh agent session. `title` is the pull request's own
-/// title, as on a review link; it names the session.
+/// `cc-hub://fix?pr=<url>[&title=<text>][&kind=<word>]`: address the review
+/// comments of a pull request in a fresh agent session, filed as a card on
+/// the Tasks board. `title` is the pull request's own title, as on a review
+/// link; it names the session and the card. `kind` is the deliverable kind
+/// the card is filed under — one of the board's configured kinds — and the
+/// key the resource broker routes the session's account by.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FixLink {
     pub pr: PullRequestUrl,
     pub title: Option<String>,
+    pub kind: Option<String>,
 }
 
 impl FixLink {
@@ -161,6 +183,20 @@ impl FixLink {
              If a comment is already resolved or done, skip it. \
              Always add a remark that the response is written by Claude/Codex.",
             self.pr
+        )
+    }
+
+    /// The opening prompt once the fix is filed as board card `card`: the
+    /// standing orders, then where the outcome is written. The card is the
+    /// user's view of the work, so the session closes it out with one note.
+    pub fn prompt_for(&self, card: &BoardTaskId) -> String {
+        format!(
+            "{}\n\nThis work is card {} on the Tasks board. \
+             When every comment is handled and pushed, write one note on it: \
+             cc-hub board note --task {} --text \"Pushed: <what changed, one line>\"",
+            self.prompt(),
+            card,
+            card
         )
     }
 
@@ -613,6 +649,11 @@ mod tests {
         assert_eq!(x.pr.as_str(), PR);
         assert_eq!(x.pr.repo(), "sample-project");
         assert_eq!(x.title, None);
+        assert_eq!(x.kind, None);
+        assert_eq!(
+            fix(&format!("pr={}&kind=tps", PR)).kind.as_deref(),
+            Some("tps")
+        );
         assert_eq!(
             "cc-hub://fix?title=x".parse::<Link>(),
             Err(LinkError::MissingParam("pr"))
@@ -638,6 +679,23 @@ mod tests {
         ] {
             assert!(prompt.contains(rule), "missing `{}` in: {}", rule, prompt);
         }
+    }
+
+    #[test]
+    fn fix_prompt_for_a_card_ends_with_the_note_to_write() {
+        let card: BoardTaskId = "tk-42".parse().unwrap();
+        let prompt = fix(&format!("pr={}", PR)).prompt_for(&card);
+        assert!(prompt.starts_with(&fix(&format!("pr={}", PR)).prompt()));
+        assert!(
+            prompt.contains("card tk-42 on the Tasks board"),
+            "{}",
+            prompt
+        );
+        assert!(
+            prompt.contains("cc-hub board note --task tk-42 --text \"Pushed:"),
+            "{}",
+            prompt
+        );
     }
 
     #[test]

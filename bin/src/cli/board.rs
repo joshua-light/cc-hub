@@ -175,15 +175,10 @@ fn when(unix_secs: i64) -> String {
 /// A kind is only a kind if `[tasks].kinds` says so: one list behind the
 /// board picker, this flag, and the routing table the agent reads.
 fn known_kind(kind: &str) -> Result<String, CliError> {
-    let kinds = &cc_hub_lib::config::get().tasks.kinds;
-    if kinds.iter().any(|k| k == kind) {
-        return Ok(kind.to_string());
-    }
-    Err(CliError::Usage(if kinds.is_empty() {
-        "--kind: no task kinds configured — set [tasks].kinds in ~/.cc-hub/config.toml".into()
-    } else {
-        format!("--kind {}: expected one of {}", kind, kinds.join(", "))
-    }))
+    cc_hub_lib::config::get()
+        .tasks
+        .known_kind(kind)
+        .map_err(|why| CliError::Usage(format!("--kind: {}", why)))
 }
 
 fn parse_priority(s: &str) -> Result<TaskPriority, CliError> {

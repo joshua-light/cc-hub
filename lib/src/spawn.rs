@@ -175,6 +175,15 @@ fn build_agent_command(
                 }
                 None => {}
             }
+            // Positional prompt, valid bare and after `--resume` — how the
+            // resource broker opens replacement sessions. Callers that queue
+            // prompts via send-keys gate on `supports_initial_prompt()` and
+            // pass None here, so this only fires for explicit openers
+            // (respawn's continuation note).
+            if let Some(prompt) = initial_prompt {
+                cmd.push(' ');
+                cmd.push_str(&shell_quote(prompt));
+            }
             // Pin the spawned `claude` to this instance's account. The hub
             // process already has CLAUDE_CONFIG_DIR set, but a detached mux
             // session attaches to a possibly-pre-existing tmux server whose
@@ -563,6 +572,31 @@ mod tests {
         assert_eq!(
             cmd,
             "codex -c model_reasoning_effort=high -m 'gpt-5.6-luna' 'do the thing'"
+        );
+    }
+
+    #[test]
+    fn claude_resume_carries_the_positional_prompt() {
+        let agent = AgentConfig {
+            id: "claude".into(),
+            kind: AgentKind::Claude,
+            command: "claude".into(),
+            use_bridge: false,
+            models: Vec::new(),
+        };
+        let cmd = build_agent_command(
+            &agent,
+            "/tmp",
+            "cchub-1-2",
+            Some(super::SessionTarget::Resume("sid-1".into())),
+            Some("pick up where you left off"),
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(
+            cmd.ends_with("claude --resume 'sid-1' 'pick up where you left off'"),
+            "got: {cmd}"
         );
     }
 

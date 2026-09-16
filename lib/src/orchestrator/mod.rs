@@ -824,6 +824,17 @@ where
         state.touch();
     }
     write_task_state(&state)?;
+    if state.status != prev_status {
+        // A card changed column. Agents that watch the board — the task
+        // router above all — poll on the next second instead of waiting out
+        // their interval. Best-effort by design: the wake says only "look
+        // now", so one that never lands costs latency, not a routing.
+        if let Some(wake) = crate::wake::Wake::named(crate::wake::BOARD) {
+            if let Err(e) = wake.now() {
+                log::warn!("board wake: {}", e);
+            }
+        }
+    }
     Ok((state, true))
 }
 

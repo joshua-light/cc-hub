@@ -96,6 +96,9 @@ pub enum SessionsCommand {
     OpenModelPicker,
     /// `A` — choose the default agent used by subsequent new sessions.
     OpenAgentPicker,
+    /// `R` — respawn the selected session on another subscription account,
+    /// continuing from its transcript ([`crate::respawn`]).
+    OpenRespawnPicker,
     /// `p` — places picker.
     OpenPlacesPicker,
     /// `M` — bookmarks picker.
@@ -417,6 +420,17 @@ impl App {
             }
             OpenAgentPicker => {
                 self.enter_agent_picker();
+                Vec::new()
+            }
+            OpenRespawnPicker => {
+                if !self.enter_respawn_picker() {
+                    let msg = if self.selected_session_info().is_none() {
+                        "no session selected"
+                    } else {
+                        "no accounts configured — see ~/.cc-hub/resources.toml"
+                    };
+                    self.set_status(msg.into());
+                }
                 Vec::new()
             }
             OpenPlacesPicker => {
@@ -2096,6 +2110,155 @@ mod tests {
             tasks(&mut app, TasksCommand::OpenTaskInfo);
             assert_eq!(app.view, crate::app::View::Grid);
             assert_eq!(status(&app), "no task focused");
+        });
+    }
+
+    /// The four-account registry from docs/resource-management.md, homes
+    /// under the (redirected) test $HOME.
+    fn write_accounts_registry() {
+        let dir = dirs::home_dir().unwrap().join(".cc-hub");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("resources.toml"),
+            r#"
+[accounts.cc-1]
+provider = "claude"
+home_mode = "default"
+
+[accounts.cc-2]
+provider = "claude"
+home = "~/.claude-personal"
+
+[accounts.codex-1]
+provider = "codex"
+
+[accounts.codex-2]
+provider = "codex"
+home = "~/.codex-personal"
+"#,
+        )
+        .unwrap();
+    }
+
+    /// An inactive cc-1 Claude session whose transcript really exists under
+    /// the test home, so a carry can be performed against it.
+    fn respawnable_session() -> SessionInfo {
+        let jsonl = dirs::home_dir()
+            .unwrap()
+            .join(".claude/projects/-tmp-proj/sid-abc.jsonl");
+        std::fs::create_dir_all(jsonl.parent().unwrap()).unwrap();
+        std::fs::write(&jsonl, "{\"type\":\"user\"}\n").unwrap();
+        let mut s = session("sid-abc", SessionState::Inactive, None);
+        s.agent_id = "cc-1".into();
+        s.title = Some("Fix the auth flow".into());
+        s.jsonl_path = Some(jsonl);
+        s
+    }
+
+    #[test]
+    fn respawn_picker_plans_every_account_and_preselects_the_sibling() {
+        crate::test_util::with_temp_home(|| {
+            write_accounts_registry();
+            let (mut app, _rt) = app_with(vec![respawnable_session()]);
+            let effects = app.execute(Command::Sessions(SessionsCommand::OpenRespawnPicker));
+            assert!(effects.is_empty());
+            assert_eq!(app.view, crate::app::View::RespawnPicker);
+
+            let picker = app.respawn_picker.as_ref().expect("picker state");
+            let ids: Vec<&str> = picker
+                .choices
+                .iter()
+                .map(|c| c.account_id.as_str())
+                .collect();
+            assert_eq!(ids, ["cc-1", "cc-2", "codex-1", "codex-2"]);
+            // The other Claude account is the likeliest target.
+            assert_eq!(picker.choices[picker.selected].account_id, "cc-2");
+            let labels: Vec<&str> = picker
+                .choices
+                .iter()
+                .map(|c| c.plan.as_ref().unwrap().label())
+                .collect();
+            assert_eq!(labels, ["resume", "resume", "handoff", "handoff"]);
+        });
+    }
+
+    #[test]
+    fn respawn_on_claude_account_carries_the_transcript_and_resumes() {
+        crate::test_util::with_temp_home(|| {
+            write_accounts_registry();
+            let (mut app, runtime) = app_with(vec![respawnable_session()]);
+            app.execute(Command::Sessions(SessionsCommand::OpenRespawnPicker));
+            app.confirm_respawn_picker();
+
+            let carried = dirs::home_dir()
+                .unwrap()
+                .join(".claude-personal/projects/-tmp-proj/sid-abc.jsonl");
+            assert!(carried.is_file(), "transcript must be copied to cc-2");
+            let spawns = runtime.spawns.lock().unwrap();
+            assert_eq!(spawns.len(), 1);
+            assert_eq!(spawns[0].agent_id, "cc-2");
+            assert_eq!(spawns[0].cwd, "/tmp/proj");
+            assert_eq!(spawns[0].resume.as_deref(), Some("Resume(\"sid-abc\")"));
+            assert_eq!(
+                spawns[0].initial_prompt.as_deref(),
+                Some(crate::respawn::RESUMED)
+            );
+            assert!(
+                status(&app).starts_with("respawned"),
+                "got: {}",
+                status(&app)
+            );
+            // The old name travels with the session instead of a rename
+            // prompt: it is staged for adoption under the new tmux name.
+            assert_eq!(
+                app.pending_spawn_names.get("mock-spawn"),
+                Some(&Some("Fix the auth flow".into()))
+            );
+        });
+    }
+
+    #[test]
+    fn respawn_on_codex_account_hands_off_with_the_transcript_prompt() {
+        crate::test_util::with_temp_home(|| {
+            write_accounts_registry();
+            let (mut app, runtime) = app_with(vec![respawnable_session()]);
+            app.execute(Command::Sessions(SessionsCommand::OpenRespawnPicker));
+            {
+                let picker = app.respawn_picker.as_mut().unwrap();
+                picker.selected = picker
+                    .choices
+                    .iter()
+                    .position(|c| c.account_id == "codex-1")
+                    .unwrap();
+            }
+            app.confirm_respawn_picker();
+
+            let spawns = runtime.spawns.lock().unwrap();
+            assert_eq!(spawns.len(), 1);
+            assert_eq!(spawns[0].agent_id, "codex-1");
+            assert_eq!(spawns[0].resume, None, "cross-provider must not resume");
+            let prompt = spawns[0].initial_prompt.as_deref().unwrap_or_default();
+            assert!(
+                prompt.contains("sid-abc.jsonl"),
+                "handoff prompt must point at the transcript, got: {}",
+                prompt
+            );
+        });
+    }
+
+    #[test]
+    fn respawn_without_accounts_reports_instead_of_opening() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, runtime) = app_with(vec![session("sid-1", SessionState::Idle, None)]);
+            app.execute(Command::Sessions(SessionsCommand::OpenRespawnPicker));
+            assert_eq!(app.view, crate::app::View::Grid);
+            assert!(app.respawn_picker.is_none());
+            assert!(runtime.spawns.lock().unwrap().is_empty());
+            assert!(
+                status(&app).starts_with("no accounts configured"),
+                "got: {}",
+                status(&app)
+            );
         });
     }
 

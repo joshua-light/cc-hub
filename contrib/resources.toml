@@ -39,11 +39,28 @@ args = ["--yolo"]
 max_workers = 2
 capabilities = ["task-workflow"]
 
+# Hosts commands can run on, and the resources that live on them. A resource
+# is anything only one session may use at a time; nothing here says who needs
+# one — a session claims what its work needs while it runs.
+[hosts.main]
+[hosts.wh]
+ssh = "workhorse"
+
+[resources.main-tps]
+host = "main"
+description = "TPS checkout + Unity Editor on this machine"
+[resources.wh-tps]
+host = "wh"
+description = "TPS checkout + Unity Editor on the workhorse"
+[resources.android]
+host = "wh"
+description = "Android phone, for installing and running a client build"
+
 [profiles.sonnet-medium]
 provider = "claude"
 model = "claude-sonnet-5[1m]"
 effort = "medium"
-autocompact = 250_000 # Compact well inside the 1M window.
+autocompact = 350_000 # Compact well inside the 1M window.
 accounts = ["cc-1", "cc-2"]
 [profiles.luna-medium]
 provider = "codex"

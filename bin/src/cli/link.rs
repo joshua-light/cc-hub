@@ -8,7 +8,10 @@
 //! names a `role` or another directory: that is a hand-over, which starts a
 //! fresh session and closes the card's old one after this command has
 //! reported. With accounts configured the broker applies the same rule and
-//! stops the old worker itself. It is also handy by hand:
+//! stops the old worker itself. A fix link files a board card first and is
+//! then worked like a task link's card: through the broker when accounts are
+//! configured, so the fix runs on whichever subscription has room, and the
+//! card moves to Running once its worker is bound. It is also handy by hand:
 //! `cc-hub open 'cc-hub://review?depth=light&pr=…' --dry-run` shows where a
 //! link would land without spawning anything.
 
@@ -54,6 +57,27 @@ pub(crate) fn open(args: &[String]) -> Result<(), CliError> {
     };
 
     if f.agent.is_none() && !cc_hub_lib::resources::accounts().is_empty() {
+        if let Link::Fix(fix) = &link {
+            let target = ops::link::target(&link, None)?;
+            let card = ops::link::file_fix(fix)?;
+            let started = super::resource::resource(&[
+                "start".into(),
+                "--task".into(),
+                card.to_string(),
+                "--kind".into(),
+                fix.kind.clone().unwrap_or_else(|| "basic".into()),
+                "--role".into(),
+                "implementation".into(),
+                "--cwd".into(),
+                target.cwd.to_string_lossy().into(),
+                "--prompt".into(),
+                fix.prompt_for(&card),
+            ]);
+            if started.is_ok() {
+                ops::link::start_card(card.as_str())?;
+            }
+            return started;
+        }
         if let Link::Task(task) = &link {
             if let Some(kind) = task
                 .kind
@@ -99,6 +123,7 @@ pub(crate) fn open(args: &[String]) -> Result<(), CliError> {
         "tmux": opened.tmux,
         "reused": opened.reused,
         "session_id": opened.session_id,
+        "task_id": opened.task_id,
         "cwd": opened.target.cwd,
         "agent_id": opened.target.agent_id,
         "title": opened.target.title,

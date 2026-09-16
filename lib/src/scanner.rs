@@ -42,7 +42,7 @@ fn projects_dir() -> Option<PathBuf> {
 /// the cwd also carries `\` and a drive `:` (e.g. `C:\Users\me` →
 /// `C--Users-me`). Without the latter two, transcript lookup never matches on
 /// Windows and every session resolves to `jsonl=none`.
-fn encode_path(path: &str) -> String {
+pub(crate) fn encode_path(path: &str) -> String {
     path.replace(['/', '.', '\\', ':'], "-")
 }
 

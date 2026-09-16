@@ -10,6 +10,10 @@ The configuration is `~/.cc-hub/resources.toml`; see
 - **Profiles** pair an exact model and effort with the accounts that may run it.
 - **Routing** picks profiles by task kind and role: `implementation` or
   `verification`, the two roles of the `task` skill.
+- **Hosts** are the places commands can run (`main`, `wh`), and **resources**
+  are the things on them that only one session may use at a time (a checkout,
+  a phone). Routing says nothing about resources: a session claims what its
+  work needs.
 
 ## One session per task
 
@@ -30,6 +34,55 @@ A `cc-hub://task?…&role=…` link is the same hand-over from the board's side:
 `cc-hub open` starts the new role through the broker when accounts are
 configured, then closes the card's previous session once it has reported.
 
+## Resources
+
+```toml
+[hosts.main]
+[hosts.wh]
+ssh = "workhorse"
+
+[resources.main-tps]
+host = "main"
+description = "TPS checkout + Unity Editor on this machine"
+[resources.wh-tps]
+host = "wh"
+description = "TPS checkout + Unity Editor on the workhorse"
+[resources.android]
+host = "wh"
+description = "Android phone, for installing and running a client build"
+```
+
+A resource is a thing only one session may use at a time. The config says
+which exist and on which host; it does not say who needs one, because only the
+session doing the work knows that — a Grafana check and an on-device test are
+both `tps` verification, and one of them needs a phone. So a worker launches
+holding nothing and asks for what it needs:
+
+```sh
+cc-hub resource claim android --wait 300   # the complete set the work needs
+cc-hub resource release                    # as soon as it is done
+cc-hub resource list                       # who holds what, and the queue
+```
+
+A claim is granted only if every resource in it is free and nobody asked
+earlier for any of them — first to ask, first served. All of it or none: a
+half-granted claim is how two sessions deadlock, each holding what the other
+waits for. For the same reason a claim is the *complete* set, so claiming a
+different one hands back what the worker holds until the new set can be
+granted in full. A waiting card reads `waiting for a resource`.
+
+Holding is derived from the live workers, never stored as a lock: a session
+that forgets to release holds nothing the moment it ends, and there is no
+lease to expire. A quota replacement keeps what its predecessor held, because
+it continues the same work.
+
+The `description` is the only thing that tells a session whether it needs the
+thing, so write it for a reader who knows the work and not the hardware. A
+resource on a remote host comes with that host's `ssh` name; the session
+itself still runs in tmux on this machine and reaches the host over SSH.
+Holding `android` does not hold `wh-tps`: the phone hangs off that machine,
+but using it does not take the checkout beside it.
+
 ## Replacement from the transcript
 
 Each worker carries the `PreToolUse` hook, which records the provider session
@@ -37,11 +90,14 @@ id and transcript path and notes the account's quota in the tool context.
 It blocks nothing. When the worker's account reaches `stop_percent` (or the
 transcript shows a native usage-limit error) the supervisor stops the
 session, puts the pool on cooldown until the window resets, selects another
-account, and relaunches. A Claude worker resumes its own session: the
-transcript is copied into the new account's `projects/` and the session id is
-kept for the worker's whole life, so `--resume` continues where it stopped. A
-Codex worker starts fresh with the transcript path in its prompt. No
-checkpoint files, no model call to prepare.
+account, and relaunches. What the successor does depends on both sides of
+the pairing. Claude→Claude resumes the same session: the transcript is copied
+into the new account's `projects/` and the session id is kept, so `--resume`
+continues where it stopped. Every other pairing — Codex anywhere, or across
+providers — is a hand-off: a fresh session, with a new id, whose opening
+prompt names the old transcript. A generation that never wrote a transcript
+of its own (it died before its first tool call) passes on the one it was
+handed. No checkpoint files, no model call to prepare.
 
 Defaults: **80% warning** (noted to the worker), **85% start ceiling** (no new
 allocation on that account), **95% stop** (replace). An unexplained exit is
@@ -54,6 +110,18 @@ The board shows the broker's state on the task card while it matters:
 `waiting for subscription capacity`, `changing worker account`, `worker
 needs recovery`. A running worker shows nothing; the card's Done state is the
 user's.
+
+## Account health
+
+A Claude account is allocatable when `cc-hub usage --home DIR` reports it
+`ready`, its usage sits below `start_percent`, and fewer than `max_workers`
+of its workers are live. The store only reads the OAuth access token Claude
+Code keeps; it never refreshes one. Claude Code refreshes on its next real
+request, so an account nothing has run on for a few hours holds a lapsed
+token and would read as `login_required` forever. The probe tells the two
+apart by the report's `token_expires_at`: a lapsed token gets one trivial
+`claude -p` on that home (the cheapest model, one turn) and the account is
+`unknown` until the store re-asks; a missing login stays `login_required`.
 
 ## Install
 

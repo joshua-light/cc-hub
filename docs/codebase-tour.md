@@ -166,6 +166,10 @@ the Tasks status bar instead of silently overwriting or resetting state.
   `~/.cc-hub/agents/<name>/agent.toml`; `tools.rs` turns a tool allow-list
   into the deny-everything-else rules that keep the prompt prefix small;
   `trigger.rs` is the at-least-once inbox plus poll/interval sources;
+  `wake.rs` (top level) is the other half of the pacing: a spec's
+  `trigger.wake` names files under `~/.cc-hub/wake/` that make the next poll
+  run within a second, which is how a card moved to In Progress reaches the
+  task router without waiting out its interval;
   `runner.rs` builds the `claude -p` argv and folds stream-json into a
   `Tick`; `supervisor.rs` is the per-agent tokio loop spawned from
   `main.rs::run`; `mod.rs` owns `state.json`, `notes.jsonl`, the snapshot
@@ -185,6 +189,11 @@ the Tasks status bar instead of silently overwriting or resetting state.
   `platform::mux::spawn_detached`. Returns the new tmux session name.
   Claude sessions go through `ensure_path_trusted` first (writes to
   Claude's per-cwd trust store).
+- **`respawn.rs`** — continuation planning for `R` on the Sessions grid:
+  decides whether a session moving to another subscription account resumes
+  natively (Claude→Claude, transcript carried into the target home) or
+  hands off (fresh session pointed at the old transcript). Mirrors the
+  resource broker's worker-replacement rules.
 - **`send.rs`** — dispatches a prompt into a running agent. Walks the
   PID's ancestor chain to find the tmux pane, then `tmux send-keys`. Used
   for the Sessions-tab `p` prompt and for the orchestrator's "queued

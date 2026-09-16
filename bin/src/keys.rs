@@ -71,6 +71,24 @@ fn open_agent_transcript(app: &mut App) {
     }
 }
 
+/// `o` on the Agents tab: open what the agent last pointed at — the
+/// artifact, page or file in its newest note's `--ref` — with the OS
+/// opener, the same way an attachment opens from a task card.
+fn open_agent_ref(app: &mut App) {
+    let Some(agent) = app.harness.selected() else {
+        return;
+    };
+    let name = agent.name.clone();
+    let Some(target) = agent.latest_ref().map(str::to_string) else {
+        app.set_status(format!("{}: no note with a ref yet", name));
+        return;
+    };
+    match crate::open_path_detached(&target) {
+        Ok(()) => app.set_status(format!("opening {}", target)),
+        Err(e) => app.set_status(format!("open failed: {}", e)),
+    }
+}
+
 /// Sessions- and Global-tab command mapping (Tasks lives in
 /// [`tasks::map_tasks_command`]).
 fn map_sessions_command(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<Command> {
@@ -115,6 +133,7 @@ fn map_sessions_command(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<
         (View::Grid, KeyCode::Char('n')) if on_sessions => Command::Sessions(S::SpawnAgentHere),
         (View::Grid, KeyCode::Char('N')) if on_sessions => Command::Sessions(S::OpenModelPicker),
         (View::Grid, KeyCode::Char('A')) if on_sessions => Command::Sessions(S::OpenAgentPicker),
+        (View::Grid, KeyCode::Char('R')) if on_sessions => Command::Sessions(S::OpenRespawnPicker),
         (View::Grid, KeyCode::Char('M')) if on_sessions => {
             Command::Sessions(S::OpenBookmarksPicker)
         }
@@ -604,6 +623,9 @@ pub(crate) async fn handle_key(
         (View::Grid | View::AgentDetail, KeyCode::Char('f')) if on_agents => {
             open_agent_transcript(app);
         }
+        (View::Grid | View::AgentDetail, KeyCode::Char('o')) if on_agents => {
+            open_agent_ref(app);
+        }
         (View::Grid, KeyCode::Char('r')) if on_metrics => {
             app.metrics.analysis = None;
             spawn_metrics();
@@ -958,6 +980,13 @@ pub(crate) async fn handle_key(
             KeyCode::Enter | KeyCode::Char(' ') => app.confirm_default_session_agent(),
             KeyCode::Down | KeyCode::Char('j') => app.agent_picker_move(1),
             KeyCode::Up | KeyCode::Char('k') => app.agent_picker_move(-1),
+            _ => {}
+        },
+        (View::RespawnPicker, code) => match code {
+            KeyCode::Esc => app.close_respawn_picker(),
+            KeyCode::Enter | KeyCode::Char(' ') => app.confirm_respawn_picker(),
+            KeyCode::Down | KeyCode::Char('j') => app.respawn_picker_move(1),
+            KeyCode::Up | KeyCode::Char('k') => app.respawn_picker_move(-1),
             _ => {}
         },
         (View::TaskKindPicker, code) => match code {

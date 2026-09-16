@@ -69,6 +69,7 @@ pub(crate) mod test_util {
     }
 }
 pub mod resources;
+pub mod respawn;
 pub mod scanner;
 pub mod send;
 pub mod session_count;
@@ -86,6 +87,7 @@ pub mod triage;
 pub mod ui;
 pub mod usage;
 pub mod version;
+pub mod wake;
 pub mod watcher;
 
 pub use ratatui_image;

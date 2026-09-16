@@ -26,6 +26,7 @@ use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::PathBuf;
 
+use crate::models::{SessionInfo, SessionState};
 use crate::orchestrator::{
     self, personal_task_dir, personal_tasks_dir, read_task_state_for, update_personal_task,
     write_task_state, TaskPriority, TaskState, TaskStatus,
@@ -142,6 +143,40 @@ fn save_board_meta(meta: &BoardMeta) -> io::Result<()> {
 pub struct PersonalBoard {
     tasks: Vec<TaskState>,
     last_assign_cwd: Option<String>,
+}
+
+/// What a scan teaches a card about its own session.
+enum Binding {
+    /// The card's session is live in another tmux: follow it there.
+    FollowSession(String),
+    /// The card only knows its tmux; the session running there is its own.
+    LearnSession(String),
+}
+
+impl Binding {
+    fn learned(card: &TaskState, sessions: &[SessionInfo]) -> Option<Self> {
+        let live = |s: &&SessionInfo| s.state != SessionState::Inactive;
+        if let Some(sid) = card.session_id.as_deref() {
+            let own = sessions.iter().filter(live).find(|s| s.session_id == sid);
+            if let Some(tmux) = own.and_then(|s| s.tmux_session.clone()) {
+                return (card.tmux.as_deref() != Some(tmux.as_str()))
+                    .then_some(Binding::FollowSession(tmux));
+            }
+        }
+        let tmux = card.tmux.as_deref()?;
+        let running = sessions
+            .iter()
+            .find(|s| s.tmux_session.as_deref() == Some(tmux))?;
+        (card.session_id.as_deref() != Some(running.session_id.as_str()))
+            .then(|| Binding::LearnSession(running.session_id.clone()))
+    }
+
+    fn apply(&self, card: &mut TaskState) {
+        match self {
+            Binding::FollowSession(tmux) => card.tmux = Some(tmux.clone()),
+            Binding::LearnSession(sid) => card.session_id = Some(sid.clone()),
+        }
+    }
 }
 
 impl PersonalBoard {
@@ -361,29 +396,25 @@ impl PersonalBoard {
         Ok(true)
     }
 
-    /// Fill in `session_id` for any assigned task whose tmux name matches a
-    /// scanned session. Returns true when something new was learned (and
-    /// persisted) so callers can repaint.
+    /// Keep every card's binding — `session_id` and `tmux` — in step with the
+    /// scan, so `f`, Space and Done act on one session, not on whichever field
+    /// was written last. The session the card names wins: if it is live, the
+    /// card follows it to wherever it runs now (a replacement on another
+    /// account, a hand-over). Otherwise the card learns the session running in
+    /// its tmux — a fresh assignment, or a Claude resume that forked a new id.
+    /// Returns true when something was learned (and persisted) so callers can
+    /// repaint.
     pub fn bind_sessions(&mut self, sessions: &[crate::models::SessionInfo]) -> io::Result<bool> {
-        let bindings: Vec<(String, String)> = self
+        let bindings: Vec<(String, Binding)> = self
             .tasks
             .iter()
-            .filter_map(|t| {
-                if t.session_id.is_some() {
-                    return None;
-                }
-                let tmux = t.tmux.as_deref()?;
-                sessions
-                    .iter()
-                    .find(|s| s.tmux_session.as_deref() == Some(tmux))
-                    .map(|s| (t.task_id.clone(), s.session_id.clone()))
-            })
+            .filter_map(|t| Binding::learned(t, sessions).map(|b| (t.task_id.clone(), b)))
             .collect();
         if bindings.is_empty() {
             return Ok(false);
         }
-        for (id, sid) in bindings {
-            let updated = update_personal_task(&id, |s| s.session_id = Some(sid.clone()))?;
+        for (id, binding) in bindings {
+            let updated = update_personal_task(&id, |s| binding.apply(s))?;
             self.apply(updated);
         }
         Ok(true)
@@ -798,6 +829,94 @@ mod tests {
         });
     }
 
+    fn scanned(id: &str, state: SessionState, tmux: &str) -> SessionInfo {
+        SessionInfo {
+            agent_id: "claude".into(),
+            agent_kind: crate::agent::AgentKind::Claude,
+            pid: 4242,
+            session_id: id.into(),
+            cwd: "/tmp/project".into(),
+            project_name: "project".into(),
+            started_at: 0,
+            last_activity: None,
+            state,
+            last_user_message: None,
+            summary: None,
+            title: None,
+            titling: false,
+            model: None,
+            git_branch: None,
+            version: None,
+            jsonl_path: None,
+            tmux_session: Some(tmux.into()),
+            current_tool: None,
+            is_thinking: false,
+            context_tokens: None,
+            tool_uses_count: 0,
+        }
+    }
+
+    #[test]
+    fn a_card_follows_its_session_to_where_it_runs_now() {
+        with_temp_home(|| {
+            let mut board = PersonalBoard::load();
+            let id = board.add("managed task").unwrap().unwrap();
+            board
+                .bind_resource(
+                    &id,
+                    "/tmp/project",
+                    "cc-1",
+                    "cchub-stale",
+                    Some("sid-worker"),
+                )
+                .unwrap();
+            // The card's tmux was repointed at a resumed, long-dead session
+            // while the worker it names runs on in the broker's tmux.
+            let learned = board
+                .bind_sessions(&[
+                    scanned("sid-exhausted", SessionState::Idle, "cchub-stale"),
+                    scanned("sid-worker", SessionState::Processing, "cchr-worker-2"),
+                ])
+                .unwrap();
+            assert!(learned);
+            let card = PersonalBoard::load().get(&id).cloned().unwrap();
+            assert_eq!(card.tmux.as_deref(), Some("cchr-worker-2"));
+            assert_eq!(card.session_id.as_deref(), Some("sid-worker"));
+            // Nothing more to learn: the same scan is a no-op.
+            assert!(!board
+                .bind_sessions(&[scanned("sid-worker", SessionState::Idle, "cchr-worker-2")])
+                .unwrap());
+        });
+    }
+
+    #[test]
+    fn a_card_whose_session_is_gone_learns_the_one_running_in_its_tmux() {
+        with_temp_home(|| {
+            let mut board = PersonalBoard::load();
+            let id = board.add("resumed task").unwrap().unwrap();
+            board
+                .bind_resource(
+                    &id,
+                    "/tmp/project",
+                    "claude",
+                    "cchub-resumed",
+                    Some("sid-old"),
+                )
+                .unwrap();
+            // A Claude resume forks a fresh session id in the card's tmux;
+            // the old id only survives in the archive.
+            board
+                .bind_sessions(&[
+                    scanned("sid-old", SessionState::Inactive, "cchub-dead"),
+                    scanned("sid-forked", SessionState::Idle, "cchub-resumed"),
+                ])
+                .unwrap();
+            let card = PersonalBoard::load().get(&id).cloned().unwrap();
+            assert_eq!(card.session_id.as_deref(), Some("sid-forked"));
+            assert_eq!(card.tmux.as_deref(), Some("cchub-resumed"));
+        });
+    }
+
     #[test]
     fn resource_replacement_changes_session_without_changing_board_status() {
         with_temp_home(|| {
@@ -1162,6 +1281,31 @@ mod tests {
                 PersonalBoard::load().get("tk-2").unwrap().status,
                 TaskStatus::Running
             );
+        });
+    }
+
+    #[test]
+    fn a_card_changing_column_wakes_the_board() {
+        with_temp_home(|| {
+            let wake = crate::wake::Wake::named(crate::wake::BOARD).unwrap();
+            let mut b = PersonalBoard::load();
+            let id = b.add("route me").unwrap().unwrap();
+            let minted = wake.last();
+
+            // Only a column change is news: renaming a card is not.
+            b.rename(&id, "route me now").unwrap();
+            assert_eq!(wake.last(), minted, "a rename is not a move");
+
+            b.set_status(&id, TaskStatus::Planning).unwrap();
+            let planning = wake.last();
+            assert!(planning.is_some());
+            assert_ne!(planning, minted, "Backlog → Planning is a move");
+
+            b.set_status(&id, TaskStatus::Planning).unwrap();
+            assert_eq!(wake.last(), planning, "a no-op is not a move");
+
+            b.set_status(&id, TaskStatus::Running).unwrap();
+            assert_ne!(wake.last(), planning, "Planning → Running is a move");
         });
     }
 }

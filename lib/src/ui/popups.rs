@@ -648,6 +648,85 @@ pub(crate) fn render_agent_picker(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// `R` on the Sessions tab: pick the subscription account the selected
+/// session respawns on. Each row already says how it would continue —
+/// `resume` (native `--resume` under the target home) or `handoff` (fresh
+/// session reading the old transcript) — so the choice is honest before
+/// Enter commits it.
+pub(crate) fn render_respawn_picker(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(picker) = app.respawn_picker.as_ref() else {
+        return;
+    };
+
+    let desired_w = 64u16.min(area.width);
+    let desired_h = (picker.choices.len().max(4) as u16 + 2).min(area.height);
+    let popup = centered_fixed(area, desired_w, desired_h);
+    frame.render_widget(Clear, popup);
+
+    let block = popup_block(Span::styled(
+        format!(
+            " Respawn {} on account ",
+            crate::models::short_sid(&picker.session.session_id)
+        ),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .title_bottom(Span::styled(
+        " j/k:move · enter/space:respawn · esc:cancel ",
+        Style::default().fg(DIM_TEXT),
+    ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let id_width = picker
+        .choices
+        .iter()
+        .map(|choice| choice.account_id.chars().count())
+        .max()
+        .unwrap_or(0);
+    let lines: Vec<Line<'static>> = picker
+        .choices
+        .iter()
+        .enumerate()
+        .map(|(i, choice)| {
+            let selected = i == picker.selected;
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else if choice.plan.is_err() {
+                Style::default().fg(DIM_TEXT)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            let how = match &choice.plan {
+                Ok(plan) => plan.label().to_string(),
+                Err(why) => format!("unavailable: {}", why),
+            };
+            let current = if choice.account_id == picker.session.agent_id {
+                "  (current)"
+            } else {
+                ""
+            };
+            Line::from(Span::styled(
+                format!(
+                    "{} {}{}  {} · {}{}",
+                    if selected { "▶" } else { " " },
+                    choice.account_id,
+                    " ".repeat(id_width.saturating_sub(choice.account_id.chars().count())),
+                    choice.provider.badge(),
+                    how,
+                    current,
+                ),
+                style,
+            ))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 /// `L` on the Sessions tab: fuzzy-filter which task the selected session is
 /// linked to. Same chrome and interaction as the model picker; the footer
 /// names the session being linked.

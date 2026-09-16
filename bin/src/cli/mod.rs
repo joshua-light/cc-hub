@@ -33,6 +33,7 @@ mod task;
 #[cfg(test)]
 mod test_util;
 mod usage;
+mod wake;
 mod worker;
 
 use cc_hub_lib::ops::{self, OpError};
@@ -59,6 +60,7 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
         "agent" => Some(handle(agent::agent_subcommand(rest))),
         "board" => Some(handle(board::board_subcommand(rest))),
         "usage" => Some(handle(usage::usage(rest))),
+        "wake" => Some(handle(wake::wake(rest))),
         _ => None,
     }
 }

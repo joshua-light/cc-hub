@@ -71,6 +71,11 @@ pub struct TriggerCfg {
     pub dedupe: bool,
     /// Poll command timeout.
     pub timeout_s: u64,
+    /// Wakes that cut the wait: when one of these happens (see
+    /// [`crate::wake`]) the next poll or interval runs on the next second
+    /// instead of at the end of `interval_s`. The interval stays the floor
+    /// under it, so a lost wake only costs latency.
+    pub wake: Vec<String>,
 }
 
 impl Default for TriggerCfg {
@@ -81,6 +86,7 @@ impl Default for TriggerCfg {
             interval_s: 60,
             dedupe: true,
             timeout_s: 120,
+            wake: Vec::new(),
         }
     }
 }
@@ -225,13 +231,18 @@ impl Spec {
         AUTOCOMPACT_FLOOR * self.run.window_pct as u64 / 100
     }
 
-    /// One-line trigger description for cards: `poll 5m`, `every 6h`, `inbox`.
+    /// One-line trigger description for cards: `poll 5m`, `every 6h`,
+    /// `inbox`, and what wakes it early: `poll 5m ← board`.
     pub fn trigger_label(&self) -> String {
-        match self.trigger.kind {
-            TriggerKind::Inbox => "inbox".into(),
+        let paced = match self.trigger.kind {
+            TriggerKind::Inbox => "inbox".to_string(),
             TriggerKind::Poll => format!("poll {}", fmt_secs(self.trigger.interval_s)),
             TriggerKind::Interval => format!("every {}", fmt_secs(self.trigger.interval_s)),
+        };
+        if self.trigger.wake.is_empty() {
+            return paced;
         }
+        format!("{} ← {}", paced, self.trigger.wake.join(","))
     }
 }
 
@@ -272,6 +283,17 @@ pub fn parse(dir: &Path, raw: &str) -> Result<Spec, String> {
     }
     if file.trigger.kind == TriggerKind::Poll && file.trigger.command.is_none() {
         return Err("trigger.kind = \"poll\" needs trigger.command".into());
+    }
+    // An inbox agent already reacts within a second, so it has nothing to
+    // cut short: a wake listed here would read as a promise the loop keeps
+    // for the other two kinds only.
+    if file.trigger.kind == TriggerKind::Inbox && !file.trigger.wake.is_empty() {
+        return Err("trigger.wake needs kind = \"poll\" or \"interval\"".into());
+    }
+    for name in &file.trigger.wake {
+        if crate::wake::Wake::named(name).is_none() {
+            return Err(format!("trigger.wake: {:?} is not a usable wake name", name));
+        }
     }
     super::tools::scope(&file.run.tools)?;
 
@@ -379,6 +401,25 @@ instruction = "Go."
     }
 
     #[test]
+    fn a_wake_needs_a_paced_trigger_to_cut_short() {
+        let raw = "[trigger]\nkind = \"inbox\"\nwake = [\"board\"]\n[prompt]\ninstruction = \"x\"";
+        assert!(parse(Path::new("/tmp/x"), raw)
+            .unwrap_err()
+            .contains("trigger.wake"));
+
+        let raw = "[trigger]\nkind = \"poll\"\ncommand = \"true\"\nwake = [\"../escape\"]\n[prompt]\ninstruction = \"x\"";
+        assert!(parse(Path::new("/tmp/x"), raw)
+            .unwrap_err()
+            .contains("usable wake name"));
+
+        let raw = "[trigger]\nkind = \"interval\"\nwake = [\"board\"]\n[prompt]\ninstruction = \"x\"";
+        assert_eq!(
+            parse(Path::new("/tmp/x"), raw).unwrap().trigger.wake,
+            vec!["board"]
+        );
+    }
+
+    #[test]
     fn unknown_tool_rejected() {
         let raw = "[run]\ntools = [\"Frobnicate\"]\n[prompt]\ninstruction = \"x\"";
         assert!(parse(Path::new("/tmp/x"), raw)
@@ -398,6 +439,11 @@ instruction = "Go."
         assert_eq!(
             parse(Path::new("/tmp/x"), raw).unwrap().trigger_label(),
             "poll 5m"
+        );
+        let raw = "[trigger]\nkind = \"poll\"\ncommand = \"true\"\ninterval_s = 300\nwake = [\"board\"]\n[prompt]\ninstruction = \"x\"";
+        assert_eq!(
+            parse(Path::new("/tmp/x"), raw).unwrap().trigger_label(),
+            "poll 5m ← board"
         );
         assert_eq!(fmt_secs(7200), "2h");
         assert_eq!(fmt_secs(90), "90s");

@@ -587,8 +587,8 @@ fn render_spec_summary(frame: &mut Frame, area: Rect, agent: &AgentSnapshot) {
 /// Key hints for the Agents tab and its popup.
 pub(crate) fn hints(view: &View) -> &'static str {
     match view {
-        View::AgentDetail => "j/k:scroll  f:transcript  p:poke  space:pause/resume  R:reset  esc/enter:close",
-        _ => "enter:detail  f:transcript  p:poke  space:pause/resume  R:reset  j/k:nav  r:refresh  tab:next  q:quit",
+        View::AgentDetail => "j/k:scroll  o:open ref  f:transcript  p:poke  space:pause/resume  R:reset  esc/enter:close",
+        _ => "enter:detail  o:open ref  f:transcript  p:poke  space:pause/resume  R:reset  j/k:nav  r:refresh  tab:next  q:quit",
     }
 }
 

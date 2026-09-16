@@ -40,6 +40,7 @@ pub fn label_at(root: &Path, task: &str) -> Option<Label> {
     let label = match activity.stage.as_str() {
         "clarification" => "needs clarification",
         "capacity_wait" => "waiting for subscription capacity",
+        "resource_wait" => "waiting for a resource",
         "resource_handoff" => "changing worker account",
         "resource_blocked" => "worker needs recovery",
         _ => return None,

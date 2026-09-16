@@ -67,7 +67,9 @@ impl Account {
         format!("Claude Code-credentials-{}", &digest[..8])
     }
 
-    fn token(&self) -> Option<String> {
+    /// What Claude Code left behind for this home: the file, or on macOS the
+    /// Keychain entry. `None` is no login at all.
+    fn credential(&self) -> Option<Credential> {
         let from_file = fs::read_to_string(self.home.join(".credentials.json")).ok();
         let credentials = from_file.or_else(|| {
             if !cfg!(target_os = "macos") {
@@ -88,11 +90,34 @@ impl Account {
                 .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
         })?;
         let value: serde_json::Value = serde_json::from_str(credentials.trim()).ok()?;
-        value
-            .get("claudeAiOauth")?
-            .get("accessToken")?
-            .as_str()
-            .map(String::from)
+        let oauth = value.get("claudeAiOauth")?;
+        Some(Credential {
+            access_token: oauth.get("accessToken")?.as_str()?.to_string(),
+            expires_at: oauth
+                .get("expiresAt")
+                .and_then(|ms| ms.as_u64())
+                .map(|ms| ms / 1000),
+        })
+    }
+
+    /// When the stored access token lapses, as an epoch second, if a login
+    /// is stored and records one.
+    pub fn token_expires_at(&self) -> Option<u64> {
+        self.credential()?.expires_at
+    }
+}
+
+/// A stored OAuth login. Claude Code rotates the access token on its next
+/// real request; this store only reads it, so a home nothing has run in for a
+/// few hours holds an expired token until something runs there.
+struct Credential {
+    access_token: String,
+    expires_at: Option<u64>,
+}
+
+impl Credential {
+    fn expired(&self, now: u64) -> bool {
+        self.expires_at.is_some_and(|at| at <= now)
     }
 }
 
@@ -173,6 +198,12 @@ impl Usage {
                 self.error = Some("no Claude login for this account".into());
                 self.retry_at = now + LOGIN_RETRY.as_secs();
             }
+            Outcome::TokenExpired => {
+                self.health = Health::LoginRequired;
+                self.error =
+                    Some("access token expired; any claude run for this home refreshes it".into());
+                self.retry_at = now + LOGIN_RETRY.as_secs();
+            }
             Outcome::Unavailable(error) => {
                 self.failures += 1;
                 self.health = Health::Unavailable;
@@ -209,6 +240,7 @@ impl Usage {
             "observed_at": self.reading.as_ref().map(|r| r.observed_at),
             "age_s": age,
             "retry_at": (self.retry_at > now).then_some(self.retry_at),
+            "token_expires_at": account.token_expires_at(),
             "five_hour": self.reading.as_ref().map(|r| &r.five_hour),
             "seven_day": self.reading.as_ref().map(|r| &r.seven_day),
         })
@@ -305,13 +337,19 @@ enum Outcome {
     Answered(Reading),
     Throttled(Option<Duration>),
     LoginRequired,
+    TokenExpired,
     Unavailable(String),
 }
 
 fn probe(account: &Account) -> Outcome {
-    let Some(token) = account.token() else {
+    let Some(credential) = account.credential() else {
         return Outcome::LoginRequired;
     };
+    // A dead token can only earn a 401, and the endpoint counts the request.
+    if credential.expired(now()) {
+        return Outcome::TokenExpired;
+    }
+    let token = credential.access_token;
     let output = Command::new("curl")
         .args([
             "-sS",
@@ -456,6 +494,21 @@ mod tests {
             })
             .collect();
         assert_eq!(waits, vec![60, 120, 240, 480, 600, 600]);
+    }
+
+    #[test]
+    fn an_expired_token_is_a_login_problem_the_report_can_tell_apart() {
+        let live = Credential {
+            access_token: "t".into(),
+            expires_at: Some(2_000),
+        };
+        assert!(!live.expired(1_999));
+        assert!(live.expired(2_000));
+        let mut usage = Usage::default();
+        usage.absorb(Outcome::TokenExpired, 2_000);
+        assert_eq!(usage.health, Health::LoginRequired);
+        assert!(usage.error.unwrap().starts_with("access token expired"));
+        assert_eq!(usage.retry_at, 2_000 + LOGIN_RETRY.as_secs());
     }
 
     #[test]

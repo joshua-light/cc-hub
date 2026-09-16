@@ -226,6 +226,23 @@ pub struct TasksConfig {
     pub kinds: Vec<String>,
 }
 
+impl TasksConfig {
+    /// `kind` as the board would accept it from `T`, or why not: a word
+    /// outside the configured list, or a board with no list at all. Every
+    /// caller that files a card with a kind goes through this — the CLI, a
+    /// link — so a kind on a card is always one the picker offers.
+    pub fn known_kind(&self, kind: &str) -> Result<String, String> {
+        if self.kinds.iter().any(|k| k == kind) {
+            return Ok(kind.to_string());
+        }
+        Err(if self.kinds.is_empty() {
+            "no task kinds configured — set [tasks].kinds in ~/.cc-hub/config.toml".into()
+        } else {
+            format!("{} is not one of {}", kind, self.kinds.join(", "))
+        })
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TitleConfig {

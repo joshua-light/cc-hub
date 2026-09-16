@@ -11,6 +11,10 @@ tail of the JSONL transcript.
 From the grid you can:
 
 - spawn new agent sessions in any folder,
+- respawn a session on another subscription account (`R`) — say, when its
+  account hits a usage limit: Claude→Claude carries the transcript over and
+  resumes it natively, every other pairing starts fresh with the transcript
+  path in the opening prompt (the broker's replacement rules, by hand),
 - send a prompt to the first idle agent (auto-spawning one if none exist),
 - embed a session's terminal pane inside the TUI,
 - focus the real terminal window of a detached session (Unix only),
@@ -73,7 +77,7 @@ or a persistent agent can start a session. Three link kinds exist today:
 
 ```
 cc-hub://review?depth=<light|full>&pr=<pull request url>[&title=<text>][&post=<confidence>]
-cc-hub://fix?pr=<pull request url>[&title=<text>]
+cc-hub://fix?pr=<pull request url>[&title=<text>][&kind=<word>]
 cc-hub://task?id=<task id>[&dir=<path>][&kind=<word>]
 ```
 
@@ -81,8 +85,9 @@ cc-hub://task?id=<task id>[&dir=<path>][&kind=<word>]
 the pull request's repository, names the session `PR: <title>` (from the
 optional `title` parameter, else `PR: <repo>#<n>`) before it starts, and opens
 it with `Let's do <depth> review of this PR: <url>`. The checkout is found by repo name among registered projects,
-bookmarks, and the cwds of known sessions; `--dry-run` shows where a link
-would land without spawning anything. `--agent <id>` runs the review under a
+bookmarks, and the cwds of known sessions; a repository none of them names is
+reviewed from the home directory, off the pull request alone. `--dry-run`
+shows where a link would land without spawning anything. `--agent <id>` runs the review under a
 backend other than the default one.
 
 The optional `post` parameter is a confidence percentage. It adds `Post
@@ -91,13 +96,21 @@ prompt. A person clicking a browser button needs no such licence, because the
 review can just ask them. A caller with nobody watching does need it, which is
 why a persistent agent that starts its own reviews sends `post=80`.
 
-A `fix` link is the other side of a review. It lands in the same checkout,
-names the session `Fix: <title>`, and opens it with the standing orders for
-working through the pull request's comments: switch to its branch, address
-every comment, track each one as a Bitbucket task and mark it done once the
-fix is committed and pushed, answer questions, ask when a comment is
-ambiguous, skip what is already resolved, and sign every reply as written by
-Claude/Codex.
+A `fix` link is the other side of a review, and it is a task: opening it
+files a card on the Tasks board named `Fix: <title>`, whose first note is the
+brief (the pull request's comments are the problem, working them is the
+solution, the reviewer is the verification) and whose kind is the link's
+`kind`, one of `[tasks].kinds`. The session lands in the same checkout as a
+review would and opens with the standing orders for working through the
+comments: switch to the branch, address every comment, track each one as a
+Bitbucket task and mark it done once the fix is committed and pushed, answer
+questions, ask when a comment is ambiguous, skip what is already resolved,
+sign every reply as written by Claude/Codex, and note `Pushed: …` on the card
+when done. With subscription accounts configured the session starts through
+the resource broker, so it runs on whichever account has room and is replaced
+when that account hits its limit, like any routed card. The card moves to
+Running the moment its session is bound and skips Planning: the plan gate
+exists to produce a brief, and a fix arrives with one.
 
 A `task` link works one card of the Tasks board: it spawns a session in
 `dir` (default: the card's own cwd), names it `Task: <card>`, opens it with
@@ -127,7 +140,17 @@ permissions, and budgets. Between events the agent costs nothing.
 cc-hub agent new hello                             # scaffold a spec
 cc-hub agent once hello --event "hi"                # run one tick
 cc-hub agent poke hello --event "hi"                # queue an event
+cc-hub wake board                                   # "look now" to agents watching the board
 ```
+
+A polling agent can also subscribe to a wake — `trigger.wake = ["board"]` —
+and then its poll runs within a second of the thing happening instead of at
+the end of `interval_s`, which is how a card moved to In Progress reaches the
+task router immediately. A wake carries no payload: it says "look now", and
+the poll command still decides what an event is, so the interval stays a
+floor under it and a wake that never lands costs latency only. The board
+wakes `board` on every card status change; anything else says so with
+`cc-hub wake <name>`.
 
 Agents report through `cc-hub agent note`, shown on the Agents tab and detail
 popup. Press `f` to view a running or recent tick's transcript. Halted agents
@@ -621,4 +644,4 @@ queued backlog tasks, so pending work is visible at chip level.
 
 MIT — see [LICENSE](LICENSE).
 
-Account profiles, capacity-aware Task Agent roles and proactive handoff are described in [Resource management](docs/resource-management.md).
+Account profiles, session-claimed resources (checkouts, devices), capacity-aware Task Agent roles and proactive handoff are described in [Resource management](docs/resource-management.md).

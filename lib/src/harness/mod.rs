@@ -525,6 +525,12 @@ impl AgentSnapshot {
         crate::scanner::find_jsonl(&self.workdir().to_string_lossy(), sid)
             .or_else(|| crate::scanner::find_jsonl_anywhere(sid))
     }
+
+    /// What the agent most recently pointed at with `cc-hub agent note
+    /// --ref`: a URL or a path. Notes are newest first.
+    pub fn latest_ref(&self) -> Option<&str> {
+        self.notes.iter().find_map(|n| n.r#ref.as_deref())
+    }
 }
 
 /// The sessions agents run in, so the Sessions tab can leave them to the
@@ -798,6 +804,26 @@ mod tests {
         assert!(budget_block(&spec, &st).unwrap().contains("daily"));
         st.cost_usd = 1.2;
         assert!(budget_block(&spec, &st).unwrap().contains("total"));
+    }
+
+    #[test]
+    fn latest_ref_is_the_newest_note_that_has_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("a");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(spec::SPEC_FILE), "[prompt]\ninstruction=\"x\"").unwrap();
+        assert_eq!(snapshot(&dir).latest_ref(), None);
+        let note = |at, r#ref: Option<&str>| Note {
+            at,
+            level: "info".into(),
+            text: "t".into(),
+            r#ref: r#ref.map(str::to_string),
+            tick: at as u64,
+        };
+        append_note(&dir, &note(1, Some("https://claude.ai/a/1"))).unwrap();
+        append_note(&dir, &note(2, Some("https://claude.ai/a/2"))).unwrap();
+        append_note(&dir, &note(3, None)).unwrap();
+        assert_eq!(snapshot(&dir).latest_ref(), Some("https://claude.ai/a/2"));
     }
 
     #[test]

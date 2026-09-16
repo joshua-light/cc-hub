@@ -2,11 +2,23 @@
 //!
 //! A review link becomes a fresh agent session in the local checkout of the
 //! pull request's repository, named `PR: <title>` and opened with the link's
-//! prompt. A fix link lands in the same place under the name `Fix: <title>`;
-//! only the prompt differs. The checkout is found by name among the folders the hub already
+//! prompt. The checkout is found by name among the folders the hub already
 //! knows — registered projects, then bookmarks, then the cwds of scanned
 //! sessions — so a repo the user has ever worked in from the hub needs no
-//! extra mapping.
+//! extra mapping. A repo none of them names is not a refusal: the review
+//! runs from the home directory against the pull request alone, which is
+//! all a review needs, and its prompt says there is no working tree.
+//!
+//! A fix link lands in a checkout under the name `Fix: <title>` — and only
+//! in a checkout, because a fix writes and pushes. But it is a task, not a
+//! stray session: [`file_fix`] mints a Tasks-board card
+//! for it first, with the brief as the card's first note. That note is the
+//! record the board's plan gate exists to produce, and a fix has nothing to
+//! plan — the pull request's comments are the brief — so the card is born
+//! past the gate: it skips Planning and reaches Running as soon as its
+//! session is bound ([`start_card`]). Filing the card also gives the resource
+//! broker something to hold a worker against, so a fix is placed on a
+//! subscription account exactly as a routed card is.
 //!
 //! Naming happens *before* the spawn when the backend lets us pick the
 //! session id (Claude's `--session-id`): the title is on disk before the
@@ -39,13 +51,14 @@ use std::time::{Duration, Instant};
 
 use crate::agent::AgentKind;
 use crate::bookmarks::Bookmarks;
-use crate::link::{Link, PullRequestUrl};
+use crate::link::{BoardTaskId, FixLink, Link, PullRequestUrl, ReviewLink};
 use crate::ops::worker::{wait_until_idle_and_send, PromptStatus, DEFAULT_PROMPT_WAIT_SECS};
 use crate::ops::OpError;
-use crate::orchestrator::{self, TaskState};
+use crate::orchestrator::{self, TaskState, TaskStatus};
 use crate::platform::paths::expand_home;
 use crate::session_tasks;
 use crate::spawn::SessionTarget;
+use crate::tasks::PersonalBoard;
 use crate::{config, projects_scan, scanner, send, spawn, title};
 
 /// Options for [`open`].
@@ -72,6 +85,9 @@ pub struct Opened {
     pub tmux: String,
     pub session_id: Option<String>,
     pub prompt_status: PromptStatus,
+    /// The board card the session is bound to: the link's own for a task,
+    /// the one [`file_fix`] minted for a fix, none for a review.
+    pub task_id: Option<String>,
     /// The card already had a live session where the link pointed, and the
     /// prompt went there instead of to a new one.
     pub reused: bool,
@@ -102,13 +118,11 @@ pub fn target(link: &Link, agent: Option<&str>) -> Result<LinkTarget, OpError> {
         .ok_or_else(|| OpError::Usage(format!("unknown agent id: {}", agent_id)))?;
 
     match link {
-        Link::Review(review) => pull_request_target(
-            &review.pr,
-            review.session_title(),
-            review.prompt(),
-            agent_id,
-        ),
-        Link::Fix(fix) => pull_request_target(&fix.pr, fix.session_title(), fix.prompt(), agent_id),
+        Link::Review(review) => review_target(review, agent_id),
+        Link::Fix(fix) => {
+            fix_kind(fix)?;
+            fix_target(&fix.pr, fix.session_title(), fix.prompt(), agent_id)
+        }
         Link::Task(task) => {
             let card = board_card(task.id.as_str())?;
             let cwd = task
@@ -142,9 +156,32 @@ pub fn target(link: &Link, agent: Option<&str>) -> Result<LinkTarget, OpError> {
     }
 }
 
-/// Where a link about a pull request lands: the local checkout of the
-/// repository the URL names, found among the folders the hub knows.
-fn pull_request_target(
+/// Where a review lands: the local checkout of the repository the URL names
+/// when the hub knows one, else the home directory. A pull request is
+/// reviewable without a working tree — the diff, the files and the comments
+/// all come from the server — so a repository nobody has cloned here is
+/// reviewed from the pull request alone, and the prompt says so.
+fn review_target(review: &ReviewLink, agent_id: String) -> Result<LinkTarget, OpError> {
+    let checkout = folder_named(review.pr.repo());
+    let prompt = match checkout {
+        Some(_) => review.prompt(),
+        None => review.prompt_without_checkout(),
+    };
+    let cwd = checkout.or_else(dirs::home_dir).ok_or_else(|| {
+        OpError::NotFound("no checkout of the repository and no home directory".to_string())
+    })?;
+    Ok(LinkTarget {
+        cwd,
+        title: review.session_title(),
+        prompt,
+        agent_id,
+    })
+}
+
+/// Where a fix lands: the local checkout of the repository the URL names,
+/// found among the folders the hub knows. Unlike a review, a fix writes,
+/// commits and pushes, so without a working tree there is nothing to do.
+fn fix_target(
     pr: &PullRequestUrl,
     title: String,
     prompt: String,
@@ -163,6 +200,70 @@ fn pull_request_target(
         prompt,
         agent_id,
     })
+}
+
+/// File a fix as a card on the Tasks board: the standing orders as its text,
+/// `Fix: <title>` as its title, the link's kind, and the brief as its first
+/// note. The card is left in To-Do — it moves to Running through
+/// [`start_card`] once a session actually holds it, so a fix that failed to
+/// start is visible as a card with a brief and nobody on it, not as one that
+/// claims to be running.
+pub fn file_fix(fix: &FixLink) -> Result<BoardTaskId, OpError> {
+    let kind = fix_kind(fix)?;
+    let mut board =
+        PersonalBoard::load_result().map_err(|e| OpError::Other(format!("load board: {}", e)))?;
+    let task_id = board
+        .add(&fix.prompt())
+        .map_err(|e| OpError::Other(format!("write card: {}", e)))?
+        .expect("a fix prompt is never empty");
+    board
+        .set_kind(&task_id, kind)
+        .map_err(|e| OpError::Other(format!("write kind: {}", e)))?;
+    orchestrator::set_task_title(None, &task_id, &fix.session_title())
+        .map_err(|e| OpError::Other(format!("write title: {}", e)))?;
+    crate::ops::task::task_artifact_add_text(None, &task_id, &fix_brief(fix), "link")?;
+    Ok(task_id.parse().expect("the board mints tk- ids"))
+}
+
+/// The kind a fix card is filed under, checked against the board's list so
+/// `--dry-run` refuses a link the browser button got wrong before anything
+/// is filed. `None` is a card without a kind, as the board allows.
+fn fix_kind(fix: &FixLink) -> Result<Option<String>, OpError> {
+    fix.kind
+        .as_deref()
+        .map(|k| config::get().tasks.known_kind(k))
+        .transpose()
+        .map_err(|why| OpError::Usage(format!("fix link kind: {}", why)))
+}
+
+/// The brief a fix card starts with. It is what a task session would have
+/// agreed with the user in the plan gate, written down without asking,
+/// because a review already asked: the comments are the problem, working
+/// them is the solution, and the reviewer is the verification.
+fn fix_brief(fix: &FixLink) -> String {
+    format!(
+        "Brief\n\
+         Problem: {} has review comments waiting on the author.\n\
+         Solution: address them on the pull request's branch — one Bitbucket task per comment, done once its fix is committed and pushed; answer questions, ask when a comment is ambiguous.\n\
+         Verification: the reviewer re-reads the pull request. This task has the one role; no hand-over.",
+        fix.pr
+    )
+}
+
+/// The card's session is up: move it to Running. Called after the binding,
+/// never before, so the task router — which hands out cards that are Running
+/// with no session — never sees this one as its own.
+pub fn start_card(task_id: &str) -> Result<(), OpError> {
+    PersonalBoard::load_result()
+        .map_err(|e| OpError::Other(format!("load board: {}", e)))?
+        .set_status(task_id, TaskStatus::Running)
+        .map(|_| ())
+        .map_err(|e| {
+            OpError::Other(format!(
+                "card {} is bound but could not start: {}",
+                task_id, e
+            ))
+        })
 }
 
 /// No hand-over without a brief. The session that hands a card to the next
@@ -225,7 +326,7 @@ fn bind_card(task_id: &str, cwd: &Path, agent_id: &str, tmux: &str) -> Result<()
 
 /// Spawn the session `link` asks for, name it, and deliver its prompt.
 pub fn open(link: &Link, opts: OpenOpts) -> Result<Opened, OpError> {
-    let target = self::target(link, opts.agent.as_deref())?;
+    let mut target = self::target(link, opts.agent.as_deref())?;
     let agent = config::get()
         .agent(&target.agent_id)
         .ok_or_else(|| OpError::Usage(format!("unknown agent id: {}", target.agent_id)))?;
@@ -254,11 +355,27 @@ pub fn open(link: &Link, opts: OpenOpts) -> Result<Opened, OpError> {
                 tmux,
                 session_id: card.session_id,
                 prompt_status,
+                task_id: Some(task.id.to_string()),
                 reused: true,
                 superseded: None,
             });
         }
     }
+
+    // The card the session will be bound to. A fix mints its own here, and
+    // from then on is worked exactly like a task link's card.
+    let filed = match link {
+        Link::Fix(fix) => {
+            let card = file_fix(fix)?;
+            target.prompt = fix.prompt_for(&card);
+            Some(card)
+        }
+        _ => None,
+    };
+    let card_id = match link {
+        Link::Task(task) => Some(task.id.as_str()),
+        _ => filed.as_ref().map(BoardTaskId::as_str),
+    };
 
     // Claude lets us choose the id, so the name lands first.
     let chosen_id = (agent.kind == AgentKind::Claude).then(|| uuid::Uuid::new_v4().to_string());
@@ -275,8 +392,8 @@ pub fn open(link: &Link, opts: OpenOpts) -> Result<Opened, OpError> {
         spawn::spawn_agent_session(&target.agent_id, &cwd, session, initial_prompt, None, false)
             .map_err(|e| OpError::Other(format!("spawn session: {}", e)))?;
 
-    if let Link::Task(task) = link {
-        bind_card(task.id.as_str(), &target.cwd, &target.agent_id, &tmux)?;
+    if let Some(card) = card_id {
+        bind_card(card, &target.cwd, &target.agent_id, &tmux)?;
     }
 
     let session_id = match chosen_id {
@@ -284,8 +401,11 @@ pub fn open(link: &Link, opts: OpenOpts) -> Result<Opened, OpError> {
         None => name_once_visible(&tmux, &target.title, wait),
     };
 
-    if let (Link::Task(task), Some(sid)) = (link, session_id.as_deref()) {
-        link_session_to_card(sid, task.id.as_str());
+    if let (Some(card), Some(sid)) = (card_id, session_id.as_deref()) {
+        link_session_to_card(sid, card);
+    }
+    if let Some(card) = &filed {
+        start_card(card.as_str())?;
     }
 
     let prompt_status = if initial_prompt.is_some() {
@@ -305,6 +425,7 @@ pub fn open(link: &Link, opts: OpenOpts) -> Result<Opened, OpError> {
         tmux,
         session_id,
         prompt_status,
+        task_id: card_id.map(str::to_string),
         reused: false,
         superseded,
     })
@@ -401,6 +522,106 @@ mod tests {
         state.cwd = cwd.map(str::to_string);
         orchestrator::write_task_state(&state).expect("write card");
         state.task_id
+    }
+
+    #[cfg(unix)]
+    fn fix_link(query: &str) -> FixLink {
+        let raw = format!(
+            "cc-hub://fix?pr=https://bitbucket.example.com/projects/APP/repos/sample-project/pull-requests/11280{}",
+            query
+        );
+        match raw.parse::<Link>() {
+            Ok(Link::Fix(fix)) => fix,
+            other => panic!("expected a fix link, got {:?}", other),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_fix_is_filed_as_a_card_with_its_brief() {
+        crate::test_util::with_temp_home(|| {
+            let fix = fix_link("&title=Fix%20the%20parser");
+            let id = file_fix(&fix).expect("file");
+            let card = board_card(id.as_str()).expect("card");
+            assert_eq!(card.status, TaskStatus::Backlog);
+            assert_eq!(card.title.as_deref(), Some("Fix: Fix the parser"));
+            assert_eq!(card.prompt, fix.prompt());
+            assert_eq!(card.kind, None);
+            assert!(card.tmux.is_none());
+            let notes = crate::ops::task::notes_of(&card);
+            assert_eq!(notes.len(), 1);
+            assert!(
+                notes[0].text.starts_with("Brief\nProblem: "),
+                "{}",
+                notes[0].text
+            );
+            assert!(notes[0].text.contains("pull-requests/11280"));
+            assert!(notes[0].text.contains("Verification:"));
+            // With a note on it, a role link would pass the hand-over gate.
+            without_a_brief(&card).expect("the brief is the note");
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_filed_fix_starts_into_running() {
+        crate::test_util::with_temp_home(|| {
+            let id = file_fix(&fix_link("")).expect("file");
+            start_card(id.as_str()).expect("start");
+            assert_eq!(
+                board_card(id.as_str()).expect("card").status,
+                TaskStatus::Running
+            );
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_fix_kind_must_be_one_the_board_offers() {
+        crate::test_util::with_temp_home(|| {
+            // A temp home has no [tasks].kinds, so any kind is unknown.
+            assert!(matches!(
+                file_fix(&fix_link("&kind=tps")),
+                Err(OpError::Usage(why)) if why.contains("fix link kind")
+            ));
+        });
+    }
+
+    #[cfg(unix)]
+    fn link_of(raw: &str) -> Link {
+        raw.parse().expect("parse")
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_review_without_a_checkout_runs_from_home() {
+        crate::test_util::with_temp_home(|| {
+            let link = link_of(
+                "cc-hub://review?depth=light&pr=https://bitbucket.example.com/projects/APP/repos/never-cloned/pull-requests/7",
+            );
+            let target = target(&link, Some("claude")).expect("target");
+            assert_eq!(target.cwd, dirs::home_dir().expect("home"));
+            assert!(target.prompt.contains("Let's do light review of this PR"));
+            assert!(
+                target.prompt.contains("no local checkout of `never-cloned`"),
+                "{}",
+                target.prompt
+            );
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_fix_without_a_checkout_is_refused() {
+        crate::test_util::with_temp_home(|| {
+            let link = link_of(
+                "cc-hub://fix?pr=https://bitbucket.example.com/projects/APP/repos/never-cloned/pull-requests/7",
+            );
+            assert!(matches!(
+                target(&link, Some("claude")),
+                Err(OpError::NotFound(why)) if why.contains("never-cloned")
+            ));
+        });
     }
 
     #[test]
