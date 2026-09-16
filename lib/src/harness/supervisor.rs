@@ -238,65 +238,6 @@ async fn reclaim_stale_tick(dir: &std::path::Path, spec: &Spec) -> super::AgentS
         .unwrap_or(state)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{tick_is_stale, woken, Stamp, Wake};
-    use crate::test_util::with_temp_home;
-    use std::collections::HashMap;
-
-    fn watching(name: &str) -> crate::harness::Spec {
-        crate::harness::spec::parse(
-            std::path::Path::new("/tmp/x"),
-            &format!(
-                "[trigger]\nkind = \"interval\"\nwake = [\"{}\"]\n[prompt]\ninstruction = \"x\"",
-                name
-            ),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn the_first_look_records_without_waking() {
-        with_temp_home(|| {
-            Wake::named("board").unwrap().now().unwrap();
-            let spec = watching("board");
-            let mut seen: HashMap<String, Stamp> = HashMap::new();
-
-            assert!(!woken(&spec, &mut seen), "a wake older than the loop");
-            assert!(!woken(&spec, &mut seen), "nothing happened since");
-
-            Wake::named("board").unwrap().now().unwrap();
-            assert!(woken(&spec, &mut seen), "touched since the last look");
-            assert!(!woken(&spec, &mut seen), "and only once");
-        });
-    }
-
-    #[test]
-    fn a_wake_nobody_ever_touched_is_quiet() {
-        with_temp_home(|| {
-            let spec = watching("board");
-            let mut seen: HashMap<String, Stamp> = HashMap::new();
-            assert!(!woken(&spec, &mut seen));
-            assert!(seen.is_empty());
-        });
-    }
-
-    #[test]
-    fn fresh_tick_is_not_stale() {
-        assert!(!tick_is_stale(1000, 1000 + 3600, 3600));
-    }
-
-    #[test]
-    fn tick_within_grace_past_timeout_is_not_stale() {
-        assert!(!tick_is_stale(1000, 1000 + 3600 + 60, 3600));
-    }
-
-    #[test]
-    fn tick_past_timeout_and_grace_is_stale() {
-        assert!(tick_is_stale(1000, 1000 + 3600 + 61, 3600));
-    }
-}
-
 async fn halt(dir: &std::path::Path, spec: &Spec, reason: &str, tx: &mpsc::Sender<TickReport>) {
     let already = super::load_state(dir).stopped_reason.is_some();
     if !already {
@@ -360,5 +301,64 @@ async fn next_event(
                 "interval",
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{tick_is_stale, woken, Stamp, Wake};
+    use crate::test_util::with_temp_home;
+    use std::collections::HashMap;
+
+    fn watching(name: &str) -> crate::harness::Spec {
+        crate::harness::spec::parse(
+            std::path::Path::new("/tmp/x"),
+            &format!(
+                "[trigger]\nkind = \"interval\"\nwake = [\"{}\"]\n[prompt]\ninstruction = \"x\"",
+                name
+            ),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_first_look_records_without_waking() {
+        with_temp_home(|| {
+            Wake::named("board").unwrap().now().unwrap();
+            let spec = watching("board");
+            let mut seen: HashMap<String, Stamp> = HashMap::new();
+
+            assert!(!woken(&spec, &mut seen), "a wake older than the loop");
+            assert!(!woken(&spec, &mut seen), "nothing happened since");
+
+            Wake::named("board").unwrap().now().unwrap();
+            assert!(woken(&spec, &mut seen), "touched since the last look");
+            assert!(!woken(&spec, &mut seen), "and only once");
+        });
+    }
+
+    #[test]
+    fn a_wake_nobody_ever_touched_is_quiet() {
+        with_temp_home(|| {
+            let spec = watching("board");
+            let mut seen: HashMap<String, Stamp> = HashMap::new();
+            assert!(!woken(&spec, &mut seen));
+            assert!(seen.is_empty());
+        });
+    }
+
+    #[test]
+    fn fresh_tick_is_not_stale() {
+        assert!(!tick_is_stale(1000, 1000 + 3600, 3600));
+    }
+
+    #[test]
+    fn tick_within_grace_past_timeout_is_not_stale() {
+        assert!(!tick_is_stale(1000, 1000 + 3600 + 60, 3600));
+    }
+
+    #[test]
+    fn tick_past_timeout_and_grace_is_stale() {
+        assert!(tick_is_stale(1000, 1000 + 3600 + 61, 3600));
     }
 }

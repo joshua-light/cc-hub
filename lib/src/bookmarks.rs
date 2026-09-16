@@ -87,7 +87,7 @@ mod tests {
     use crate::test_util::HOME_TEST_LOCK;
 
     fn with_temp_home<F: FnOnce()>(f: F) {
-        let _guard = HOME_TEST_LOCK.lock().unwrap();
+        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var_os("HOME");
         std::env::set_var("HOME", tmp.path());

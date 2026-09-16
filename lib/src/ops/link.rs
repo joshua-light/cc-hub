@@ -603,7 +603,9 @@ mod tests {
             assert_eq!(target.cwd, dirs::home_dir().expect("home"));
             assert!(target.prompt.contains("Let's do light review of this PR"));
             assert!(
-                target.prompt.contains("no local checkout of `never-cloned`"),
+                target
+                    .prompt
+                    .contains("no local checkout of `never-cloned`"),
                 "{}",
                 target.prompt
             );

@@ -292,7 +292,10 @@ pub fn parse(dir: &Path, raw: &str) -> Result<Spec, String> {
     }
     for name in &file.trigger.wake {
         if crate::wake::Wake::named(name).is_none() {
-            return Err(format!("trigger.wake: {:?} is not a usable wake name", name));
+            return Err(format!(
+                "trigger.wake: {:?} is not a usable wake name",
+                name
+            ));
         }
     }
     super::tools::scope(&file.run.tools)?;
@@ -412,7 +415,8 @@ instruction = "Go."
             .unwrap_err()
             .contains("usable wake name"));
 
-        let raw = "[trigger]\nkind = \"interval\"\nwake = [\"board\"]\n[prompt]\ninstruction = \"x\"";
+        let raw =
+            "[trigger]\nkind = \"interval\"\nwake = [\"board\"]\n[prompt]\ninstruction = \"x\"";
         assert_eq!(
             parse(Path::new("/tmp/x"), raw).unwrap().trigger.wake,
             vec!["board"]

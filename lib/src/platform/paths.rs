@@ -122,7 +122,7 @@ mod tests {
     use crate::test_util::HOME_TEST_LOCK;
 
     fn with_config_dir<F: FnOnce()>(value: Option<&str>, f: F) {
-        let _guard = HOME_TEST_LOCK.lock().unwrap();
+        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var_os("CLAUDE_CONFIG_DIR");
         match value {
             Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),

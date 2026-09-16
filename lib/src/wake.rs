@@ -61,7 +61,9 @@ impl Wake {
         // and so the value survives a filesystem with coarse mtimes. Staged
         // and renamed so a reader never parses half a stamp, but not
         // fsynced: a wake lost to a power cut costs one poll interval.
-        let tmp = self.path.with_extension(format!("tmp.{}", std::process::id()));
+        let tmp = self
+            .path
+            .with_extension(format!("tmp.{}", std::process::id()));
         std::fs::write(&tmp, stamp.0.to_string())?;
         std::fs::rename(&tmp, &self.path)?;
         Ok(stamp)
