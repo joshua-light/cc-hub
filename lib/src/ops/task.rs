@@ -568,8 +568,17 @@ pub fn task_artifact_add_text(
     }
     // Confirm the task exists before touching the filesystem, mirroring
     // `task_artifact_add`.
-    let _ = orchestrator::read_task_state_for(project_id, task_id)
+    let state = orchestrator::read_task_state_for(project_id, task_id)
         .map_err(|e| OpError::Other(format!("load state: {}", e)))?;
+    // The notes are the card's record, and a record does not say the same
+    // thing twice in a row: a session that writes its wait again has not
+    // asked anything new, and the second copy only rings a second bell.
+    if newest_note_says(&state, trimmed) {
+        return Err(OpError::Usage(format!(
+            "the card's newest note already says that: {}",
+            crate::models::first_line_truncated(trimmed, 48)
+        )));
+    }
 
     let dest_dir = orchestrator::task_dir_for(project_id, task_id)
         .ok_or_else(|| OpError::Other("no home dir".into()))?
@@ -598,6 +607,16 @@ pub fn task_artifact_add_text(
         added_at: ts,
     };
     update_task_for(project_id, task_id, |s| s.artifacts.push(artifact.clone()))
+}
+
+/// Whether the card's newest note is, word for word, `text`.
+fn newest_note_says(task: &TaskState, text: &str) -> bool {
+    task.artifacts
+        .iter()
+        .rev()
+        .find(|a| a.kind == "note")
+        .and_then(|a| std::fs::read_to_string(&a.path).ok())
+        .is_some_and(|newest| newest.trim() == text)
 }
 
 /// One `note` attachment of a card, with its text read back from the file
@@ -867,6 +886,29 @@ mod tests {
             .expect("progress note allowed while Merging");
             assert_eq!(out.state.status, TaskStatus::Merging);
             assert_eq!(out.state.note.as_deref(), Some("still merging"));
+        });
+    }
+
+    #[test]
+    fn a_note_identical_to_the_newest_one_is_refused() {
+        crate::test_util::with_temp_home(|| {
+            let mut state = TaskState::new_personal("Semantic Linter".into());
+            state.task_id = "tk-dup".into();
+            orchestrator::write_task_state(&state).expect("write card");
+
+            task_artifact_add_text(None, "tk-dup", "Waiting: which branch?", "cli").expect("first");
+            match task_artifact_add_text(None, "tk-dup", "Waiting: which branch?\n", "cli") {
+                Err(OpError::Usage(msg)) => assert!(msg.contains("already says that"), "{msg}"),
+                other => panic!(
+                    "the same note twice must be refused, got {:?}",
+                    other.map(|s| s.artifacts.len())
+                ),
+            }
+            // An older note saying the same thing is history, not a repeat.
+            task_artifact_add_text(None, "tk-dup", "Posted: asked", "cli").expect("posted");
+            let state = task_artifact_add_text(None, "tk-dup", "Waiting: which branch?", "cli")
+                .expect("a wait after a Posted is a new note");
+            assert_eq!(state.artifacts.len(), 3);
         });
     }
 

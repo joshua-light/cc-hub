@@ -310,6 +310,8 @@ Usage:
       Append a note to the card: --text, or stdin when there is none (a
       heredoc for a long brief). The same `note` attachment the `p` key
       pastes; it shows on the card. Emits {"ok":true,"note":{…},"count":N}.
+      A note identical to the card's newest one is refused (exit 2): the
+      record does not say the same thing twice in a row.
   cc-hub board notes --task ID [--json]
       The card's notes in attach order, each under a dated rule.
 
