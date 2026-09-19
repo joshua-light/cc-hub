@@ -606,7 +606,24 @@ pub fn task_artifact_add_text(
         caption: Some(crate::models::first_line_truncated(trimmed, 48)),
         added_at: ts,
     };
-    update_task_for(project_id, task_id, |s| s.artifacts.push(artifact.clone()))
+    // The notes are the card's record, so the column follows them: the `PR:`
+    // a session writes when it opens a pull request is the moment the card
+    // stops being work in progress and starts waiting to be read. Saying it
+    // once — in the note — is the point; a second command to move the card is
+    // one an agent forgets, and then the board lies. Orchestrated tasks keep
+    // their own Review edge (`cc-hub pr create`), which knows about the PR
+    // record and the merge lock, so only board cards move from here.
+    let opens_pr = project_id.is_none()
+        && matches!(
+            crate::task_activity::Caption::read(trimmed.lines().next().unwrap_or_default()),
+            crate::task_activity::Caption::PullRequest(_)
+        );
+    update_task_for(project_id, task_id, |s| {
+        s.artifacts.push(artifact.clone());
+        if opens_pr && matches!(s.status, TaskStatus::Planning | TaskStatus::Running) {
+            s.status = TaskStatus::Review;
+        }
+    })
 }
 
 /// Whether the card's newest note is, word for word, `text`.
@@ -909,6 +926,64 @@ mod tests {
             let state = task_artifact_add_text(None, "tk-dup", "Waiting: which branch?", "cli")
                 .expect("a wait after a Posted is a new note");
             assert_eq!(state.artifacts.len(), 3);
+        });
+    }
+
+    /// The card's record is what moves it: a session that writes the `PR:`
+    /// does not also have to remember to move the card, and a board that
+    /// shows the PR in Review is one the note alone kept honest.
+    #[test]
+    fn a_pr_note_carries_a_board_card_into_review() {
+        crate::test_util::with_temp_home(|| {
+            let mut state = TaskState::new_personal("Semantic Linter".into());
+            state.task_id = "tk-pr".into();
+            state.status = TaskStatus::Running;
+            orchestrator::write_task_state(&state).expect("write card");
+
+            let after = task_artifact_add_text(
+                None,
+                "tk-pr",
+                "PR: https://example.com/pull-requests/42\n\nDraft, tests green.",
+                "cli",
+            )
+            .expect("note");
+            assert_eq!(after.status, TaskStatus::Review);
+        });
+    }
+
+    /// Only the PR word moves a card. Everything else a session writes —
+    /// a wait, a candidate branch, a failure — is still work in progress.
+    #[test]
+    fn any_other_note_leaves_the_card_where_it_is() {
+        crate::test_util::with_temp_home(|| {
+            let mut state = TaskState::new_personal("Semantic Linter".into());
+            state.task_id = "tk-plain".into();
+            state.status = TaskStatus::Running;
+            orchestrator::write_task_state(&state).expect("write card");
+
+            let after = task_artifact_add_text(None, "tk-plain", "Candidate: fix/linter", "cli")
+                .expect("note");
+            assert_eq!(after.status, TaskStatus::Running);
+        });
+    }
+
+    /// An orchestrated task reaches Review through `cc-hub pr create`, which
+    /// also writes the PR record and takes the merge lock into account. A
+    /// note must not smuggle the card past that.
+    #[test]
+    fn a_pr_note_on_an_orchestrated_task_moves_nothing() {
+        crate::test_util::with_temp_home(|| {
+            let (p, t) = ("p-prnote", "t-prnote");
+            seed(p, t, TaskStatus::Running);
+
+            let after = task_artifact_add_text(
+                Some(p),
+                t,
+                "PR: https://example.com/pull-requests/42",
+                "cli",
+            )
+            .expect("note");
+            assert_eq!(after.status, TaskStatus::Running);
         });
     }
 

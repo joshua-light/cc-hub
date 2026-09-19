@@ -184,10 +184,13 @@ pub enum TaskStatus {
     /// first; the card waits for the user to approve it (Space → Running).
     Planning,
     Running,
-    /// Orchestrator finished its work and the PR is open, waiting on a human
-    /// (or future agentic reviewer) to approve or request changes via the
-    /// Projects UI. The orchestrator's tmux stays alive through Review so
-    /// follow-up "request changes" rounds can iterate on the same worktree.
+    /// The work is delivered as a pull request and waits on a human to read
+    /// it. Orchestrated: the orchestrator finished, the PR is open, and its
+    /// tmux stays alive through Review so follow-up "request changes" rounds
+    /// iterate on the same worktree. Personal: the card's session wrote a
+    /// `PR:` note, which carries the card here (see
+    /// [`crate::ops::task::task_artifact_add_text`]) — so the board separates
+    /// a card that wants a review from one that wants an answer.
     Review,
     /// PR was approved; the orchestrator is now actively merging the feature
     /// branch into main. Only one task per project can be in `Merging` at
@@ -690,17 +693,21 @@ pub(crate) fn lock_task_state(
 /// | Planning → Done     | personal     | finish an assigned card without approving the plan  |
 /// | Done → Backlog      | personal     | board reopen (Space on a Done card)                 |
 /// | Done → Running      | personal     | board manual move off Done                          |
-/// | Running → Review    | orchestrated | `pr create`, `pr reopen`, `task report`             |
-/// | Review  → Running   | orchestrated | `pr request-changes`                                |
+/// | Running → Review    | both         | `pr create`, `pr reopen`, `task report`; `PR:` note |
+/// | Planning → Review   | personal     | a `PR:` note from a card still in the plan gate     |
+/// | Review  → Running   | both         | `pr request-changes`; board manual move             |
+/// | Review  → Planning  | personal     | re-assign a card whose PR needs another round       |
+/// | Done → Review       | personal     | board manual move off Done                          |
 /// | Review  → Merging   | orchestrated | approve (TUI `Space`, `pr merge`)                   |
-/// | Review  → Done      | orchestrated | PR-less approve, `pr close`, explicit done          |
+/// | Review  → Done      | both         | PR-less approve, `pr close`, explicit done; board finish |
 /// | Merging → Review    | orchestrated | merge-conflict demotion, dead-orchestrator rollback |
 /// | Merging → Done      | orchestrated | `pr finalize`, `pr close`                           |
 ///
 /// Self-transitions are always allowed (idempotent re-reports). For
 /// orchestrated tasks Done stays terminal and Backlog is re-entered only by
 /// the claim-first spawn rollback; the personal board additionally admits
-/// the plan gate (Planning) and reopening finished cards.
+/// the plan gate (Planning), the review gate (Review), and reopening
+/// finished cards.
 pub fn validate_status_transition(
     from: &TaskStatus,
     to: &TaskStatus,
@@ -730,6 +737,15 @@ pub fn validate_status_transition(
                     | (Planning, Done)
                     | (Done, Backlog)
                     | (Done, Running)
+                    // The review gate: a `PR:` note carries the card here,
+                    // and it leaves either finished or back into another
+                    // round of work.
+                    | (Running, Review)
+                    | (Planning, Review)
+                    | (Review, Running)
+                    | (Review, Planning)
+                    | (Review, Done)
+                    | (Done, Review)
             ),
             TaskFlow::Orchestrated => matches!(
                 (from, to),
@@ -746,8 +762,8 @@ pub fn validate_status_transition(
     } else {
         let rule = match flow {
             TaskFlow::Personal => {
-                "personal flow is Backlog → Planning → Running → Done; Done can reopen to \
-                 Backlog/Running"
+                "personal flow is Backlog → Planning → Running → Review → Done; Review can \
+                 bounce back to Running/Planning, and Done can reopen to Backlog/Running/Review"
             }
             TaskFlow::Orchestrated => {
                 "orchestrated flow is Backlog → Running → Review → Merging → Done; Review can \
@@ -919,6 +935,14 @@ mod status_transition_tests {
             // Done reopens on the board.
             (Done, Backlog),
             (Done, Running),
+            // The review gate: a `PR:` note carries the card in, and it
+            // leaves finished or into another round.
+            (Running, Review),
+            (Planning, Review),
+            (Review, Running),
+            (Review, Planning),
+            (Review, Done),
+            (Done, Review),
         ] {
             assert!(
                 validate_status_transition(&from, &to, TaskFlow::Personal).is_ok(),
@@ -933,14 +957,14 @@ mod status_transition_tests {
     fn personal_illegal_edges_fail() {
         use TaskStatus::*;
         for (from, to) in [
-            // The PR pipeline is orchestrated-only.
-            (Running, Review),
+            // Merging — the merge lock and its serialization — stays
+            // orchestrated-only; the personal board's Review leads to Done.
             (Review, Merging),
-            (Review, Done),
             (Merging, Done),
+            (Merging, Review),
             (Backlog, Review),
             (Backlog, Merging),
-            (Planning, Review),
+            (Review, Backlog),
         ] {
             assert!(
                 validate_status_transition(&from, &to, TaskFlow::Personal).is_err(),

@@ -1,15 +1,17 @@
-//! Tasks-tab body: a kanban board (To-Do · In Progress · Done by default)
-//! over the personal task store. Visually a sibling of the Projects kanban,
-//! but each card is a flat task, optionally annotated with its bound agent
-//! session's live state (resolved by tmux name, same as project cards).
+//! Tasks-tab body: a kanban board (To-Do · In Progress · Review · Done by
+//! default) over the personal task store. Visually a sibling of the Projects
+//! kanban, but each card is a flat task, optionally annotated with its bound
+//! agent session's live state (resolved by tmux name, same as project cards).
 //! Planning holds cards whose agent is drafting a plan; Space approves it and
 //! the card moves to In Progress. The Planning column is opt-in
 //! (`ui.show_planning_column = true`); when hidden its cards fold into In
-//! Progress.
+//! Progress. Review holds cards whose session wrote a `PR:` note, so a card
+//! that wants a reading is never mistaken for one that wants an answer.
 
 use crate::app::{visible_task_columns, App, View};
 use crate::models::{self, SessionInfo, SessionState};
 use crate::orchestrator::{TaskState, TaskStatus};
+use crate::task_activity::Errand;
 use crate::ui::common::{centered_rect, popup_block, priority_color};
 use crate::ui::now_ms;
 use crate::ui::palette::{
@@ -361,8 +363,9 @@ pub(crate) fn render_task_info(frame: &mut Frame, area: Rect, app: &mut App) {
 
 fn column_meta(status: TaskStatus) -> (&'static str, &'static str, Color) {
     match status {
-        // Orchestrated-only states never render as board columns.
-        TaskStatus::Review | TaskStatus::Merging => ("", "", Color::DarkGray),
+        // Merging belongs to the orchestrated PR pipeline and never renders
+        // as a board column.
+        TaskStatus::Merging => ("", "", Color::DarkGray),
         // Icon/accent come from the shared status palette so the columns,
         // the Projects kanban, and the task-link picker read the same.
         _ => {
@@ -451,9 +454,10 @@ fn render_task_column(
             TaskStatus::Backlog => "No tasks — press a to add one",
             TaskStatus::Planning => "Nothing planning — s hands a task to an agent",
             TaskStatus::Running => "Nothing running — Space approves a plan",
+            TaskStatus::Review => "No PR waiting on you",
             TaskStatus::Done => "Nothing done yet",
-            // Orchestrated-only states never render as board columns.
-            TaskStatus::Review | TaskStatus::Merging => "",
+            // Merging is orchestrated-only, so it never renders a column.
+            TaskStatus::Merging => "",
         };
         let hint = Paragraph::new(Line::from(Span::styled(
             empty_hint,
@@ -677,12 +681,17 @@ fn meta_line(
             None if t.session_id.is_some() => ("○", "gone — f resumes", DOT_IDLE),
             None => ("○", "starting…", DOT_IDLE),
         };
-        // An open question is not idle: it reads as `starting…` forever
-        // otherwise, and only the user can answer it.
+        // What the card itself records outranks what the session looks like:
+        // an open question is not idle (it reads as `starting…` forever
+        // otherwise), and a session that has opened a PR is not asking for
+        // input even when its pane sits at a prompt — the distinction the
+        // Review column is drawn along, carried onto the card in the
+        // column's own glyph and hue.
         let activity = crate::task_activity::label(&t.task_id);
-        let color = match &activity {
-            Some(item) if item.blocked_on_user => Color::Yellow,
-            _ => color,
+        let (glyph, color) = match activity.as_ref().map(|item| item.errand) {
+            Some(Errand::Answer) => (glyph, Color::Yellow),
+            Some(Errand::Review) => crate::ui::common::task_status_meta(TaskStatus::Review),
+            _ => (glyph, color),
         };
         spans.push(Span::styled(
             format!(
@@ -1012,6 +1021,31 @@ mod tests {
         t.status = TaskStatus::Running;
         let line = meta_line(&t, t.status, &sessions, 1_000).to_string();
         assert!(line.contains("idle — check progress"), "line: {line}");
+    }
+
+    /// The reading the Review column exists for: a session that opened a PR
+    /// and went back to its prompt looks exactly like one holding a question
+    /// for you, so the card's own `PR:` note — not the pane — has the say.
+    #[cfg(unix)]
+    #[test]
+    fn a_pr_note_reads_as_a_review_not_as_a_question() {
+        crate::test_util::with_temp_home(|| {
+            let mut board = crate::tasks::PersonalBoard::load();
+            let id = board.add("ship the linter").unwrap().unwrap();
+            board.assign(&id, "/tmp", "claude", "mux-pr").unwrap();
+            crate::ops::task::task_artifact_add_text(None, &id, "PR: sample-project#42", "cli")
+                .unwrap();
+            let t = crate::orchestrator::read_task_state_for(None, &id).unwrap();
+            assert_eq!(t.status, TaskStatus::Review, "the note moved the card");
+
+            let mut session = idle_session("mux-pr");
+            session.state = SessionState::WaitingForInput;
+            let sessions: HashMap<&str, &SessionInfo> = [("mux-pr", &session)].into();
+
+            let line = meta_line(&t, t.status, &sessions, 1_000).to_string();
+            assert!(line.contains("PR ready: sample-project#42"), "line: {line}");
+            assert!(!line.contains("needs input"), "line: {line}");
+        });
     }
 
     #[test]

@@ -1656,13 +1656,14 @@ impl App {
 
     /// `H`/`L`: move the focused card one column left (`dir < 0`) or right
     /// by hand. Planning is agent-owned — assignment is the only way in —
-    /// so manual moves hop over it: To-Do ↔ In Progress ↔ Done. A Planning
-    /// card can still be moved out: left parks it back in To-Do, right
-    /// takes it to In Progress *without* telling the agent to proceed
-    /// (Space stays the approve path). Moving into Done closes the live
-    /// agent session exactly like Space; moving a Done card left reopens it
-    /// into In Progress. The cursor rides with the card. Returns `None`
-    /// when no task is focused or the move runs off the board's edge.
+    /// so manual moves hop over it: To-Do ↔ In Progress ↔ Review ↔ Done. A
+    /// Planning card can still be moved out: left parks it back in To-Do,
+    /// right takes it to In Progress *without* telling the agent to proceed
+    /// (Space stays the approve path). Review is normally reached by the
+    /// card's own `PR:` note; by hand it is the column before Done, and a
+    /// Done card reopens into it. Moving into Done closes the live agent
+    /// session exactly like Space. The cursor rides with the card. Returns
+    /// `None` when no task is focused or the move runs off the board's edge.
     pub fn move_selected_task(&mut self, dir: i8) -> Option<String> {
         let t = self.selected_board_task()?;
         let id = t.task_id.clone();
@@ -1671,13 +1672,16 @@ impl App {
         let to = match (t.status, dir < 0) {
             (TaskStatus::Backlog, false) => TaskStatus::Running,
             (TaskStatus::Planning, false) => TaskStatus::Running,
-            (TaskStatus::Running, false) => TaskStatus::Done,
+            (TaskStatus::Running, false) => TaskStatus::Review,
+            (TaskStatus::Review, false) => TaskStatus::Done,
             (TaskStatus::Planning, true) => TaskStatus::Backlog,
             (TaskStatus::Running, true) => TaskStatus::Backlog,
-            (TaskStatus::Done, true) => TaskStatus::Running,
+            (TaskStatus::Review, true) => TaskStatus::Running,
+            (TaskStatus::Done, true) => TaskStatus::Review,
             (TaskStatus::Backlog, true) | (TaskStatus::Done, false) => return None,
-            // Orchestrated-only states never appear on the personal board.
-            (TaskStatus::Review | TaskStatus::Merging, _) => return None,
+            // Merging belongs to the orchestrated PR pipeline and never
+            // appears on the personal board.
+            (TaskStatus::Merging, _) => return None,
         };
         if to == TaskStatus::Done {
             let msg = self.finish_task(&id, &preview, tmux.as_deref());
@@ -1693,7 +1697,8 @@ impl App {
         let label = match to {
             TaskStatus::Backlog => "To-Do",
             TaskStatus::Running => "In Progress",
-            _ => unreachable!("manual moves only land in To-Do/In Progress here"),
+            TaskStatus::Review => "Review",
+            _ => unreachable!("manual moves only land in To-Do/In Progress/Review here"),
         };
         Some(if from_planning && to == TaskStatus::Running {
             format!(
@@ -6333,6 +6338,10 @@ mod tests {
                 );
                 // The cursor rides with the card.
                 assert_eq!(app.selected_board_task().unwrap().task_id, id);
+                // Right again: → Review, the column a `PR:` note fills.
+                let msg = app.move_selected_task(1).unwrap();
+                assert!(msg.contains("Review"), "msg: {msg}");
+                assert_eq!(app.tasks.board.get(&id).unwrap().status, TaskStatus::Review);
                 // Right again: → Done, stamping done_at exactly like Space.
                 let msg = app.move_selected_task(1).unwrap();
                 assert!(msg.starts_with("done:"), "msg: {msg}");
@@ -6342,12 +6351,17 @@ mod tests {
                 // Off the right edge: refused.
                 app.focus_task(&id);
                 assert!(app.move_selected_task(1).is_none());
-                // Left: Done → In Progress reopens (done_at cleared).
+                // Left: Done → Review reopens (done_at cleared).
                 app.move_selected_task(-1).unwrap();
                 let t = app.tasks.board.get(&id).unwrap();
-                assert_eq!(t.status, TaskStatus::Running);
+                assert_eq!(t.status, TaskStatus::Review);
                 assert!(t.done_at.is_none());
-                // Left again: → To-Do; then off the left edge.
+                // Left again: → In Progress, → To-Do; then off the edge.
+                app.move_selected_task(-1).unwrap();
+                assert_eq!(
+                    app.tasks.board.get(&id).unwrap().status,
+                    TaskStatus::Running
+                );
                 app.move_selected_task(-1).unwrap();
                 assert_eq!(
                     app.tasks.board.get(&id).unwrap().status,

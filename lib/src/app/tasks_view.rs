@@ -9,11 +9,14 @@ use crate::tasks::PersonalBoard;
 
 /// Full board column order. Planning is optional at render time (see
 /// [`visible_task_columns`]); this stays the canonical set the board logic
-/// and on-disk statuses are defined against.
-pub const TASK_COLUMNS: [TaskStatus; 4] = [
+/// and on-disk statuses are defined against. Review holds cards whose
+/// session opened a pull request — a `PR:` note puts them there — so what
+/// wants a reading of yours never sits among what wants an answer.
+pub const TASK_COLUMNS: [TaskStatus; 5] = [
     TaskStatus::Backlog,
     TaskStatus::Planning,
     TaskStatus::Running,
+    TaskStatus::Review,
     TaskStatus::Done,
 ];
 
@@ -260,13 +263,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn planning_shown_keeps_all_four_columns() {
+    fn planning_shown_keeps_every_column() {
         assert_eq!(
             visible_columns(true),
             vec![
                 TaskStatus::Backlog,
                 TaskStatus::Planning,
                 TaskStatus::Running,
+                TaskStatus::Review,
                 TaskStatus::Done,
             ]
         );
@@ -280,7 +284,12 @@ mod tests {
     fn planning_hidden_drops_column_and_folds_into_in_progress() {
         assert_eq!(
             visible_columns(false),
-            vec![TaskStatus::Backlog, TaskStatus::Running, TaskStatus::Done,]
+            vec![
+                TaskStatus::Backlog,
+                TaskStatus::Running,
+                TaskStatus::Review,
+                TaskStatus::Done,
+            ]
         );
         // In Progress now also renders Planning cards; the other columns are
         // unchanged.

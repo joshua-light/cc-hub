@@ -22,7 +22,7 @@ From the grid you can:
 
 ## Tasks board
 
-The personal layer: a three-column board — **To-Do · In Progress · Done** —
+The personal layer: a board — **To-Do · In Progress · Review · Done** —
 stored one file per task under `~/.cc-hub/tasks/` (a pre-existing
 `tasks.json` migrates automatically on first launch; the original is kept as
 `tasks.json.migrated-v1` — don't run pre-migration builds against the same
@@ -36,6 +36,9 @@ them off by hand, or hand one to an agent:
    the agent — and the card moves to **In Progress**.
 3. `f` / `Enter` attaches the agent's pane, exactly like the Sessions tab,
    including resume after the tmux session dies.
+4. The agent opens a pull request and writes it on the card as a note that
+   opens with `PR:`. That note moves the card to **Review**, so what waits
+   on a reading of yours never sits among what waits on an answer.
 
 A script mints a card with `cc-hub board add --text "…" [--title T] [--tags
 "a b"] [--priority p1..p4]`; it lands in To-Do with no session, and a
@@ -44,6 +47,11 @@ appends a note to a card (the same attachment the `p` key pastes) and
 `cc-hub board notes --task ID` reads them back in order. A task session's
 record — the brief it agreed with the user, the branch it built, what
 verification found — is those notes, on the card, where you already look.
+The first word of a note is read by the board: `Waiting:` / `Needs you:`
+makes the card say `waiting on you: <question>` in yellow, and `PR:` moves it
+to Review and makes it say `PR ready: <link>` in the column's cyan. A later
+note supersedes an earlier one, so a question asked after the PR went up
+brings the card back to asking for an answer.
 
 ## Projects layer (WIP)
 
@@ -528,7 +536,7 @@ the plan, so the plan-first workflow works with one fewer column.
 |---|---|
 | `h` / `l` (or arrows) | Switch column |
 | `j` / `k` (or arrows) | Move within the column |
-| `H` / `L` | Move the focused card one column left/right by hand. Planning is agent-owned, so manual moves skip it (To-Do ↔ In Progress ↔ Done); moving a Planning card right lands in In Progress *without* telling the agent to proceed. Into Done closes the live agent session like `Space`; out of Done reopens |
+| `H` / `L` | Move the focused card one column left/right by hand. Planning is agent-owned, so manual moves skip it (To-Do ↔ In Progress ↔ Review ↔ Done); moving a Planning card right lands in In Progress *without* telling the agent to proceed. Review is normally reached by the card's own `PR:` note. Into Done closes the live agent session like `Space`; out of Done reopens into Review |
 | `a` / `n` | Add a task (lands in To-Do; `#tag` and `!1`–`!4` tokens set tags/priority inline; `Tab` — or a multi-line paste — fills the context box, saved as the card's first note) |
 | `/` | Filter the board (fuzzy over text and `#tag`s; Enter keeps it applied, Esc clears — also from the board) |
 | `1` – `4` | Set priority P1–P4 (sorts the column P1-first; P1 red · P2 yellow · P3 green · P4 blue) |

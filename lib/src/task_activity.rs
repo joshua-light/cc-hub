@@ -20,21 +20,55 @@ struct Activity {
 /// host, and a host is fixed by whoever is nearest, not by answering.
 const WAITS: [&str; 2] = ["Waiting:", "Needs you:"];
 
+/// The word a session writes when it has opened a pull request.
+const PULL_REQUEST: &str = "PR:";
+
 /// Saying you told the user is not the user answering. A `Posted:` follows
 /// nearly every wait — it is the record of the message about it — so a card
 /// whose newest note is one is still waiting on whatever came before.
 const BOOKKEEPING: &str = "Posted:";
 
-/// The wait the running session wrote on the card itself.
+/// A note's first line, read by the word it opens with. The card's notes are
+/// its record, and that word is how the board knows whose move comes next:
+/// a question only the user can answer, a pull request waiting to be read,
+/// a line of bookkeeping about an earlier note, or plain progress — which
+/// clears whatever the notes before it left open.
+///
+/// This is the one place the note vocabulary is spelled out: the board reads
+/// it for the card's pill, and [`crate::ops::task`] reads it to move a card
+/// whose session has just opened a PR into Review.
+pub enum Caption<'a> {
+    Wait(&'a str),
+    PullRequest(&'a str),
+    Posted,
+    Progress,
+}
+
+impl<'a> Caption<'a> {
+    pub fn read(line: &'a str) -> Self {
+        let line = line.trim();
+        if let Some(rest) = WAITS.iter().find_map(|prefix| line.strip_prefix(prefix)) {
+            return Caption::Wait(rest.trim());
+        }
+        if let Some(rest) = line.strip_prefix(PULL_REQUEST) {
+            return Caption::PullRequest(rest.trim());
+        }
+        if line.starts_with(BOOKKEEPING) {
+            return Caption::Posted;
+        }
+        Caption::Progress
+    }
+}
+
+/// What the running session last wrote on the card itself.
 ///
 /// `clarification.json` belongs to the router, which writes it before any
 /// session exists; a session that starts and then needs an answer has only
 /// the card's notes, so that is where the board has to read it. The newest
 /// note that says something about the work wins, and the next one clears it
-/// — a `Candidate:` or a `PR:` is a session that stopped waiting. Only the
-/// note's caption is read, which is its first line as the board already
-/// stores it.
-fn waiting(root: &Path, task: &str) -> Option<Activity> {
+/// — a `Candidate:` is a session that stopped waiting. Only the note's
+/// caption is read, which is its first line as the board already stores it.
+fn newest_note(root: &Path, task: &str) -> Option<Activity> {
     #[derive(Deserialize)]
     struct Card {
         #[serde(default)]
@@ -52,25 +86,40 @@ fn waiting(root: &Path, task: &str) -> Option<Activity> {
         .iter()
         .rev()
         .filter(|a| a.kind == "note")
-        .find_map(|a| {
-            let caption = a.caption.as_deref()?.trim();
-            (!caption.starts_with(BOOKKEEPING)).then_some(caption)
+        .find_map(|a| match Caption::read(a.caption.as_deref()?) {
+            Caption::Posted => None,
+            read => Some(read),
         })?;
-    let detail = WAITS
-        .iter()
-        .find_map(|prefix| latest.strip_prefix(prefix))?;
+    let (stage, detail) = match latest {
+        Caption::Wait(detail) => ("waiting", detail),
+        Caption::PullRequest(detail) => ("pr", detail),
+        _ => return None,
+    };
     Some(Activity {
-        stage: "waiting".into(),
-        detail: detail.trim().to_string(),
+        stage: stage.into(),
+        detail: detail.to_string(),
     })
 }
 
-/// What the board shows for a task, and whether the task can still move
-/// without the user. A stage nobody but the user can clear is worth a
-/// different colour, so the caller does not have to re-match the text.
+/// What the label asks of whoever reads the board. A question nobody but the
+/// user can answer and a pull request nobody has read yet are both the user's
+/// move, but they are not the same errand — one unblocks an agent, the other
+/// is the work arriving — and the board colours them apart. Carried on the
+/// label so the caller never re-matches the text.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Errand {
+    /// Only an answer from the user moves the card.
+    Answer,
+    /// A pull request is open, waiting to be read.
+    Review,
+    /// Nothing is asked: the card still moves on its own.
+    Nothing,
+}
+
+/// What the board shows for a task, and what it asks of the reader.
 pub struct Label {
     pub text: String,
-    pub blocked_on_user: bool,
+    pub errand: Errand,
 }
 
 pub fn label_at(root: &Path, task: &str) -> Option<Label> {
@@ -87,11 +136,12 @@ pub fn label_at(root: &Path, task: &str) -> Option<Label> {
     };
     // An open question outranks the broker's own state, whoever asked it.
     let activity = read("clarification.json")
-        .or_else(|| waiting(root, task))
+        .or_else(|| newest_note(root, task))
         .or_else(|| read("resources.json"))?;
     let label = match activity.stage.as_str() {
         "clarification" => "needs clarification",
         "waiting" => "waiting on you",
+        "pr" => "PR ready",
         "capacity_wait" => "waiting for subscription capacity",
         "resource_wait" => "waiting for a resource",
         "resource_handoff" => "changing worker account",
@@ -104,7 +154,11 @@ pub fn label_at(root: &Path, task: &str) -> Option<Label> {
         } else {
             format!("{}: {}", label, activity.detail)
         },
-        blocked_on_user: matches!(activity.stage.as_str(), "clarification" | "waiting"),
+        errand: match activity.stage.as_str() {
+            "clarification" | "waiting" => Errand::Answer,
+            "pr" => Errand::Review,
+            _ => Errand::Nothing,
+        },
     })
 }
 
@@ -144,7 +198,7 @@ mod tests {
 
         let label = label_at(tmp.path(), "tk-1").expect("a wait");
         assert_eq!(label.text, "waiting on you: which base branch?");
-        assert!(label.blocked_on_user);
+        assert_eq!(label.errand, Errand::Answer);
     }
 
     #[test]
@@ -166,6 +220,53 @@ mod tests {
         );
 
         assert!(label_at(tmp.path(), "tk-1").is_none());
+    }
+
+    /// The errand a PR leaves is a reading, not an answer — the point of
+    /// telling the two apart on the board at all.
+    #[test]
+    fn a_pr_note_asks_for_a_review_not_an_answer() {
+        let tmp = tempfile::tempdir().unwrap();
+        card(tmp.path(), "tk-1", &["PR: sample-project#42"]);
+
+        let label = label_at(tmp.path(), "tk-1").expect("a pull request");
+        assert_eq!(label.text, "PR ready: sample-project#42");
+        assert_eq!(label.errand, Errand::Review);
+    }
+
+    /// Opening the PR is what a wait was blocking on, so the `PR:` note
+    /// replaces it — and a `Posted:` about the PR does not undo that.
+    #[test]
+    fn a_pr_note_clears_an_earlier_wait() {
+        let tmp = tempfile::tempdir().unwrap();
+        card(
+            tmp.path(),
+            "tk-1",
+            &[
+                "Waiting: which base branch?",
+                "PR: sample-project#42",
+                "Posted: told you in #status",
+            ],
+        );
+
+        let label = label_at(tmp.path(), "tk-1").expect("a pull request");
+        assert_eq!(label.errand, Errand::Review);
+    }
+
+    /// A question asked after the PR went up is the newer note, so the card
+    /// goes back to asking for an answer.
+    #[test]
+    fn a_wait_after_the_pr_is_the_one_that_shows() {
+        let tmp = tempfile::tempdir().unwrap();
+        card(
+            tmp.path(),
+            "tk-1",
+            &["PR: sample-project#42", "Waiting: squash or merge?"],
+        );
+
+        let label = label_at(tmp.path(), "tk-1").expect("a wait");
+        assert_eq!(label.text, "waiting on you: squash or merge?");
+        assert_eq!(label.errand, Errand::Answer);
     }
 
     /// `Blocked:` names a host, not a question: it is a note like any other

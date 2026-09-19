@@ -1713,15 +1713,20 @@ mod tests {
             let (mut app, _rt) = task_app();
             let id = app.tasks.board.add("walk me").unwrap().unwrap();
             app.focus_task(&id);
-            // Manual moves hop over Planning: Backlog → Running → Done.
+            // Manual moves hop over Planning: Backlog → Running → Review →
+            // Done.
             tasks(&mut app, TasksCommand::MoveTaskRight);
             assert_eq!(
                 app.tasks.board.get(&id).unwrap().status,
                 TaskStatus::Running
             );
             tasks(&mut app, TasksCommand::MoveTaskRight);
+            assert_eq!(app.tasks.board.get(&id).unwrap().status, TaskStatus::Review);
+            tasks(&mut app, TasksCommand::MoveTaskRight);
             assert_eq!(app.tasks.board.get(&id).unwrap().status, TaskStatus::Done);
-            // And back: Done → Running → Backlog.
+            // And back: Done → Review → Running → Backlog.
+            tasks(&mut app, TasksCommand::MoveTaskLeft);
+            assert_eq!(app.tasks.board.get(&id).unwrap().status, TaskStatus::Review);
             tasks(&mut app, TasksCommand::MoveTaskLeft);
             assert_eq!(
                 app.tasks.board.get(&id).unwrap().status,

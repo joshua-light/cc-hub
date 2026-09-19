@@ -89,7 +89,10 @@ fn board_add(args: &[String]) -> Result<(), CliError> {
 /// Append a note to the card: `--text`, or stdin when there is none, so a
 /// long brief can arrive as a heredoc without a temp file. The note lands
 /// as a `<ts>-note.md` in the card's artifacts dir, captioned by its first
-/// line. Emits `{"ok":true,"task_id":…,"note":{…},"count":N}`.
+/// line. Emits `{"ok":true,"task_id":…,"note":{…},"count":N,"status":"…"}`.
+/// The status is echoed because a note can move the card: a `PR:` note
+/// carries it to Review, where what wants reading is kept apart from what
+/// wants an answer.
 fn board_note(args: &[String]) -> Result<(), CliError> {
     let f = parse_flags(args)?;
     let task_id = super::require_task(&f)?;
@@ -108,6 +111,7 @@ fn board_note(args: &[String]) -> Result<(), CliError> {
             "added_at": added.added_at,
         },
         "count": state.artifacts.iter().filter(|a| a.kind == "note").count(),
+        "status": state.status.as_str(),
     }));
     Ok(())
 }
@@ -262,6 +266,39 @@ mod tests {
                 Some("Problem: the cache is cold")
             );
             assert!(board_notes(&argv(&["--task", &id, "--json"])).is_ok());
+        });
+    }
+
+    /// The whole point of the `PR:` word: a session writes the note it
+    /// already writes, and the card leaves In Progress by itself.
+    #[test]
+    fn a_pr_note_moves_the_card_to_review() {
+        with_tempdir_home(|| {
+            board_add(&argv(&["--text", "Cache research"])).expect("add");
+            let mut board = PersonalBoard::load();
+            let id = board.tasks()[0].task_id.clone();
+            board
+                .set_status(&id, TaskStatus::Running)
+                .expect("card in progress");
+            // Everything else a session writes leaves the card where it is.
+            board_note(&argv(&["--task", &id, "--text", "Candidate: fix/cache"]))
+                .expect("candidate note");
+            assert_eq!(
+                PersonalBoard::load().get(&id).unwrap().status,
+                TaskStatus::Running
+            );
+
+            board_note(&argv(&[
+                "--task",
+                &id,
+                "--text",
+                "PR: https://example.com/pull-requests/42",
+            ]))
+            .expect("pr note");
+            assert_eq!(
+                PersonalBoard::load().get(&id).unwrap().status,
+                TaskStatus::Review
+            );
         });
     }
 

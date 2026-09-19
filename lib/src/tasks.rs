@@ -6,6 +6,9 @@
 //! Planning until the user approves the plan (Space), which tells the agent
 //! to proceed and moves the card to In Progress. The binding is recorded so
 //! `f` on the card attaches to that session exactly like the Sessions tab.
+//! When that session opens a pull request it writes a `PR:` note, and the
+//! note carries the card to Review — the column for work that wants reading
+//! rather than answering.
 //!
 //! Since the task-model unification a board task IS an
 //! [`orchestrator::TaskState`] with `project_id: None`, stored one file per

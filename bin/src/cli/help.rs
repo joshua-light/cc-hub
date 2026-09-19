@@ -309,9 +309,13 @@ Usage:
   cc-hub board note --task ID [--text TEXT]
       Append a note to the card: --text, or stdin when there is none (a
       heredoc for a long brief). The same `note` attachment the `p` key
-      pastes; it shows on the card. Emits {"ok":true,"note":{…},"count":N}.
+      pastes; it shows on the card. Emits
+      {"ok":true,"note":{…},"count":N,"status":"…"}.
       A note identical to the card's newest one is refused (exit 2): the
       record does not say the same thing twice in a row.
+      A note that opens with `PR:` moves the card to Review — the column for
+      work that wants reading, apart from work that wants an answer — which
+      is why the status comes back with the note.
   cc-hub board notes --task ID [--json]
       The card's notes in attach order, each under a dated rule.
 
