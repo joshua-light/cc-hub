@@ -115,7 +115,18 @@ user's.
 
 A Claude account is allocatable when `cc-hub usage --home DIR` reports it
 `ready`, its usage sits below `start_percent`, and fewer than `max_workers`
-of its workers are live. The store only reads the OAuth access token Claude
+of its workers are live. A routing policy may carry a `start_percent` of its
+own, and then the higher of the two applies:
+
+```toml
+[routing.prod-alert.implementation]
+profiles = ["sonnet-medium-work", "sonnet-medium"]
+start_percent = 94   # a page may spend the reserve ordinary work leaves alone
+```
+
+That is the whole exemption. It never lowers an account's reserve, and
+`stop_percent` is untouched: work started this way is still replaced when its
+account reaches the limit, like any other. The store only reads the OAuth access token Claude
 Code keeps; it never refreshes one. Claude Code refreshes on its next real
 request, so an account nothing has run on for a few hours holds a lapsed
 token and would read as `login_required` forever. The probe tells the two

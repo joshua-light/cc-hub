@@ -808,6 +808,12 @@ pub struct App {
     /// it (see [`Self::adopt_pending_spawn_names`]). Populated while Haiku
     /// auto-titling is off, and by respawns carrying the old session's name.
     pending_spawn_names: HashMap<String, Option<String>>,
+    /// The card a Done was just refused on, because its newest note still
+    /// asks the user something. A second Done on that same card goes
+    /// through — the board is the user's, and a card can be abandoned on
+    /// purpose; what it can no longer be is closed by accident with an
+    /// agent's question unanswered. See [`Self::unanswered_ask`].
+    done_refused_on: Option<String>,
 }
 
 /// One pending spawn-verification: the agent must show up in a scan snapshot
@@ -966,6 +972,7 @@ impl App {
             image_picker: None,
             spawn_watches: Vec::new(),
             pending_spawn_names: HashMap::new(),
+            done_refused_on: None,
         }
     }
 
@@ -1633,10 +1640,33 @@ impl App {
         Some(self.finish_task(&id, &preview, tmux.as_deref()))
     }
 
+    /// The question the card still carries, if the first Done on it should
+    /// be refused. A card whose newest note is a `Waiting:`/`Needs you:` —
+    /// or whose router left a clarification unanswered — is a card an agent
+    /// stopped on: closing it records a task nobody did as a task done.
+    /// Answering is a note away (`p`, or a `Decided:` note from a session),
+    /// and pressing Done again closes it regardless.
+    fn unanswered_ask(&mut self, id: &str) -> Option<String> {
+        if self.done_refused_on.as_deref() == Some(id) {
+            self.done_refused_on = None;
+            return None;
+        }
+        let label = crate::task_activity::label(id)
+            .filter(|l| l.errand == crate::task_activity::Errand::Answer)?;
+        self.done_refused_on = Some(id.to_string());
+        Some(format!(
+            "not done — {} · answer it on the card, or press again to close it anyway",
+            label.text
+        ))
+    }
+
     /// Mark `id` Done and close its live agent session; the binding is kept
     /// so `f` on the Done card can still resume the transcript. Shared by
     /// Space (toggle) and the manual column move (`L` into Done).
     fn finish_task(&mut self, id: &str, preview: &str, tmux: Option<&str>) -> String {
+        if let Some(refusal) = self.unanswered_ask(id) {
+            return refusal;
+        }
         if let Err(e) = self.tasks.board.set_status(id, TaskStatus::Done) {
             return format!("finish failed: {e}");
         }
@@ -6281,6 +6311,68 @@ mod tests {
                 assert_eq!(t.status, TaskStatus::Done);
                 // The binding survives completion so `f` can still resume.
                 assert_eq!(t.tmux.as_deref(), Some("mux-dead"));
+            });
+        }
+
+        /// The card the retro found: an agent asked, nobody answered, and
+        /// the card went to Done carrying the question.
+        #[test]
+        fn done_on_an_unanswered_ask_is_refused_once() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                let id = app
+                    .tasks
+                    .board
+                    .add("marketplace duplication")
+                    .unwrap()
+                    .unwrap();
+                let note = |text: &str| {
+                    crate::ops::task::task_artifact_add_text(None, &id, text, "test").unwrap();
+                };
+                app.focus_task(&id);
+                note("Needs you: keep the duplicate or fold it in?");
+
+                let refusal = app.toggle_task_done().unwrap();
+                assert!(refusal.starts_with("not done"), "{refusal}");
+                assert!(refusal.contains("keep the duplicate"), "{refusal}");
+                assert_eq!(
+                    app.tasks.board.get(&id).unwrap().status,
+                    TaskStatus::Backlog
+                );
+
+                // Pressing again is the user saying it anyway.
+                assert_eq!(
+                    app.toggle_task_done().unwrap(),
+                    "done: marketplace duplication"
+                );
+                assert_eq!(app.tasks.board.get(&id).unwrap().status, TaskStatus::Done);
+            });
+        }
+
+        /// The answer is a note, so an answered card closes on the first
+        /// press — and saying you asked is not answering.
+        #[test]
+        fn an_answered_ask_closes_on_the_first_press() {
+            with_temp_home(|| {
+                let mut app = App::new();
+                let note = |id: &str, text: &str| {
+                    crate::ops::task::task_artifact_add_text(None, id, text, "test").unwrap();
+                };
+                let told = app.tasks.board.add("node 24").unwrap().unwrap();
+                note(&told, "Needs you: pin 24 or stay on 22?");
+                note(&told, "Posted: asked by DM");
+                app.focus_task(&told);
+                assert!(app.toggle_task_done().unwrap().starts_with("not done"));
+
+                let answered = app.tasks.board.add("node 22").unwrap().unwrap();
+                note(&answered, "Needs you: pin 24 or stay on 22?");
+                note(&answered, "Decided: pin 24");
+                app.focus_task(&answered);
+                assert_eq!(app.toggle_task_done().unwrap(), "done: node 22");
+                assert_eq!(
+                    app.tasks.board.get(&answered).unwrap().status,
+                    TaskStatus::Done
+                );
             });
         }
 

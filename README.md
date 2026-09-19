@@ -51,7 +51,10 @@ The first word of a note is read by the board: `Waiting:` / `Needs you:`
 makes the card say `waiting on you: <question>` in yellow, and `PR:` moves it
 to Review and makes it say `PR ready: <link>` in the column's cyan. A later
 note supersedes an earlier one, so a question asked after the PR went up
-brings the card back to asking for an answer.
+brings the card back to asking for an answer. A card still asking one does
+not go to Done on the first press: the status line repeats the question, and
+either a note answers it (`Decided: …`) or a second press closes the card
+anyway — a task nobody answered is not a task done by accident.
 
 ## Projects layer (WIP)
 
@@ -536,7 +539,7 @@ the plan, so the plan-first workflow works with one fewer column.
 |---|---|
 | `h` / `l` (or arrows) | Switch column |
 | `j` / `k` (or arrows) | Move within the column |
-| `H` / `L` | Move the focused card one column left/right by hand. Planning is agent-owned, so manual moves skip it (To-Do ↔ In Progress ↔ Review ↔ Done); moving a Planning card right lands in In Progress *without* telling the agent to proceed. Review is normally reached by the card's own `PR:` note. Into Done closes the live agent session like `Space`; out of Done reopens into Review |
+| `H` / `L` | Move the focused card one column left/right by hand. Planning is agent-owned, so manual moves skip it (To-Do ↔ In Progress ↔ Review ↔ Done); moving a Planning card right lands in In Progress *without* telling the agent to proceed. Review is normally reached by the card's own `PR:` note. Into Done closes the live agent session like `Space` — and, on a card still asking a question, is refused once, exactly like `Space`; out of Done reopens into Review |
 | `a` / `n` | Add a task (lands in To-Do; `#tag` and `!1`–`!4` tokens set tags/priority inline; `Tab` — or a multi-line paste — fills the context box, saved as the card's first note) |
 | `/` | Filter the board (fuzzy over text and `#tag`s; Enter keeps it applied, Esc clears — also from the board) |
 | `1` – `4` | Set priority P1–P4 (sorts the column P1-first; P1 red · P2 yellow · P3 green · P4 blue) |

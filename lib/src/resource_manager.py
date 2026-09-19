@@ -153,7 +153,22 @@ def policy(cfg, kind, role):
     for name in value.get('profiles', []):
         if name not in cfg.get('profiles', {}):
             raise ValueError(f'unknown profile {name}')
+    if not 0 < value.get('start_percent', 1) < cfg['settings']['stop_percent']:
+        raise ValueError(f'{kind}/{role}: start_percent must be above 0 and below stop_percent')
     return value
+
+
+def ceiling(cfg, rules, account):
+    """How full an account may be and still take this work.
+
+    Ordinarily the account decides — its own `start_percent` is the reserve it
+    keeps for the user. A policy may raise that for work that cannot wait for
+    the window to reset: a paged production alert answered five hours late is
+    an alert nobody answered. Nothing lowers it; a policy that asks for less
+    room than the account already leaves changes nothing.
+    """
+    return max(account.get('start_percent', cfg['settings']['start_percent']),
+               rules.get('start_percent', 0))
 
 
 # ─── account probes ──────────────────────────────────────────────────────
@@ -422,15 +437,15 @@ def select(cfg, usage, db, kind, role, exclude=None):
             if not windows:
                 continue
             used = max(w['used'] for w in windows)
-            ceiling = account.get('start_percent', cfg['settings']['start_percent'])
-            if used >= ceiling:
+            room = ceiling(cfg, rules, account)
+            if used >= room:
                 continue
             active = sum(w.get('pool') == pool and w['status'] in LIVE for w in db['workers'].values())
             if active >= account.get('max_workers', 2):
                 continue
             # Percentages are a heuristic, not equivalent token budgets. A
             # configured weight and in-flight penalty make this explicit.
-            score = (ceiling - used) * account.get('weight', 1) - active * 10
+            score = (room - used) * account.get('weight', 1) - active * 10
             candidates.append((score, -order, account_id, name, pool))
     if not candidates:
         return None

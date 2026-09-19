@@ -139,6 +139,24 @@ PROJECT="keep-project"
             snapshot['models'] = {'gpt-6-astra': ['high']}
         self.assertIsNone(self.choose())
 
+    def test_a_policy_may_spend_the_reserve_the_others_leave_alone(self):
+        rules = self.cfg['routing']['project']['implementation']
+        for snapshot in self.usage.values():
+            snapshot['windows'][0]['used'] = 88
+        self.assertIsNone(self.choose())
+        rules['start_percent'] = 94
+        self.assertIsNotNone(self.choose())
+        # It raises a ceiling, never lowers one: cc-1 keeps its own reserve.
+        rules['start_percent'] = 50
+        self.usage['cc-1']['windows'][0]['used'] = 60
+        self.assertEqual(self.choose(exclude='cc-2')['account'], 'cc-1')
+
+    def test_a_policy_ceiling_stops_below_the_stop_percent(self):
+        self.cfg['routing']['project']['implementation']['start_percent'] = \
+            self.cfg['settings']['stop_percent']
+        with self.assertRaises(ValueError):
+            broker.policy(self.cfg, 'project', 'implementation')
+
     def test_pin_and_capabilities_never_fall_through(self):
         self.cfg['routing']['project']['implementation'].update(account='cc-1', requires=['fathom'])
         self.assertIsNone(self.choose())
