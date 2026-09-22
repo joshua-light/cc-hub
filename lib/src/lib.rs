@@ -45,6 +45,7 @@ pub(crate) mod test_util {
     /// into every session the hub starts, which is exactly where the suite
     /// is run — leaving them set made `resources::accounts()` find the real
     /// registry inside a temp home.
+    #[cfg(unix)]
     const REDIRECTED: [&str; 4] = [
         "HOME",
         "CODEX_HOME",

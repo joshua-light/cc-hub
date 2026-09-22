@@ -460,7 +460,7 @@ pub fn terminate(pid: u32) -> bool {
     }
     unsafe {
         let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
-        if handle == 0 {
+        if handle.is_null() {
             return false;
         }
         let ok = TerminateProcess(handle, 0) != 0;
