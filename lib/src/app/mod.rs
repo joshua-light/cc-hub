@@ -4434,7 +4434,10 @@ pub fn kanban_col_name(col: usize) -> &'static str {
     }
 }
 
-#[cfg(test)]
+// Unix-only: most of these drive the hub against a `$HOME` redirected by
+// `with_temp_home`, which `dirs::home_dir()` honours on unix and ignores on
+// Windows — same policy as the sibling `app::command` tests.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::agent_runtime::testing::RecordingRuntime;

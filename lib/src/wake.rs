@@ -80,7 +80,9 @@ impl Wake {
     }
 }
 
-#[cfg(test)]
+// Unix-only: isolation works by redirecting `$HOME`, which
+// `dirs::home_dir()` ignores on Windows — same policy as bookmarks.rs.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::test_util::with_temp_home;

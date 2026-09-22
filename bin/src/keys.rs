@@ -508,12 +508,12 @@ pub(crate) async fn handle_key(
                             models::short_sid(sid),
                             session_store,
                             task.project_root.as_deref().unwrap_or(std::path::Path::new("")).display(),
-                            &task.task_id,
+                            task.task_id,
                         ),
                         None => format!(
                             "orchestrator dead — no JSONL under {} contains orchestrator prompt for task {} (cwd {})",
                             session_store,
-                            &task.task_id,
+                            task.task_id,
                             task.project_root.as_deref().unwrap_or(std::path::Path::new("")).display(),
                         ),
                     };

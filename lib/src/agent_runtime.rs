@@ -25,7 +25,10 @@ pub trait AgentRuntime: Send + Sync {
 
 /// Shared test double: records every runtime call so controller tests can
 /// assert on the process-control traffic without a terminal or tmux.
-#[cfg(test)]
+// Both callers (`app::command` and `app` tests) redirect `$HOME` and are
+// therefore unix-only; keeping the same gate here stops the double from
+// reading as dead code on Windows.
+#[cfg(all(test, unix))]
 pub(crate) mod testing {
     use super::AgentRuntime;
     use crate::spawn::SessionTarget;

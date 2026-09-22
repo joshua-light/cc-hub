@@ -304,7 +304,9 @@ async fn next_event(
     }
 }
 
-#[cfg(test)]
+// Unix-only: `with_temp_home` isolates by redirecting `$HOME`, which
+// `dirs::home_dir()` honours on unix and ignores on Windows.
+#[cfg(all(test, unix))]
 mod tests {
     use super::{tick_is_stale, woken, Stamp, Wake};
     use crate::test_util::with_temp_home;
