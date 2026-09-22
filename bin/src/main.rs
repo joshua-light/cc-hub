@@ -24,9 +24,9 @@ mod hot {
     pub use cc_hub_lib::render;
 }
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use log::LevelFilter;
@@ -513,10 +513,14 @@ fn restore_terminal<W: io::Write>(
     out: &mut W,
     bracketed_paste: bool,
     kb_enhanced: bool,
+    focus_events: bool,
 ) -> io::Result<()> {
     let _ = crossterm::execute!(out, DisableMouseCapture);
     if bracketed_paste {
         let _ = crossterm::execute!(out, DisableBracketedPaste);
+    }
+    if focus_events {
+        let _ = crossterm::execute!(out, DisableFocusChange);
     }
     if kb_enhanced {
         let _ = crossterm::execute!(out, PopKeyboardEnhancementFlags);
@@ -533,7 +537,7 @@ fn install_panic_hook() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let mut out = io::stdout();
-        let _ = restore_terminal(&mut out, true, true);
+        let _ = restore_terminal(&mut out, true, true, true);
         prev(info);
     }));
 }
@@ -616,6 +620,14 @@ async fn main() -> io::Result<()> {
     // mode tells the host terminal to wrap pastes in markers so crossterm
     // surfaces them as a single `Event::Paste(String)` instead.
     let bracketed_paste = crossterm::execute!(stdout, EnableBracketedPaste).is_ok();
+    // Focus reporting: coming back to the hub (Mission Control swipe, cmd-tab,
+    // tmux window switch) delivers `Event::FocusGained`, which the loop turns
+    // into a full clear + repaint. Ratatui only ever writes the cells that
+    // changed since its last frame, so whatever the host terminal dropped
+    // while the window was hidden or animating stays black until something
+    // forces every cell out again. Terminals without focus reporting ignore
+    // the request; tmux forwards it only with `focus-events on`.
+    let focus_events = crossterm::execute!(stdout, EnableFocusChange).is_ok();
     // Querying the terminal must happen on the alt screen but before we
     // hand stdout to ratatui's backend. On terminals that don't reply (or
     // swallow the probe — e.g. tmux without passthrough), fall back to a
@@ -642,7 +654,12 @@ async fn main() -> io::Result<()> {
     // backend's mutex.
     log::logger().flush();
 
-    restore_terminal(terminal.backend_mut(), bracketed_paste, kb_enhanced)?;
+    restore_terminal(
+        terminal.backend_mut(),
+        bracketed_paste,
+        kb_enhanced,
+        focus_events,
+    )?;
     terminal.show_cursor()?;
 
     eprintln!("Logs: {}", log_path.display());
@@ -1119,6 +1136,21 @@ async fn run(
     // event read to frame flushed. If a user-felt lag isn't visible here,
     // the time is being lost outside the process (terminal, compositor).
     let mut last_input_at: Option<Instant> = None;
+    // Full-repaint requests (issue: black stripes after a Mission Control
+    // swipe on a single fullscreen monitor). Ratatui's `autoresize` compares
+    // the terminal size against the size of the *last drawn* frame, so a
+    // resize that bounces back before the next draw (the swipe produces
+    // Resize pairs ~5ms apart: 244x76 -> 131x35 -> ... -> 244x76) is
+    // invisible to it — no clear, diff-only frame onto a screen the
+    // terminal/tmux already wiped, and only the cells that changed since
+    // the previous frame show. `full_redraw` makes the next frame start
+    // from `Terminal::clear()` regardless of what `autoresize` thinks.
+    let mut full_redraw = false;
+    // A resize storm's first frame can land while the window is still
+    // animating; the terminal may repaint over it afterwards. Once no Resize
+    // has arrived for RESIZE_SETTLE we repaint in full a second time.
+    let mut resize_settle_at: Option<Instant> = None;
+    const RESIZE_SETTLE: Duration = Duration::from_millis(250);
     /// Any single loop phase taking this long is a responsiveness incident
     /// worth a warn-level breakdown in the log.
     const STALL: Duration = Duration::from_millis(30);
@@ -1180,9 +1212,20 @@ async fn run(
         // changed, plus a ~1Hz tick so the elapsed clocks keep moving.
         let in_tmux = app.view == View::TmuxPane;
         let clock_tick = last_clock_redraw.elapsed() >= Duration::from_secs(1);
+        if resize_settle_at.is_some_and(|t| Instant::now() >= t) {
+            resize_settle_at = None;
+            full_redraw = true;
+            log::debug!("event: resize settled — full redraw");
+        }
         let t_draw = Instant::now();
         let mut draw_dur = Duration::ZERO;
-        if dirty || in_tmux || clock_tick {
+        if dirty || in_tmux || clock_tick || full_redraw {
+            if full_redraw {
+                // Wipes the terminal and resets ratatui's back buffer, so
+                // the draw below emits every non-blank cell instead of a
+                // diff against a frame the screen no longer shows.
+                terminal.clear()?;
+            }
             terminal.draw(|frame| hot::render(frame, &mut app))?;
             draw_dur = t_draw.elapsed();
             // Diff size this frame pushed at the terminal. Drained even for
@@ -1206,7 +1249,13 @@ async fn run(
                     app.sessions.sel_group,
                     app.sessions.sel_in_group,
                     app.view,
-                    if dirty { "dirty" } else { "clock" },
+                    if full_redraw {
+                        "full"
+                    } else if dirty {
+                        "dirty"
+                    } else {
+                        "clock"
+                    },
                     draw_dur,
                     flushed,
                     input_latency,
@@ -1224,6 +1273,7 @@ async fn run(
                 }
             }
             dirty = false;
+            full_redraw = false;
             last_clock_redraw = Instant::now();
 
             // Terminal round-trip probe (see `probe_ok` above): fired only
@@ -1390,9 +1440,24 @@ async fn run(
                             }
                         }
                     }
+                    Event::Resize(w, h) => {
+                        // Never trust `autoresize` alone here — see the
+                        // `full_redraw` comment. Every resize repaints in
+                        // full now, and once more after the storm settles.
+                        log::debug!("event: Resize({}, {})", w, h);
+                        full_redraw = true;
+                        resize_settle_at = Some(Instant::now() + RESIZE_SETTLE);
+                    }
+                    Event::FocusGained => {
+                        // Coming back to the window: whatever the terminal
+                        // did to the screen while we were hidden, one full
+                        // frame is cheap insurance.
+                        log::debug!("event: FocusGained — full redraw");
+                        full_redraw = true;
+                    }
                     other => {
-                        // Resize / focus events: nothing to do beyond the
-                        // repaint, but keep them visible in the trace.
+                        // FocusLost: nothing to do beyond the repaint, but
+                        // keep it visible in the trace.
                         log::debug!("event: {:?}", other);
                     }
                 }
