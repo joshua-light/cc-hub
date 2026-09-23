@@ -25,12 +25,16 @@ pub(crate) fn resource(args: &[String]) -> Result<(), CliError> {
         super::print_json(&serde_json::json!({"ok": true, "sent": sent}));
         return Ok(());
     }
+    // The broker names a Claude session before launching it, so the hub
+    // never sees it nameless and never opens the rename prompt for it.
+    if args.first().map(String::as_str) == Some("_name") {
+        cc_hub_lib::resources::name_session(&worker(args)?)
+            .map_err(|e| CliError::Other(format!("name session: {e}")))?;
+        super::print_json(&serde_json::json!({"ok": true}));
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("_bind") {
-        let value: serde_json::Value = serde_json::from_str(
-            args.get(1)
-                .ok_or_else(|| CliError::Usage("missing worker".into()))?,
-        )
-        .map_err(|e| CliError::Usage(e.to_string()))?;
+        let value = worker(args)?;
         let field = |key: &str| {
             value[key]
                 .as_str()
@@ -53,6 +57,12 @@ pub(crate) fn resource(args: &[String]) -> Result<(), CliError> {
                 },
             )
             .map_err(|e| CliError::Other(e.to_string()))?;
+            // A Codex session is first seen here, under the id it minted
+            // itself; a Claude one was named before launch and keeps it.
+            // Cosmetic, unlike the binding: a failure costs the name.
+            if let Err(e) = cc_hub_lib::resources::name_session(&value) {
+                log::warn!("resource bind: naming session {} failed: {}", sid, e);
+            }
         }
         super::print_json(&serde_json::json!({"ok": true}));
         return Ok(());
@@ -84,4 +94,13 @@ pub(crate) fn resource(args: &[String]) -> Result<(), CliError> {
     } else {
         Err(CliError::Reported("resource operation failed".into()))
     }
+}
+
+/// The worker record the broker passes to its `_name` / `_bind` callbacks.
+fn worker(args: &[String]) -> Result<serde_json::Value, CliError> {
+    serde_json::from_str(
+        args.get(1)
+            .ok_or_else(|| CliError::Usage("missing worker".into()))?,
+    )
+    .map_err(|e| CliError::Usage(e.to_string()))
 }

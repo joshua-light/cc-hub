@@ -395,9 +395,10 @@ impl TaskLink {
         self.role.is_some()
     }
 
-    /// The name the session is born with: `Task: <card text>`.
-    pub fn session_title(&self, brief: &str) -> String {
-        titled("Task", brief)
+    /// The hand-over forward, to the session that tests the candidate and
+    /// opens the pull request. `implementation` is the hand back.
+    pub fn is_verification(&self) -> bool {
+        self.role.as_deref() == Some("verification")
     }
 }
 
@@ -432,7 +433,7 @@ impl FromStr for BoardTaskId {
 
 /// `<prefix>: <subject>`, whitespace collapsed and the whole thing capped so
 /// a novel of a title still fits a session card.
-fn titled(prefix: &str, subject: &str) -> String {
+pub(crate) fn titled(prefix: &str, subject: &str) -> String {
     const MAX_CHARS: usize = 60;
     let subject = subject.split_whitespace().collect::<Vec<_>>().join(" ");
     let title = format!("{}: {}", prefix, subject);
@@ -633,10 +634,10 @@ mod tests {
     #[test]
     fn titles_are_prefixed_and_capped() {
         assert_eq!(
-            task("id=tk-42").session_title("Add a\n  commit  skill"),
+            titled("Task", "Add a\n  commit  skill"),
             "Task: Add a commit skill"
         );
-        let long = task("id=tk-42").session_title(&"word ".repeat(30));
+        let long = titled("Task", &"word ".repeat(30));
         assert_eq!(long.chars().count(), 61);
         assert!(long.ends_with('…'), "{}", long);
     }

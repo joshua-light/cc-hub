@@ -9,7 +9,9 @@ The configuration is `~/.cc-hub/resources.toml`; see
 - **Accounts** are separate Claude or Codex homes with their own login.
 - **Profiles** pair an exact model and effort with the accounts that may run it.
 - **Routing** picks profiles by task kind and role: `implementation` or
-  `verification`, the two roles of the `task` skill.
+  `verification`, the two roles of the `task` skill. A kind that is worked by
+  one session needs no `verification` route, and giving it none is the rule
+  saying so — the broker refuses a role nothing routes.
 - **Hosts** are the places commands can run (`main`, `wh`), and **resources**
   are the things on them that only one session may use at a time (a checkout,
   a phone). Routing says nothing about resources: a session claims what its
@@ -24,11 +26,17 @@ launched and the old one is stopped by the next supervisor tick. That is the
 whole protocol between the two roles; the card's notes carry the context.
 
 ```sh
-cc-hub resource start --task tk-ID --kind tps --role implementation --cwd /repo --prompt '…'
+cc-hub resource start --task tk-ID --kind tps --role implementation --cwd /repo --prompt '…' [--title TEXT]
 cc-hub resource status [--worker ID]
 cc-hub resource stop --worker ID [--reason TEXT]
 cc-hub resource retry --worker ID          # a blocked worker, after inspecting why it exited
 ```
+
+A worker's session is born named: `--title`, else the card's title — an agent
+that files its own card titles it as its session (`Polish: …`) — else
+`Task: <card text>`. A Claude session is named before it is launched, a Codex
+one when its binding learns the id it minted. A name is never overwritten, so
+a session resumed on another account keeps whatever the user renamed it to.
 
 A `cc-hub://task?…&role=…` link is the same hand-over from the board's side:
 `cc-hub open` starts the new role through the broker when accounts are
@@ -71,7 +79,7 @@ waits for. For the same reason a claim is the *complete* set, so claiming a
 different one hands back what the worker holds until the new set can be
 granted in full. A waiting card reads `waiting for a resource`.
 
-Holding is derived from the live workers, never stored as a lock: a session
+Holding is derived from the live sessions, never stored as a lock: a session
 that forgets to release holds nothing the moment it ends, and there is no
 lease to expire. A quota replacement keeps what its predecessor held, because
 it continues the same work.
@@ -82,6 +90,30 @@ resource on a remote host comes with that host's `ssh` name; the session
 itself still runs in tmux on this machine and reaches the host over SSH.
 Holding `android` does not hold `wh-tps`: the phone hangs off that machine,
 but using it does not take the checkout beside it.
+
+### A session the hub did not launch
+
+Not every session that needs the checkout came from `resource start`: a
+terminal, an editor's agent, a `claude` somebody opened by hand. Such a session
+claims as a **guest**. It names itself once, and after that its process is its
+name:
+
+```sh
+cc-hub resource claim main-tps --as 'reviving TPS-21146' --wait 300
+cc-hub resource release
+```
+
+A guest queues in the same queue as the workers, first to ask first served, and
+shows up in `resource list` under the name it gave. What it does not get is
+everything else a worker has: no account, no card, no replacement when a
+subscription runs dry. The hub lends it a resource, nothing more.
+
+Liveness is the same rule the workers live under, read off the one thing a
+guest has: the process that claimed. That process is the session, not the shell
+it typed the command into, nor the `cc-hub` that answered — the broker walks up
+past the shells and past itself to find it, and `--pid` names it outright when
+that walk would guess wrong. When the process ends, so does the hold; a guest
+that forgets to release still leaks nothing.
 
 ## Replacement from the transcript
 

@@ -72,6 +72,8 @@ pub(crate) fn open(args: &[String]) -> Result<(), CliError> {
                 target.cwd.to_string_lossy().into(),
                 "--prompt".into(),
                 fix.prompt_for(&card),
+                "--title".into(),
+                target.title,
             ]);
             if started.is_ok() {
                 ops::link::start_card(card.as_str())?;
@@ -100,6 +102,8 @@ pub(crate) fn open(args: &[String]) -> Result<(), CliError> {
                         "Read ~/.claude/skills/task/SKILL.md and follow it for:\n{}",
                         target.prompt
                     ),
+                    "--title".into(),
+                    target.title,
                 ]);
                 if started.is_ok() {
                     close_superseded();

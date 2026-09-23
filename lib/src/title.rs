@@ -108,6 +108,19 @@ pub fn persist_title(sid: &str, title: &str) -> std::io::Result<()> {
     save(&map)
 }
 
+/// [`persist_title`], unless `sid` already has a name — the user's rename, or
+/// the one it was born with — which is never overwritten. Returns whether
+/// `title` was written.
+pub fn name_if_nameless(sid: &str, title: &str) -> std::io::Result<bool> {
+    let _g = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map = load();
+    if map.contains_key(sid) {
+        return Ok(false);
+    }
+    map.insert(sid.to_string(), title.to_string());
+    save(&map).map(|()| true)
+}
+
 /// Cached result of resolving the configured spawn command through the
 /// user's login shell. `Some(argv)` is the direct argv to exec, skipping
 /// the shell on every call; `None` means the last resolve attempt failed
@@ -447,6 +460,17 @@ fn sanitize_title(raw: &str, max: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn naming_never_overwrites_a_name() {
+        crate::test_util::with_temp_home(|| {
+            assert!(name_if_nameless("sid-1", "Task: born with").unwrap());
+            persist_title("sid-1", "renamed by hand").unwrap();
+            assert!(!name_if_nameless("sid-1", "Task: born with").unwrap());
+            assert_eq!(load()["sid-1"], "renamed by hand");
+        });
+    }
 
     #[test]
     fn sanitize_strips_quotes_and_trailing_period() {

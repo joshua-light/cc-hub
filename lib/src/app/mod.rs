@@ -1793,6 +1793,7 @@ impl App {
             return "task vanished before assignment".into();
         };
         let prompt = planning_prompt(task);
+        let title = task.session_title();
         let agent_id = config::get().default_session_agent_id();
         let supports_initial_prompt = config::get()
             .agent(&agent_id)
@@ -1818,6 +1819,9 @@ impl App {
                         .unwrap_or_default();
                     return format!("assign rolled back: task write failed: {e}{cleanup}");
                 }
+                // Named after its card the moment the scanner sees it; see
+                // `adopt_pending_spawn_names`.
+                self.pending_spawn_names.insert(tmux.clone(), Some(title));
                 self.focus_task(&id);
                 format!(
                     "assigned {} [{}] — planning (Space approves the plan)",
@@ -3680,6 +3684,26 @@ mod tests {
             assert_eq!(
                 runtime.prompts.lock().unwrap().as_slice(),
                 &[("mux-task".into(), PROCEED_PROMPT.into())]
+            );
+        });
+    }
+
+    // A session the board starts for a card is named after it, instead of
+    // arriving nameless and asking.
+    #[test]
+    #[cfg(unix)]
+    fn assigned_session_is_named_after_its_card() {
+        crate::test_util::with_temp_home(|| {
+            let runtime = Arc::new(RecordingRuntime::default());
+            let mut app = App::new_with_runtime(runtime.clone());
+            let id = app.tasks.board.add("implement it").unwrap().unwrap();
+            app.tasks.pending_assign = Some(id);
+
+            app.assign_task_agent("/tmp");
+
+            assert_eq!(
+                app.pending_spawn_names.get("mock-spawn"),
+                Some(&Some("Task: implement it".into()))
             );
         });
     }

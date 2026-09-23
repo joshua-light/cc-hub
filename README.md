@@ -105,8 +105,10 @@ moves a card. `kind` and `role` are words passed through to the prompt; the
 always starts a fresh session and closes the card's previous one once the
 command has reported, which is how the skill's implementation session passes
 a task to its verification session. A hand-over is refused for a card with
-no note: the notes are the brief the next session works from, so there is no
-hand-over without one. Local agents can use these links to hand tasks to
+no note — the notes are the brief the next session works from, so there is no
+hand-over without one — and a `role=verification` hand-over is refused for a
+kind outside `[tasks].handover_kinds`, which has no verification session to
+receive it. Local agents can use these links to hand tasks to
 interactive sessions.
 An OS URL-scheme handler or browser integration can forward links to
 `cc-hub open`; platform integrations are configured separately.
@@ -440,10 +442,17 @@ A card can also carry a **kind** — the deliverable it produces, picked with
 ```toml
 [tasks]
 kinds = ["tps", "ai-plugin", "tool", "hub", "basic", "repair"]
+handover_kinds = ["tps"]
 ```
 
-cc-hub never interprets a kind; it stores the word and hands it to whoever
-opens the session — `cc-hub://task?...&kind=<word>`, the same query parameter
+`handover_kinds` is the one thing cc-hub reads a kind for: the kinds whose
+task is worked by two sessions in sequence — one builds, a second tests the
+candidate and opens the pull request. A `role=verification` link naming a
+kind outside the list is refused, because that kind has no second session to
+hand to. Leave the list empty and every kind may hand over, as before.
+
+Otherwise cc-hub never interprets a kind; it stores the word and hands it to
+whoever opens the session — `cc-hub://task?...&kind=<word>`, the same query parameter
 a link already carries. For an agent that routes the board that is the
 difference between a card it classifies and one it merely places: a card with
 a kind is worked where that word says, and can't come back asking which kind

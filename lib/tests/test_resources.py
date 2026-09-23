@@ -190,6 +190,26 @@ PROJECT="keep-project"
             broker.save(db)
             return freed
 
+    def alive(self, *pids):
+        """Which processes exist, as the broker sees them: a guest is alive
+        exactly as long as the process it claimed from."""
+        stamps = {pid: 'started-%d' % pid for pid in pids}
+        return patch.object(broker, 'process_stamp', side_effect=lambda pid: stamps.get(int(pid)) if pid else None)
+
+    def guest_claim(self, pid, *names, alias='by hand', wait=0):
+        argv = ['claim', *names, '--wait', str(wait), '--pid', str(pid)]
+        return broker.claim_and_wait(self.cfg, broker.parser().parse_args(
+            argv + (['--as', alias] if alias else [])))
+
+    def guest_release(self, pid, *names):
+        args = broker.parser().parse_args(['release', *names, '--pid', str(pid)])
+        with broker.lock():
+            db = broker.state()
+            session = broker.current_session(db, args)
+            freed = broker.release(db, session, args.names or None) if session else []
+            broker.save(db)
+            return freed
+
     def test_a_worker_starts_holding_nothing(self):
         for task in ('tk-one', 'tk-two'):
             self.assertEqual(self.start('verification', task=task)['status'], 'starting')
@@ -288,6 +308,67 @@ PROJECT="keep-project"
         self.assertIn('already holds android',
                       broker.execution(broker.state()['workers'][worker['id']], self.cfg)[0][-1])
 
+    # ─── guests ──────────────────────────────────────────────────────────
+
+    def test_a_guest_joins_the_one_queue_the_workers_wait_in(self):
+        worker = self.start(task='tk-one')
+        with self.alive(4242):
+            self.assertEqual(self.guest_claim(4242, 'main-tps', alias='reviving TPS-21146'),
+                             {'ok': True, 'holds': ['main-tps']})
+            queued = self.claim(worker, 'main-tps')
+            self.assertEqual(queued['queue']['main-tps'], {'held_by': 'reviving TPS-21146', 'ahead': 0})
+            listing = broker.resource_list(self.cfg, broker.state())
+            self.assertEqual((listing['main-tps']['holder'], listing['main-tps']['queue']),
+                             ('reviving TPS-21146', ['tk-one']))
+
+            # Its process is its name from here on: no second `--as`.
+            self.assertEqual(self.guest_release(4242), ['main-tps'])
+            self.assertEqual(broker.state()['workers'][worker['id']]['holds'], ['main-tps'])
+
+    def test_a_worker_asked_first_so_the_guest_waits(self):
+        worker = self.start(task='tk-one')
+        self.claim(worker, 'android', 'main-tps')
+        with self.alive(4242):
+            waiting = self.guest_claim(4242, 'main-tps')
+            self.assertEqual((waiting['ok'], waiting['holds']), (False, []))
+            self.assertEqual(waiting['queue']['main-tps']['held_by'], 'tk-one')
+            self.release(worker, 'main-tps')
+            self.assertEqual(broker.resource_list(self.cfg, broker.state())['main-tps']['holder'], 'by hand')
+
+    def test_a_guest_that_ended_holds_nothing(self):
+        worker = self.start(task='tk-one')
+        with self.alive(4242):
+            self.guest_claim(4242, 'main-tps')
+            self.claim(worker, 'main-tps')
+        # Nothing released it; the process is simply gone.
+        with self.alive():
+            self.assertEqual(broker.state()['guests'], {})
+            after = self.supervise()
+        self.assertEqual(after[worker['id']]['holds'], ['main-tps'])
+
+    def test_a_guest_names_itself_before_it_may_hold_anything(self):
+        with self.alive(4242):
+            with self.assertRaises(ValueError):
+                self.guest_claim(4242, 'main-tps', alias=None)
+            self.assertEqual(self.guest_release(4242), [])
+            self.assertIsNone(broker.resource_list(self.cfg, broker.state())['main-tps']['holder'])
+
+    def test_a_guest_claims_for_the_session_not_the_shell_it_typed_in(self):
+        # As the broker is really reached: a `cc-hub` run from a shell, which
+        # runs this file. Anchoring on either of the two would end the hold
+        # with the command that made it.
+        tree = {'900': '1 /usr/local/bin/claude', '901': '900 -zsh',
+                '902': '901 /opt/cc-hub/bin/cc-hub', '903': '902 python3'}
+        with patch.object(broker, 'run', side_effect=lambda argv, **kw: type(
+                'done', (), {'returncode': 0, 'stdout': tree.get(argv[2], '')})()):
+            self.assertEqual(broker.session_pid(start=903), 900)
+        # An installed hub may answer to another name; it says which it is.
+        tree['902'] = '901 /opt/hub/libexec/hubd'
+        with patch.object(broker, 'run', side_effect=lambda argv, **kw: type(
+                'done', (), {'returncode': 0, 'stdout': tree.get(argv[2], '')})()):
+            with patch.dict(os.environ, CC_HUB_BINARY='/opt/hub/libexec/hubd'):
+                self.assertEqual(broker.session_pid(start=903), 900)
+
     def test_unknown_role_has_no_policy(self):
         with self.assertRaises(ValueError):
             broker.policy(self.cfg, 'project', 'qa')
@@ -378,6 +459,23 @@ PROJECT="keep-project"
             self.assertEqual(command[command.index('--model') + 1], profile['model'])
             self.assertEqual(command[command.index('--autocompact') + 1], str(profile['autocompact']))
             self.assertEqual(command[command.index('--session-id') + 1], worker['session_id'])
+
+    def test_a_claude_session_is_named_before_it_exists(self):
+        args = broker.parser().parse_args(['start', '--task', 'tk-test', '--kind', 'project', '--role', 'implementation',
+                                           '--cwd', str(self.directory), '--prompt', 'p', '--title', 'Polish: The PR'])
+        with patch.object(broker, 'launch'), patch.object(broker, 'bind_board'):
+            worker = broker.start_worker(args, self.cfg, self.usage)
+        self.assertEqual(worker['title'], 'Polish: The PR')
+        order = []
+        done = type('done', (), {'returncode': 0, 'stdout': ''})()
+        with patch.dict(os.environ, CC_HUB_BINARY='/opt/hub'), patch.object(broker, 'tmux_exists', return_value=False), \
+                patch.object(broker, 'run', side_effect=lambda argv, **_: order.append(argv) or done):
+            broker.launch(worker, self.cfg)
+        provider = self.cfg['accounts'][worker['account']]['provider']
+        verbs = [argv[1] if argv[0] == 'tmux' else argv[2] for argv in order]
+        self.assertEqual(verbs, ['_name', 'new-session'] if provider == 'claude' else ['new-session'])
+        if provider == 'claude':
+            self.assertEqual(json.loads(order[0][3])['session_id'], worker['session_id'])
 
     def test_hook_records_the_transcript_and_blocks_nothing(self):
         worker = self.start()

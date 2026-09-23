@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 
 use crate::agent::AgentKind;
 use crate::bookmarks::Bookmarks;
-use crate::link::{BoardTaskId, FixLink, Link, PullRequestUrl, ReviewLink};
+use crate::link::{BoardTaskId, FixLink, Link, PullRequestUrl, ReviewLink, TaskLink};
 use crate::ops::prompt::{wait_until_idle_and_send, PromptStatus, DEFAULT_PROMPT_WAIT_SECS};
 use crate::ops::OpError;
 use crate::platform::paths::expand_home;
@@ -143,11 +143,11 @@ pub fn target(link: &Link, agent: Option<&str>) -> Result<LinkTarget, OpError> {
             }
             if task.is_handover() {
                 without_a_brief(&card)?;
+                without_a_verification_role(task, card.kind.as_deref())?;
             }
-            let brief = card.title.as_deref().unwrap_or(&card.prompt);
             Ok(LinkTarget {
                 cwd,
-                title: task.session_title(brief),
+                title: card.session_title(),
                 prompt: task.prompt(&card.prompt),
                 agent_id,
             })
@@ -284,6 +284,23 @@ fn without_a_brief(card: &TaskState) -> Result<(), OpError> {
         ));
     }
     Ok(())
+}
+
+/// No hand-over to a role the kind does not have. Only the kinds in
+/// `[tasks].handover_kinds` are worked by two sessions; every other kind has
+/// the one session, which tests its own candidate and opens the pull request
+/// itself. A verification link for one of those is a link nobody can honour,
+/// so it is refused here rather than spawning a session that reads a brief
+/// and finds the work already delivered.
+fn without_a_verification_role(task: &TaskLink, filed: Option<&str>) -> Result<(), OpError> {
+    let kind = task.kind.as_deref().or(filed);
+    if !task.is_verification() || config::get().tasks.hands_over(kind) {
+        return Ok(());
+    }
+    Err(OpError::Usage(format!(
+        "{} has no verification role: its implementation session tests what it built and opens the pull request",
+        kind.expect("a kind the list does not hold")
+    )))
 }
 
 /// The board card a task link addresses.

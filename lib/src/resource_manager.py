@@ -14,8 +14,9 @@ restart. Provider credentials stay in their own homes.
 A session may also need a resource: a repository checkout, a phone. The config
 says which exist and on which host; it does not say who needs one, because only
 the session doing the work knows that. A session claims what it needs while it
-runs, and one resource is held by one session at a time. Holding is derived
-from live workers, so a session that forgets to release holds nothing once it
+runs, and one resource is held by one session at a time. A session the hub did
+not launch claims as a guest, under the name it gives itself. Holding is derived
+from the live sessions, so one that forgets to release holds nothing once it
 ends: there is no lock to leak.
 """
 import argparse
@@ -386,7 +387,12 @@ USING = ('waiting_for_capacity', 'starting', 'running', 'replacing', 'stopping')
 
 
 def state():
-    return read_json(root() / 'state.json', {'workers': {}, 'cooldowns': {}})
+    db = read_json(root() / 'state.json', {'workers': {}, 'cooldowns': {}})
+    # A guest is remembered only while its process is: reading the state is
+    # where one that ended stops being anybody, and holds nothing.
+    db['guests'] = {key: guest for key, guest in db.get('guests', {}).items()
+                    if process_stamp(guest['pid']) == guest['pid_stamp']}
+    return db
 
 
 def save(value):
@@ -469,24 +475,37 @@ def allocate(cfg, usage, db, worker):
 # checkout, a phone. The config says which exist and on which host; nothing
 # says who needs one, because only the session doing the work knows that.
 #
-# Holding is *derived* from live workers, never stored as a lock, so a
+# Holding is *derived* from live sessions, never stored as a lock, so a
 # session that forgets to release — or dies mid-claim — holds nothing the
 # moment it is no longer live. There is no lease to expire and no lock to
-# leak. Waiting is a `wants` set on the worker plus the time it asked, which
+# leak. Waiting is a `wants` set on the session plus the time it asked, which
 # is the whole queue: first to ask, first served.
+#
+# Two kinds of session ask. A *worker* the hub launched, which it knows is
+# live because it supervises it, and a *guest* it did not, which is live as
+# long as the process that claimed still runs. Everything below treats them
+# alike: the queue is one queue, and a guest waits behind a worker and a
+# worker behind a guest.
+
+
+def sessions(db):
+    return [w for w in db['workers'].values() if w['status'] in USING] + list(db.get('guests', {}).values())
+
+
+def holder_name(session):
+    """Who a resource is out to, as the other side of the queue reads it: a
+    worker answers with its task, a guest with the name it gave itself."""
+    return session.get('task') or session['name']
 
 
 def resource_holders(db, except_worker=None):
-    return {name: worker for worker in db['workers'].values()
-            if worker['status'] in USING and worker['id'] != except_worker
-            for name in worker.get('holds', [])}
+    return {name: session for session in sessions(db) if session['id'] != except_worker
+            for name in session.get('holds', [])}
 
 
 def waiting_for_resources(db):
-    """Workers with an ungranted claim, in the order they asked."""
-    return sorted((w for w in db['workers'].values()
-                   if w['status'] in USING and w.get('wants')),
-                  key=lambda w: w['wants_at'])
+    """Sessions with an ungranted claim, in the order they asked."""
+    return sorted((s for s in sessions(db) if s.get('wants')), key=lambda s: s['wants_at'])
 
 
 def grant(db, worker):
@@ -559,7 +578,7 @@ def standing(cfg, db, worker):
         earlier = [w for w in waiting_for_resources(db)
                    if name in w['wants'] and w['wants_at'] < worker['wants_at']]
         holder = resource_holders(db, except_worker=worker['id']).get(name)
-        ahead[name] = {'held_by': holder['task'] if holder else None, 'ahead': len(earlier)}
+        ahead[name] = {'held_by': holder_name(holder) if holder else None, 'ahead': len(earlier)}
     return {'ok': False, 'holds': [], 'waiting_for': worker['wants'], 'queue': ahead}
 
 
@@ -569,16 +588,19 @@ def claim_and_wait(cfg, args):
     deadline = time.monotonic() + max(0.0, args.wait)
     with lock():
         db = state()
-        worker = claim(cfg, db, current_worker(db, args.worker, require_owner=True), args.names)
-        answer = standing(cfg, db, worker)
+        session = current_session(db, args)
+        if session is None:
+            raise ValueError('this session is not a managed worker; claim as a guest by naming yourself: --as "<who you are>"')
+        session = claim(cfg, db, session, args.names)
+        answer = standing(cfg, db, session)
         save(db)
     while not answer['ok'] and time.monotonic() < deadline:
         time.sleep(min(2.0, max(0.1, deadline - time.monotonic())))
         with lock():
             db = state()
-            worker = current_worker(db, args.worker, require_owner=True)
-            grant(db, worker)
-            answer = standing(cfg, db, worker)
+            session = current_session(db, args)
+            grant(db, session)
+            answer = standing(cfg, db, session)
             save(db)
     return answer
 
@@ -609,11 +631,11 @@ def inventory(cfg):
 def resource_list(cfg, db):
     holders = resource_holders(db)
     queue = {}
-    for w in waiting_for_resources(db):
-        for name in w['wants']:
-            queue.setdefault(name, []).append(w['task'])
+    for session in waiting_for_resources(db):
+        for name in session['wants']:
+            queue.setdefault(name, []).append(holder_name(session))
     return {name: dict(resource,
-                       holder=holders[name]['task'] if name in holders else None,
+                       holder=holder_name(holders[name]) if name in holders else None,
                        queue=queue.get(name, []),
                        reach=cfg['hosts'][resource['host']].get('ssh'))
             for name, resource in cfg['resources'].items()}
@@ -630,6 +652,63 @@ def current_worker(db, requested=None, require_owner=False):
         if worker['status'] not in ('starting', 'running'):
             raise ValueError('worker lease is not active')
     return worker
+
+
+# Shells, and the broker itself, are how a session runs a command; they are
+# not the session. A guest's hold belongs to whoever is behind them.
+SHELLS = ('sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'csh', 'tcsh', 'env', 'login', 'python', 'python3')
+
+
+def passthrough(command):
+    """Whether a process is somebody running a command rather than the session
+    that wanted it: a shell, or the `cc-hub` that runs this file. The broker is
+    always the first parent and it lives no longer than the answer it prints,
+    so a guest anchored to it would be gone the moment it was granted."""
+    return command in SHELLS or command == Path(os.environ.get('CC_HUB_BINARY', 'cc-hub')).name
+
+
+def session_pid(start=None):
+    """The process a guest hold belongs to: the nearest ancestor of this
+    command that is a session rather than a shell it was typed into."""
+    pid = start or os.getppid()
+    for _ in range(16):
+        fields = run(['ps', '-p', str(pid), '-o', 'ppid=', '-o', 'comm='], timeout=3).stdout.split(None, 1)
+        if len(fields) != 2:
+            return pid
+        # A login shell answers with a leading dash: `-zsh` is still a shell.
+        parent, command = int(fields[0]), Path(fields[1].strip()).name.lstrip('-')
+        if parent <= 1 or not passthrough(command):
+            return pid
+        pid = parent
+    return pid
+
+
+def guest(db, name=None, pid=None):
+    """A session the hub did not launch, claiming on its own behalf. It is not
+    supervised and never replaced: the hub lends it a resource and finds out it
+    is gone when its process is, which is the same rule its own workers live
+    under. A guest names itself once; after that its process is its name."""
+    pid = pid or session_pid()
+    stamp = process_stamp(pid)
+    if not stamp:
+        raise ValueError('nothing alive to hold for at pid ' + str(pid))
+    existing = db['guests'].get(str(pid))
+    if existing:
+        return existing
+    if not name:
+        return None
+    entry = {'id': 'guest-' + str(pid), 'name': name[:64], 'pid': pid, 'pid_stamp': stamp,
+             'since': time.time(), 'events': []}
+    db['guests'][str(pid)] = entry
+    return entry
+
+
+def current_session(db, args):
+    """Who is asking. A managed worker names itself through the environment
+    the hub launched it with; anybody else asks as a guest."""
+    if args.worker or os.environ.get('CC_HUB_RESOURCE_WORKER'):
+        return current_worker(db, args.worker, require_owner=True)
+    return guest(db, getattr(args, 'name', None), getattr(args, 'pid', None))
 
 
 def live_worker(db, task):
@@ -785,10 +864,11 @@ def execution(worker, cfg):
     return argv, env
 
 
-def launch(worker):
+def launch(worker, cfg):
     # Stable generation-specific name makes crash-after-spawn reconciliation idempotent.
     if tmux_exists(worker['tmux']):
         return
+    name_session(worker, cfg)
     execute = [sys.executable, str(Path(__file__).resolve()), '_exec', '--worker', worker['id'],
                '--generation', str(worker['generation'])]
     argv = ['/usr/bin/env', 'CC_HUB_RESOURCE_CONFIG=' + str(config_path()),
@@ -797,6 +877,16 @@ def launch(worker):
     result = run(['tmux', 'new-session', '-d', '-s', worker['tmux'], '-c', worker['cwd'], *argv])
     if result.returncode:
         raise ValueError('tmux worker launch failed')
+
+
+def name_session(worker, cfg):
+    """Name the session before it exists, so the hub never sees it nameless.
+    Only Claude takes the id it is given; a Codex session mints its own and is
+    named when `bind_board` first learns it. A failure costs the name, not the
+    launch: the hub asks the user for one instead."""
+    binary = os.environ.get('CC_HUB_BINARY')
+    if binary and cfg['accounts'][worker['account']]['provider'] == 'claude':
+        run([binary, 'resource', '_name', json.dumps(worker)])
 
 
 def bind_board(worker, cfg):
@@ -854,7 +944,7 @@ def start_worker(args, cfg, usage):
             # A hand-over: the task changes hands or place, and the old session ends.
             stop(current, handover_reason(current, args.role, cwd))
         worker = {'id': uuid.uuid4().hex, 'task': args.task, 'kind': args.kind, 'role': args.role, 'cwd': cwd,
-                  'prompt': args.prompt, 'generation': 0, 'status': 'waiting_for_capacity', 'events': [],
+                  'prompt': args.prompt, 'title': args.title, 'generation': 0, 'status': 'waiting_for_capacity', 'events': [],
                   'created_at': time.time(), 'predecessor': current['id'] if current else None}
         db['workers'][worker['id']] = worker
         choice = allocate(cfg, usage, db, worker)
@@ -863,7 +953,7 @@ def start_worker(args, cfg, usage):
         save(db)
     # No lock held during CLI startup. Generation already reserved durably.
     if choice:
-        launch(worker)
+        launch(worker, cfg)
         bind_board(worker, cfg)
     return worker
 
@@ -937,7 +1027,7 @@ def supervise(cfg, usage):
                             bind_board(worker, cfg)
                         elif time.time() - worker['started_at'] > 30:
                             # Reconcile a crash before launch without manufacturing a new generation.
-                            launch(worker)
+                            launch(worker, cfg)
                     elif not tmux_exists(worker['tmux']):
                         worker['status'] = 'blocked'
                         record(worker, 'process_exited', reason='inspect exit before retrying; not classified as quota')
@@ -982,7 +1072,7 @@ def supervise(cfg, usage):
                     if choice:
                         reserve(worker, choice, cfg)
                         save(db)
-                        launch(worker)
+                        launch(worker, cfg)
                         bind_board(worker, cfg)
             # A worker that ended above stopped holding what it held, so this
             # is where a queued claim finds out. No other sweep is needed:
@@ -1033,18 +1123,25 @@ def parser():
     claim_p = commands.add_parser('claim')
     claim_p.add_argument('names', nargs='+')
     claim_p.add_argument('--worker')
+    # A session the hub did not launch says who it is; its process says how
+    # long it is around to hold anything.
+    claim_p.add_argument('--as', dest='name')
+    claim_p.add_argument('--pid', type=int)
     # A tool call has its own timeout, so a claim waits for a while and says
     # where it stands rather than blocking until it is granted.
     claim_p.add_argument('--wait', type=float, default=0)
     release_p = commands.add_parser('release')
     release_p.add_argument('names', nargs='*')
     release_p.add_argument('--worker')
+    release_p.add_argument('--pid', type=int)
     select_p = commands.add_parser('select')
     for name in ('kind', 'role'):
         select_p.add_argument('--' + name, required=True)
     start = commands.add_parser('start')
     for name in ('task', 'kind', 'role', 'cwd', 'prompt'):
         start.add_argument('--' + name, required=True)
+    # The session's name; without one it takes its card's (see `cc-hub resource _name`).
+    start.add_argument('--title')
     commands.add_parser('status').add_argument('--worker')
     commands.add_parser('retry').add_argument('--worker', required=True)
     stop_p = commands.add_parser('stop')
@@ -1116,9 +1213,10 @@ def main(argv=None):
                     stop(worker, args.reason)
                     result = worker
                 elif args.verb == 'release':
-                    worker = current_worker(db, args.worker, require_owner=True)
-                    freed = release(db, worker, args.names or None)
-                    result = {'released': freed, 'holds': worker.get('holds', [])}
+                    # A guest with nothing to its name held nothing to hand back.
+                    session = current_session(db, args)
+                    freed = release(db, session, args.names or None) if session else []
+                    result = {'released': freed, 'holds': session.get('holds', []) if session else []}
                 save(db)
         print(json.dumps({'ok': True, 'result': result}))
         return 0

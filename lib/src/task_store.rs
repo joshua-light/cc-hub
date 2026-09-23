@@ -237,6 +237,12 @@ impl TaskState {
     pub fn touch(&mut self) {
         self.updated_at = now_unix_secs();
     }
+
+    /// The name a session working this card is born with: `Task: <title>`,
+    /// or `Task: <prompt>` while the card has no title yet.
+    pub fn session_title(&self) -> String {
+        crate::link::titled("Task", self.title.as_deref().unwrap_or(&self.prompt))
+    }
 }
 
 /// Read a task state file; missing file returns NotFound, parse errors

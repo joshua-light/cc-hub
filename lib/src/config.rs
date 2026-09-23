@@ -226,6 +226,13 @@ pub struct TasksConfig {
     /// owns where each one lands. Empty (the default) means the board offers
     /// nothing to pick and every card stays router-classified.
     pub kinds: Vec<String>,
+    /// The kinds whose task is worked by two sessions in sequence: one
+    /// builds, a second tests what was built and opens the pull request.
+    /// A kind outside this list has the one session — it checks its own work
+    /// and delivers — so a `role=verification` link naming it hands the card
+    /// to a role that does not exist, and is refused. Empty (the default)
+    /// leaves every kind free to hand over, as before the list existed.
+    pub handover_kinds: Vec<String>,
 }
 
 impl TasksConfig {
@@ -242,6 +249,14 @@ impl TasksConfig {
         } else {
             format!("{} is not one of {}", kind, self.kinds.join(", "))
         })
+    }
+
+    /// Whether a card of this kind is handed to a verification session. A
+    /// card with no kind is nobody's to refuse: nothing has classified it
+    /// yet, so it keeps the freedom it had before the list existed.
+    pub fn hands_over(&self, kind: Option<&str>) -> bool {
+        self.handover_kinds.is_empty()
+            || kind.is_none_or(|k| self.handover_kinds.iter().any(|h| h == k))
     }
 }
 
@@ -512,6 +527,25 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(src).unwrap();
         assert_eq!(cfg.ui.cell_width, 50);
+    }
+
+    #[test]
+    fn only_a_listed_kind_hands_over() {
+        let src = r#"
+            [tasks]
+            kinds = ["tps", "basic"]
+            handover_kinds = ["tps"]
+        "#;
+        let cfg: Config = toml::from_str(src).unwrap();
+        assert!(cfg.tasks.hands_over(Some("tps")));
+        assert!(!cfg.tasks.hands_over(Some("basic")));
+        assert!(cfg.tasks.hands_over(None));
+    }
+
+    #[test]
+    fn an_empty_handover_list_holds_nobody_back() {
+        let cfg: Config = toml::from_str("[tasks]\nkinds = [\"basic\"]").unwrap();
+        assert!(cfg.tasks.hands_over(Some("basic")));
     }
 
     #[test]
