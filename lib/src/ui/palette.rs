@@ -29,7 +29,7 @@ pub(crate) const SEP_GRAY: Color = Color::Rgb(60, 60, 70);
 /// Diff/context and tail-entry gray.
 pub(crate) const CONTEXT_GRAY: Color = Color::Rgb(160, 160, 170);
 
-/// Soft blue accent (cwd path, note icon, selected to-do marker).
+/// Soft blue accent (cwd path, note icon).
 pub(crate) const ACCENT_BLUE: Color = Color::Rgb(180, 200, 230);
 
 /// Planning/thinking purple accent.

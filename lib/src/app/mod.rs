@@ -27,7 +27,6 @@ mod session_finder;
 mod sessions_view;
 mod task_link_picker;
 mod tasks_view;
-mod todo_panel;
 
 pub use command::{Command, Effect, GlobalCommand, HarnessCommand, SessionsCommand, TasksCommand};
 pub use harness_view::HarnessView;
@@ -38,7 +37,6 @@ pub use session_finder::{SessionFinderChoice, SessionFinderRow, SessionFinderSta
 pub use sessions_view::{SessionsLayout, SessionsView};
 pub use task_link_picker::{TaskLinkAction, TaskLinkChoice, TaskLinkPickerState, TaskLinkRow};
 pub use tasks_view::{column_statuses, visible_task_columns, TaskField, TasksView, TASK_COLUMNS};
-pub use todo_panel::TodoPanelState;
 
 pub fn status_msg_ttl() -> Duration {
     config::get().ui.status_msg_ttl()
@@ -255,8 +253,6 @@ pub enum View {
     GhCreateInput,
     ProjectsResult,
     Backlog,
-    /// Scratch to-do side panel on the Sessions tab (toggled with `t`).
-    TodoPanel,
     /// Centered single-line input for adding a task on the Tasks tab.
     TaskInput,
     /// Centered single-line input for editing the focused task's tags.
@@ -725,7 +721,6 @@ pub struct App {
     pub metrics: MetricsView,
     pub harness: HarnessView,
     pub tasks: TasksView,
-    pub todo: TodoPanelState,
     pub view: View,
     pub detail: Option<SessionDetail>,
     pub detail_loading: bool,
@@ -936,7 +931,6 @@ impl App {
             metrics: MetricsView::new(),
             harness: HarnessView::default(),
             tasks: TasksView::new(),
-            todo: TodoPanelState::new(),
             view: View::Grid,
             detail: None,
             detail_loading: false,
@@ -973,37 +967,6 @@ impl App {
             spawn_watches: Vec::new(),
             pending_spawn_names: HashMap::new(),
             done_refused_on: None,
-        }
-    }
-
-    /// Open the Sessions-tab to-do side panel. Reloads the list from disk so
-    /// edits that landed since it was last open (another instance, the file
-    /// hand-edited) show up, clamps the cursor in case the list shrank, and
-    /// starts in navigation mode rather than add mode.
-    pub fn enter_todo_panel(&mut self) {
-        self.view = View::TodoPanel;
-        self.todo.reload();
-    }
-
-    /// Close the panel and return to the grid, discarding any in-progress add.
-    pub fn close_todo_panel(&mut self) {
-        self.view = View::Grid;
-        self.todo.reset_add();
-    }
-
-    /// Delete every completed item in one stroke, keeping the cursor in range.
-    /// Surfaces a status line so the bulk removal is visible — unlike the
-    /// single-item delete, the user can't see at a glance what just vanished.
-    pub fn todo_clear_completed(&mut self) {
-        let removed = self.todo.clear_completed();
-        if removed > 0 {
-            self.set_status(format!(
-                "cleared {} completed task{}",
-                removed,
-                if removed == 1 { "" } else { "s" }
-            ));
-        } else {
-            self.set_status("no completed tasks to clear".to_string());
         }
     }
 
@@ -2153,8 +2116,7 @@ impl App {
 
     pub fn set_tab(&mut self, tab: Tab) {
         // Entering the Tasks tab re-reads the board so edits from another
-        // instance (or a hand-edited tasks.json) show up, mirroring the
-        // to-do panel's reload-on-open. The reload and the re-floated
+        // instance (or a hand-edited state.json) show up. The reload and the re-floated
         // In Progress order can both rearrange rows, so the cursor is
         // re-anchored to the task it was on (by id) rather than left at a
         // stale (col, row) pointing at whatever card landed there.
@@ -5593,24 +5555,6 @@ mod tests {
             app.projects.pending_focus_task_id.is_none(),
             "cleared after budget=0"
         );
-    }
-
-    /// Opening the to-do panel must pick up edits that landed on disk while
-    /// it was closed (another instance, the file hand-edited) — App::new()
-    /// deliberately starts with an empty list and defers I/O to panel open.
-    #[test]
-    #[cfg(unix)]
-    fn enter_todo_panel_reloads_from_disk() {
-        crate::test_util::with_temp_home(|| {
-            let mut app = App::new();
-            assert!(app.todo.list.is_empty(), "no disk I/O in App::new()");
-            // Simulate an external writer landing while the panel is closed.
-            let mut external = crate::todo::TodoList::load();
-            external.add("written elsewhere");
-            app.enter_todo_panel();
-            assert_eq!(app.todo.list.len(), 1);
-            assert_eq!(app.todo.list.items()[0].text, "written elsewhere");
-        });
     }
 
     /// Three sessions in one group, in scanner order. `fake_session` keys

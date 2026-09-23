@@ -1,5 +1,5 @@
 //! Shared persistence helper for the JSON state files under `~/.cc-hub/`
-//! (to-do list, bookmarks, …). Writes go through a tempfile + rename so a
+//! (bookmarks, …). Writes go through a tempfile + rename so a
 //! crash mid-write can't leave a torn file behind.
 
 use serde::Serialize;

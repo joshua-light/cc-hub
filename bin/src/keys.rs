@@ -144,7 +144,6 @@ fn map_sessions_command(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<
         (View::Grid, KeyCode::Char('L')) if on_sessions => Command::Sessions(S::OpenTaskLinkPicker),
         (View::Grid, KeyCode::Char('/')) if on_sessions => Command::Sessions(S::OpenSessionFinder),
         (View::SessionFinder, KeyCode::Enter) => Command::Sessions(S::ConfirmSessionFinder),
-        (View::Grid, KeyCode::Char('t')) if on_sessions => Command::Sessions(S::OpenTodoPanel),
         (View::Grid, KeyCode::Char('r')) if on_sessions => Command::Sessions(S::OpenRenameSession),
         (View::RenameSession, KeyCode::Enter) => Command::Sessions(S::SubmitRename),
         _ => return None,
@@ -1115,44 +1114,6 @@ pub(crate) async fn handle_key(
                 }
             }
             return KeyOutcome::Continue;
-        }
-        // To-do side panel — add-task input mode (these guarded arms come
-        // first so typed characters edit the buffer instead of triggering
-        // the navigation commands below).
-        (View::TodoPanel, KeyCode::Esc) if app.todo.adding => {
-            app.todo.cancel_add();
-        }
-        (View::TodoPanel, KeyCode::Enter) if app.todo.adding => {
-            app.todo.commit_add();
-        }
-        (View::TodoPanel, KeyCode::Backspace) if app.todo.adding => {
-            app.todo.input.pop();
-        }
-        (View::TodoPanel, KeyCode::Char(c)) if app.todo.adding => {
-            app.todo.input.push(c);
-        }
-        // To-do side panel — navigation / commands (only reached when not
-        // in add mode).
-        (View::TodoPanel, KeyCode::Down | KeyCode::Char('j')) => {
-            app.todo.move_down();
-        }
-        (View::TodoPanel, KeyCode::Up | KeyCode::Char('k')) => {
-            app.todo.move_up();
-        }
-        (View::TodoPanel, KeyCode::Char(' ') | KeyCode::Enter) => {
-            app.todo.toggle_selected();
-        }
-        (View::TodoPanel, KeyCode::Char('a') | KeyCode::Char('i')) => {
-            app.todo.begin_add();
-        }
-        (View::TodoPanel, KeyCode::Char('d') | KeyCode::Char('x')) => {
-            app.todo.delete_selected();
-        }
-        (View::TodoPanel, KeyCode::Char('c')) => {
-            app.todo_clear_completed();
-        }
-        (View::TodoPanel, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('t')) => {
-            app.close_todo_panel();
         }
         // Popup navigation
         (View::Popup, KeyCode::Esc | KeyCode::Char('q')) => app.close_popup(),

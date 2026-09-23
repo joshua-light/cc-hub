@@ -1,5 +1,5 @@
 //! Overlay views: folder picker, gh-create / prompt / rename inputs, confirm
-//! dialogs, the to-do side panel, the embedded tmux pane, the state-debug
+//! dialogs, the embedded tmux pane, the state-debug
 //! popup, and the live transcript tail.
 
 use crate::app::{App, PendingConfirm, TaskField};
@@ -8,7 +8,6 @@ use crate::conversation::{StateExplanation, Verdict};
 use crate::folder_picker::{FolderPicker, PickerMode, PlaceSource};
 use crate::models::SessionInfo;
 use crate::ui::common::{centered_fixed, centered_rect, format_tokens, popup_block, state_color};
-use crate::ui::main_layout;
 use crate::ui::palette::{ACCENT_BLUE, CONTEXT_GRAY, DIM_TEXT, GRAY_80};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -1077,59 +1076,6 @@ pub(crate) fn render_session_finder(frame: &mut Frame, area: Rect, app: &App) {
 
     frame.render_widget(Paragraph::new(lines), list_area);
 }
-
-/// Word-wrap `text` to `width` columns for the to-do panel: break on
-/// whitespace, hard-split any single word longer than `width`, and count each
-/// char as one column (matching the add-input's `chars().count()` budget).
-/// Always returns at least one line so an empty item still occupies a row.
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut lines: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    let mut cur_len = 0usize;
-    for word in text.split_whitespace() {
-        let wlen = word.chars().count();
-        if wlen > width {
-            // Word can't fit on any line — flush what we have, then chop it
-            // into width-sized chunks so it still shows in full.
-            if cur_len > 0 {
-                lines.push(std::mem::take(&mut cur));
-                cur_len = 0;
-            }
-            for ch in word.chars() {
-                if cur_len == width {
-                    lines.push(std::mem::take(&mut cur));
-                    cur_len = 0;
-                }
-                cur.push(ch);
-                cur_len += 1;
-            }
-            continue;
-        }
-        let need = if cur_len == 0 {
-            wlen
-        } else {
-            cur_len + 1 + wlen
-        };
-        if need > width {
-            lines.push(std::mem::take(&mut cur));
-            cur = word.to_string();
-            cur_len = wlen;
-        } else {
-            if cur_len > 0 {
-                cur.push(' ');
-                cur_len += 1;
-            }
-            cur.push_str(word);
-            cur_len += wlen;
-        }
-    }
-    if cur_len > 0 || lines.is_empty() {
-        lines.push(cur);
-    }
-    lines
-}
-
 /// Visual rows one logical `Line` occupies when a `Paragraph` with
 /// `Wrap { trim: false }` renders it into `width` columns. ratatui scrolls a
 /// wrapped paragraph by these *wrapped rows*, not by logical lines, so every
@@ -1151,157 +1097,6 @@ pub(crate) fn wrapped_total_rows(lines: &[Line], width: u16) -> u16 {
         .line_count(width)
         .max(lines.len().min(1))
         .min(u16::MAX as usize) as u16
-}
-
-/// Scratch to-do list, drawn as a right-anchored side panel over the body
-/// region so the tab strip and status bar (which carries the panel's own key
-/// hints) stay visible behind it.
-pub(crate) fn render_todo_panel(frame: &mut Frame, area: Rect, app: &App) {
-    // Anchor to the body band of the same split `render` uses, so the panel
-    // sits under the header band and above the status row rather than
-    // covering the whole screen.
-    let body = main_layout(area)[2];
-
-    let width = 46u16.min(body.width);
-    if width == 0 || body.height == 0 {
-        return;
-    }
-    let panel = Rect::new(body.x + body.width - width, body.y, width, body.height);
-    frame.render_widget(Clear, panel);
-
-    let done = app.todo.list.items().iter().filter(|i| i.done).count();
-    let total = app.todo.list.len();
-    let block = popup_block(Span::styled(
-        format!(" To-Do · {}/{} done ", done, total),
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    ))
-    .title_bottom(Span::styled(
-        if app.todo.adding {
-            " enter add · esc cancel "
-        } else {
-            " a add · space toggle · d delete · c clear done · esc close "
-        },
-        Style::default().fg(DIM_TEXT),
-    ));
-
-    let inner = block.inner(panel);
-    frame.render_widget(block, panel);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    // Reserve the bottom two rows (spacer + input) in add mode so a long list
-    // can never push the input line off-screen.
-    let input_rows = if app.todo.adding { 2usize } else { 0 };
-    let list_rows = (inner.height as usize).saturating_sub(input_rows);
-
-    let mut lines: Vec<Line> = Vec::new();
-    if total == 0 && !app.todo.adding {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            "  No tasks yet — press a to add one.",
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
-        )));
-    } else {
-        // Wrap each item to the panel width, indenting continuation rows under
-        // the text so they line up past the cursor + checkbox. An item now
-        // spans a variable number of screen rows, so the scroll window counts
-        // rows (not items) and we track where each item's rows begin.
-        const PREFIX_W: usize = 6; // "  " cursor + "[ ] " checkbox
-        let text_width = (inner.width as usize).saturating_sub(PREFIX_W);
-        let sel = app.todo.selected.min(total.saturating_sub(1));
-
-        let mut rows: Vec<Line> = Vec::new();
-        let mut item_start: Vec<usize> = Vec::with_capacity(total);
-        for (i, item) in app.todo.list.items().iter().enumerate() {
-            item_start.push(rows.len());
-            let selected = !app.todo.adding && i == sel;
-            let cursor = if selected { "› " } else { "  " };
-            let checkbox = if item.done { "[x] " } else { "[ ] " };
-            let text_style = if item.done {
-                Style::default().fg(DIM_TEXT).add_modifier(Modifier::ITALIC)
-            } else if selected {
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Rgb(200, 200, 210))
-            };
-            let marker_style = if item.done {
-                Style::default().fg(Color::Green)
-            } else if selected {
-                Style::default()
-                    .fg(ACCENT_BLUE)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            for (j, seg) in wrap_text(&item.text, text_width).into_iter().enumerate() {
-                if j == 0 {
-                    rows.push(Line::from(vec![
-                        Span::styled(cursor, marker_style),
-                        Span::styled(checkbox, marker_style),
-                        Span::styled(seg, text_style),
-                    ]));
-                } else {
-                    rows.push(Line::from(vec![
-                        Span::raw(" ".repeat(PREFIX_W)),
-                        Span::styled(seg, text_style),
-                    ]));
-                }
-            }
-        }
-
-        // Scroll so the selected item is visible: pull its bottom edge into
-        // view, but never past its top, so an item taller than the window
-        // shows from the top down.
-        let total_rows = rows.len();
-        let sel_start = item_start.get(sel).copied().unwrap_or(0);
-        let sel_end = item_start.get(sel + 1).copied().unwrap_or(total_rows);
-        let mut scroll = 0usize;
-        if total_rows > list_rows {
-            if sel_end > list_rows {
-                scroll = sel_end - list_rows;
-            }
-            scroll = scroll.min(sel_start).min(total_rows - list_rows);
-        }
-        lines.extend(rows.into_iter().skip(scroll).take(list_rows));
-    }
-
-    if app.todo.adding {
-        let mut input = app.todo.input.clone();
-        input.push('▎');
-        // Without wrap the line clips on the right, which would hide the
-        // cursor on long input — show the tail instead, like an input field.
-        let avail = (inner.width as usize).saturating_sub(2); // "+ " prefix
-        let chars = input.chars().count();
-        if chars > avail && avail > 0 {
-            input = std::iter::once('…')
-                .chain(input.chars().skip(chars + 1 - avail))
-                .collect();
-        }
-        lines.push(Line::raw(""));
-        lines.push(Line::from(vec![
-            Span::styled(
-                "+ ",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                input,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-    }
-
-    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// The add/rename-task popup. Renaming is the one-line editor it always was;
@@ -2521,41 +2316,6 @@ pub(crate) fn push_bullet_block(
         lines.push(Line::from(p));
     }
 }
-
-#[cfg(test)]
-mod wrap_text_tests {
-    use super::wrap_text;
-
-    #[test]
-    fn wraps_on_word_boundaries() {
-        assert_eq!(
-            wrap_text("the quick brown fox", 9),
-            vec!["the quick", "brown fox"]
-        );
-    }
-
-    #[test]
-    fn hard_splits_a_word_longer_than_width() {
-        assert_eq!(wrap_text("abcdefgh", 3), vec!["abc", "def", "gh"]);
-    }
-
-    #[test]
-    fn long_word_breaks_after_flushing_the_current_line() {
-        assert_eq!(wrap_text("hi abcdefgh", 3), vec!["hi", "abc", "def", "gh"]);
-    }
-
-    #[test]
-    fn empty_or_blank_text_yields_one_empty_row() {
-        assert_eq!(wrap_text("", 10), vec![String::new()]);
-        assert_eq!(wrap_text("   ", 10), vec![String::new()]);
-    }
-
-    #[test]
-    fn zero_width_is_clamped_to_one_column() {
-        assert_eq!(wrap_text("ab", 0), vec!["a", "b"]);
-    }
-}
-
 #[cfg(test)]
 mod task_kind_picker_tests {
     use crate::app::TaskKindPickerState;
@@ -3035,47 +2795,6 @@ mod task_input_tests {
                 "no context box:\n{}",
                 rendered
             );
-        });
-    }
-}
-
-// Unix-only: `with_temp_home` redirects `$HOME` so the todo add doesn't touch
-// the real `~/.cc-hub` — the same isolation the todo module's own tests rely on.
-#[cfg(all(test, unix))]
-mod todo_panel_tests {
-    use crate::app::{App, View};
-    use crate::test_util::with_temp_home;
-    use crate::ui::common::buffer_to_string;
-    use ratatui::backend::TestBackend;
-    use ratatui::Terminal;
-
-    #[test]
-    fn long_item_wraps_instead_of_clipping() {
-        with_temp_home(|| {
-            let mut app = App::new();
-            // Longer than the panel's ~38-column text area, so it must wrap to
-            // a second row instead of clipping the tail off the right edge.
-            let long = "remember to refactor the orchestrator retry backoff logic today";
-            app.todo.list.add(long);
-            app.view = View::TodoPanel;
-
-            let backend = TestBackend::new(60, 12);
-            let mut terminal = Terminal::new(backend).expect("terminal");
-            terminal
-                .draw(|f| super::render_todo_panel(f, f.area(), &app))
-                .expect("render");
-            let rendered = buffer_to_string(terminal.backend().buffer());
-
-            // Every word survives somewhere in the panel — the tail words would
-            // be missing if the row were clipped rather than wrapped.
-            for word in long.split_whitespace() {
-                assert!(
-                    rendered.contains(word),
-                    "word {:?} should appear in the wrapped panel:\n{}",
-                    word,
-                    rendered
-                );
-            }
         });
     }
 }

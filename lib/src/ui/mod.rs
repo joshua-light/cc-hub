@@ -2,7 +2,7 @@
 //! status bar). `render` is the hot-reload entry called by lib.rs's
 //! `#[no_mangle]` shim. The per-tab bodies and overlays live in the sibling
 //! modules; the band background and layout split are defined here so the tab
-//! strip, project chip strip, and to-do panel all share one source of truth.
+//! strip and project chip strip share one source of truth.
 
 pub mod agents;
 pub mod common;
@@ -46,8 +46,8 @@ pub(crate) fn now_ms() -> u64 {
 }
 
 /// Top-level vertical split: title bar, tab strip, body, status bar. Shared
-/// between `render` and overlays that anchor to the body region (e.g. the
-/// to-do side panel) so the band heights are defined in exactly one place.
+/// between `render` and overlays that anchor to the body region so the band
+/// heights are defined in exactly one place.
 pub(crate) fn main_layout(area: Rect) -> std::rc::Rc<[Rect]> {
     Layout::default()
         .direction(Direction::Vertical)
@@ -96,7 +96,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         }
         View::ProjectsResult => projects::render_projects_result(frame, frame.area(), app),
         View::Backlog => projects::render_backlog(frame, frame.area(), app),
-        View::TodoPanel => popups::render_todo_panel(frame, frame.area(), app),
         View::TaskInput => popups::render_task_input(frame, frame.area(), app),
         View::TaskTags => popups::render_task_tags(frame, frame.area(), app),
         View::TaskKindPicker => popups::render_task_kind_picker(frame, frame.area(), app),
@@ -264,7 +263,7 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 // it is never the first thing clipped.
                 Tab::Tasks => "a/n:add  enter/f:focus agent  v:info  s:assign agent  S:agent in ~  h/l:col  j/k:task  H/L:move  /:filter  1-4:priority  t:tags  T:kind  r:rename  A:attach  p:paste note  x:delete  u:undo  c:clear done  tab:next  q:quit",
                 Tab::Projects => "enter:focus orch  n:new task  r:result  f:agent terminal/resurrect  R:restart  b:backlog  h/l:col  j/k:task  H/L:project  N:register project  c:copy id  x:delete task  X:remove project  tab:next  q:quit",
-                Tab::Sessions => "enter/f:focus/resume  /:find any  n:new  R:respawn  A:default agent  N:new+model  p:new in…  i:info  r:rename  L:link task  t:to-do  o:shell  M:bookmarks  D:why?  h/j/k/l:nav  v:layout  x:close  H:inactive  W:workers  tab:next  q:quit",
+                Tab::Sessions => "enter/f:focus/resume  /:find any  n:new  R:respawn  A:default agent  N:new+model  p:new in…  i:info  r:rename  L:link task  o:shell  M:bookmarks  D:why?  h/j/k/l:nav  v:layout  x:close  H:inactive  W:workers  tab:next  q:quit",
                 Tab::Metrics => "enter:view transcript  j/k:select  r:refresh  tab:next  q:quit",
                 Tab::Agents => agents::hints(&View::Grid),
             },
@@ -287,13 +286,6 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             View::TaskLinkPicker => "type:filter  ↑/↓:move  enter/space:link  esc:cancel",
             View::SessionFinder => "type:filter  ↑/↓:move  enter:open  esc:cancel",
             View::RenameSession => "edit title  enter:rename  esc:cancel",
-            View::TodoPanel => {
-                if app.todo.adding {
-                    "type task  enter:add  esc:cancel"
-                } else {
-                    "j/k:move  space/enter:toggle  a:add  d:delete  c:clear done  t/esc:close"
-                }
-            }
             View::TmuxPane => "forwarding keys to tmux · F1: detach & close",
             View::FolderPicker => match app.folder_picker.as_ref().map(|p| p.mode) {
                 Some(PickerMode::Bookmarks) => {

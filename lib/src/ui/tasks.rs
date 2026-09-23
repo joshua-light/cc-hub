@@ -766,9 +766,7 @@ fn dir_basename(cwd: &str) -> String {
         .unwrap_or_else(|| cwd.to_string())
 }
 
-/// Greedy word wrap to `width` columns (char-counted). Local copy of the
-/// to-do panel's helper — popups' is private and this one doesn't need the
-/// continuation-indent variant.
+/// Greedy word wrap to `width` columns (char-counted).
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![String::new()];

@@ -110,8 +110,6 @@ pub enum SessionsCommand {
     OpenSessionFinder,
     /// SessionFinder Enter.
     ConfirmSessionFinder,
-    /// `t` — todo side panel.
-    OpenTodoPanel,
     /// `r` — rename input.
     OpenRenameSession,
     /// RenameSession Enter.
@@ -457,10 +455,6 @@ impl App {
                     };
                     self.set_status(msg.into());
                 }
-                Vec::new()
-            }
-            OpenTodoPanel => {
-                self.enter_todo_panel();
                 Vec::new()
             }
             OpenRenameSession => {
