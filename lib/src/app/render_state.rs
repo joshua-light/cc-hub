@@ -17,7 +17,6 @@ use std::collections::{HashMap, HashSet};
 ///   [`Self::metrics_row_lines`], and [`Self::metrics_scroll`].
 /// - `ui/projects/result_popup.rs` clamps [`Self::result_scroll`] and reads
 ///   [`Self::result_artifact_expanded`].
-/// - `ui/popups.rs` clamps [`Self::state_debug_scroll`].
 /// - `ui/projects/cards.rs` (`ensure_image_decoded`) populates
 ///   [`Self::artifact_images`] and [`Self::artifact_image_failed`].
 pub struct RenderState {
@@ -47,9 +46,6 @@ pub struct RenderState {
     /// enlarged. Read by the renderer; toggled via
     /// [`App::toggle_result_artifact_expanded`].
     pub result_artifact_expanded: bool,
-    /// Scroll offset of the state-debug popup; clamped to content by the
-    /// renderer.
-    pub state_debug_scroll: u16,
     /// Scroll offset (lines) of the Tasks-tab Task Info popup body. Clamped
     /// by the renderer (`ui/tasks.rs`) to keep the selected attachment
     /// visible.
@@ -80,7 +76,6 @@ impl Default for RenderState {
             metrics_row_lines: Vec::new(),
             result_scroll: 0,
             result_artifact_expanded: false,
-            state_debug_scroll: 0,
             task_info_scroll: 0,
             agents_scroll: 0,
             agent_detail_scroll: 0,

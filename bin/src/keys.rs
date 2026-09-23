@@ -118,7 +118,6 @@ fn map_sessions_command(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<
             Command::Sessions(S::NavUp)
         }
         (View::Grid, KeyCode::Char('i')) if on_sessions => Command::Sessions(S::OpenDetailPopup),
-        (View::Grid, KeyCode::Char('D')) if on_sessions => Command::Sessions(S::OpenStateDebug),
         (View::Grid, KeyCode::Char('H')) if on_sessions => Command::Sessions(S::ToggleShowInactive),
         (View::Grid, KeyCode::Char('W')) if on_sessions => {
             Command::Sessions(S::ToggleShowOrchWorkers)
@@ -184,7 +183,6 @@ pub(crate) async fn handle_key(
     terminal: &crate::Term,
     scan_tx_main: &mpsc::Sender<ScanMsg>,
     detail_tx: &mpsc::Sender<String>,
-    state_debug_tx: &mpsc::Sender<String>,
     spawn_metrics: &impl Fn(),
     on_sessions: bool,
     on_metrics: bool,
@@ -200,7 +198,6 @@ pub(crate) async fn handle_key(
                 terminal,
                 scan_tx_main,
                 detail_tx,
-                state_debug_tx,
                 spawn_metrics,
             )
             .await;
@@ -628,15 +625,6 @@ pub(crate) async fn handle_key(
         (View::Grid, KeyCode::Char('r')) if on_metrics => {
             app.metrics.analysis = None;
             spawn_metrics();
-        }
-        (View::StateDebug, KeyCode::Esc | KeyCode::Char('q')) => {
-            app.close_state_debug();
-        }
-        (View::StateDebug, KeyCode::Down | KeyCode::Char('j')) => {
-            app.debug_scroll_down();
-        }
-        (View::StateDebug, KeyCode::Up | KeyCode::Char('k')) => {
-            app.debug_scroll_up();
         }
         (View::TmuxPane, KeyCode::F(1)) => {
             app.close_tmux_pane();

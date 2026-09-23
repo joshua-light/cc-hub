@@ -1,7 +1,7 @@
 #![allow(clippy::collapsible_match)]
 
 use cc_hub_lib::{
-    app, auto_review, config, conversation, harness, metrics, models, platform, projects_scan,
+    app, auto_review, config, harness, metrics, models, platform, projects_scan,
     scanner, send, session_count, spawn, title, triage, ui, usage, watcher,
 };
 
@@ -329,7 +329,6 @@ pub(crate) enum ScanMsg {
     /// event loop by [`Effect::BuildSessionIndex`].
     SessionIndex(Vec<cc_hub_lib::session_index::IndexedSession>),
     Detail(models::SessionDetail),
-    StateDebug(models::SessionInfo, conversation::StateExplanation),
     Usage(usage::UsageInfo),
     SessionCounts(session_count::SessionCounts),
     Metrics(metrics::MetricsAnalysis),
@@ -711,10 +710,6 @@ fn apply_scan_msg(
         ScanMsg::TaskStats(stats) => app.tasks.board.update_stats(stats),
         ScanMsg::SessionIndex(index) => app.update_session_index(index),
         ScanMsg::Detail(detail) => app.update_detail(detail),
-        ScanMsg::StateDebug(info, exp) => {
-            let lines = ui::build_state_debug_content(&info, &exp);
-            app.update_state_debug(info, exp, lines);
-        }
         ScanMsg::Usage(u) => {
             let line = ui::build_usage_line(&u);
             app.update_usage(u, line);
@@ -844,7 +839,6 @@ async fn run(
 
     let (scan_tx, mut scan_rx) = mpsc::channel::<ScanMsg>(16);
     let (detail_tx, mut detail_rx) = mpsc::channel::<String>(4);
-    let (state_debug_tx, mut state_debug_rx) = mpsc::channel::<String>(4);
 
     let usage_tx = scan_tx.clone();
     let scan_tx_main = scan_tx.clone();
@@ -1039,18 +1033,6 @@ async fn run(
                     .flatten();
                     if let Some(d) = detail {
                         let _ = session_scan_tx.send(ScanMsg::Detail(d)).await;
-                    }
-                }
-                Some(session_id) = state_debug_rx.recv() => {
-                    let sessions = latest_sessions.clone();
-                    let exp = tokio::task::spawn_blocking(move || {
-                        scanner::load_state_explanation(&session_id, &sessions)
-                    })
-                    .await
-                    .ok()
-                    .flatten();
-                    if let Some((info, e)) = exp {
-                        let _ = session_scan_tx.send(ScanMsg::StateDebug(info, e)).await;
                     }
                 }
             }
@@ -1425,7 +1407,6 @@ async fn run(
                                 terminal,
                                 &scan_tx_main,
                                 &detail_tx,
-                                &state_debug_tx,
                                 &spawn_metrics,
                                 on_sessions,
                                 on_metrics,

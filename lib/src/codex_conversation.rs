@@ -12,7 +12,7 @@
 
 use crate::conversation::classify;
 use crate::conversation::{
-    parse_timestamp_ms, CurrentTool, EntrySummary, ExplanationStep, StateExplanation, Verdict,
+    parse_timestamp_ms, CurrentTool,
     NO_TEXT_CONTENT,
 };
 use crate::models::{ConversationMessage, SessionState};
@@ -500,82 +500,6 @@ pub fn count_tool_uses(path: &Path) -> usize {
         Err(_) => return 0,
     };
     count_tool_uses_in_reader(BufReader::new(file))
-}
-
-pub fn explain_state(entries: &[Value], mtime_age_secs: Option<u64>) -> StateExplanation {
-    let final_state = extract_state(entries);
-    let last = entries.iter().rev().find(|e| CodexDialect.role_present(e));
-    let detail = match last {
-        None => "no lifecycle events or messages yet → Idle".to_string(),
-        Some(e) => match (rec_type(e), payload_type(e)) {
-            (Some("event_msg"), Some(pt)) => {
-                format!("last lifecycle event {:?} → {}", pt, final_state)
-            }
-            (Some("response_item"), _) => {
-                let role = payload(e)
-                    .and_then(|p| p.get("role"))
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("?");
-                format!("last message role={:?} → {}", role, final_state)
-            }
-            _ => format!("→ {}", final_state),
-        },
-    };
-
-    let tail = entries
-        .iter()
-        .enumerate()
-        .rev()
-        .take(12)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|(idx, entry)| EntrySummary {
-            idx,
-            kind: match (rec_type(entry), payload_type(entry)) {
-                (Some("event_msg"), Some(pt)) => format!("event:{}", pt),
-                (Some("response_item"), Some(pt)) => format!("item:{}", pt),
-                (Some(t), _) => t.to_string(),
-                _ => "?".to_string(),
-            },
-            timestamp: entry
-                .get("timestamp")
-                .and_then(|t| t.as_str())
-                .map(str::to_string),
-            stop_reason: classify::TranscriptDialect::stop_reason(&CodexDialect, entry)
-                .map(str::to_string),
-            blocks: summarize_blocks(entry),
-        })
-        .collect();
-
-    StateExplanation {
-        final_state: final_state.clone(),
-        mtime_age_secs,
-        entry_count: entries.len(),
-        steps: vec![ExplanationStep {
-            name: "codex_last_lifecycle_or_message",
-            verdict: Verdict::Decided(final_state),
-            details: vec![detail],
-        }],
-        tail,
-    }
-}
-
-fn summarize_blocks(entry: &Value) -> Vec<String> {
-    match (rec_type(entry), payload_type(entry)) {
-        (Some("response_item"), Some("message")) => payload(entry)
-            .and_then(|p| p.get("role"))
-            .and_then(|r| r.as_str())
-            .map(|r| vec![format!("msg:{}", r)])
-            .unwrap_or_default(),
-        (Some("response_item"), Some("function_call" | "custom_tool_call")) => payload(entry)
-            .and_then(|p| p.get("name"))
-            .and_then(|n| n.as_str())
-            .map(|n| vec![format!("tool:{}", n)])
-            .unwrap_or_default(),
-        (Some("response_item"), Some("reasoning")) => vec!["reasoning".to_string()],
-        _ => Vec::new(),
-    }
 }
 
 fn truncate_str(s: &str, max: usize) -> String {

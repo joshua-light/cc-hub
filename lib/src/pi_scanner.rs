@@ -11,16 +11,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-fn mtime_age_secs(path: &Path) -> Option<u64> {
-    path.metadata()
-        .ok()?
-        .modified()
-        .ok()?
-        .elapsed()
-        .ok()
-        .map(|d| d.as_secs())
-}
-
 fn encode_path(path: &str) -> String {
     let trimmed = path.trim_matches('/');
     format!("--{}--", trimmed.replace('/', "-"))
@@ -434,18 +424,6 @@ pub fn load_detail(info: &SessionInfo) -> Option<SessionDetail> {
         total_input_tokens,
         total_output_tokens,
     })
-}
-
-pub fn load_state_explanation(
-    info: &SessionInfo,
-) -> Option<(SessionInfo, crate::conversation::StateExplanation)> {
-    let path = info.jsonl_path.as_ref()?;
-    let entries = pi_conversation::read_jsonl_tail_for_state(path);
-    let mtime_age_secs = mtime_age_secs(path);
-    Some((
-        info.clone(),
-        pi_conversation::explain_state(&entries, mtime_age_secs),
-    ))
 }
 
 pub fn find_orchestrator_session(

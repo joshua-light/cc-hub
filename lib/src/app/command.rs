@@ -68,8 +68,6 @@ pub enum SessionsCommand {
     NavRight,
     /// `i` — session-detail popup.
     OpenDetailPopup,
-    /// `D` — state-debug popup.
-    OpenStateDebug,
     /// `H` — toggle inactive sessions.
     ToggleShowInactive,
     /// `W` — toggle orchestrator/worker sessions.
@@ -188,8 +186,6 @@ pub enum TasksCommand {
 pub enum Effect {
     /// Fetch the session-detail payload for the popup (detail channel).
     RequestSessionDetail { session_id: String },
-    /// Fetch the state-debug payload (state-debug channel).
-    RequestStateDebug { session_id: String },
     /// Kick the background metrics analysis.
     SpawnMetricsScan,
     /// Walk the transcript stores off the event loop and deliver the archive
@@ -353,13 +349,6 @@ impl App {
                 Some(id) => {
                     self.enter_popup();
                     vec![Effect::RequestSessionDetail { session_id: id }]
-                }
-                None => Vec::new(),
-            },
-            OpenStateDebug => match self.selected_session_id() {
-                Some(id) => {
-                    self.enter_state_debug();
-                    vec![Effect::RequestStateDebug { session_id: id }]
                 }
                 None => Vec::new(),
             },

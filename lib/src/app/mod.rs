@@ -2,7 +2,6 @@ use crate::agent::AgentConfig;
 use crate::agent_runtime::{AgentRuntime, SystemAgentRuntime};
 use crate::bookmarks::Bookmarks;
 use crate::config;
-use crate::conversation::StateExplanation;
 use crate::folder_picker::{FolderPicker, PickerMode, Place};
 use crate::live_view::LiveView;
 use crate::metrics::{MetricsAnalysis, SelectableSession};
@@ -227,7 +226,6 @@ pub enum View {
     Popup,
     LiveTail,
     ConfirmClose,
-    StateDebug,
     PromptInput,
     RenameSession,
     TmuxPane,
@@ -736,8 +734,6 @@ pub struct App {
     /// [`View::ConfirmClose`]. At most one can be pending at a time, which
     /// the [`PendingConfirm`] enum makes structural rather than conventional.
     pub pending_confirm: Option<PendingConfirm>,
-    pub state_debug: Option<(SessionInfo, StateExplanation)>,
-    pub state_debug_lines: Vec<Line<'static>>,
     pub usage: Option<UsageInfo>,
     pub usage_line: Line<'static>,
     pub session_counts: SessionCounts,
@@ -940,8 +936,6 @@ impl App {
             live_view: None,
             status_msg: None,
             pending_confirm: None,
-            state_debug: None,
-            state_debug_lines: Vec::new(),
             usage: None,
             usage_line: Line::default(),
             session_counts: SessionCounts::default(),
@@ -3646,38 +3640,6 @@ impl App {
     pub fn close_live_tail(&mut self) {
         self.live_view = None;
         self.view = View::Grid;
-    }
-
-    pub fn enter_state_debug(&mut self) {
-        self.view = View::StateDebug;
-        self.state_debug = None;
-        self.state_debug_lines.clear();
-        self.render.state_debug_scroll = 0;
-    }
-
-    pub fn close_state_debug(&mut self) {
-        self.view = View::Grid;
-        self.state_debug = None;
-        self.state_debug_lines.clear();
-        self.render.state_debug_scroll = 0;
-    }
-
-    pub fn update_state_debug(
-        &mut self,
-        info: SessionInfo,
-        exp: StateExplanation,
-        rendered: Vec<Line<'static>>,
-    ) {
-        self.state_debug = Some((info, exp));
-        self.state_debug_lines = rendered;
-    }
-
-    pub fn debug_scroll_down(&mut self) {
-        self.render.state_debug_scroll = self.render.state_debug_scroll.saturating_add(3);
-    }
-
-    pub fn debug_scroll_up(&mut self) {
-        self.render.state_debug_scroll = self.render.state_debug_scroll.saturating_sub(3);
     }
 
     pub fn selected_session_id(&self) -> Option<String> {

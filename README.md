@@ -570,7 +570,6 @@ the plan, so the plan-first workflow works with one fewer column.
 | `L` | Link the selected session to a task from the Tasks board (fuzzy picker, banded by status in board-column order with the board's status colors; tasks assigned to the session's cwd lead their band). A linked session's card carries a `󰓹 task` badge on its bottom border, colored per task (stable hash of the task id), so cards of the same task share a mark without regrouping the grid; press `L` again to switch tasks or pick `✕ unlink`. A Done/deleted task keeps the group but dims the header. Links live in `~/.cc-hub/session-tasks.json` |
 | `x` | Close the selected session's window (Unix WM only) |
 | `Space` | Ack / mark selected session idle |
-| `D` | State-debug popup (why is this session in this state?) |
 | `m` | Jump to Metrics tab |
 | `q` | Quit |
 | `F1` (in embedded pane) | Close the pane, return to grid |

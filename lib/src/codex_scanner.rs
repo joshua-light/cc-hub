@@ -40,16 +40,6 @@ fn default_codex_agent(agents: &[AgentConfig]) -> Option<AgentConfig> {
     agents.iter().find(|a| a.kind == AgentKind::Codex).cloned()
 }
 
-fn mtime_age_secs(path: &Path) -> Option<u64> {
-    path.metadata()
-        .ok()?
-        .modified()
-        .ok()?
-        .elapsed()
-        .ok()
-        .map(|d| d.as_secs())
-}
-
 pub(crate) fn read_head(path: &Path) -> Vec<Value> {
     conversation::read_jsonl_head(path, HEAD_BYTES)
 }
@@ -434,18 +424,6 @@ pub fn load_detail(info: &SessionInfo) -> Option<SessionDetail> {
         total_input_tokens,
         total_output_tokens,
     })
-}
-
-pub fn load_state_explanation(
-    info: &SessionInfo,
-) -> Option<(SessionInfo, crate::conversation::StateExplanation)> {
-    let path = info.jsonl_path.as_ref()?;
-    let entries = codex_conversation::read_jsonl_tail_for_state(path);
-    let mtime_age = mtime_age_secs(path);
-    Some((
-        info.clone(),
-        codex_conversation::explain_state(&entries, mtime_age),
-    ))
 }
 
 /// Resolve a codex session id to resume for a project/task orchestrator. Codex

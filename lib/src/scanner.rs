@@ -1212,31 +1212,6 @@ pub fn load_detail(session_id: &str, sessions: &[SessionInfo]) -> Option<Session
     }
 }
 
-pub fn load_state_explanation(
-    session_id: &str,
-    sessions: &[SessionInfo],
-) -> Option<(SessionInfo, conversation::StateExplanation)> {
-    let info = sessions.iter().find(|s| s.session_id == session_id)?;
-    match info.agent_kind {
-        AgentKind::Claude => {
-            let jsonl_path = info.jsonl_path.as_ref()?;
-            let entries = conversation::read_jsonl_tail_for_state(jsonl_path);
-            let mtime_age_secs = jsonl_path
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.elapsed().ok())
-                .map(|d| d.as_secs());
-            Some((
-                info.clone(),
-                conversation::explain_state(&entries, mtime_age_secs),
-            ))
-        }
-        AgentKind::Pi => pi_scanner::load_state_explanation(info),
-        AgentKind::Codex => codex_scanner::load_state_explanation(info),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

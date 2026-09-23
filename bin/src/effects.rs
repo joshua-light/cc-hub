@@ -19,15 +19,11 @@ pub(crate) async fn apply_effect(
     terminal: &crate::Term,
     scan_tx: &mpsc::Sender<crate::ScanMsg>,
     detail_tx: &mpsc::Sender<String>,
-    state_debug_tx: &mpsc::Sender<String>,
     spawn_metrics: &impl Fn(),
 ) {
     match effect {
         Effect::RequestSessionDetail { session_id } => {
             let _ = detail_tx.send(session_id).await;
-        }
-        Effect::RequestStateDebug { session_id } => {
-            let _ = state_debug_tx.send(session_id).await;
         }
         Effect::SpawnMetricsScan => spawn_metrics(),
         Effect::BuildSessionIndex => {

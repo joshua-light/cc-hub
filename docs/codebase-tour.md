@@ -234,7 +234,7 @@ session running under bash) can drive the same state from its tools.
   and `app.current_tab` into `sessions.rs` (grid + cards + detail popup),
   `projects.rs` (chips, kanban, task/artifact cards, result + backlog
   popups), `metrics.rs`, and `popups.rs` (pickers, inputs, live tail,
-  state debug, embedded tmux pane). Shared helpers live in `common.rs`,
+  embedded tmux pane). Shared helpers live in `common.rs`,
   named colors in `palette.rs`. Reads from `App`; the only render-time
   writes are scroll clamping and the documented renderer-synced metrics
   fields.
