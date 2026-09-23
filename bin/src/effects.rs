@@ -60,6 +60,11 @@ pub(crate) async fn apply_effect(
                 }
             }
         }
+        Effect::OpenExternal { target } => {
+            if let Err(e) = crate::open_path_detached(&target) {
+                app.set_status(format!("open failed: {}", e));
+            }
+        }
         Effect::FocusWindow { pid, cwd } => match focus::focus_window(pid) {
             focus::FocusOutcome::Focused => {}
             focus::FocusOutcome::NeedsReattach(name) => {

@@ -367,8 +367,19 @@ pub fn parse(raw: &str, returncode: i32, stderr: &str) -> Tick {
                 }
             }
             ("result", _) => {
+                // An API error (not logged in, unknown model, overload) still
+                // arrives as subtype `success`, flagged only by `is_error`;
+                // `terminal_reason` names it.
+                let is_error = msg.get("is_error").and_then(|v| v.as_bool()) == Some(true);
+                let subtype = if is_error && subtype == "success" {
+                    msg.get("terminal_reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("error")
+                } else {
+                    subtype
+                };
                 tick.subtype = Some(subtype.to_string());
-                tick.ok = subtype == "success";
+                tick.ok = subtype == "success" && !is_error;
                 if let Some(id) = msg.get("session_id").and_then(|v| v.as_str()) {
                     tick.session_id = Some(id.to_string());
                 }
@@ -495,6 +506,16 @@ mod tests {
         assert!(!t.ok);
         assert_eq!(t.subtype.as_deref(), Some("error_max_turns"));
         assert_eq!(t.result, "hit max turns");
+    }
+
+    #[test]
+    fn an_api_error_behind_a_success_subtype_is_a_failure() {
+        // Captured from `claude -p` with no credentials.
+        let raw = r#"{"type":"result","subtype":"success","is_error":true,"terminal_reason":"api_error","total_cost_usd":0,"result":"Not logged in · Please run /login"}"#;
+        let t = parse(raw, 1, "");
+        assert!(!t.ok);
+        assert_eq!(t.subtype.as_deref(), Some("api_error"));
+        assert_eq!(t.result, "Not logged in · Please run /login");
     }
 
     #[test]

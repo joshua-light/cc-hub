@@ -12,10 +12,16 @@ use std::path::Path;
 /// so two instances replacing the same file don't trip over each other's
 /// staging file (last rename still wins, but neither write tears).
 pub fn save_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    let raw = serde_json::to_string_pretty(value).map_err(io::Error::other)?;
+    write_atomic(path, raw.as_bytes())
+}
+
+/// Atomically replace `path` with `bytes`, creating parent directories as
+/// needed. See [`save_json`] for why the tempfile is pid-namespaced.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let raw = serde_json::to_string_pretty(value).map_err(io::Error::other)?;
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     // fsync the tempfile's bytes before the rename. `fs::write` alone leaves
     // the data in the page cache: with delayed allocation a power loss can
@@ -24,7 +30,7 @@ pub fn save_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     // Mirrors the atomic writer in spawn.rs::ensure_path_trusted.
     {
         let mut f = fs::File::create(&tmp)?;
-        f.write_all(raw.as_bytes())?;
+        f.write_all(bytes)?;
         f.sync_all()?;
     }
     fs::rename(&tmp, path)

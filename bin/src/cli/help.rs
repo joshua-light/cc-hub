@@ -170,6 +170,7 @@ Agent-facing (inside a tick, CC_HUB_AGENT is set):
 Layout of ~/.cc-hub/agents/<name>/:
   agent.toml   spec        work/   the agent's world     state.json  bookkeeping
   inbox/       events      notes.jsonl  outbox           log/        stream-json per tick
+  events.jsonl harness log: runs, poll failures, halts, edits made in the hub
 "#;
 
 const BOARD_HELP: &str = r#"cc-hub board

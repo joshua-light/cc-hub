@@ -95,5 +95,5 @@ cc-hub agent note --text TEXT [--level info|warn] [--ref URL]
 ```
 
 Agent-facing. Appends a line to `notes.jsonl`; the Agents tab shows the
-newest note on the card and the last twenty in the detail popup. Needs
+newest note on its row and the last fifty under Artifacts in its detail. Needs
 `CC_HUB_AGENT` (set inside a tick) or `--agent`.

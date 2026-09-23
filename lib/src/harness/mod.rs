@@ -9,6 +9,7 @@
 //! work/               the agent's whole world (default workdir)
 //! state.json          supervisor-owned: ticks, spend, failures, halt reason
 //! notes.jsonl         outbox to the user (`cc-hub agent note`)
+//! events.jsonl        harness log: runs, poll failures, halts, hub edits
 //! inbox/              events: new files, then processing/ done/ failed/
 //! log/YYYY-MM-DD.jsonl raw stream-json per tick
 //! ```
@@ -17,6 +18,7 @@
 //! is the harness that runs unattended agents on top of one of them.
 
 pub mod runner;
+pub mod settings;
 pub mod spec;
 pub mod supervisor;
 pub mod tools;
@@ -78,8 +80,13 @@ pub struct TickRecord {
     pub context_start: u64,
     pub context_end: u64,
     pub duration_s: u64,
-    /// First ~200 chars of the result, for the timeline.
+    /// The result, for the timeline: ~200 chars on success, more on
+    /// failure, where it is the reason.
     pub result: String,
+    /// The CLI's stderr tail and exit code, kept for failed runs only —
+    /// often the one line that says why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// Supervisor-owned bookkeeping. The agent's own working state lives in its
@@ -236,6 +243,66 @@ pub fn read_notes(dir: &Path, limit: usize) -> Vec<Note> {
     notes
 }
 
+// ---- events ---------------------------------------------------------------
+//
+// The harness's own log, one line per thing worth knowing later: a run
+// started or ended, a poll command failed, the agent halted, someone changed
+// it from the hub. The Agents tab reads it to answer "why didn't it run?" —
+// questions the per-run transcripts can't, because no run happened.
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LogLine {
+    pub at: i64,
+    /// `info` | `warn` | `error`.
+    pub level: String,
+    pub text: String,
+}
+
+pub fn events_path(dir: &Path) -> PathBuf {
+    dir.join("events.jsonl")
+}
+
+/// Past this the log rolls over to `events.1.jsonl`, keeping one old file.
+const EVENTS_MAX_BYTES: u64 = 256 * 1024;
+
+/// Append a line to the agent's event log. Best effort: a log that can't be
+/// written must never stop a run.
+pub fn log_event(dir: &Path, level: &str, text: impl Into<String>) {
+    use std::io::Write;
+    let path = events_path(dir);
+    if fs::metadata(&path).is_ok_and(|m| m.len() > EVENTS_MAX_BYTES) {
+        let _ = fs::rename(&path, dir.join("events.1.jsonl"));
+    }
+    let line = LogLine {
+        at: now_unix(),
+        level: level.into(),
+        text: text.into(),
+    };
+    let Ok(json) = serde_json::to_string(&line) else {
+        return;
+    };
+    let _ = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| writeln!(f, "{}", json));
+}
+
+/// The newest `limit` log lines, newest first.
+pub fn read_events(dir: &Path, limit: usize) -> Vec<LogLine> {
+    let Ok(raw) = fs::read_to_string(events_path(dir)) else {
+        return Vec::new();
+    };
+    let mut lines: Vec<LogLine> = raw
+        .lines()
+        .rev()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .take(limit)
+        .collect();
+    lines.shrink_to_fit();
+    lines
+}
+
 // ---- paths ----------------------------------------------------------------
 
 pub fn inbox_path(dir: &Path) -> PathBuf {
@@ -269,6 +336,16 @@ pub fn tick_once(spec: &Spec, event: Option<&Event>) -> io::Result<(Tick, AgentS
     } else {
         None
     };
+    let number = state.ticks + 1;
+    log_event(
+        &spec.dir,
+        "info",
+        format!(
+            "run #{} started · {}",
+            number,
+            event_id.as_deref().unwrap_or("manual")
+        ),
+    );
     let prompt = trigger::render_prompt(spec, event);
     let header = serde_json::json!({
         "type": "cc-hub-tick",
@@ -332,7 +409,8 @@ pub fn tick_once(spec: &Spec, event: Option<&Event>) -> io::Result<(Tick, AgentS
             context_end: tick.context_end,
             duration_s: tick.duration_s,
             session_id: tick.session_id.clone(),
-            result: truncate(&tick.result, 200),
+            result: truncate(&tick.result, if tick.ok { 200 } else { 800 }),
+            detail: failure_detail(&tick),
         });
         if s.history.len() > MAX_HISTORY {
             let drop = s.history.len() - MAX_HISTORY;
@@ -345,6 +423,30 @@ pub fn tick_once(spec: &Spec, event: Option<&Event>) -> io::Result<(Tick, AgentS
             ));
         }
     })?;
+    if tick.ok {
+        log_event(
+            &spec.dir,
+            "info",
+            format!(
+                "run #{} ok · {} turns · ${:.2} · {}s",
+                number, tick.turns, tick.cost_usd, tick.duration_s
+            ),
+        );
+    } else {
+        log_event(
+            &spec.dir,
+            "warn",
+            format!(
+                "run #{} failed ({}): {}",
+                number,
+                tick.subtype.as_deref().unwrap_or("?"),
+                truncate(&tick.result, 200)
+            ),
+        );
+    }
+    if let Some(reason) = &state.stopped_reason {
+        log_event(&spec.dir, "error", format!("halted: {}", reason));
+    }
     info!(
         "harness[{}]: tick={} ok={} turns={} compact={} ${:.3} total=${:.2} {}",
         spec.name,
@@ -357,6 +459,28 @@ pub fn tick_once(spec: &Spec, event: Option<&Event>) -> io::Result<(Tick, AgentS
         tick.subtype.as_deref().unwrap_or("")
     );
     Ok((tick, state))
+}
+
+/// What a failed tick left on stderr, with its exit code: the part of a
+/// failure the result text often lacks (a crash, a missing binary).
+fn failure_detail(tick: &Tick) -> Option<String> {
+    if tick.ok {
+        return None;
+    }
+    let stderr = tick.stderr.trim();
+    if stderr.is_empty() && tick.returncode == 0 {
+        return None;
+    }
+    let tail: String = {
+        let chars: Vec<char> = stderr.chars().collect();
+        let from = chars.len().saturating_sub(1000);
+        chars[from..].iter().collect()
+    };
+    Some(if tail.is_empty() {
+        format!("exit {}", tick.returncode)
+    } else {
+        format!("exit {} · {}", tick.returncode, tail)
+    })
 }
 
 /// Why a tick must not start now, if any. Checked by the supervisor before
@@ -450,6 +574,8 @@ pub struct AgentSnapshot {
     pub spec: Result<Spec, String>,
     pub state: AgentState,
     pub notes: Vec<Note>,
+    /// Newest first; see [`log_event`].
+    pub events: Vec<LogLine>,
     pub inbox_pending: usize,
 }
 
@@ -519,17 +645,59 @@ impl AgentSnapshot {
             )
     }
 
-    /// Transcript of [`Self::session_id`], if Claude Code has written one.
-    pub fn transcript(&self) -> Option<PathBuf> {
-        let sid = self.session_id()?;
+    /// Transcript of session `sid`, if Claude Code has written one.
+    pub fn transcript(&self, sid: &str) -> Option<PathBuf> {
         crate::scanner::find_jsonl(&self.workdir().to_string_lossy(), sid)
             .or_else(|| crate::scanner::find_jsonl_anywhere(sid))
     }
 
-    /// What the agent most recently pointed at with `cc-hub agent note
-    /// --ref`: a URL or a path. Notes are newest first.
-    pub fn latest_ref(&self) -> Option<&str> {
-        self.notes.iter().find_map(|n| n.r#ref.as_deref())
+    /// Every run the agent remembers, newest first: the one in flight, then
+    /// the history. Numbers count from the agent's first run, so they stay
+    /// put as old history rolls off.
+    pub fn runs(&self) -> Vec<Run<'_>> {
+        let done = self.state.history.len() as u64;
+        let base = self.state.ticks.saturating_sub(done);
+        let mut runs = Vec::with_capacity(self.state.history.len() + 1);
+        if let Some(t) = &self.state.ticking {
+            runs.push(Run::InFlight {
+                n: self.state.ticks + 1,
+                ticking: t,
+            });
+        }
+        for (i, rec) in self.state.history.iter().enumerate().rev() {
+            runs.push(Run::Done {
+                n: base + i as u64 + 1,
+                rec,
+            });
+        }
+        runs
+    }
+
+    /// The newest finished run.
+    pub fn last_run(&self) -> Option<&TickRecord> {
+        self.state.history.last()
+    }
+}
+
+/// One row of the Runs list.
+#[derive(Debug, Clone, Copy)]
+pub enum Run<'a> {
+    InFlight { n: u64, ticking: &'a Ticking },
+    Done { n: u64, rec: &'a TickRecord },
+}
+
+impl Run<'_> {
+    pub fn n(&self) -> u64 {
+        match self {
+            Run::InFlight { n, .. } | Run::Done { n, .. } => *n,
+        }
+    }
+
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            Run::InFlight { ticking, .. } => ticking.session_id.as_deref(),
+            Run::Done { rec, .. } => rec.session_id.as_deref(),
+        }
     }
 }
 
@@ -539,9 +707,10 @@ impl AgentSnapshot {
 ///
 /// Two ways to belong to an agent, both of them the agent's own doing: the
 /// tick recorded the session id it ran in, or the session runs inside the
-/// agent's directory (where the default workdir lives). A spec pointing its
-/// `workdir` at one of your repos owns only the sessions it recorded —
-/// yours in that repo stay yours.
+/// agent's default workdir. A spec pointing its `workdir` at one of your
+/// repos owns only the sessions it recorded — yours in that repo stay
+/// yours. So does a session you open in the agent's own directory to edit
+/// it (`n` on the Agents tab): that one is a normal, attachable session.
 #[derive(Debug, Default, Clone)]
 pub struct AgentSessions {
     by_id: std::collections::HashMap<String, String>,
@@ -556,7 +725,7 @@ impl AgentSessions {
             for sid in agent.session_ids() {
                 by_id.insert(sid.to_string(), agent.name.clone());
             }
-            dirs.push((agent.dir.clone(), agent.name.clone()));
+            dirs.push((agent.dir.join("work"), agent.name.clone()));
         }
         Self { by_id, dirs }
     }
@@ -586,7 +755,8 @@ pub fn snapshot(dir: &Path) -> AgentSnapshot {
         name,
         spec: spec::load(dir),
         state: load_state(dir),
-        notes: read_notes(dir, 20),
+        notes: read_notes(dir, 50),
+        events: read_events(dir, 200),
         inbox_pending: trigger::pending_count(&inbox_path(dir)),
         dir: dir.to_path_buf(),
     }
@@ -708,6 +878,7 @@ mod tests {
             spec: Err("not loaded".into()),
             state,
             notes: Vec::new(),
+            events: Vec::new(),
             inbox_pending: 0,
         }
     }
@@ -732,6 +903,7 @@ mod tests {
             context_end: 0,
             duration_s: 1,
             result: String::new(),
+            detail: None,
         });
         let owned = AgentSessions::of(&[agent_at(dir, "bb-prs", state)]);
 
@@ -744,8 +916,10 @@ mod tests {
             owned.owner("persistent", Path::new("/home/me/code")),
             Some("bb-prs")
         );
-        // … as does anything running inside the agent's own directory.
+        // … as does anything running inside the agent's default workdir …
         assert_eq!(owned.owner("unknown", &dir.join("work")), Some("bb-prs"));
+        // … but not a session opened in the agent's directory to edit it.
+        assert_eq!(owned.owner("editing", dir), None);
         // A session of yours in your own repo stays yours.
         assert_eq!(owned.owner("mine", Path::new("/home/me/code")), None);
     }
@@ -767,6 +941,53 @@ mod tests {
         });
         let agent = agent_at(dir, "a", state);
         assert_eq!(agent.session_id(), Some("in-flight"));
+    }
+
+    #[test]
+    fn runs_are_numbered_from_the_first_and_newest_first() {
+        let dir = Path::new("/tmp/agents/a");
+        let rec = |at| TickRecord {
+            at,
+            event: None,
+            session_id: None,
+            ok: true,
+            subtype: None,
+            turns: 1,
+            compactions: 0,
+            cost_usd: 0.0,
+            context_start: 0,
+            context_end: 0,
+            duration_s: 1,
+            result: String::new(),
+            detail: None,
+        };
+        // 10 runs so far, the last two still in history, an eleventh running.
+        let state = AgentState {
+            ticks: 10,
+            history: vec![rec(1), rec(2)],
+            ticking: Some(Ticking {
+                since: 3,
+                event: None,
+                session_id: Some("live".into()),
+            }),
+            ..Default::default()
+        };
+        let agent = agent_at(dir, "a", state);
+        let runs = agent.runs();
+        let ns: Vec<u64> = runs.iter().map(Run::n).collect();
+        assert_eq!(ns, vec![11, 10, 9]);
+        assert_eq!(runs[0].session_id(), Some("live"));
+    }
+
+    #[test]
+    fn events_log_newest_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        log_event(tmp.path(), "info", "one");
+        log_event(tmp.path(), "warn", "two");
+        let lines = read_events(tmp.path(), 10);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "two");
+        assert_eq!(lines[0].level, "warn");
     }
 
     #[test]
@@ -804,26 +1025,6 @@ mod tests {
         assert!(budget_block(&spec, &st).unwrap().contains("daily"));
         st.cost_usd = 1.2;
         assert!(budget_block(&spec, &st).unwrap().contains("total"));
-    }
-
-    #[test]
-    fn latest_ref_is_the_newest_note_that_has_one() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("a");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join(spec::SPEC_FILE), "[prompt]\ninstruction=\"x\"").unwrap();
-        assert_eq!(snapshot(&dir).latest_ref(), None);
-        let note = |at, r#ref: Option<&str>| Note {
-            at,
-            level: "info".into(),
-            text: "t".into(),
-            r#ref: r#ref.map(str::to_string),
-            tick: at as u64,
-        };
-        append_note(&dir, &note(1, Some("https://claude.ai/a/1"))).unwrap();
-        append_note(&dir, &note(2, Some("https://claude.ai/a/2"))).unwrap();
-        append_note(&dir, &note(3, None)).unwrap();
-        assert_eq!(snapshot(&dir).latest_ref(), Some("https://claude.ai/a/2"));
     }
 
     #[test]

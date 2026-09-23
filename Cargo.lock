@@ -189,6 +189,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "toml_edit",
  "tui-term",
  "uuid",
  "vt100",

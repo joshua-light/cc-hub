@@ -135,9 +135,9 @@ floor under it and a wake that never lands costs latency only. The board
 wakes `board` on every card status change; anything else says so with
 `cc-hub wake <name>`.
 
-Agents report through `cc-hub agent note`, shown on the Agents tab and detail
-popup. Press `f` to view a running or recent tick's transcript. Halted agents
-show a "needs you" indicator. See `cc-hub help agent` for configuration fields,
+Agents report through `cc-hub agent note`, shown on the Agents tab and under
+Artifacts in the agent's detail view (`f`). Halted agents show a "needs you"
+indicator. See `cc-hub help agent` for configuration fields,
 or copy a local spec with `cc-hub agent new <name> --from <directory>`.
 
 Custom agents and skills remain local: `contrib/` is ignored, and installed
@@ -494,26 +494,46 @@ the plan, so the plan-first workflow works with one fewer column.
 
 ### Agents tab
 
-Shown once `~/.cc-hub/agents/` exists. One row per agent, in the same table
-grammar as the Sessions list: the status icon carries the state (green
-ticking, yellow halted, red broken spec, purple paused), then the name, the
-agent's latest word (halt reason, newest note, last tick result, or the spec
-description), and the columns — trigger, queued events, last tick, context,
-today's spend, age.
+Shown once `~/.cc-hub/agents/` exists. One row per agent: the status icon
+carries the state (green running, gray off, yellow halted, red broken spec),
+then the name, the last run (`✓ 12m` or `✗ 2h`), what the agent has to say
+(a spec error, the halt reason, why the last run failed, its newest note, or
+its description), the trigger with any queued events (`poll 5m +2`), and
+today's spend.
 
-A tick is a headless `claude -p` run with no terminal behind it, so its
-session never appears on the Sessions tab — there would be nothing for `f` to
-attach to. It lives here instead: `f` opens the transcript of the tick in
-flight (or the last one), tailing live while it runs.
+`f` opens the agent. The top of the detail answers "does it need me?": off,
+halted and why, or the last run's outcome with the failure reason and stderr.
+Below it, four sections:
+
+- **Runs** — every remembered run, newest first. `f` opens the selected
+  run's transcript, tailing live while it runs.
+- **Artifacts** — what the agent reported with `cc-hub agent note`. `f` opens
+  the note's `--ref` (a URL or a path).
+- **Log** — the harness log (`events.jsonl`): runs starting and ending, poll
+  commands failing, halts, and changes made from the hub. It answers "why
+  didn't it run?", which no transcript can.
+- **Settings** — model, effort, interval, budgets, context window, session
+  mode, permissions, tools, MCP, timeout, description. `Enter` flips a toggle
+  or steps through a short list (model: haiku → sonnet → opus → default);
+  `e` types any value. Edits keep `agent.toml`'s comments, are validated
+  before saving, and apply on the next run.
+
+A run is a headless `claude -p` with no terminal behind it, so its session
+never appears on the Sessions tab. A session you open with `n` does: it runs
+in the agent's folder, primed with what the folder holds and why the agent
+last failed, so "fix it" is a complete instruction.
 
 | Key | Action |
 |---|---|
-| `j` / `k` (or arrows) | Move between agents |
-| `Enter` / `i` | Detail popup: tick timeline, notes, spec summary (`j`/`k` scroll) |
-| `f` | Open the tick's transcript, tailing live |
-| `p` | Poke: drop an empty event into the agent's inbox |
-| `Space` | Pause a running agent; resume a paused or halted one |
-| `R` | Reset the harness bookkeeping (ticks, spend); the workdir is untouched |
+| `j` / `k` (or arrows) | Move between agents, or within a section |
+| `f` / `Enter` | Open the agent; inside, open the selected run, artifact, or setting |
+| `Tab` / `h` / `l` / `1`–`4` | Switch sections |
+| `e` | Type a new value for the selected setting |
+| `Space` | Turn the agent off, or on (turning on also clears a halt) |
+| `p` | Run now: queue an empty event |
+| `n` | New Claude session in the agent's folder, attached |
+| `R` (detail) | Reset the harness bookkeeping (runs, spend); the workdir is untouched |
+| `Esc` / `q` | Close the detail |
 
 ## Known limitations
 
