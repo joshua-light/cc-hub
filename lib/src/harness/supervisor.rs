@@ -82,11 +82,24 @@ async fn agent_loop(dir: PathBuf, tx: mpsc::Sender<TickReport>) {
     let mut last_digest: Option<String> = None;
     let mut interval_n: u64 = 0;
     let mut wakes: HashMap<String, Stamp> = HashMap::new();
+    // The last spec error and poll failure written to the event log, so a
+    // condition that persists is logged once, not every loop.
+    let mut spec_error: Option<String> = None;
+    let mut poll_error: Option<String> = None;
 
     loop {
         let spec = match super::spec::load(&dir) {
-            Ok(s) => s,
-            Err(_) => {
+            Ok(s) => {
+                if spec_error.take().is_some() {
+                    super::log_event(&dir, "info", "agent.toml loads again");
+                }
+                s
+            }
+            Err(e) => {
+                if spec_error.as_deref() != Some(e.as_str()) {
+                    super::log_event(&dir, "error", format!("parked: {}", e));
+                    spec_error = Some(e);
+                }
                 tokio::time::sleep(PARKED_POLL).await;
                 continue;
             }
@@ -118,6 +131,7 @@ async fn agent_loop(dir: PathBuf, tx: mpsc::Sender<TickReport>) {
             &mut last_interval,
             &mut last_digest,
             &mut interval_n,
+            &mut poll_error,
         )
         .await
         {
@@ -138,12 +152,14 @@ async fn agent_loop(dir: PathBuf, tx: mpsc::Sender<TickReport>) {
             Ok(Ok(v)) => v,
             Ok(Err(e)) => {
                 warn!("harness[{}]: tick failed to record: {}", spec.name, e);
+                super::log_event(&dir, "error", format!("run failed to record: {}", e));
                 trigger::ack(&event, false);
                 tokio::time::sleep(PARKED_POLL).await;
                 continue;
             }
             Err(e) => {
                 warn!("harness[{}]: tick task panicked: {}", spec.name, e);
+                super::log_event(&dir, "error", format!("run crashed: {}", e));
                 trigger::ack(&event, false);
                 tokio::time::sleep(PARKED_POLL).await;
                 continue;
@@ -230,6 +246,11 @@ async fn reclaim_stale_tick(dir: &std::path::Path, spec: &Spec) -> super::AgentS
         spec.name,
         super::now_unix() - t.since
     );
+    super::log_event(
+        dir,
+        "warn",
+        "cleared a run left marked in flight — the hub likely quit or slept mid-run",
+    );
     let dir = dir.to_path_buf();
     tokio::task::spawn_blocking(move || super::update_state(&dir, |s| s.ticking = None))
         .await
@@ -242,6 +263,7 @@ async fn halt(dir: &std::path::Path, spec: &Spec, reason: &str, tx: &mpsc::Sende
     let already = super::load_state(dir).stopped_reason.is_some();
     if !already {
         let _ = super::update_state(dir, |s| s.stopped_reason = Some(reason.to_string()));
+        super::log_event(dir, "error", format!("halted: {}", reason));
         let _ = tx
             .send(TickReport {
                 name: spec.name.clone(),
@@ -260,6 +282,7 @@ async fn next_event(
     last_interval: &mut Option<Instant>,
     last_digest: &mut Option<String>,
     interval_n: &mut u64,
+    poll_error: &mut Option<String>,
 ) -> Option<Event> {
     let inbox_owned = inbox.to_path_buf();
     if let Ok(Ok(Some(ev))) = tokio::task::spawn_blocking(move || trigger::take(&inbox_owned)).await
@@ -277,11 +300,25 @@ async fn next_event(
             let command = spec.trigger.command.clone()?;
             let cwd = spec.dir.clone();
             let timeout = Duration::from_secs(spec.trigger.timeout_s);
-            let out =
+            let polled =
                 tokio::task::spawn_blocking(move || trigger::run_poll(&command, &cwd, timeout))
                     .await
-                    .ok()
-                    .flatten()?;
+                    .ok()?;
+            let out = match polled {
+                Ok(out) => {
+                    if poll_error.take().is_some() {
+                        super::log_event(&spec.dir, "info", "poll works again");
+                    }
+                    out?
+                }
+                Err(e) => {
+                    if poll_error.as_deref() != Some(e.as_str()) {
+                        super::log_event(&spec.dir, "warn", e.clone());
+                        *poll_error = Some(e);
+                    }
+                    return None;
+                }
+            };
             let digest = trigger::digest(&out);
             if spec.trigger.dedupe && last_digest.as_deref() == Some(&digest) {
                 return None;

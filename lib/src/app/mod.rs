@@ -26,7 +26,7 @@ mod task_link_picker;
 mod tasks_view;
 
 pub use command::{Command, Effect, GlobalCommand, HarnessCommand, SessionsCommand, TasksCommand};
-pub use harness_view::HarnessView;
+pub use harness_view::{Detail, HarnessView, Section};
 pub use metrics_view::MetricsView;
 pub use render_state::RenderState;
 pub use session_finder::{SessionFinderChoice, SessionFinderRow, SessionFinderState};
@@ -257,7 +257,7 @@ pub enum View {
     /// Typing edits the Tasks-board filter live; the board renders
     /// underneath, already narrowed. Enter keeps the filter, Esc clears it.
     TaskFilter,
-    /// Agents tab: tick timeline + notes + spec for the focused agent.
+    /// Agents tab: runs, artifacts, log and settings of the focused agent.
     AgentDetail,
 }
 
@@ -2674,7 +2674,7 @@ impl App {
 
     pub fn close_tmux_pane(&mut self) {
         self.tmux_pane = None;
-        self.view = View::Grid;
+        self.view = self.view_under_overlay();
     }
 
     /// Open the rename-title modal for the currently selected session,
@@ -3008,7 +3008,17 @@ impl App {
 
     pub fn close_live_tail(&mut self) {
         self.live_view = None;
-        self.view = View::Grid;
+        self.view = self.view_under_overlay();
+    }
+
+    /// Where closing a transcript or pane lands: back in the agent detail
+    /// it was opened from, else the grid.
+    fn view_under_overlay(&self) -> View {
+        if self.current_tab == Tab::Agents && self.harness.detail.is_some() {
+            View::AgentDetail
+        } else {
+            View::Grid
+        }
     }
 
     pub fn selected_session_id(&self) -> Option<String> {

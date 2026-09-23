@@ -13,6 +13,7 @@
 //! character editing) stay as thin `bin` arms — only their submit/logic arms
 //! became commands.
 
+use super::harness_view::{Detail, Section};
 use super::{App, RenameSubmit, SessionsLayout, Tab};
 use crate::agent::AgentKind;
 use crate::config;
@@ -32,18 +33,35 @@ pub enum Command {
 pub enum HarnessCommand {
     NavUp,
     NavDown,
-    NavLeft,
-    NavRight,
-    /// Enter — the detail popup.
+    /// `f`/Enter — the detail view.
     OpenDetail,
     CloseDetail,
-    DetailScrollDown,
-    DetailScrollUp,
-    /// `p` — drop an empty event into the focused agent's inbox.
-    Poke,
-    /// Space — pause a running agent, or resume a paused/halted one.
-    TogglePause,
-    /// `R` — clear harness bookkeeping (workdir untouched).
+    /// Tab/`l` and Shift-Tab/`h` in the detail view.
+    NextSection,
+    PrevSection,
+    /// `1`–`4` in the detail view.
+    ShowSection(Section),
+    /// `j`/`k` in the detail view: the open section's cursor.
+    DetailDown,
+    DetailUp,
+    /// `f`/Enter in the detail view: the selected run's transcript, the
+    /// selected artifact, or change the selected setting.
+    Activate,
+    /// `e` on a setting — type a value instead of stepping through them.
+    EditSetting,
+    EditChar(char),
+    EditBackspace,
+    EditSubmit,
+    EditCancel,
+    /// Space — turn the agent off, or on (which also clears a halt).
+    ToggleOn,
+    /// `p` — queue an empty event so the agent runs now.
+    RunNow,
+    /// `n` — an interactive Claude session in the agent's folder, primed
+    /// to change it.
+    NewSession,
+    /// `R` in the detail view — clear harness bookkeeping (workdir
+    /// untouched).
     Reset,
 }
 
@@ -195,6 +213,8 @@ pub enum Effect {
     /// Focus the OS window hosting `pid`, falling back to a tmux reattach
     /// in `cwd` when the window manager reports the session is detached.
     FocusWindow { pid: u32, cwd: String },
+    /// Open a URL or path with the OS opener.
+    OpenExternal { target: String },
 }
 
 impl App {
@@ -211,71 +231,368 @@ impl App {
     }
 
     fn execute_harness(&mut self, cmd: HarnessCommand) -> Vec<Effect> {
+        use crate::app::View;
         use crate::harness;
+        use HarnessCommand::*;
         match cmd {
-            // One agent per row, so h/l move the same way j/k do.
-            HarnessCommand::NavUp | HarnessCommand::NavLeft => self.harness.nav(-1),
-            HarnessCommand::NavDown | HarnessCommand::NavRight => self.harness.nav(1),
-            HarnessCommand::OpenDetail => {
+            NavUp => self.harness.nav(-1),
+            NavDown => self.harness.nav(1),
+            OpenDetail => {
                 if self.harness.selected().is_some() {
+                    self.harness.detail = Some(Detail::default());
                     self.render.agent_detail_scroll = 0;
-                    self.view = crate::app::View::AgentDetail;
+                    self.view = View::AgentDetail;
                 }
             }
-            HarnessCommand::CloseDetail => self.view = crate::app::View::Grid,
-            HarnessCommand::DetailScrollDown => {
-                self.render.agent_detail_scroll = self.render.agent_detail_scroll.saturating_add(1)
+            CloseDetail => {
+                self.harness.detail = None;
+                self.view = View::Grid;
             }
-            HarnessCommand::DetailScrollUp => {
-                self.render.agent_detail_scroll = self.render.agent_detail_scroll.saturating_sub(1)
+            NextSection | PrevSection | ShowSection(_) => {
+                if let Some(d) = self.harness.detail.as_mut() {
+                    d.section = match cmd {
+                        NextSection => d.section.step(1),
+                        PrevSection => d.section.step(-1),
+                        ShowSection(s) => s,
+                        _ => d.section,
+                    };
+                    d.editing = None;
+                    self.render.agent_detail_scroll = 0;
+                }
             }
-            HarnessCommand::Poke => {
-                let Some(agent) = self.harness.selected() else {
+            DetailDown => self.harness.detail_nav(1),
+            DetailUp => self.harness.detail_nav(-1),
+            Activate => return self.harness_activate(),
+            EditSetting => self.harness_edit_setting(),
+            EditChar(c) => {
+                if let Some(buf) = self.harness_edit_buffer() {
+                    buf.push(c);
+                }
+            }
+            EditBackspace => {
+                if let Some(buf) = self.harness_edit_buffer() {
+                    buf.pop();
+                }
+            }
+            EditCancel => {
+                if let Some(d) = self.harness.detail.as_mut() {
+                    d.editing = None;
+                }
+            }
+            EditSubmit => {
+                let Some(input) = self.harness.detail.as_ref().and_then(|d| d.editing.clone())
+                else {
                     return Vec::new();
                 };
-                let (name, dir) = (agent.name.clone(), agent.dir.clone());
-                let msg = match harness::poke(&dir, "") {
-                    Ok(id) => format!("{}: queued {}", name, id),
-                    Err(e) => format!("{}: poke failed: {}", name, e),
-                };
-                self.set_status(msg);
-            }
-            HarnessCommand::TogglePause => {
-                let Some(agent) = self.harness.selected() else {
-                    return Vec::new();
-                };
-                let (name, dir) = (agent.name.clone(), agent.dir.clone());
-                let pause = !(agent.state.paused || agent.state.stopped_reason.is_some());
-                let msg = match harness::set_paused(&dir, pause) {
-                    Ok(_) if pause => format!("{}: paused", name),
-                    Ok(_) => format!("{}: resumed", name),
-                    Err(e) => format!("{}: {}", name, e),
-                };
-                // Reflect it immediately; the disk rescan confirms it.
-                if let Some(a) = self.harness.agents.get_mut(self.harness.selected) {
-                    a.state.paused = pause;
-                    if !pause {
-                        a.state.stopped_reason = None;
+                // A rejected value keeps the box open so it can be fixed.
+                if self.harness_apply_setting(&input) {
+                    if let Some(d) = self.harness.detail.as_mut() {
+                        d.editing = None;
                     }
                 }
-                self.set_status(msg);
             }
-            HarnessCommand::Reset => {
+            ToggleOn => self.harness_toggle_on(),
+            RunNow => self.harness_run_now(),
+            NewSession => return self.harness_new_session(),
+            Reset => {
                 let Some(agent) = self.harness.selected() else {
                     return Vec::new();
                 };
                 let (name, dir) = (agent.name.clone(), agent.dir.clone());
                 let msg = match harness::reset(&dir) {
-                    Ok(()) => format!("{}: state reset (workdir untouched)", name),
+                    Ok(()) => {
+                        harness::log_event(&dir, "info", "state reset from the hub");
+                        format!("{}: state reset (workdir untouched)", name)
+                    }
                     Err(e) => format!("{}: reset failed: {}", name, e),
                 };
-                if let Some(a) = self.harness.agents.get_mut(self.harness.selected) {
+                if let Some(a) = self.harness.selected_mut() {
                     a.state = Default::default();
                 }
                 self.set_status(msg);
             }
         }
         Vec::new()
+    }
+
+    fn harness_edit_buffer(&mut self) -> Option<&mut String> {
+        self.harness.detail.as_mut()?.editing.as_mut()
+    }
+
+    /// `f`/Enter inside the detail view, by section.
+    fn harness_activate(&mut self) -> Vec<Effect> {
+        use crate::harness::Run;
+        let (Some(agent), Some(d)) = (self.harness.selected(), self.harness.detail.as_ref()) else {
+            return Vec::new();
+        };
+        match d.section {
+            Section::Runs => {
+                let runs = agent.runs();
+                let Some(run) = runs.get(d.run) else {
+                    let msg = format!("{}: no runs yet — p runs it now", agent.name);
+                    self.set_status(msg);
+                    return Vec::new();
+                };
+                let n = run.n();
+                let Some(sid) = run.session_id().map(str::to_string) else {
+                    let msg = match run {
+                        Run::InFlight { .. } => {
+                            format!("run #{}: starting — its transcript appears in a moment", n)
+                        }
+                        Run::Done { .. } => format!("run #{}: no transcript recorded", n),
+                    };
+                    self.set_status(msg);
+                    return Vec::new();
+                };
+                let Some(path) = agent.transcript(&sid) else {
+                    self.set_status(format!(
+                        "run #{}: transcript {} not found",
+                        n,
+                        models::short_sid(&sid)
+                    ));
+                    return Vec::new();
+                };
+                let lv = crate::live_view::LiveView::new(path.clone(), AgentKind::Claude);
+                if lv.messages.is_empty() {
+                    self.set_status(format!("run #{}: {} is empty", n, path.display()));
+                } else {
+                    self.enter_live_tail(lv);
+                }
+                Vec::new()
+            }
+            Section::Artifacts => {
+                let Some(note) = agent.notes.get(d.artifact) else {
+                    let msg = format!("{}: nothing reported yet", agent.name);
+                    self.set_status(msg);
+                    return Vec::new();
+                };
+                match note.r#ref.clone() {
+                    Some(target) => {
+                        self.set_status(format!("opening {}", target));
+                        vec![Effect::OpenExternal { target }]
+                    }
+                    None => {
+                        self.set_status("this note points at nothing to open".into());
+                        Vec::new()
+                    }
+                }
+            }
+            Section::Log => Vec::new(),
+            Section::Settings => {
+                let Some(setting) = crate::harness::settings::SETTINGS.get(d.setting).copied()
+                else {
+                    return Vec::new();
+                };
+                let Ok(spec) = &agent.spec else {
+                    self.set_status(BROKEN_SPEC.into());
+                    return Vec::new();
+                };
+                if let Some(why) = setting.locked(spec) {
+                    self.set_status(format!("{}: {}", setting.label(), why));
+                    return Vec::new();
+                }
+                match setting.step(spec) {
+                    Some(next) => {
+                        self.harness_apply_setting(&next);
+                    }
+                    None => self.harness_edit_setting(),
+                }
+                Vec::new()
+            }
+        }
+    }
+
+    /// Open the edit box on the selected setting, pre-filled.
+    fn harness_edit_setting(&mut self) {
+        let (Some(agent), Some(d)) = (self.harness.selected(), self.harness.detail.as_ref()) else {
+            return;
+        };
+        if d.section != Section::Settings {
+            return;
+        }
+        let Some(setting) = crate::harness::settings::SETTINGS.get(d.setting).copied() else {
+            return;
+        };
+        let Ok(spec) = &agent.spec else {
+            self.set_status(BROKEN_SPEC.into());
+            return;
+        };
+        if let Some(why) = setting.locked(spec) {
+            self.set_status(format!("{}: {}", setting.label(), why));
+            return;
+        }
+        let raw = setting.raw(spec);
+        if let Some(d) = self.harness.detail.as_mut() {
+            d.editing = Some(raw);
+        }
+    }
+
+    /// Write `input` to the selected setting. True when it was saved.
+    fn harness_apply_setting(&mut self, input: &str) -> bool {
+        use crate::harness::{self, settings};
+        let (Some(agent), Some(d)) = (self.harness.selected(), self.harness.detail.as_ref()) else {
+            return false;
+        };
+        let Some(setting) = settings::SETTINGS.get(d.setting).copied() else {
+            return false;
+        };
+        if setting == settings::Setting::Enabled {
+            return match input.trim() {
+                "on" | "true" => self.harness_set_on(true),
+                "off" | "false" => self.harness_set_on(false),
+                _ => {
+                    self.set_status("enabled: on or off".into());
+                    false
+                }
+            };
+        }
+        let (name, dir) = (agent.name.clone(), agent.dir.clone());
+        match settings::apply(&dir, setting, input) {
+            Ok(spec) => {
+                let shown = setting.show(&spec);
+                harness::log_event(
+                    &dir,
+                    "info",
+                    format!("{} → {} (from the hub)", setting.label(), shown),
+                );
+                self.set_status(format!("{}: {} → {}", name, setting.label(), shown));
+                if let Some(a) = self.harness.selected_mut() {
+                    a.spec = Ok(spec);
+                }
+                true
+            }
+            Err(e) => {
+                self.set_status(format!("{}: {}", name, e));
+                false
+            }
+        }
+    }
+
+    /// Space: off when it would run, on otherwise — turning on also clears
+    /// a halt or a CLI pause, so one key means "make it go".
+    fn harness_toggle_on(&mut self) {
+        use crate::harness::AgentStatus as S;
+        let Some(agent) = self.harness.selected() else {
+            return;
+        };
+        let on = !matches!(agent.status(), S::Sleeping | S::Ticking);
+        self.harness_set_on(on);
+    }
+
+    fn harness_set_on(&mut self, on: bool) -> bool {
+        use crate::harness::{self, settings};
+        let Some(agent) = self.harness.selected() else {
+            return false;
+        };
+        let (name, dir) = (agent.name.clone(), agent.dir.clone());
+        let Ok(spec) = &agent.spec else {
+            self.set_status(format!("{}: {}", name, BROKEN_SPEC));
+            return false;
+        };
+        let ticking = agent.state.ticking.is_some();
+        let held = agent.state.paused || agent.state.stopped_reason.is_some();
+        let mut new_spec = None;
+        if spec.enabled != on {
+            match settings::set_enabled(&dir, on) {
+                Ok(s) => new_spec = Some(s),
+                Err(e) => {
+                    self.set_status(format!("{}: {}", name, e));
+                    return false;
+                }
+            }
+        }
+        if on && held {
+            if let Err(e) = harness::set_paused(&dir, false) {
+                self.set_status(format!("{}: {}", name, e));
+                return false;
+            }
+        }
+        let what = if on { "on" } else { "off" };
+        harness::log_event(&dir, "info", format!("turned {} from the hub", what));
+        // Reflect it now; the next disk scan confirms it.
+        if let Some(a) = self.harness.selected_mut() {
+            if let Some(s) = new_spec {
+                a.spec = Ok(s);
+            }
+            if on {
+                a.state.paused = false;
+                a.state.stopped_reason = None;
+                a.state.failures_in_a_row = 0;
+            }
+        }
+        let msg = if !on && ticking {
+            format!("{}: off — the current run finishes first", name)
+        } else {
+            format!("{}: {}", name, what)
+        };
+        self.set_status(msg);
+        true
+    }
+
+    /// `p`: queue an empty event, and say when it will actually run.
+    fn harness_run_now(&mut self) {
+        use crate::harness::{self, AgentStatus as S};
+        let Some(agent) = self.harness.selected() else {
+            return;
+        };
+        let (name, dir, status) = (agent.name.clone(), agent.dir.clone(), agent.status());
+        if let Err(e) = harness::poke(&dir, "") {
+            self.set_status(format!("{}: couldn't queue a run: {}", name, e));
+            return;
+        }
+        let when = match status {
+            _ if !self.harness.supervisor_on => {
+                "queued — but the supervisor is off ([harness] enabled in config.toml)"
+            }
+            S::Sleeping => "starting a run",
+            S::Ticking => "queued after the current run",
+            S::Disabled | S::Paused => "queued — runs once you turn it on (space)",
+            S::Halted => "queued — it is halted; space resumes it",
+            S::Broken => "queued — but agent.toml doesn't load",
+        };
+        self.set_status(format!("{}: {}", name, when));
+    }
+
+    /// `n`: a Claude session in the agent's folder, told what the folder is
+    /// and how the agent last fared, then attached — the shortest path from
+    /// "that run failed" to "fix it".
+    fn harness_new_session(&mut self) -> Vec<Effect> {
+        let Some(agent) = self.harness.selected() else {
+            return Vec::new();
+        };
+        let cfg = config::get();
+        let Some(agent_id) = [self.default_session_agent_id.as_str(), "claude"]
+            .into_iter()
+            .find(|id| cfg.agent(id).is_some_and(|a| a.kind == AgentKind::Claude))
+            .map(str::to_string)
+        else {
+            self.set_status("no Claude agent configured".into());
+            return Vec::new();
+        };
+        let name = agent.name.clone();
+        let cwd = agent.dir.to_string_lossy().into_owned();
+        let prompt = edit_prompt(agent);
+        let sid = uuid::Uuid::new_v4().to_string();
+        if let Err(e) = title::persist_title(&sid, &format!("agent: {}", name)) {
+            log::warn!("agents: couldn't title the edit session: {}", e);
+        }
+        match self.runtime.spawn_session(
+            &agent_id,
+            &cwd,
+            Some(spawn::SessionTarget::Fresh(sid)),
+            Some(&prompt),
+            None,
+            false,
+        ) {
+            Ok(tmux) => {
+                self.set_status(format!("{}: Claude in {} — F1 detaches", name, cwd));
+                vec![Effect::OpenTmuxPane { tmux, owned: false }]
+            }
+            Err(e) => {
+                self.set_status(format!("{}: spawn failed: {}", name, e));
+                Vec::new()
+            }
+        }
     }
 
     fn execute_global(&mut self, cmd: GlobalCommand) -> Vec<Effect> {
@@ -787,6 +1104,45 @@ impl App {
 // store — with_temp_home isolation redirects $HOME, which only works on
 // unix. An App built WITHOUT with_temp_home reads and writes the
 // developer's real ~/.cc-hub.
+const BROKEN_SPEC: &str = "agent.toml doesn't load — n opens Claude in its folder to fix it";
+
+/// The opening message of an `n` session: what the folder is, and what is
+/// wrong with the agent right now, so "fix it" is a complete instruction.
+fn edit_prompt(agent: &crate::harness::AgentSnapshot) -> String {
+    let name = &agent.name;
+    let mut p = format!(
+        "You're working on `{name}`, a cc-hub persistent agent: a headless `claude -p` \
+that wakes on its trigger and runs one bounded turn. This directory is the agent:
+- agent.toml — its spec: trigger, model, tools, budgets, prompts. Edits apply on the next run.
+- work/ — its default working directory and its only memory between runs.
+- notes.jsonl — what it reported. events.jsonl — the harness log: runs, poll failures, halts.
+- log/ — raw stream-json of every run, one file per day.
+- state.json — harness bookkeeping. Don't edit it.
+`cc-hub agent once {name}` runs it once and prints the outcome.\n"
+    );
+    let trouble = match (&agent.spec, &agent.state.stopped_reason, agent.last_run()) {
+        (Err(e), _, _) => Some(format!("agent.toml doesn't load: {}", e)),
+        (_, Some(reason), _) => Some(format!("It is halted: {}.", reason)),
+        (_, _, Some(run)) if !run.ok => Some(format!(
+            "Its last run failed ({}): {}{}",
+            run.subtype.as_deref().unwrap_or("error"),
+            run.result,
+            run.detail
+                .as_deref()
+                .map(|d| format!("\nstderr: {}", d))
+                .unwrap_or_default()
+        )),
+        _ => None,
+    };
+    if let Some(t) = trouble {
+        p.push('\n');
+        p.push_str(&t);
+        p.push('\n');
+    }
+    p.push_str("\nRead agent.toml, then wait for my instructions.");
+    p
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -2134,6 +2490,212 @@ home = "~/.codex-personal"
                 "got: {}",
                 status(&app)
             );
+        });
+    }
+
+    // ---- Agents tab ------------------------------------------------------
+
+    const AGENT_SPEC: &str = "description = \"Watches PRs\"\n\n[run]\nmax_budget_usd = 0.50  # per run\n\n[prompt]\ninstruction = \"go\"\n";
+
+    /// An app whose Agents tab holds one agent, `bb-prs`, on disk under the
+    /// temp home. Returns the agent's folder.
+    fn app_with_agent() -> (App, Arc<RecordingRuntime>, std::path::PathBuf) {
+        let (mut app, runtime) = app_with(Vec::new());
+        let dir = dirs::home_dir().unwrap().join(".cc-hub/agents/bb-prs");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("agent.toml"), AGENT_SPEC).unwrap();
+        app.harness.update(vec![crate::harness::snapshot(&dir)]);
+        app.harness.supervisor_on = true;
+        app.current_tab = Tab::Agents;
+        (app, runtime, dir)
+    }
+
+    fn harness(app: &mut App, cmd: HarnessCommand) -> Vec<Effect> {
+        app.execute(Command::Harness(cmd))
+    }
+
+    fn open_settings_at(app: &mut App, setting: crate::harness::settings::Setting) {
+        harness(app, HarnessCommand::OpenDetail);
+        harness(app, HarnessCommand::ShowSection(Section::Settings));
+        let i = crate::harness::settings::SETTINGS
+            .iter()
+            .position(|s| *s == setting)
+            .unwrap();
+        app.harness.detail.as_mut().unwrap().setting = i;
+    }
+
+    #[test]
+    fn f_opens_the_agent_and_esc_closes_it() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt, _dir) = app_with_agent();
+            harness(&mut app, HarnessCommand::OpenDetail);
+            assert_eq!(app.view, crate::app::View::AgentDetail);
+            assert_eq!(app.harness.detail.as_ref().unwrap().section, Section::Runs);
+            harness(&mut app, HarnessCommand::NextSection);
+            assert_eq!(
+                app.harness.detail.as_ref().unwrap().section,
+                Section::Artifacts
+            );
+            harness(&mut app, HarnessCommand::CloseDetail);
+            assert_eq!(app.view, crate::app::View::Grid);
+            assert!(app.harness.detail.is_none());
+        });
+    }
+
+    #[test]
+    fn space_turns_an_agent_off_and_on_again_clearing_a_halt() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt, dir) = app_with_agent();
+            harness(&mut app, HarnessCommand::ToggleOn);
+            assert!(!crate::harness::spec::load(&dir).unwrap().enabled);
+            assert_eq!(
+                app.harness.selected().unwrap().status(),
+                crate::harness::AgentStatus::Disabled
+            );
+
+            crate::harness::update_state(&dir, |s| {
+                s.stopped_reason = Some("daily budget $1 reached".into())
+            })
+            .unwrap();
+            app.harness.update(vec![crate::harness::snapshot(&dir)]);
+            harness(&mut app, HarnessCommand::ToggleOn);
+            assert!(crate::harness::spec::load(&dir).unwrap().enabled);
+            assert_eq!(crate::harness::load_state(&dir).stopped_reason, None);
+            assert_eq!(status(&app), "bb-prs: on");
+            let log = crate::harness::read_events(&dir, 10);
+            assert_eq!(log[0].text, "turned on from the hub");
+        });
+    }
+
+    #[test]
+    fn space_resumes_a_halted_agent_instead_of_turning_it_off() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt, dir) = app_with_agent();
+            crate::harness::update_state(&dir, |s| s.stopped_reason = Some("5 failed".into()))
+                .unwrap();
+            app.harness.update(vec![crate::harness::snapshot(&dir)]);
+            harness(&mut app, HarnessCommand::ToggleOn);
+            assert!(crate::harness::spec::load(&dir).unwrap().enabled);
+            assert_eq!(crate::harness::load_state(&dir).stopped_reason, None);
+        });
+    }
+
+    #[test]
+    fn enter_on_model_steps_to_the_next_and_saves_it() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt, dir) = app_with_agent();
+            open_settings_at(&mut app, crate::harness::settings::Setting::Model);
+            harness(&mut app, HarnessCommand::Activate);
+            let raw = std::fs::read_to_string(dir.join("agent.toml")).unwrap();
+            assert!(raw.contains("model = \"haiku\""), "{raw}");
+            assert!(raw.contains("# per run"), "comments survive: {raw}");
+            assert_eq!(status(&app), "bb-prs: model → haiku");
+            // The in-memory snapshot follows without waiting for a rescan.
+            let spec = app.harness.selected().unwrap().spec.as_ref().unwrap();
+            assert_eq!(spec.run.model.as_deref(), Some("haiku"));
+        });
+    }
+
+    #[test]
+    fn typed_value_saves_and_a_rejected_one_keeps_the_box_open() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt, dir) = app_with_agent();
+            open_settings_at(&mut app, crate::harness::settings::Setting::RunBudget);
+            // Free text: Enter opens the box pre-filled with the value.
+            harness(&mut app, HarnessCommand::Activate);
+            let d = app.harness.detail.as_ref().unwrap();
+            assert_eq!(d.editing.as_deref(), Some("0.5"));
+
+            for _ in 0..3 {
+                harness(&mut app, HarnessCommand::EditBackspace);
+            }
+            harness(&mut app, HarnessCommand::EditChar('x'));
+            harness(&mut app, HarnessCommand::EditSubmit);
+            assert!(app.harness.detail.as_ref().unwrap().editing.is_some());
+            assert!(status(&app).contains("dollar amount"), "{}", status(&app));
+
+            harness(&mut app, HarnessCommand::EditBackspace);
+            for c in "1.25".chars() {
+                harness(&mut app, HarnessCommand::EditChar(c));
+            }
+            harness(&mut app, HarnessCommand::EditSubmit);
+            assert!(app.harness.detail.as_ref().unwrap().editing.is_none());
+            let spec = crate::harness::spec::load(&dir).unwrap();
+            assert_eq!(spec.run.max_budget_usd, 1.25);
+        });
+    }
+
+    #[test]
+    fn p_queues_a_run() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt, dir) = app_with_agent();
+            harness(&mut app, HarnessCommand::RunNow);
+            assert_eq!(
+                crate::harness::trigger::pending_count(&crate::harness::inbox_path(&dir)),
+                1
+            );
+            assert_eq!(status(&app), "bb-prs: starting a run");
+        });
+    }
+
+    #[test]
+    fn n_opens_claude_in_the_agent_folder_and_attaches_it() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, rt, dir) = app_with_agent();
+            crate::harness::update_state(&dir, |s| {
+                s.history.push(crate::harness::TickRecord {
+                    at: 0,
+                    event: None,
+                    session_id: None,
+                    ok: false,
+                    subtype: Some("error_max_turns".into()),
+                    turns: 40,
+                    compactions: 0,
+                    cost_usd: 0.1,
+                    context_start: 0,
+                    context_end: 0,
+                    duration_s: 30,
+                    result: "hit the turn cap".into(),
+                    detail: None,
+                })
+            })
+            .unwrap();
+            app.harness.update(vec![crate::harness::snapshot(&dir)]);
+
+            let effects = harness(&mut app, HarnessCommand::NewSession);
+            assert_eq!(
+                effects,
+                vec![Effect::OpenTmuxPane {
+                    tmux: "mock-spawn".into(),
+                    owned: false
+                }]
+            );
+            let spawns = rt.spawns.lock().unwrap();
+            assert_eq!(spawns.len(), 1);
+            assert_eq!(spawns[0].cwd, dir.to_string_lossy());
+            assert!(spawns[0].resume.as_deref().unwrap().contains("Fresh"));
+            let prompt = spawns[0].initial_prompt.as_deref().unwrap();
+            assert!(prompt.contains("`bb-prs`"), "{prompt}");
+            assert!(
+                prompt.contains("last run failed (error_max_turns): hit the turn cap"),
+                "{prompt}"
+            );
+        });
+    }
+
+    #[test]
+    fn closing_a_transcript_lands_back_in_the_agent_detail() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt, _dir) = app_with_agent();
+            harness(&mut app, HarnessCommand::OpenDetail);
+            app.view = crate::app::View::LiveTail;
+            app.close_live_tail();
+            assert_eq!(app.view, crate::app::View::AgentDetail);
+
+            harness(&mut app, HarnessCommand::CloseDetail);
+            app.view = crate::app::View::LiveTail;
+            app.close_live_tail();
+            assert_eq!(app.view, crate::app::View::Grid);
         });
     }
 }

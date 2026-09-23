@@ -151,8 +151,9 @@ pub fn drop_event(inbox: &Path, label: &str, payload: &str) -> io::Result<String
 // ---- poll -----------------------------------------------------------------
 
 /// Run the poll command; non-empty trimmed stdout is a candidate event.
-/// `None` on timeout, spawn failure, or empty output.
-pub fn run_poll(command: &str, cwd: &Path, timeout: Duration) -> Option<String> {
+/// `Ok(None)` on empty output; `Err` says why the command failed, for the
+/// agent's event log.
+pub fn run_poll(command: &str, cwd: &Path, timeout: Duration) -> Result<Option<String>, String> {
     #[cfg(unix)]
     let mut cmd = {
         let mut c = Command::new("sh");
@@ -169,22 +170,30 @@ pub fn run_poll(command: &str, cwd: &Path, timeout: Duration) -> Option<String> 
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let out = crate::title::run_with_timeout(cmd, timeout)?;
+    let out = crate::title::run_with_timeout(cmd, timeout).ok_or_else(|| {
+        format!(
+            "poll `{}` timed out after {}s or failed to start",
+            command,
+            timeout.as_secs()
+        )
+    })?;
     if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
         log::warn!(
             "harness poll: {:?} exit={} stderr={}",
             command,
             out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
+            stderr.trim()
         );
-        return None;
+        let stderr = super::truncate(stderr.trim(), 400);
+        return Err(if stderr.is_empty() {
+            format!("poll `{}` failed ({})", command, out.status)
+        } else {
+            format!("poll `{}` failed ({}): {}", command, out.status, stderr)
+        });
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    Ok(if s.is_empty() { None } else { Some(s) })
 }
 
 /// Short stable digest for poll dedupe and event ids.

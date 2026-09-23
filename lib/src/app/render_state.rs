@@ -40,8 +40,9 @@ pub struct RenderState {
     /// Scroll offset (rows) of the Agents-tab table, written by the
     /// renderer to keep the selected row on screen.
     pub agents_scroll: u16,
-    /// Scroll offset of the agent-detail popup's tick timeline.
-    pub agent_detail_scroll: u16,
+    /// First visible row of the agent detail's open section, written by
+    /// the renderer to keep the cursor on screen.
+    pub agent_detail_scroll: usize,
 }
 
 impl Default for RenderState {

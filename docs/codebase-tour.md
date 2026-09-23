@@ -128,8 +128,10 @@ overwriting or resetting state.
   task router without waiting out its interval;
   `runner.rs` builds the `claude -p` argv and folds stream-json into a
   `Tick`; `supervisor.rs` is the per-agent tokio loop spawned from
-  `main.rs::run`; `mod.rs` owns `state.json`, `notes.jsonl`, the snapshot
-  the TUI renders, and `tick_once` (shared with `cc-hub agent once`).
+  `main.rs::run`; `settings.rs` is the Settings section's in-place,
+  comment-preserving `agent.toml` editor; `mod.rs` owns `state.json`,
+  `notes.jsonl`, the `events.jsonl` harness log, the snapshot the TUI
+  renders, and `tick_once` (shared with `cc-hub agent once`).
   Not to be confused with `agent.rs`, the backend registry.
 
 ### Spawning + dispatching
