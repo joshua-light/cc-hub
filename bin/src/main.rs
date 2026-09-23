@@ -11,18 +11,6 @@ mod cli;
 mod effects;
 mod keys;
 
-#[cfg(feature = "hot-reload")]
-#[hot_lib_reloader::hot_module(dylib = "cc_hub_lib", lib_dir = "target/debug")]
-mod hot {
-    use cc_hub_lib::app;
-    use ratatui::Frame;
-    hot_functions_from_file!("lib/src/lib.rs");
-}
-
-#[cfg(not(feature = "hot-reload"))]
-mod hot {
-    pub use cc_hub_lib::render;
-}
 use crossterm::event::{
     self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
     EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
@@ -815,8 +803,7 @@ async fn run(
     let mut app = App::new();
     // Swap in the persisted ack tracker so Space-idled cards survive a
     // restart. Same rationale as the migration above for living here and not
-    // in App::new(): tests and hot-reload paths must never touch the real
-    // home, so App::new() constructs a purely in-memory tracker.
+    // in App::new(): tests must never touch the real home, so App::new() constructs a purely in-memory tracker.
     app.sessions.acks = cc_hub_lib::acks::Acks::load();
     app.image_picker = Some(image_picker);
     if let Some(msg) = migration_error {
@@ -1208,7 +1195,7 @@ async fn run(
                 // diff against a frame the screen no longer shows.
                 terminal.clear()?;
             }
-            terminal.draw(|frame| hot::render(frame, &mut app))?;
+            terminal.draw(|frame| cc_hub_lib::ui::render(frame, &mut app))?;
             draw_dur = t_draw.elapsed();
             // Diff size this frame pushed at the terminal. Drained even for
             // pane frames so their bytes can't leak into the next Grid

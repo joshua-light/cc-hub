@@ -14,16 +14,15 @@ bin/                # cc-hub binary — TUI driver + CLI subcommands
   src/main.rs       # tokio runtime, terminal setup, scan/event loop
   src/cli/          # `cc-hub spawn-worker | merge-worktree | task | orchestrate | pr`
 lib/                # cc-hub-lib — everything else, behind a stable API
-  src/lib.rs        # module wiring + #[no_mangle] render() for hot-reload
+  src/lib.rs        # module wiring
   src/*.rs          # state, scanners, UI, platform, agents, orchestrator…
   src/platform/     # OS-specific shims (process, mux, window, paths, terminal)
   tests/            # integration tests for orchestrator git ops + tmux pane
 ```
 
-Why split? `bin/` owns the runtime; `lib/` is rebuildable as a `cdylib` so
-`cargo run --features hot-reload` can swap rendering code without restarting
-the TUI. `bin/src/main.rs` calls `hot::render(...)` which routes to
-`cc_hub_lib::render` — see `lib/src/lib.rs:46`.
+Why split? `bin/` owns the runtime (tokio, terminal, key dispatch); `lib/`
+owns state and rendering, so tests can build an `App` and draw it without a
+terminal. `bin/src/main.rs` draws through `cc_hub_lib::ui::render`.
 
 ## Runtime flow (TUI)
 
@@ -48,7 +47,7 @@ the TUI. `bin/src/main.rs` calls `hot::render(...)` which routes to
      by a shared semaphore (`config.title.concurrency`)
 3. **Event loop** (`bin/src/main.rs:619`). Each iteration: poll `LiveView`,
    reap exited tmux panes, toggle mouse capture if the embedded pane is
-   visible, draw via `hot::render`, then `event::poll(50ms)` (16 ms when a
+   visible, draw via `ui::render`, then `event::poll(50ms)` (16 ms when a
    tmux pane is foregrounded). Keys are matched against `(View, KeyCode)`
    tuples. Dominant feature handlers such as Tasks live under `bin/src/keys/`
    instead of adding workflow logic to the root dispatcher.
@@ -230,7 +229,7 @@ session running under bash) can drive the same state from its tools.
 ### TUI rendering
 
 - **`ui/`** — `render(frame, app)` entry in `ui/mod.rs` (the function
-  `bin/main.rs` resolves through hot-reload), dispatched on `app.view`
+  `bin/main.rs` draws through), dispatched on `app.view`
   and `app.current_tab` into `sessions.rs` (grid + cards + detail popup),
   `projects.rs` (chips, kanban, task/artifact cards, result + backlog
   popups), `metrics.rs`, and `popups.rs` (pickers, inputs, live tail,
@@ -316,10 +315,6 @@ committed to feature branches.
   `bin/src/main.rs:run`; emit a `ScanMsg` variant for results; drain it in
   the same big `select!`. The fs-watcher fallback timer is the reference
   pattern.
-- **Hot-reload-safe code.** `lib/src/lib.rs` re-exports the `render`
-  entry point with `#[no_mangle]`. Anything reachable from `render` will
-  swap on rebuild; anything in `bin/` will not (the TUI process holds
-  state across reloads, and `App` is in `lib/`).
 
 ## Tests
 

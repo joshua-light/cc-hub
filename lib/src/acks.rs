@@ -21,8 +21,8 @@ use crate::platform::paths::cc_hub_home;
 pub struct Acks {
     entries: HashMap<String, Option<u64>>,
     /// When set, mutations are mirrored to this file. `None` (the [`Acks::new`]
-    /// default) keeps the tracker purely in-memory — tests and hot-reload
-    /// paths that must never touch the real home.
+    /// default) keeps the tracker purely in-memory, for tests that must never touch
+    /// the real home.
     path: Option<PathBuf>,
 }
 

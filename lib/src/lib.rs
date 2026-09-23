@@ -111,10 +111,3 @@ pub mod wake;
 pub mod watcher;
 
 pub use ratatui_image;
-
-use ratatui::Frame;
-
-#[no_mangle]
-pub fn render(frame: &mut Frame, app: &mut app::App) {
-    ui::render(frame, app);
-}

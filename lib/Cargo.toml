@@ -3,12 +3,6 @@ name = "cc-hub-lib"
 version.workspace = true
 edition.workspace = true
 
-[lib]
-crate-type = ["rlib", "cdylib"]
-
-[features]
-hot-reload = []
-
 [dependencies]
 ratatui.workspace = true
 crossterm.workspace = true

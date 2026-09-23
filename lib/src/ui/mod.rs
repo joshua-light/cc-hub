@@ -1,8 +1,8 @@
 //! Top-level TUI render entry point and shared chrome (title bar, tab strip,
-//! status bar). `render` is the hot-reload entry called by lib.rs's
-//! `#[no_mangle]` shim. The per-tab bodies and overlays live in the sibling
-//! modules; the band background and layout split are defined here so the tab
-//! strip and project chip strip share one source of truth.
+//! status bar). `render` is the entry the binary's draw loop calls. The
+//! per-tab bodies and overlays live in the sibling modules; the band
+//! background and layout split are defined here so the tab strip and project
+//! chip strip share one source of truth.
 
 pub mod agents;
 pub mod common;

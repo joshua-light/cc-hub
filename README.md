@@ -437,15 +437,6 @@ max_comments_in_prompt = 8
 Only include the sections and fields you want to override — everything else
 inherits defaults.
 
-### Hot reload (development)
-
-```bash
-cargo run --features hot-reload
-```
-
-Rebuilds of `cc-hub-lib` are picked up without restarting the TUI. Only
-useful while hacking on UI code.
-
 ## Platform differences
 
 cc-hub behaves the same everywhere it can, but a few things genuinely differ:
@@ -647,8 +638,6 @@ queued backlog tasks, so pending work is visible at chip level.
   under a new session id without updating the session metadata. cc-hub
   follows the `/clear` chain by matching clear-event timestamps against new
   JSONL creation times — best-effort.
-- **Hot reload is dev-only.** Requires the `hot-reload` feature; don't ship
-  release builds with it.
 
 ## License
 
