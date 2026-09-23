@@ -27,7 +27,7 @@ pub fn count_recent_sessions() -> SessionCounts {
     let week_start: NaiveDate =
         today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
 
-    // Skip the titler's/triage scratch project dir: its JSONLs are one-shot
+    // Skip the titler's scratch project dir: its JSONLs are one-shot
     // `claude -p` runs cc-hub itself spawns, not real sessions — the same
     // exclusion scanner.rs applies. Sharing the predicate keeps both aligned.
     let scratch_proj_dir = crate::scanner::scratch_project_dir_name();

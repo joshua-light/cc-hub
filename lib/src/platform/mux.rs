@@ -296,23 +296,6 @@ pub fn capture_pane(session: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// Capture the full scrollback of `session`'s window 0 pane (`-S -` walks
-/// to the start of history). Returns empty on failure. Used to archive an
-/// agent's terminal output before its tmux session is killed.
-pub fn capture_pane_full(session: &str) -> String {
-    let target = format!("{}:0", session);
-    let Ok(out) = Command::new(MUX_BIN)
-        .args(["capture-pane", "-t", &target, "-p", "-S", "-"])
-        .output()
-    else {
-        return String::new();
-    };
-    if !out.status.success() {
-        return String::new();
-    }
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
 /// True when the multiplexer reports `session` exists.
 pub fn has_session(session: &str) -> bool {
     Command::new(MUX_BIN)

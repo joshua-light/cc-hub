@@ -3,8 +3,7 @@
 //! A review link becomes a fresh agent session in the local checkout of the
 //! pull request's repository, named `PR: <title>` and opened with the link's
 //! prompt. The checkout is found by name among the folders the hub already
-//! knows — registered projects, then bookmarks, then the cwds of scanned
-//! sessions — so a repo the user has ever worked in from the hub needs no
+//! knows — bookmarks, then the cwds of scanned sessions — so a repo the user has ever worked in from the hub needs no
 //! extra mapping. A repo none of them names is not a refusal: the review
 //! runs from the home directory against the pull request alone, which is
 //! all a review needs, and its prompt says there is no working tree.
@@ -52,14 +51,14 @@ use std::time::{Duration, Instant};
 use crate::agent::AgentKind;
 use crate::bookmarks::Bookmarks;
 use crate::link::{BoardTaskId, FixLink, Link, PullRequestUrl, ReviewLink};
-use crate::ops::worker::{wait_until_idle_and_send, PromptStatus, DEFAULT_PROMPT_WAIT_SECS};
+use crate::ops::prompt::{wait_until_idle_and_send, PromptStatus, DEFAULT_PROMPT_WAIT_SECS};
 use crate::ops::OpError;
-use crate::orchestrator::{self, TaskState, TaskStatus};
 use crate::platform::paths::expand_home;
 use crate::session_tasks;
 use crate::spawn::SessionTarget;
+use crate::task_store::{self, TaskState, TaskStatus};
 use crate::tasks::PersonalBoard;
-use crate::{config, projects_scan, scanner, send, spawn, title};
+use crate::{config, scanner, send, spawn, title};
 
 /// Options for [`open`].
 #[derive(Default)]
@@ -190,7 +189,7 @@ fn fix_target(
     let repo = pr.repo();
     let cwd = folder_named(repo).ok_or_else(|| {
         OpError::NotFound(format!(
-            "no known folder named `{}` — bookmark the checkout in cc-hub (or register it as a project) and retry",
+            "no known folder named `{}` — bookmark the checkout in cc-hub and retry",
             repo
         ))
     })?;
@@ -219,9 +218,9 @@ pub fn file_fix(fix: &FixLink) -> Result<BoardTaskId, OpError> {
     board
         .set_kind(&task_id, kind)
         .map_err(|e| OpError::Other(format!("write kind: {}", e)))?;
-    orchestrator::set_task_title(None, &task_id, &fix.session_title())
+    task_store::set_task_title(&task_id, &fix.session_title())
         .map_err(|e| OpError::Other(format!("write title: {}", e)))?;
-    crate::ops::task::task_artifact_add_text(None, &task_id, &fix_brief(fix), "link")?;
+    crate::ops::task::task_artifact_add_text(&task_id, &fix_brief(fix), "link")?;
     Ok(task_id.parse().expect("the board mints tk- ids"))
 }
 
@@ -287,10 +286,9 @@ fn without_a_brief(card: &TaskState) -> Result<(), OpError> {
     Ok(())
 }
 
-/// The board card a task link addresses. Personal-board tasks are the only
-/// ones a `tk-` id can name, so the project store is never consulted.
+/// The board card a task link addresses.
 fn board_card(task_id: &str) -> Result<TaskState, OpError> {
-    orchestrator::read_task_state_for(None, task_id)
+    task_store::read_task_state(task_id)
         .map_err(|e| OpError::NotFound(format!("no board task {}: {}", task_id, e)))
 }
 
@@ -309,7 +307,7 @@ fn live_session_in(card: &TaskState, cwd: &Path, alive: impl Fn(&str) -> bool) -
 /// and a link never moves a card. `session_id` is left for the first scan
 /// that sees the mux session to resolve, as it is for a board assignment.
 fn bind_card(task_id: &str, cwd: &Path, agent_id: &str, tmux: &str) -> Result<(), OpError> {
-    orchestrator::update_personal_task(task_id, |s| {
+    task_store::update_task(task_id, |s| {
         s.cwd = Some(cwd.to_string_lossy().into_owned());
         s.agent_id = Some(agent_id.to_string());
         s.tmux = Some(tmux.to_string());
@@ -445,7 +443,6 @@ fn link_session_to_card(session_id: &str, task_id: &str) {
     };
     let link = session_tasks::TaskLink {
         task_id: task_id.to_string(),
-        project_id: None,
         title,
     };
     if let Err(e) = session_tasks::link(session_id, link) {
@@ -485,7 +482,7 @@ fn name_once_visible(tmux: &str, title: &str, timeout: Duration) -> Option<Strin
 
 /// The first known folder whose name is `repo` (case-insensitive) and that
 /// still exists on disk. Precedence follows the hub's folder picker:
-/// registered projects, bookmarks, then session cwds newest-first.
+/// bookmarks, then session cwds newest-first.
 fn folder_named(repo: &str) -> Option<PathBuf> {
     known_folders()
         .into_iter()
@@ -500,7 +497,6 @@ fn is_named(path: &Path, name: &str) -> bool {
 
 fn known_folders() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
-    out.extend(projects_scan::scan().projects.into_iter().map(|p| p.root));
     out.extend(Bookmarks::load().list());
 
     let mut sessions = scanner::scan_sessions();
@@ -517,10 +513,10 @@ mod tests {
 
     #[cfg(unix)]
     fn card(cwd: Option<&str>) -> String {
-        let mut state = TaskState::new_personal("Semantic Linter".into());
+        let mut state = TaskState::new("Semantic Linter".into());
         state.task_id = "tk-1".into();
         state.cwd = cwd.map(str::to_string);
-        orchestrator::write_task_state(&state).expect("write card");
+        task_store::write_task_state(&state).expect("write card");
         state.task_id
     }
 
@@ -674,7 +670,7 @@ mod tests {
                 Err(OpError::Conflict { .. })
             ));
 
-            crate::ops::task::task_artifact_add_text(None, &id, "Problem: …", "cli").expect("note");
+            crate::ops::task::task_artifact_add_text(&id, "Problem: …", "cli").expect("note");
             let target = target(&link, Some("claude")).expect("target");
             assert_eq!(
                 target.prompt,
@@ -717,13 +713,12 @@ mod tests {
             let links = session_tasks::load();
             let link = links.get("sid-1").expect("linked");
             assert_eq!(link.task_id, id);
-            assert_eq!(link.project_id, None);
             assert_eq!(link.title, "Semantic Linter");
         });
     }
 
     fn card_with_session(cwd: &str, tmux: Option<&str>) -> TaskState {
-        let mut state = TaskState::new_personal("Semantic Linter".into());
+        let mut state = TaskState::new("Semantic Linter".into());
         state.cwd = Some(cwd.into());
         state.tmux = tmux.map(str::to_string);
         state

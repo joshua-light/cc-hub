@@ -62,11 +62,6 @@ pub fn kill_tmux_session(session_name: &str) -> io::Result<()> {
     mux::kill_session(session_name)
 }
 
-/// Full scrollback capture of the session's first pane. Empty on failure.
-pub fn capture_tmux_pane_full(session_name: &str) -> String {
-    mux::capture_pane_full(session_name)
-}
-
 /// True when the multiplexer reports `session_name` is alive.
 pub fn tmux_session_exists(session_name: &str) -> bool {
     mux::has_session(session_name)

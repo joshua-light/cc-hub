@@ -1,15 +1,10 @@
 //! Overlay views: folder picker, gh-create / prompt / rename inputs, confirm
-//! dialogs, the to-do side panel, the embedded tmux pane, the state-debug
-//! popup, and the live transcript tail.
+//! dialogs, the embedded tmux pane, and the live transcript tail.
 
 use crate::app::{App, PendingConfirm, TaskField};
-use crate::config;
-use crate::conversation::{StateExplanation, Verdict};
 use crate::folder_picker::{FolderPicker, PickerMode, PlaceSource};
-use crate::models::SessionInfo;
-use crate::ui::common::{centered_fixed, centered_rect, format_tokens, popup_block, state_color};
-use crate::ui::main_layout;
-use crate::ui::palette::{ACCENT_BLUE, CONTEXT_GRAY, DIM_TEXT, GRAY_80};
+use crate::ui::common::{centered_fixed, centered_rect, format_tokens, popup_block};
+use crate::ui::palette::{ACCENT_BLUE, DIM_TEXT};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -39,7 +34,7 @@ pub(crate) fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
     } else if assigning {
         (
             " Assign task · pick folder ",
-            " enter:descend · bksp:parent · space/.:pick · tab:projects · esc:cancel ",
+            " enter:descend · bksp:parent · space/.:pick · tab:places · esc:cancel ",
             "  (no subdirectories)",
         )
     } else {
@@ -143,7 +138,7 @@ pub(crate) fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// Places mode of the assign / new-session picker: a flat, fuzzy-filterable
-/// list of known directories (registered projects, bookmarks, recent cwds).
+/// list of known directories (bookmarks, recent cwds).
 /// The top row is the live filter; matched chars are highlighted in each row.
 fn render_places_picker(frame: &mut Frame, area: Rect, picker: &FolderPicker, assigning: bool) {
     let popup = centered_fixed(area, 80, 24);
@@ -246,7 +241,6 @@ fn render_places_picker(frame: &mut Frame, area: Rect, picker: &FolderPicker, as
                 bar.fg(Color::Black).add_modifier(Modifier::BOLD),
             );
             let badge = match place.source {
-                PlaceSource::Project => Span::styled("◆ ", bar.fg(Color::Cyan)),
                 PlaceSource::Bookmark => Span::styled("★ ", bar.fg(Color::Yellow)),
                 PlaceSource::Recent => Span::styled("· ", bar.fg(Color::DarkGray)),
             };
@@ -353,109 +347,6 @@ pub(crate) fn render_gh_create_input(frame: &mut Frame, area: Rect, app: &App) {
     ]);
 
     let lines = vec![cwd_line, Line::raw(""), name_line, vis_line];
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-}
-
-pub(crate) fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
-    let mut input_line = app.prompt_buffer.clone();
-    input_line.push('▎');
-
-    let desired_w = 80u16.min(area.width);
-    let wrap_width = desired_w.saturating_sub(4) as usize;
-    let prompt_lines: u16 = if wrap_width == 0 {
-        1
-    } else {
-        let total: usize = input_line
-            .split('\n')
-            .map(|seg| {
-                let w = seg.chars().count();
-                w.div_ceil(wrap_width).max(1)
-            })
-            .sum();
-        total.try_into().unwrap_or(u16::MAX)
-    };
-    let desired_h = 5u16.saturating_add(prompt_lines).max(9).min(area.height);
-
-    let popup = centered_fixed(area, desired_w, desired_h);
-    frame.render_widget(Clear, popup);
-
-    let cwd = app
-        .projects
-        .pending_cwd
-        .clone()
-        .unwrap_or_else(|| "?".into());
-    let agent = app.pending_agent_label().unwrap_or_else(|| "?".into());
-    let (title, target_label, title_color) = (
-        " New project task ",
-        format!(" → {} orchestrator in {} ", agent, cwd),
-        Color::Cyan,
-    );
-
-    let block = popup_block(Span::styled(
-        title,
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    ))
-    .title_bottom(Span::styled(
-        target_label,
-        Style::default()
-            .fg(title_color)
-            .add_modifier(Modifier::BOLD),
-    ));
-
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
-    if inner.height == 0 || inner.width == 0 {
-        return;
-    }
-
-    let mut footer_spans = vec![
-        Span::raw("  "),
-        Span::styled(
-            "[enter]",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" create task   ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            "[esc]",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
-    ];
-    if config::get().resolved_agents().len() > 1 {
-        footer_spans.push(Span::styled("   ", Style::default().fg(Color::DarkGray)));
-        footer_spans.push(Span::styled(
-            "[tab]",
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD),
-        ));
-        footer_spans.push(Span::styled(
-            " cycle agent",
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-    let lines = vec![
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled("  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                input_line,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::raw(""),
-        Line::from(footer_spans),
-    ];
-
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
@@ -1077,59 +968,6 @@ pub(crate) fn render_session_finder(frame: &mut Frame, area: Rect, app: &App) {
 
     frame.render_widget(Paragraph::new(lines), list_area);
 }
-
-/// Word-wrap `text` to `width` columns for the to-do panel: break on
-/// whitespace, hard-split any single word longer than `width`, and count each
-/// char as one column (matching the add-input's `chars().count()` budget).
-/// Always returns at least one line so an empty item still occupies a row.
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut lines: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    let mut cur_len = 0usize;
-    for word in text.split_whitespace() {
-        let wlen = word.chars().count();
-        if wlen > width {
-            // Word can't fit on any line — flush what we have, then chop it
-            // into width-sized chunks so it still shows in full.
-            if cur_len > 0 {
-                lines.push(std::mem::take(&mut cur));
-                cur_len = 0;
-            }
-            for ch in word.chars() {
-                if cur_len == width {
-                    lines.push(std::mem::take(&mut cur));
-                    cur_len = 0;
-                }
-                cur.push(ch);
-                cur_len += 1;
-            }
-            continue;
-        }
-        let need = if cur_len == 0 {
-            wlen
-        } else {
-            cur_len + 1 + wlen
-        };
-        if need > width {
-            lines.push(std::mem::take(&mut cur));
-            cur = word.to_string();
-            cur_len = wlen;
-        } else {
-            if cur_len > 0 {
-                cur.push(' ');
-                cur_len += 1;
-            }
-            cur.push_str(word);
-            cur_len += wlen;
-        }
-    }
-    if cur_len > 0 || lines.is_empty() {
-        lines.push(cur);
-    }
-    lines
-}
-
 /// Visual rows one logical `Line` occupies when a `Paragraph` with
 /// `Wrap { trim: false }` renders it into `width` columns. ratatui scrolls a
 /// wrapped paragraph by these *wrapped rows*, not by logical lines, so every
@@ -1151,157 +989,6 @@ pub(crate) fn wrapped_total_rows(lines: &[Line], width: u16) -> u16 {
         .line_count(width)
         .max(lines.len().min(1))
         .min(u16::MAX as usize) as u16
-}
-
-/// Scratch to-do list, drawn as a right-anchored side panel over the body
-/// region so the tab strip and status bar (which carries the panel's own key
-/// hints) stay visible behind it.
-pub(crate) fn render_todo_panel(frame: &mut Frame, area: Rect, app: &App) {
-    // Anchor to the body band of the same split `render` uses, so the panel
-    // sits under the header band and above the status row rather than
-    // covering the whole screen.
-    let body = main_layout(area)[2];
-
-    let width = 46u16.min(body.width);
-    if width == 0 || body.height == 0 {
-        return;
-    }
-    let panel = Rect::new(body.x + body.width - width, body.y, width, body.height);
-    frame.render_widget(Clear, panel);
-
-    let done = app.todo.list.items().iter().filter(|i| i.done).count();
-    let total = app.todo.list.len();
-    let block = popup_block(Span::styled(
-        format!(" To-Do · {}/{} done ", done, total),
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    ))
-    .title_bottom(Span::styled(
-        if app.todo.adding {
-            " enter add · esc cancel "
-        } else {
-            " a add · space toggle · d delete · c clear done · esc close "
-        },
-        Style::default().fg(DIM_TEXT),
-    ));
-
-    let inner = block.inner(panel);
-    frame.render_widget(block, panel);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    // Reserve the bottom two rows (spacer + input) in add mode so a long list
-    // can never push the input line off-screen.
-    let input_rows = if app.todo.adding { 2usize } else { 0 };
-    let list_rows = (inner.height as usize).saturating_sub(input_rows);
-
-    let mut lines: Vec<Line> = Vec::new();
-    if total == 0 && !app.todo.adding {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            "  No tasks yet — press a to add one.",
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
-        )));
-    } else {
-        // Wrap each item to the panel width, indenting continuation rows under
-        // the text so they line up past the cursor + checkbox. An item now
-        // spans a variable number of screen rows, so the scroll window counts
-        // rows (not items) and we track where each item's rows begin.
-        const PREFIX_W: usize = 6; // "  " cursor + "[ ] " checkbox
-        let text_width = (inner.width as usize).saturating_sub(PREFIX_W);
-        let sel = app.todo.selected.min(total.saturating_sub(1));
-
-        let mut rows: Vec<Line> = Vec::new();
-        let mut item_start: Vec<usize> = Vec::with_capacity(total);
-        for (i, item) in app.todo.list.items().iter().enumerate() {
-            item_start.push(rows.len());
-            let selected = !app.todo.adding && i == sel;
-            let cursor = if selected { "› " } else { "  " };
-            let checkbox = if item.done { "[x] " } else { "[ ] " };
-            let text_style = if item.done {
-                Style::default().fg(DIM_TEXT).add_modifier(Modifier::ITALIC)
-            } else if selected {
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Rgb(200, 200, 210))
-            };
-            let marker_style = if item.done {
-                Style::default().fg(Color::Green)
-            } else if selected {
-                Style::default()
-                    .fg(ACCENT_BLUE)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            for (j, seg) in wrap_text(&item.text, text_width).into_iter().enumerate() {
-                if j == 0 {
-                    rows.push(Line::from(vec![
-                        Span::styled(cursor, marker_style),
-                        Span::styled(checkbox, marker_style),
-                        Span::styled(seg, text_style),
-                    ]));
-                } else {
-                    rows.push(Line::from(vec![
-                        Span::raw(" ".repeat(PREFIX_W)),
-                        Span::styled(seg, text_style),
-                    ]));
-                }
-            }
-        }
-
-        // Scroll so the selected item is visible: pull its bottom edge into
-        // view, but never past its top, so an item taller than the window
-        // shows from the top down.
-        let total_rows = rows.len();
-        let sel_start = item_start.get(sel).copied().unwrap_or(0);
-        let sel_end = item_start.get(sel + 1).copied().unwrap_or(total_rows);
-        let mut scroll = 0usize;
-        if total_rows > list_rows {
-            if sel_end > list_rows {
-                scroll = sel_end - list_rows;
-            }
-            scroll = scroll.min(sel_start).min(total_rows - list_rows);
-        }
-        lines.extend(rows.into_iter().skip(scroll).take(list_rows));
-    }
-
-    if app.todo.adding {
-        let mut input = app.todo.input.clone();
-        input.push('▎');
-        // Without wrap the line clips on the right, which would hide the
-        // cursor on long input — show the tail instead, like an input field.
-        let avail = (inner.width as usize).saturating_sub(2); // "+ " prefix
-        let chars = input.chars().count();
-        if chars > avail && avail > 0 {
-            input = std::iter::once('…')
-                .chain(input.chars().skip(chars + 1 - avail))
-                .collect();
-        }
-        lines.push(Line::raw(""));
-        lines.push(Line::from(vec![
-            Span::styled(
-                "+ ",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                input,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-    }
-
-    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// The add/rename-task popup. Renaming is the one-line editor it always was;
@@ -1871,29 +1558,7 @@ pub(crate) fn render_tmux_pane(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 pub(crate) fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
-    // The same view handles destructive/interrupting confirmations:
-    // registry-level project removal, project-task deletion, orchestrator
-    // restart, and session close. Project-delete wins precedence because
-    // it's the biggest blast radius if multiple actions somehow got staged.
     let (title, display, consequence, action_color) = match app.pending_confirm.as_ref() {
-        Some(PendingConfirm::ProjectDelete(pending)) => (
-            " Delete project? ",
-            pending.display.clone(),
-            "Removes this project from cc-hub and deletes its hub state. The repository directory is not deleted.",
-            Color::Red,
-        ),
-        Some(PendingConfirm::TaskDelete(pending)) => (
-            " Delete task? ",
-            pending.display.clone(),
-            "Kills the orchestrator if it is live and removes this task's state directory. Worker sessions are left alone.",
-            Color::Red,
-        ),
-        Some(PendingConfirm::TaskRestart(pending)) => (
-            " Restart orchestrator? ",
-            pending.display.clone(),
-            "Kills the current orchestrator if it is live, then starts a new one from the original task prompt. Task history is preserved.",
-            Color::Yellow,
-        ),
         Some(PendingConfirm::Close(pending)) => (
             " Close terminal? ",
             pending.display.clone(),
@@ -1942,181 +1607,6 @@ pub(crate) fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
     ];
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-}
-
-pub(crate) fn render_state_debug(frame: &mut Frame, area: Rect, app: &mut App) {
-    let popup_area = centered_rect(area, 0.9);
-    frame.render_widget(Clear, popup_area);
-
-    let Some((info, exp)) = app.state_debug.as_ref() else {
-        frame.render_widget(popup_block(" Why this state? — loading… "), popup_area);
-        return;
-    };
-
-    let title = format!(
-        " Why · {} · PID {} · state {} ",
-        info.project_name, info.pid, exp.final_state
-    );
-    let block = popup_block(Span::styled(
-        title,
-        Style::default()
-            .fg(state_color(&exp.final_state))
-            .add_modifier(Modifier::BOLD),
-    ))
-    .title_bottom(Span::styled(
-        " j/k scroll · esc/q close ",
-        Style::default().fg(Color::DarkGray),
-    ));
-    let inner = block.inner(popup_area);
-    frame.render_widget(block, popup_area);
-
-    // Too small to host content plus the bottom-border indicator; bail before
-    // `popup_area.height - 1` below can underflow on a 1-row terminal.
-    if inner.height == 0 || inner.width == 0 {
-        return;
-    }
-
-    // The Paragraph wraps, so scroll counts wrapped rows. Clamp the stored
-    // scroll to the real bottom each frame — the key handler only
-    // saturating_adds, so without this `j` runs off into blank space while the
-    // N/N indicator pins.
-    let total_rows = wrapped_total_rows(&app.state_debug_lines, inner.width);
-    let max_scroll = total_rows.saturating_sub(inner.height);
-    if app.render.state_debug_scroll > max_scroll {
-        app.render.state_debug_scroll = max_scroll;
-    }
-
-    let scroll_info = format!(
-        " {}/{} ",
-        (app.render.state_debug_scroll as usize).min(total_rows.saturating_sub(1) as usize) + 1,
-        total_rows
-    );
-    let indicator_area = Rect::new(
-        inner.x,
-        popup_area.y + popup_area.height - 1,
-        inner.width,
-        1,
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            scroll_info,
-            Style::default().fg(Color::DarkGray),
-        )))
-        .alignment(Alignment::Right),
-        indicator_area,
-    );
-
-    let content = Paragraph::new(app.state_debug_lines.clone())
-        .wrap(Wrap { trim: false })
-        .scroll((app.render.state_debug_scroll, 0));
-    frame.render_widget(content, inner);
-}
-
-pub fn build_state_debug_content(info: &SessionInfo, exp: &StateExplanation) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = Vec::new();
-
-    let final_color = state_color(&exp.final_state);
-
-    lines.push(Line::from(vec![
-        Span::styled("Final state: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            format!("{}", exp.final_state),
-            Style::default()
-                .fg(final_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
-
-    let path_str = info
-        .jsonl_path
-        .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "(no jsonl)".to_string());
-    lines.push(Line::from(vec![
-        Span::styled("JSONL:       ", Style::default().fg(Color::DarkGray)),
-        Span::styled(path_str, Style::default().fg(Color::White)),
-    ]));
-
-    lines.push(Line::from(vec![
-        Span::styled("Tail size:   ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            format!("{} entries (last 64 KiB)", exp.entry_count),
-            Style::default().fg(Color::White),
-        ),
-    ]));
-
-    lines.push(Line::from(vec![
-        Span::styled("mtime age:   ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            exp.mtime_age_secs
-                .map_or("unknown".to_string(), |s| format!("{}s", s)),
-            Style::default().fg(Color::White),
-        ),
-    ]));
-
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(
-        "─── decision tree ───",
-        Style::default().fg(GRAY_80),
-    )));
-    lines.push(Line::raw(""));
-
-    for step in &exp.steps {
-        let (tag, tag_color) = match &step.verdict {
-            Verdict::Decided(s) => (format!("DECIDE → {}", s), state_color(s)),
-            Verdict::Passed => ("PASS".to_string(), Color::Green),
-            Verdict::Skipped => ("SKIP".to_string(), Color::Rgb(90, 90, 100)),
-        };
-
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("[{}] ", tag),
-                Style::default().fg(tag_color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                step.name.to_string(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-        for d in &step.details {
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(d.clone(), Style::default().fg(Color::Rgb(190, 190, 200))),
-            ]));
-        }
-        lines.push(Line::raw(""));
-    }
-
-    lines.push(Line::from(Span::styled(
-        "─── tail entries (most recent last) ───",
-        Style::default().fg(GRAY_80),
-    )));
-    lines.push(Line::raw(""));
-
-    for e in &exp.tail {
-        let blocks = if e.blocks.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", e.blocks.join(", "))
-        };
-        let stop = e
-            .stop_reason
-            .as_ref()
-            .map(|s| format!(" stop={}", s))
-            .unwrap_or_default();
-        let ts = e.timestamp.as_deref().unwrap_or("        ");
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {:>3}  ", e.idx), Style::default().fg(GRAY_80)),
-            Span::styled(format!("{}  ", ts), Style::default().fg(Color::DarkGray)),
-            Span::styled(e.kind.clone(), Style::default().fg(Color::Cyan)),
-            Span::styled(stop, Style::default().fg(Color::Yellow)),
-            Span::styled(blocks, Style::default().fg(CONTEXT_GRAY)),
-        ]));
-    }
-
-    lines
 }
 
 pub(crate) fn render_live_tail(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -2521,41 +2011,6 @@ pub(crate) fn push_bullet_block(
         lines.push(Line::from(p));
     }
 }
-
-#[cfg(test)]
-mod wrap_text_tests {
-    use super::wrap_text;
-
-    #[test]
-    fn wraps_on_word_boundaries() {
-        assert_eq!(
-            wrap_text("the quick brown fox", 9),
-            vec!["the quick", "brown fox"]
-        );
-    }
-
-    #[test]
-    fn hard_splits_a_word_longer_than_width() {
-        assert_eq!(wrap_text("abcdefgh", 3), vec!["abc", "def", "gh"]);
-    }
-
-    #[test]
-    fn long_word_breaks_after_flushing_the_current_line() {
-        assert_eq!(wrap_text("hi abcdefgh", 3), vec!["hi", "abc", "def", "gh"]);
-    }
-
-    #[test]
-    fn empty_or_blank_text_yields_one_empty_row() {
-        assert_eq!(wrap_text("", 10), vec![String::new()]);
-        assert_eq!(wrap_text("   ", 10), vec![String::new()]);
-    }
-
-    #[test]
-    fn zero_width_is_clamped_to_one_column() {
-        assert_eq!(wrap_text("ab", 0), vec!["a", "b"]);
-    }
-}
-
 #[cfg(test)]
 mod task_kind_picker_tests {
     use crate::app::TaskKindPickerState;
@@ -2671,12 +2126,8 @@ mod places_picker_tests {
         with_temp_home(|| {
             let mut app = App::new();
             let mut picker = FolderPicker::new_places(vec![
-                Place::new(
-                    Some("cc-hub".into()),
-                    PathBuf::from("/g/self/cc-hub"),
-                    PlaceSource::Project,
-                ),
-                Place::new(None, PathBuf::from("/g/self/reddit"), PlaceSource::Recent),
+                Place::new(PathBuf::from("/g/self/cc-hub"), PlaceSource::Bookmark),
+                Place::new(PathBuf::from("/g/self/reddit"), PlaceSource::Recent),
             ]);
             for c in "hub".chars() {
                 picker.push_filter(c);
@@ -2707,7 +2158,7 @@ mod places_picker_tests {
 #[cfg(all(test, unix))]
 mod task_link_picker_tests {
     use crate::app::{App, TaskLinkAction, TaskLinkChoice, TaskLinkPickerState, View};
-    use crate::orchestrator::TaskStatus;
+    use crate::task_store::TaskStatus;
     use crate::test_util::with_temp_home;
     use crate::ui::common::buffer_to_string;
     use ratatui::backend::TestBackend;
@@ -2721,7 +2172,6 @@ mod task_link_picker_tests {
             status: Some(status),
             action: TaskLinkAction::Link {
                 task_id: format!("tk-{label}"),
-                project_id: None,
                 title: label.into(),
             },
         }
@@ -3035,47 +2485,6 @@ mod task_input_tests {
                 "no context box:\n{}",
                 rendered
             );
-        });
-    }
-}
-
-// Unix-only: `with_temp_home` redirects `$HOME` so the todo add doesn't touch
-// the real `~/.cc-hub` — the same isolation the todo module's own tests rely on.
-#[cfg(all(test, unix))]
-mod todo_panel_tests {
-    use crate::app::{App, View};
-    use crate::test_util::with_temp_home;
-    use crate::ui::common::buffer_to_string;
-    use ratatui::backend::TestBackend;
-    use ratatui::Terminal;
-
-    #[test]
-    fn long_item_wraps_instead_of_clipping() {
-        with_temp_home(|| {
-            let mut app = App::new();
-            // Longer than the panel's ~38-column text area, so it must wrap to
-            // a second row instead of clipping the tail off the right edge.
-            let long = "remember to refactor the orchestrator retry backoff logic today";
-            app.todo.list.add(long);
-            app.view = View::TodoPanel;
-
-            let backend = TestBackend::new(60, 12);
-            let mut terminal = Terminal::new(backend).expect("terminal");
-            terminal
-                .draw(|f| super::render_todo_panel(f, f.area(), &app))
-                .expect("render");
-            let rendered = buffer_to_string(terminal.backend().buffer());
-
-            // Every word survives somewhere in the panel — the tail words would
-            // be missing if the row were clipped rather than wrapped.
-            for word in long.split_whitespace() {
-                assert!(
-                    rendered.contains(word),
-                    "word {:?} should appear in the wrapped panel:\n{}",
-                    word,
-                    rendered
-                );
-            }
         });
     }
 }

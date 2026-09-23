@@ -2,14 +2,12 @@ use crate::agent::AgentConfig;
 use crate::agent_runtime::{AgentRuntime, SystemAgentRuntime};
 use crate::bookmarks::Bookmarks;
 use crate::config;
-use crate::conversation::StateExplanation;
 use crate::folder_picker::{FolderPicker, PickerMode, Place};
 use crate::live_view::LiveView;
 use crate::metrics::{MetricsAnalysis, SelectableSession};
 use crate::models::{ProjectGroup, SessionDetail, SessionInfo, SessionState, TaskBadge};
-use crate::orchestrator::{TaskPriority, TaskState, TaskStatus};
-use crate::projects_scan::ProjectsSnapshot;
 use crate::session_count::SessionCounts;
+use crate::task_store::{TaskPriority, TaskState, TaskStatus};
 use crate::tmux_pane::TmuxPaneView;
 use crate::usage::UsageInfo;
 use ratatui::text::Line;
@@ -21,24 +19,20 @@ use std::time::{Duration, Instant};
 mod command;
 mod harness_view;
 mod metrics_view;
-mod projects_view;
 mod render_state;
 mod session_finder;
 mod sessions_view;
 mod task_link_picker;
 mod tasks_view;
-mod todo_panel;
 
 pub use command::{Command, Effect, GlobalCommand, HarnessCommand, SessionsCommand, TasksCommand};
 pub use harness_view::HarnessView;
 pub use metrics_view::MetricsView;
-pub use projects_view::ProjectsView;
 pub use render_state::RenderState;
 pub use session_finder::{SessionFinderChoice, SessionFinderRow, SessionFinderState};
 pub use sessions_view::{SessionsLayout, SessionsView};
 pub use task_link_picker::{TaskLinkAction, TaskLinkChoice, TaskLinkPickerState, TaskLinkRow};
 pub use tasks_view::{column_statuses, visible_task_columns, TaskField, TasksView, TASK_COLUMNS};
-pub use todo_panel::TodoPanelState;
 
 pub fn status_msg_ttl() -> Duration {
     config::get().ui.status_msg_ttl()
@@ -161,24 +155,20 @@ fn cluster_by_task(
 }
 
 /// Task-link picker band order: the Tasks-board columns left to right
-/// (To-Do → Planning → In Progress → Done). Personal-board tasks never hold
-/// the orchestrated-only Review/Merging phases; they rank between In
-/// Progress and Done for exhaustiveness.
+/// (To-Do → Planning → In Progress → Review → Done).
 fn task_link_status_rank(status: TaskStatus) -> u8 {
     match status {
         TaskStatus::Backlog => 0,
         TaskStatus::Planning => 1,
         TaskStatus::Running => 2,
         TaskStatus::Review => 3,
-        TaskStatus::Merging => 4,
-        TaskStatus::Done => 5,
+        TaskStatus::Done => 4,
     }
 }
 
 /// One task-link picker candidate plus its sort key parts:
 /// `(status band, not-local-to-the-session's-cwd, updated_at)`. The detail
-/// is just the status board label — every candidate is a personal-board
-/// task, so a store/project prefix would repeat the same word on every row.
+/// is just the status board label.
 fn task_link_candidate(task: &TaskState, session_cwd: &str) -> (u8, bool, i64, TaskLinkChoice) {
     let title = task_display_title(task);
     // "Local" means the task's board assignment ran in the session's cwd —
@@ -190,7 +180,6 @@ fn task_link_candidate(task: &TaskState, session_cwd: &str) -> (u8, bool, i64, T
         status: Some(task.status),
         action: TaskLinkAction::Link {
             task_id: task.task_id.clone(),
-            project_id: task.project_id.clone(),
             title,
         },
     };
@@ -207,7 +196,7 @@ fn task_link_candidate(task: &TaskState, session_cwd: &str) -> (u8, bool, i64, T
 /// origin like "typed", not a path), the *original* file's basename
 /// otherwise (the stored copy's name carries a timestamp prefix nobody
 /// typed).
-fn attachment_label(a: &crate::orchestrator::Artifact) -> String {
+fn attachment_label(a: &crate::task_store::Artifact) -> String {
     if a.kind == "url" {
         return a.path.clone();
     }
@@ -229,8 +218,6 @@ pub enum View {
     Popup,
     LiveTail,
     ConfirmClose,
-    StateDebug,
-    PromptInput,
     RenameSession,
     TmuxPane,
     FolderPicker,
@@ -253,10 +240,6 @@ pub enum View {
     /// and reopen the pick — attach when live, resume when not.
     SessionFinder,
     GhCreateInput,
-    ProjectsResult,
-    Backlog,
-    /// Scratch to-do side panel on the Sessions tab (toggled with `t`).
-    TodoPanel,
     /// Centered single-line input for adding a task on the Tasks tab.
     TaskInput,
     /// Centered single-line input for editing the focused task's tags.
@@ -276,24 +259,6 @@ pub enum View {
     TaskFilter,
     /// Agents tab: tick timeline + notes + spec for the focused agent.
     AgentDetail,
-}
-
-/// Outcome of pressing Space on a focused Projects-tab task. The caller
-/// uses this to decide whether to show the generic "nothing to approve"
-/// toast and whether to notify the orchestrator tmux to continue the
-/// merge flow. Specific failure/success messaging is handled inside
-/// `approve_review_task` via `set_status`; the caller only acts on the
-/// variant.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ApproveOutcome {
-    /// No focused Review task — caller should show the generic toast.
-    NotReviewTask,
-    /// PR was approved; caller should ping the live orchestrator tmux.
-    PrApproved,
-    /// Review task without a PR was transitioned to Done; status set.
-    DoneNoPr,
-    /// Approve attempted but failed; specific reason already in status.
-    Failed,
 }
 
 /// Outcome of committing the rename modal, so the command layer knows where
@@ -324,7 +289,6 @@ pub struct GhCreateInput {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Tab {
     Tasks,
-    Projects,
     Sessions,
     Agents,
     Metrics,
@@ -334,7 +298,6 @@ impl Tab {
     pub fn label(&self) -> &'static str {
         match self {
             Tab::Tasks => "Tasks",
-            Tab::Projects => "Projects",
             Tab::Sessions => "Sessions",
             Tab::Agents => "Agents",
             Tab::Metrics => "Metrics",
@@ -342,21 +305,12 @@ impl Tab {
     }
 }
 
-pub const TABS: &[Tab] = &[
-    Tab::Tasks,
-    Tab::Projects,
-    Tab::Sessions,
-    Tab::Agents,
-    Tab::Metrics,
-];
+pub const TABS: &[Tab] = &[Tab::Tasks, Tab::Sessions, Tab::Agents, Tab::Metrics];
 
-/// Tabs shown in the strip and reachable via ⇥, in [`TABS`] order. The
-/// Projects tab is WIP-gated behind `[ui] show_projects_tab` (its scan and
-/// data stay live either way — only the tab is hidden).
+/// Tabs shown in the strip and reachable via ⇥, in [`TABS`] order.
 pub fn visible_tabs() -> Vec<Tab> {
     TABS.iter()
         .copied()
-        .filter(|t| *t != Tab::Projects || config::get().ui.show_projects_tab)
         // Agents shows once `~/.cc-hub/agents/` exists (at startup) unless
         // config hides it; `cc-hub agent new` creates the dir.
         .filter(|t| {
@@ -371,51 +325,10 @@ pub struct PendingClose {
     pub display: String,
 }
 
-/// Pending project-task deletion. Shown via the same `ConfirmClose` view
-/// as session close, distinguished by the [`PendingConfirm::TaskDelete`]
-/// variant (vs. [`PendingConfirm::Close`]).
-#[derive(Clone, Debug)]
-pub struct PendingTaskDelete {
-    pub project_id: String,
-    pub task_id: String,
-    pub display: String,
-    /// tmux name of the orchestrator, captured at delete-prompt time so a
-    /// concurrent state rewrite can't change what we kill.
-    pub orchestrator_tmux: Option<String>,
-    /// True when the delete was initiated from the Backlog popup, so the
-    /// confirm/cancel return path lands back on the popup instead of the Grid.
-    pub from_backlog: bool,
-}
-
-/// Pending registry-level project removal. Shown via the same
-/// `ConfirmClose` view as task delete, distinguished by the
-/// [`PendingConfirm::ProjectDelete`] variant.
-#[derive(Clone, Debug)]
-pub struct PendingProjectDelete {
-    pub project_id: String,
-    pub display: String,
-}
-
-/// Pending project-task orchestrator restart. Shown via the same
-/// `ConfirmClose` view as destructive actions because it kills/replaces
-/// runtime state even though task history is preserved.
-#[derive(Clone, Debug)]
-pub struct PendingTaskRestart {
-    pub project_id: String,
-    pub task_id: String,
-    pub display: String,
-}
-
-/// The single destructive/interrupting action staged behind
-/// [`View::ConfirmClose`]. Replaces four parallel `Option<…>` fields whose
-/// "exactly one is `Some`" invariant used to live only in convention: with
-/// one `Option<PendingConfirm>` that invariant is unrepresentable.
+/// The destructive action staged behind [`View::ConfirmClose`].
 #[derive(Clone, Debug)]
 pub enum PendingConfirm {
     Close(PendingClose),
-    TaskDelete(PendingTaskDelete),
-    ProjectDelete(PendingProjectDelete),
-    TaskRestart(PendingTaskRestart),
 }
 
 /// Default model choices for the implicit Claude agent.
@@ -721,11 +634,9 @@ pub enum DispatchAction {
 pub struct App {
     runtime: Arc<dyn AgentRuntime>,
     pub sessions: SessionsView,
-    pub projects: ProjectsView,
     pub metrics: MetricsView,
     pub harness: HarnessView,
     pub tasks: TasksView,
-    pub todo: TodoPanelState,
     pub view: View,
     pub detail: Option<SessionDetail>,
     pub detail_loading: bool,
@@ -741,12 +652,9 @@ pub struct App {
     /// [`View::ConfirmClose`]. At most one can be pending at a time, which
     /// the [`PendingConfirm`] enum makes structural rather than conventional.
     pub pending_confirm: Option<PendingConfirm>,
-    pub state_debug: Option<(SessionInfo, StateExplanation)>,
-    pub state_debug_lines: Vec<Line<'static>>,
     pub usage: Option<UsageInfo>,
     pub usage_line: Line<'static>,
     pub session_counts: SessionCounts,
-    pub prompt_buffer: String,
     /// In-progress edit buffer for the rename-session prompt (`r` on the
     /// Sessions tab). Prefilled with the current title so the user edits
     /// rather than retypes.
@@ -787,10 +695,6 @@ pub struct App {
     /// checking a couple of times a second — this throttles the fork+exec so
     /// the event loop isn't spending most frames waiting on tmux.
     last_dispatch_probe_at: Option<Instant>,
-    /// Terminal-graphics picker, initialised once after entering the alt
-    /// screen. `None` when running headless / `--no-tui` / inside tests so
-    /// the renderer can fall back to a placeholder rather than crash.
-    pub image_picker: Option<ratatui_image::picker::Picker>,
     /// Watchdogs for user-initiated detached spawns ('n', folder picker).
     /// A spawn can succeed at the tmux level yet never start the agent —
     /// e.g. a shell-rc prompt blocking the detached pane — and without a
@@ -932,11 +836,9 @@ impl App {
         Self {
             runtime,
             sessions: SessionsView::new(),
-            projects: ProjectsView::new(),
             metrics: MetricsView::new(),
             harness: HarnessView::default(),
             tasks: TasksView::new(),
-            todo: TodoPanelState::new(),
             view: View::Grid,
             detail: None,
             detail_loading: false,
@@ -946,12 +848,9 @@ impl App {
             live_view: None,
             status_msg: None,
             pending_confirm: None,
-            state_debug: None,
-            state_debug_lines: Vec::new(),
             usage: None,
             usage_line: Line::default(),
             session_counts: SessionCounts::default(),
-            prompt_buffer: String::new(),
             rename_buffer: String::new(),
             rename_target: None,
             model_picker: None,
@@ -969,41 +868,9 @@ impl App {
             current_tab: Tab::Sessions,
             pending_dispatch: VecDeque::new(),
             last_dispatch_probe_at: None,
-            image_picker: None,
             spawn_watches: Vec::new(),
             pending_spawn_names: HashMap::new(),
             done_refused_on: None,
-        }
-    }
-
-    /// Open the Sessions-tab to-do side panel. Reloads the list from disk so
-    /// edits that landed since it was last open (another instance, the file
-    /// hand-edited) show up, clamps the cursor in case the list shrank, and
-    /// starts in navigation mode rather than add mode.
-    pub fn enter_todo_panel(&mut self) {
-        self.view = View::TodoPanel;
-        self.todo.reload();
-    }
-
-    /// Close the panel and return to the grid, discarding any in-progress add.
-    pub fn close_todo_panel(&mut self) {
-        self.view = View::Grid;
-        self.todo.reset_add();
-    }
-
-    /// Delete every completed item in one stroke, keeping the cursor in range.
-    /// Surfaces a status line so the bulk removal is visible — unlike the
-    /// single-item delete, the user can't see at a glance what just vanished.
-    pub fn todo_clear_completed(&mut self) {
-        let removed = self.todo.clear_completed();
-        if removed > 0 {
-            self.set_status(format!(
-                "cleared {} completed task{}",
-                removed,
-                if removed == 1 { "" } else { "s" }
-            ));
-        } else {
-            self.set_status("no completed tasks to clear".to_string());
         }
     }
 
@@ -1112,7 +979,7 @@ impl App {
         if context.trim().is_empty() {
             return;
         }
-        match crate::ops::task::task_artifact_add_text(None, id, context, "typed") {
+        match crate::ops::task::task_artifact_add_text(id, context, "typed") {
             Ok(state) => self.tasks.board.adopt(state),
             Err(e) => self.tasks.record_persistence_error("context attach", e),
         }
@@ -1236,7 +1103,7 @@ impl App {
 
     /// The attachment under the Task Info popup cursor, if any. Used by the
     /// `c`/`o` keybinds to know what path to act on.
-    pub fn selected_task_attachment(&self) -> Option<&crate::orchestrator::Artifact> {
+    pub fn selected_task_attachment(&self) -> Option<&crate::task_store::Artifact> {
         self.selected_board_task()?
             .artifacts
             .get(self.tasks.info_sel)
@@ -1319,9 +1186,9 @@ impl App {
             return false;
         }
         let result = if self.tasks.attach_note {
-            crate::ops::task::task_artifact_add_text(None, &id, &raw, "typed")
+            crate::ops::task::task_artifact_add_text(&id, &raw, "typed")
         } else {
-            crate::ops::task::task_artifact_add(None, &id, &raw, None, None, false)
+            crate::ops::task::task_artifact_add(&id, &raw, None, None, false)
         };
         match result {
             Ok(state) => {
@@ -1379,7 +1246,7 @@ impl App {
         if text.trim().is_empty() {
             return Some("clipboard empty — nothing attached".into());
         }
-        match crate::ops::task::task_artifact_add_text(None, &id, text, "clipboard") {
+        match crate::ops::task::task_artifact_add_text(&id, text, "clipboard") {
             Ok(state) => {
                 let caption = state
                     .artifacts
@@ -1709,9 +1576,6 @@ impl App {
             (TaskStatus::Review, true) => TaskStatus::Running,
             (TaskStatus::Done, true) => TaskStatus::Review,
             (TaskStatus::Backlog, true) | (TaskStatus::Done, false) => return None,
-            // Merging belongs to the orchestrated PR pipeline and never
-            // appears on the personal board.
-            (TaskStatus::Merging, _) => return None,
         };
         if to == TaskStatus::Done {
             let msg = self.finish_task(&id, &preview, tmux.as_deref());
@@ -1755,27 +1619,17 @@ impl App {
         Some(format!("{} · {}", priority.label(), preview))
     }
 
-    /// Candidates for the task-assign places picker: registered projects
-    /// first, then bookmarks, then recently-used directories (other board
-    /// tasks, scanned sessions) newest-first — deduped by path with the
-    /// labelled project entry winning. This order is what an empty filter
+    /// Candidates for the task-assign places picker: bookmarks first, then
+    /// recently-used directories (other board tasks, scanned sessions)
+    /// newest-first — deduped by path. This order is what an empty filter
     /// shows.
     pub fn known_places(&self) -> Vec<Place> {
         use crate::folder_picker::PlaceSource;
         let mut seen: HashSet<PathBuf> = HashSet::new();
         let mut out: Vec<Place> = Vec::new();
-        for p in &self.projects.snapshot.projects {
-            if seen.insert(p.root.clone()) {
-                out.push(Place::new(
-                    Some(p.name.clone()),
-                    p.root.clone(),
-                    PlaceSource::Project,
-                ));
-            }
-        }
         for path in self.bookmarks.list() {
             if seen.insert(path.clone()) {
-                out.push(Place::new(None, path, PlaceSource::Bookmark));
+                out.push(Place::new(path, PlaceSource::Bookmark));
             }
         }
         // Recents carry a coarse timestamp purely for ordering: a task's
@@ -1803,7 +1657,7 @@ impl App {
                 break;
             }
             if seen.insert(path.clone()) {
-                out.push(Place::new(None, path, PlaceSource::Recent));
+                out.push(Place::new(path, PlaceSource::Recent));
                 added += 1;
             }
         }
@@ -1829,14 +1683,14 @@ impl App {
                 let place = places.remove(idx);
                 places.insert(0, place);
             } else {
-                places.insert(0, Place::new(None, last.to_path_buf(), PlaceSource::Recent));
+                places.insert(0, Place::new(last.to_path_buf(), PlaceSource::Recent));
             }
         }
         places
     }
 
-    /// `s` on a focused task: open the places picker (registered projects,
-    /// bookmarks, recent dirs — fuzzy-filterable) to choose the cwd the
+    /// `s` on a focused task: open the places picker (bookmarks, recent
+    /// dirs — fuzzy-filterable) to choose the cwd the
     /// agent will run in, falling back to the filesystem browser when
     /// nothing is known yet. Returns false when no task is focused or the
     /// task is already Done.
@@ -1883,12 +1737,8 @@ impl App {
 
     /// Tab in the places/browse picker: flip between the known-places list
     /// and the filesystem browser. Serves both the task-assign flow and the
-    /// Sessions-tab `N` flow; no-op in the Projects flows (register/new
-    /// task) and when there is nothing to flip to.
+    /// Sessions-tab `N` flow; no-op when there is nothing to flip to.
     pub fn toggle_places_picker_mode(&mut self) {
-        if self.projects.creating_task || self.projects.registering_only {
-            return;
-        }
         let Some(picker) = self.folder_picker.as_ref() else {
             return;
         };
@@ -2126,11 +1976,6 @@ impl App {
         self.rebuild_groups();
     }
 
-    pub fn toggle_show_orch_workers(&mut self) {
-        self.sessions.show_orch_workers = !self.sessions.show_orch_workers;
-        self.rebuild_groups();
-    }
-
     pub fn toggle_sessions_layout(&mut self) {
         self.sessions.layout = match self.sessions.layout {
             SessionsLayout::Grid => SessionsLayout::List,
@@ -2153,8 +1998,7 @@ impl App {
 
     pub fn set_tab(&mut self, tab: Tab) {
         // Entering the Tasks tab re-reads the board so edits from another
-        // instance (or a hand-edited tasks.json) show up, mirroring the
-        // to-do panel's reload-on-open. The reload and the re-floated
+        // instance (or a hand-edited state.json) show up. The reload and the re-floated
         // In Progress order can both rearrange rows, so the cursor is
         // re-anchored to the task it was on (by id) rather than left at a
         // stale (col, row) pointing at whatever card landed there.
@@ -2194,228 +2038,6 @@ impl App {
             None => tabs.first().copied().unwrap_or(Tab::Sessions),
         };
         self.set_tab(prev);
-    }
-
-    /// Apply a fresh projects snapshot. Returns true when the snapshot
-    /// differs from the current one — unchanged ticks skip the cursor
-    /// bookkeeping (and the caller skips the repaint), mirroring
-    /// [`Self::update_sessions`].
-    pub fn update_projects(&mut self, snap: ProjectsSnapshot) -> bool {
-        // A pending focus must keep polling even on identical snapshots: its
-        // budget counts scan ticks, and the task it waits for may only gain
-        // a tmux session (not a snapshot change) when the orchestrator boots.
-        if self.projects.pending_focus_task_id.is_none() && snap == self.projects.snapshot {
-            return false;
-        }
-        let pv = &mut self.projects;
-        // Preserve cursor when possible: keep the same project_id selected
-        // across rescans even if the order shifted.
-        let prev_pid = pv.snapshot.projects.get(pv.sel).map(|p| p.id.clone());
-        // Track the focused task by id so a status transition (Running →
-        // Review etc.) carries the cursor across columns. Mirrors the
-        // prev_sid trick in `update_metrics`.
-        let prev_task_id = pv.selected_project_task().map(|t| t.task_id.clone());
-        let first_load = pv.snapshot.projects.is_empty();
-        pv.snapshot = snap;
-        if let Some(pid) = prev_pid {
-            if let Some(idx) = pv.snapshot.projects.iter().position(|p| p.id == pid) {
-                pv.sel = idx;
-            }
-        }
-        // If the task is gone, fall through and let clamp handle the row.
-        if let Some(task_id) = prev_task_id {
-            pv.focus_task(&task_id);
-        }
-        // Jump-if-empty only on the very first load — once the user is in the
-        // tab, an empty focused column means they explicitly navigated there
-        // (or a task drained out of it), and silently overriding their
-        // selection on every rescan is the bug we're avoiding.
-        if first_load {
-            pv.clamp_cursor_jump_if_empty();
-        } else {
-            pv.clamp_cursor();
-        }
-        if let Some(task_id) = self.projects.pending_focus_task_id.clone() {
-            if let Some(col) = self.projects.focus_task(&task_id) {
-                self.set_status(format!(
-                    "started {} — focus moved to {}",
-                    crate::orchestrator::short_task_id(&task_id),
-                    kanban_col_name(col),
-                ));
-                self.projects.pending_focus_task_id = None;
-                self.projects.pending_focus_budget = 0;
-            } else {
-                self.projects.pending_focus_budget =
-                    self.projects.pending_focus_budget.saturating_sub(1);
-                if self.projects.pending_focus_budget == 0 {
-                    self.set_status(format!(
-                        "started {} — orchestrator booting; cursor unchanged",
-                        crate::orchestrator::short_task_id(&task_id),
-                    ));
-                    self.projects.pending_focus_task_id = None;
-                }
-            }
-        }
-        // Newly-discovered orchestrator/worker tmux names need to disappear
-        // from the Sessions view immediately; without this the hide flag
-        // would only take effect on the next session scan.
-        self.rebuild_groups();
-        true
-    }
-
-    pub fn selected_project(&self) -> Option<&crate::orchestrator::Project> {
-        self.projects.selected_project()
-    }
-
-    pub fn kanban_column_tasks(&self, col: usize) -> Vec<&crate::orchestrator::TaskState> {
-        self.projects.kanban_column_tasks(col)
-    }
-
-    pub fn backlog_tasks(&self) -> Vec<&crate::orchestrator::TaskState> {
-        self.projects.backlog_tasks()
-    }
-
-    pub fn open_backlog(&mut self) {
-        self.projects.backlog_sel = 0;
-        self.view = View::Backlog;
-    }
-
-    pub fn close_backlog(&mut self) {
-        self.view = View::Grid;
-    }
-
-    pub fn selected_backlog_task(&self) -> Option<&crate::orchestrator::TaskState> {
-        self.projects.selected_backlog_task()
-    }
-
-    pub fn selected_project_task(&self) -> Option<&crate::orchestrator::TaskState> {
-        self.projects.selected_project_task()
-    }
-
-    /// Approve the focused Review task. If the task has a PR, flip
-    /// `pr.review_state` to `Approved`, snapshot the branch/base SHAs so
-    /// `pr merge` can detect whether main moved between approval and
-    /// merge, and transition the task to `Merging` so the card moves to
-    /// the Merging column. If another task in the same project currently
-    /// holds the merge lock, the task still moves — the renderer paints
-    /// a queued border in muted gray so the user sees approval landed
-    /// even though the actual merge waits its turn. Tmux sessions stay
-    /// alive; they're torn down by `pr finalize` after the merge lands.
-    /// If the task has no PR (a research/queueing task delivered via
-    /// `task report --status done`, auto-routed into Review), transition
-    /// it directly to `Done` and tear down the orchestrator tmux. The
-    /// returned [`ApproveOutcome`] tells the caller whether to show the
-    /// generic "nothing to approve" toast and whether to ping the live
-    /// orchestrator tmux.
-    pub fn approve_review_task(&mut self) -> ApproveOutcome {
-        use crate::orchestrator::TaskStatus;
-        let Some(t) = self.selected_project_task() else {
-            return ApproveOutcome::NotReviewTask;
-        };
-        if t.status != TaskStatus::Review {
-            return ApproveOutcome::NotReviewTask;
-        }
-        // Review tasks are orchestrated by construction.
-        let Some(project_id) = t.project_id.clone() else {
-            return ApproveOutcome::NotReviewTask;
-        };
-        let task_id = t.task_id.clone();
-
-        // The read distinguishes the PR-less Done path from a real PR;
-        // for the latter, the approval itself (SHA snapshot + review_state
-        // flip) is delegated to the shared `ops::pr` implementation so the
-        // TUI and CLI record identical state.
-        let pr = match crate::pr::read_pr(&project_id, &task_id) {
-            Ok(Some(_)) => match crate::ops::pr::pr_approve(&project_id, &task_id) {
-                Ok(pr) => pr,
-                Err(e) => {
-                    self.set_status(format!("approve failed: {}", e));
-                    return ApproveOutcome::Failed;
-                }
-            },
-            Ok(None) => {
-                match crate::orchestrator::update_task_state(&project_id, &task_id, |s| {
-                    s.status = TaskStatus::Done;
-                }) {
-                    Ok(state) => {
-                        crate::orchestrator::cleanup_task_sessions(&state);
-                        self.set_status(format!(
-                            "approved PR-less task {} → Done",
-                            crate::orchestrator::short_task_id(&task_id)
-                        ));
-                        return ApproveOutcome::DoneNoPr;
-                    }
-                    Err(e) => {
-                        self.set_status(format!("approve failed: {}", e));
-                        return ApproveOutcome::Failed;
-                    }
-                }
-            }
-            Err(e) => {
-                self.set_status(format!("approve: pr read failed: {}", e));
-                return ApproveOutcome::Failed;
-            }
-        };
-        let pr_id = pr.id;
-        let lock_holder = crate::merge_lock::current_holder(&project_id)
-            .ok()
-            .flatten();
-        let queued_behind = lock_holder
-            .as_ref()
-            .filter(|h| h.task_id != task_id)
-            .map(|h| h.task_id.clone());
-        if let Err(e) = crate::orchestrator::update_task_state(&project_id, &task_id, |s| {
-            s.status = TaskStatus::Merging;
-            s.note = Some(match &queued_behind {
-                Some(other) => format!(
-                    "PR #{}: approved; queued behind {}",
-                    pr_id,
-                    crate::orchestrator::short_task_id(other),
-                ),
-                None => format!("PR #{}: approved; merging", pr_id),
-            });
-        }) {
-            self.set_status(format!("approve: state update failed: {}", e));
-            return ApproveOutcome::Failed;
-        }
-
-        // Cursor stays on the same task; it's now in the Merging column.
-        // The caller is responsible for notifying the live orchestrator
-        // tmux to continue the merge flow.
-        self.set_status(match &queued_behind {
-            Some(other) => format!(
-                "approved PR #{} for {} — queued behind {}",
-                pr.id,
-                crate::orchestrator::short_task_id(&task_id),
-                crate::orchestrator::short_task_id(other),
-            ),
-            None => format!(
-                "approved PR #{} for {}",
-                pr.id,
-                crate::orchestrator::short_task_id(&task_id),
-            ),
-        });
-        ApproveOutcome::PrApproved
-    }
-
-    /// Undo the `Review → Merging` transition written by
-    /// [`Self::approve_review_task`] when the post-approve notify discovers
-    /// there's no live orchestrator tmux to drive the merge. Without this the
-    /// card would strand in the Merging column with a dead orchestrator and no
-    /// way to act on it. Flipping it back to Review keeps the card actionable:
-    /// the user can re-approve (re-ping) or resurrect (`f`). The PR's
-    /// `review_state` stays `Approved` — only the task status rolls back —
-    /// because the approval itself is still valid; we're just no longer
-    /// claiming the merge is underway. Best-effort: a failed write leaves the
-    /// card in Merging, which is no worse than before.
-    pub fn rollback_merging_to_review(&mut self, project_id: &str, task_id: &str) {
-        use crate::orchestrator::TaskStatus;
-        let _ = crate::orchestrator::update_task_state(project_id, task_id, |s| {
-            if s.status == TaskStatus::Merging {
-                s.status = TaskStatus::Review;
-                s.note = Some("approved; orchestrator not live — re-approve or resurrect".into());
-            }
-        });
     }
 
     /// `tmux_session_name → SessionInfo` over the latest scan. Built fresh
@@ -2507,8 +2129,7 @@ impl App {
     }
 
     /// `p` on the Sessions tab: the same places picker the task-assign
-    /// flow uses (registered projects, bookmarks, recent dirs —
-    /// fuzzy-filterable) to choose where the new session spawns, falling
+    /// flow uses (bookmarks, recent dirs — fuzzy-filterable) to choose where the new session spawns, falling
     /// back to the filesystem browser when nothing is known yet. The
     /// selected session's cwd starts highlighted.
     pub fn enter_session_places_picker(&mut self) {
@@ -2777,12 +2398,9 @@ impl App {
         true
     }
 
-    /// Every linkable task — the personal board, i.e. exactly what the
-    /// Tasks tab shows (orchestrated project tasks are deliberately absent:
-    /// they live behind the WIP-gated Projects tab and would read as noise
-    /// from nowhere) — as picker rows, banded by status in Tasks-board
-    /// column order (To-Do → Planning → In Progress → Done); within a band,
-    /// tasks local to the session's cwd first, then newest first.
+    /// Every board task as picker rows, banded by status in Tasks-board
+    /// column order (To-Do → Planning → In Progress → Review → Done); within
+    /// a band, tasks local to the session's cwd first, then newest first.
     fn task_link_candidates(&self, session: &SessionInfo) -> Vec<TaskLinkChoice> {
         let mut candidates: Vec<(u8, bool, i64, TaskLinkChoice)> = self
             .tasks
@@ -2845,14 +2463,9 @@ impl App {
                     format!("unlink failed: {}", e)
                 }
             },
-            TaskLinkAction::Link {
-                task_id,
-                project_id,
-                title,
-            } => {
+            TaskLinkAction::Link { task_id, title } => {
                 let link = crate::session_tasks::TaskLink {
                     task_id,
-                    project_id,
                     title: title.clone(),
                 };
                 match crate::session_tasks::link(&sid, link.clone()) {
@@ -3004,111 +2617,6 @@ impl App {
         Some((added, display))
     }
 
-    /// Open the folder picker rooted at the most useful starting point for
-    /// project creation: the selected project's root if any, else $HOME.
-    /// Sets [`Self::creating_project_task`] so picker-pick routes through
-    /// the orchestrator flow.
-    pub fn enter_folder_picker_for_projects(&mut self) {
-        let start = self
-            .selected_project()
-            .map(|p| p.root.clone())
-            .or_else(dirs::home_dir)
-            .unwrap_or_else(|| PathBuf::from("/"));
-        self.folder_picker = Some(FolderPicker::new(start));
-        self.projects.creating_task = true;
-        self.view = View::FolderPicker;
-    }
-
-    /// Open the folder picker in "register a project, no task" mode. The
-    /// space/. picks register the chosen folder via
-    /// [`Self::register_picked_project`] and exit the picker — no
-    /// orchestrator is spawned.
-    pub fn enter_folder_picker_for_register_only(&mut self) {
-        let start = self
-            .selected_project()
-            .map(|p| p.root.clone())
-            .or_else(dirs::home_dir)
-            .unwrap_or_else(|| PathBuf::from("/"));
-        self.folder_picker = Some(FolderPicker::new(start));
-        self.projects.registering_only = true;
-        self.view = View::FolderPicker;
-    }
-
-    /// Register `cwd` as a project (no task spawned) and close the picker.
-    /// Returns the registered project name on success so callers can
-    /// surface it in a status message.
-    pub fn register_picked_project(&mut self, cwd: &str) -> Result<String, String> {
-        let path = PathBuf::from(cwd);
-        let name = path
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| cwd.to_string());
-        let result = crate::orchestrator::ensure_project_registered(&path, &name)
-            .map(|_| name)
-            .map_err(|e| e.to_string());
-        self.close_folder_picker();
-        result
-    }
-
-    /// Picker chose `cwd` while in projects-creation mode. Stash the cwd
-    /// and switch to a multi-line prompt input; the actual orchestrator
-    /// spawn happens in [`Self::submit_project_task`].
-    pub fn enter_project_task_prompt(&mut self, cwd: String) {
-        self.folder_picker = None;
-        self.projects.pending_cwd = Some(cwd);
-        self.projects.pending_agent_id = None;
-        self.prompt_buffer.clear();
-        self.view = View::PromptInput;
-    }
-
-    /// Cycle the orchestrator agent for the pending project task to the
-    /// next entry in the resolved-agents map. No-op when fewer than two
-    /// agents are configured. Called from the prompt-input Tab handler.
-    pub fn cycle_pending_agent_id(&mut self) {
-        if self.projects.pending_cwd.is_none() {
-            return;
-        }
-        let agents = config::get().resolved_agents();
-        let ids: Vec<String> = agents.into_keys().collect();
-        if ids.len() < 2 {
-            return;
-        }
-        let current = self
-            .projects
-            .pending_agent_id
-            .clone()
-            .unwrap_or_else(|| config::get().default_orchestrator_agent_id());
-        let idx = ids.iter().position(|id| id == &current).unwrap_or(0);
-        let next = ids[(idx + 1) % ids.len()].clone();
-        self.projects.pending_agent_id = Some(next);
-    }
-
-    /// Display label for the agent that will run the pending project task,
-    /// resolving `None` to the configured default. Returns `None` outside
-    /// the project-creation flow.
-    pub fn pending_agent_label(&self) -> Option<String> {
-        self.projects.pending_cwd.as_ref()?;
-        Some(
-            self.projects
-                .pending_agent_id
-                .clone()
-                .unwrap_or_else(|| config::get().default_orchestrator_agent_id()),
-        )
-    }
-
-    /// Shortcut for "new task on the currently-selected project" — same
-    /// as [`Self::enter_project_task_prompt`] but skips the folder picker
-    /// by reusing the selected project's stored root. Returns false (and
-    /// no-ops) if no project is selected.
-    pub fn enter_project_task_prompt_for_selected(&mut self) -> bool {
-        let Some(project) = self.selected_project().cloned() else {
-            return false;
-        };
-        let cwd = project.root.display().to_string();
-        self.enter_project_task_prompt(cwd);
-        true
-    }
-
     /// Best-guess cwd to spawn a new agent in: the selected session's cwd, or
     /// the user's home directory.
     pub fn default_spawn_cwd(&self) -> Option<String> {
@@ -3120,8 +2628,6 @@ impl App {
     pub fn close_folder_picker(&mut self) {
         self.folder_picker = None;
         self.gh_create_input = None;
-        self.projects.creating_task = false;
-        self.projects.registering_only = false;
         self.tasks.pending_assign = None;
         self.view = View::Grid;
     }
@@ -3169,27 +2675,6 @@ impl App {
     pub fn close_tmux_pane(&mut self) {
         self.tmux_pane = None;
         self.view = View::Grid;
-    }
-
-    pub fn close_prompt_input(&mut self) {
-        self.prompt_buffer.clear();
-        self.projects.pending_cwd = None;
-        self.projects.pending_agent_id = None;
-        self.projects.creating_task = false;
-        self.view = View::Grid;
-    }
-
-    /// Consumes the pending cwd, prompt, and agent override, clears
-    /// prompt input, returns the `(cwd, prompt, agent_id_override)` tuple.
-    /// Returns `None` if no project task is pending. The override is
-    /// `None` when the user didn't cycle off the configured default.
-    pub fn submit_project_task(&mut self) -> Option<(String, String, Option<String>)> {
-        let cwd = self.projects.pending_cwd.take()?;
-        let agent_id = self.projects.pending_agent_id.take();
-        self.projects.creating_task = false;
-        self.view = View::Grid;
-        let prompt = std::mem::take(&mut self.prompt_buffer);
-        Some((cwd, prompt, agent_id))
     }
 
     /// Open the rename-title modal for the currently selected session,
@@ -3360,10 +2845,9 @@ impl App {
         //      to the timeout and the user sees a "session that just
         //      sits there empty" — the real-world failure mode that
         //      motivated this comment.
-        // Walk the unfiltered scan set, not `self.sessions.groups`:
-        // orchestrator and worker tmux names are hidden from `groups` by the
-        // Sessions view filter, so checking `groups` here would block dispatch
-        // forever for the very sessions we need to dispatch into.
+        // Walk the unfiltered scan set, not `self.sessions.groups`: the
+        // Sessions view filter (inactive sessions) can hide the very session
+        // we need to dispatch into.
         let scanner_idle = self.sessions.last_sessions.iter().any(|s| {
             s.tmux_session.as_deref() == Some(pd.tmux.as_str()) && s.state == SessionState::Idle
         });
@@ -3411,7 +2895,7 @@ impl App {
 
     /// Time the current pending dispatch has been waiting. None when no
     /// dispatch is queued. Used by the status bar so the user can tell
-    /// at a glance that an orchestrator/dispatch is still booting rather
+    /// at a glance that a dispatch is still booting rather
     /// than wondering why nothing is happening.
     pub fn pending_dispatch_age(&self) -> Option<Duration> {
         self.pending_dispatch
@@ -3445,173 +2929,14 @@ impl App {
     }
 
     pub fn cancel_confirm_close(&mut self) {
-        let from_backlog = matches!(
-            &self.pending_confirm,
-            Some(PendingConfirm::TaskDelete(p)) if p.from_backlog
-        );
         self.pending_confirm = None;
-        self.view = if from_backlog {
-            View::Backlog
-        } else {
-            View::Grid
-        };
+        self.view = View::Grid;
     }
 
     pub fn take_pending_close(&mut self) -> Option<PendingClose> {
         self.view = View::Grid;
         if matches!(self.pending_confirm, Some(PendingConfirm::Close(_))) {
             if let Some(PendingConfirm::Close(p)) = self.pending_confirm.take() {
-                return Some(p);
-            }
-        }
-        None
-    }
-
-    /// Stage a project-task deletion behind the same ConfirmClose flow used
-    /// for sessions. Resolves `orchestrator_tmux` synchronously so the kill
-    /// step doesn't have to re-load state.json.
-    pub fn enter_confirm_task_delete(&mut self) {
-        let Some(p) = self.selected_project().cloned() else {
-            self.set_status("no project selected".into());
-            return;
-        };
-        let Some(task) = self.selected_project_task().cloned() else {
-            self.set_status("no task selected — focus a task on the kanban first".into());
-            return;
-        };
-        let status_label = task.status.as_str();
-        let display = format!(
-            "{} — {} (task {})",
-            p.name,
-            status_label,
-            crate::orchestrator::short_task_id(&task.task_id),
-        );
-        self.pending_confirm = Some(PendingConfirm::TaskDelete(PendingTaskDelete {
-            project_id: p.id.clone(),
-            task_id: task.task_id.clone(),
-            display,
-            orchestrator_tmux: task.orchestrator_tmux.clone(),
-            from_backlog: false,
-        }));
-        self.view = View::ConfirmClose;
-    }
-
-    /// Stage a backlog-task deletion, mirroring [`Self::enter_confirm_task_delete`]
-    /// but resolving the task from the Backlog popup cursor so the confirm/cancel
-    /// flow returns to the popup.
-    pub fn enter_confirm_backlog_task_delete(&mut self) {
-        let Some(p) = self.selected_project().cloned() else {
-            self.set_status("no project selected".into());
-            return;
-        };
-        let Some(task) = self.selected_backlog_task().cloned() else {
-            self.set_status("no backlog task selected".into());
-            return;
-        };
-        if task.status != crate::orchestrator::TaskStatus::Backlog {
-            self.set_status(format!(
-                "task is not in backlog (status = {:?})",
-                task.status
-            ));
-            return;
-        }
-        let display = format!(
-            "{} — backlog (task {})",
-            p.name,
-            crate::orchestrator::short_task_id(&task.task_id),
-        );
-        self.pending_confirm = Some(PendingConfirm::TaskDelete(PendingTaskDelete {
-            project_id: p.id.clone(),
-            task_id: task.task_id.clone(),
-            display,
-            orchestrator_tmux: task.orchestrator_tmux.clone(),
-            from_backlog: true,
-        }));
-        self.view = View::ConfirmClose;
-    }
-
-    pub fn take_pending_task_delete(&mut self) -> Option<PendingTaskDelete> {
-        let from_backlog = matches!(
-            &self.pending_confirm,
-            Some(PendingConfirm::TaskDelete(p)) if p.from_backlog
-        );
-        self.view = if from_backlog {
-            View::Backlog
-        } else {
-            View::Grid
-        };
-        if matches!(self.pending_confirm, Some(PendingConfirm::TaskDelete(_))) {
-            if let Some(PendingConfirm::TaskDelete(p)) = self.pending_confirm.take() {
-                return Some(p);
-            }
-        }
-        None
-    }
-
-    /// Stage removal of the currently-selected project from the cc-hub
-    /// registry, mirroring [`Self::enter_confirm_task_delete`]. Surfaces task
-    /// count in the prompt so the user sees how much state they're nuking.
-    pub fn enter_confirm_project_delete(&mut self) {
-        let Some(p) = self.selected_project().cloned() else {
-            self.set_status("no project selected".into());
-            return;
-        };
-        let n = self
-            .projects
-            .snapshot
-            .tasks
-            .get(&p.id)
-            .map(|v| v.len())
-            .unwrap_or(0);
-        let display = format!("{} ({} task{})", p.name, n, if n == 1 { "" } else { "s" });
-        self.pending_confirm = Some(PendingConfirm::ProjectDelete(PendingProjectDelete {
-            project_id: p.id.clone(),
-            display,
-        }));
-        self.view = View::ConfirmClose;
-    }
-
-    pub fn take_pending_project_delete(&mut self) -> Option<PendingProjectDelete> {
-        self.view = View::Grid;
-        if matches!(self.pending_confirm, Some(PendingConfirm::ProjectDelete(_))) {
-            if let Some(PendingConfirm::ProjectDelete(p)) = self.pending_confirm.take() {
-                return Some(p);
-            }
-        }
-        None
-    }
-
-    /// Stage an orchestrator restart behind a confirmation prompt. The
-    /// actual restart reloads state at confirmation time; only task identity
-    /// and display text are captured here.
-    pub fn enter_confirm_task_restart(&mut self) {
-        let Some(p) = self.selected_project().cloned() else {
-            self.set_status("no project selected".into());
-            return;
-        };
-        let Some(task) = self.selected_project_task().cloned() else {
-            self.set_status("no task selected — focus a task on the kanban first".into());
-            return;
-        };
-        let status_label = task.status.as_str();
-        let display = format!(
-            "{} — {} (task {})",
-            p.name,
-            status_label,
-            crate::orchestrator::short_task_id(&task.task_id),
-        );
-        self.pending_confirm = Some(PendingConfirm::TaskRestart(PendingTaskRestart {
-            project_id: p.id.clone(),
-            task_id: task.task_id.clone(),
-            display,
-        }));
-        self.view = View::ConfirmClose;
-    }
-
-    pub fn take_pending_task_restart(&mut self) -> Option<PendingTaskRestart> {
-        self.view = View::Grid;
-        if matches!(self.pending_confirm, Some(PendingConfirm::TaskRestart(_))) {
-            if let Some(PendingConfirm::TaskRestart(p)) = self.pending_confirm.take() {
                 return Some(p);
             }
         }
@@ -3684,38 +3009,6 @@ impl App {
     pub fn close_live_tail(&mut self) {
         self.live_view = None;
         self.view = View::Grid;
-    }
-
-    pub fn enter_state_debug(&mut self) {
-        self.view = View::StateDebug;
-        self.state_debug = None;
-        self.state_debug_lines.clear();
-        self.render.state_debug_scroll = 0;
-    }
-
-    pub fn close_state_debug(&mut self) {
-        self.view = View::Grid;
-        self.state_debug = None;
-        self.state_debug_lines.clear();
-        self.render.state_debug_scroll = 0;
-    }
-
-    pub fn update_state_debug(
-        &mut self,
-        info: SessionInfo,
-        exp: StateExplanation,
-        rendered: Vec<Line<'static>>,
-    ) {
-        self.state_debug = Some((info, exp));
-        self.state_debug_lines = rendered;
-    }
-
-    pub fn debug_scroll_down(&mut self) {
-        self.render.state_debug_scroll = self.render.state_debug_scroll.saturating_add(3);
-    }
-
-    pub fn debug_scroll_up(&mut self) {
-        self.render.state_debug_scroll = self.render.state_debug_scroll.saturating_sub(3);
     }
 
     pub fn selected_session_id(&self) -> Option<String> {
@@ -4043,8 +3336,6 @@ impl App {
     /// Pure with respect to selection — callers decide whether the result
     /// warrants a selection restore (see [`Self::adopt_groups`]).
     fn build_groups(&self, sessions: &[SessionInfo]) -> Vec<ProjectGroup> {
-        let roles = self.projects.snapshot.roles_by_tmux();
-
         // Placeholder cards for spawns the scanner hasn't seen yet. Checked
         // against the unfiltered snapshot: once any session is hosted by the
         // watched tmux name, the real card replaces the placeholder (the
@@ -4072,18 +3363,6 @@ impl App {
         let mut sessions: Vec<SessionInfo> = sessions
             .iter()
             .filter(|s| self.sessions.show_inactive || s.state != SessionState::Inactive)
-            .filter(|s| {
-                // Hide tmux sessions claimed by an orchestrator or worker
-                // unless the user has asked to see them. Sessions without a
-                // tmux name (legacy/manual launches) always show.
-                if self.sessions.show_orch_workers {
-                    return true;
-                }
-                match s.tmux_session.as_deref() {
-                    Some(name) => !roles.contains_key(name),
-                    None => true,
-                }
-            })
             .cloned()
             .collect();
 
@@ -4143,28 +3422,14 @@ impl App {
         groups
     }
 
-    /// Priority of a task while it's still readable — the personal board
-    /// first, then the projects snapshot (the same resolution order as
-    /// [`Self::task_badge`]). `None` once the task is gone.
+    /// Priority of a task while it's still on the board. `None` once the
+    /// task is gone.
     fn task_priority(&self, task_id: &str) -> Option<TaskPriority> {
-        self.tasks
-            .board
-            .get(task_id)
-            .map(|t| t.priority)
-            .or_else(|| {
-                self.projects
-                    .snapshot
-                    .tasks
-                    .values()
-                    .flatten()
-                    .find(|t| t.task_id == task_id)
-                    .map(|t| t.priority)
-            })
+        self.tasks.board.get(task_id).map(|t| t.priority)
     }
 
     /// Resolve a session's task link (`L`) to its card badge: live title and
-    /// status from the personal board or the projects snapshot while the
-    /// task is still readable, else the sidecar's title snapshot. `stale`
+    /// status from the board while the task is still there, else the sidecar's title snapshot. `stale`
     /// covers both a missing task and a Done one — either way the badge
     /// dims so the link visibly outlived its task. `None` for unlinked
     /// sessions.
@@ -4175,16 +3440,7 @@ impl App {
             .tasks
             .board
             .get(task_id)
-            .map(|t| (task_display_title(t), t.status, t.priority))
-            .or_else(|| {
-                self.projects
-                    .snapshot
-                    .tasks
-                    .values()
-                    .flatten()
-                    .find(|t| t.task_id == task_id)
-                    .map(|t| (task_display_title(t), t.status, t.priority))
-            });
+            .map(|t| (task_display_title(t), t.status, t.priority));
         Some(match live {
             Some((title, status, priority)) => TaskBadge {
                 task_id: task_id.to_string(),
@@ -4195,7 +3451,7 @@ impl App {
             None => {
                 let snapshot = Some(link.title.clone())
                     .filter(|t| !t.is_empty())
-                    .unwrap_or_else(|| crate::orchestrator::short_task_id(task_id));
+                    .unwrap_or_else(|| crate::task_store::short_task_id(task_id));
                 TaskBadge {
                     task_id: task_id.to_string(),
                     title: snapshot,
@@ -4268,9 +3524,8 @@ impl App {
     fn rebuild_groups(&mut self) {
         let groups = self.build_groups(&self.sessions.last_sessions);
         self.adopt_groups(groups);
-        // A rebuild (filter toggle, or a projects snapshot reclassifying tmux
-        // names) can reveal already-seen sessions without a scan. Register
-        // them as known now so the next genuine membership change doesn't
+        // A rebuild (a filter toggle) can reveal already-seen sessions
+        // without a scan. Register them as known now so the next genuine membership change doesn't
         // mistake one for a fresh arrival and teleport the cursor onto it.
         self.sync_known_session_ids();
     }
@@ -4379,59 +3634,6 @@ impl App {
         }
         log::info!("=== end state dump ===");
     }
-
-    /// Open the Projects "Result" popup for the currently-selected task.
-    /// Returns false when no task is selected, so the caller can surface a
-    /// status-bar hint instead of opening an empty popup.
-    pub fn enter_projects_result(&mut self) -> bool {
-        if self.selected_project_task().is_none() {
-            return false;
-        }
-        self.projects.result_artifact_sel = 0;
-        self.render.result_scroll = 0;
-        self.render.result_artifact_expanded = false;
-        self.view = View::ProjectsResult;
-        true
-    }
-
-    pub fn close_projects_result(&mut self) {
-        self.view = View::Grid;
-        self.projects.result_artifact_sel = 0;
-        self.render.result_scroll = 0;
-        self.render.result_artifact_expanded = false;
-    }
-
-    /// The artifact under the popup cursor, if any. Used by the `c` and `o`
-    /// keybinds to know what path to act on.
-    pub fn selected_result_artifact(&self) -> Option<&crate::orchestrator::Artifact> {
-        self.projects.selected_result_artifact()
-    }
-
-    /// PgUp/PgDn handler for the Result popup. Negative steps scroll up; the
-    /// renderer clamps the offset against content length so we never scroll
-    /// past the end. The scroll offset lives in [`RenderState`].
-    pub fn result_scroll_by(&mut self, delta: i32) {
-        let cur = self.render.result_scroll as i32;
-        let next = (cur + delta).max(0);
-        self.render.result_scroll = next.min(u16::MAX as i32) as u16;
-    }
-
-    pub fn toggle_result_artifact_expanded(&mut self) {
-        if self.projects.selected_result_artifact().is_none() {
-            return;
-        }
-        self.render.result_artifact_expanded = !self.render.result_artifact_expanded;
-    }
-}
-
-pub fn kanban_col_name(col: usize) -> &'static str {
-    match col {
-        0 => "Planning",
-        1 => "Running",
-        2 => "Review",
-        3 => "Merging",
-        _ => "Done",
-    }
 }
 
 // Unix-only: most of these drive the hub against a `$HOME` redirected by
@@ -4441,7 +3643,7 @@ pub fn kanban_col_name(col: usize) -> &'static str {
 mod tests {
     use super::*;
     use crate::agent_runtime::testing::RecordingRuntime;
-    use crate::orchestrator::{Project, TaskState, TaskStatus, Worker};
+    use crate::task_store::TaskStatus;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -4470,53 +3672,6 @@ mod tests {
                 &[("mux-task".into(), PROCEED_PROMPT.into())]
             );
         });
-    }
-
-    fn project(id: &str) -> Project {
-        Project {
-            id: id.to_string(),
-            name: id.to_string(),
-            root: PathBuf::from(format!("/tmp/{}", id)),
-            created_at: 0,
-            build_cmd: None,
-        }
-    }
-
-    fn task(project_id: &str, task_id: &str, status: TaskStatus, with_worker: bool) -> TaskState {
-        let mut t = TaskState::new(
-            project_id.to_string(),
-            PathBuf::from(format!("/tmp/{}", project_id)),
-            String::new(),
-        );
-        t.task_id = task_id.to_string();
-        t.status = status;
-        if with_worker {
-            t.workers.push(Worker {
-                tmux_name: "w-1".to_string(),
-                cwd: PathBuf::from("/tmp/w"),
-                worktree: None,
-                readonly: false,
-                spawned_at: 0,
-                agent_id: "claude".to_string(),
-                agent_kind: crate::agent::AgentKind::Claude,
-            });
-        }
-        t
-    }
-
-    fn snapshot(p: Project, tasks: Vec<TaskState>) -> ProjectsSnapshot {
-        snapshot_many(vec![(p, tasks)])
-    }
-
-    fn snapshot_many(projects: Vec<(Project, Vec<TaskState>)>) -> ProjectsSnapshot {
-        let mut snap = ProjectsSnapshot::empty();
-        for (p, tasks) in projects {
-            let pid = p.id.clone();
-            snap.projects.push(p);
-            snap.tasks
-                .insert(pid, tasks.into_iter().map(Arc::new).collect());
-        }
-        snap
     }
 
     // A watch clears as soon as any live session maps to its tmux name —
@@ -4897,7 +4052,6 @@ mod tests {
                 "s-b",
                 crate::session_tasks::TaskLink {
                     task_id: "tk-9".into(),
-                    project_id: None,
                     title: "Fix auth".into(),
                 },
             )
@@ -4937,7 +4091,6 @@ mod tests {
                     sid,
                     crate::session_tasks::TaskLink {
                         task_id: "tk-1".into(),
-                        project_id: None,
                         title: "Fix auth".into(),
                     },
                 )
@@ -4963,7 +4116,7 @@ mod tests {
     #[test]
     fn task_clusters_order_by_liveness_then_priority() {
         crate::test_util::with_temp_home(|| {
-            use crate::orchestrator::TaskPriority;
+            use crate::task_store::TaskPriority;
             let mut app = App::new();
             let low = app.tasks.board.add("low task").unwrap().unwrap();
             app.tasks
@@ -4993,7 +4146,6 @@ mod tests {
                     sid,
                     crate::session_tasks::TaskLink {
                         task_id: task_id.into(),
-                        project_id: None,
                         title: String::new(),
                     },
                 )
@@ -5059,7 +4211,7 @@ mod tests {
     fn task_link_candidates_band_in_tasks_board_column_order() {
         crate::test_util::with_temp_home(|| {
             let mut app = App::new();
-            use crate::orchestrator::TaskStatus;
+            use crate::task_store::TaskStatus;
             // Insert out of band order so the sort has to do the work.
             let done = app.tasks.board.add("done task").unwrap().unwrap();
             app.tasks.board.set_status(&done, TaskStatus::Done).unwrap();
@@ -5100,7 +4252,6 @@ mod tests {
                 "s-linked",
                 crate::session_tasks::TaskLink {
                     task_id: id.clone(),
-                    project_id: None,
                     title: "old snapshot".into(),
                 },
             )
@@ -5115,7 +4266,7 @@ mod tests {
             // A Done task keeps the badge but dims it.
             app.tasks
                 .board
-                .set_status(&id, crate::orchestrator::TaskStatus::Done)
+                .set_status(&id, crate::task_store::TaskStatus::Done)
                 .unwrap();
             assert!(app.task_badge("s-linked").unwrap().stale);
         });
@@ -5138,7 +4289,7 @@ mod tests {
 
         // A rebuild before the next scan (here via a filter toggle) must not
         // revert the ack — the mutation is mirrored onto last_sessions.
-        app.toggle_show_orch_workers();
+        app.toggle_show_inactive();
         assert_eq!(
             app.selected_session_info().map(|s| s.state.clone()),
             Some(SessionState::Idle),
@@ -5289,330 +4440,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn projects_cursor_follows_task_across_status_transition() {
-        let mut app = App::new();
-        app.current_tab = Tab::Projects;
-
-        let p = project("p-1");
-        // Running + workers → kanban column 1 (true Running).
-        let snap1 = snapshot(
-            p.clone(),
-            vec![task("p-1", "t-1", TaskStatus::Running, true)],
-        );
-        app.update_projects(snap1);
-
-        assert_eq!(app.projects.col, 1, "Running+workers should land in col 1");
-        assert_eq!(
-            app.selected_project_task().map(|t| t.task_id.clone()),
-            Some("t-1".to_string()),
-        );
-
-        // Same task moves to Review (column 2). Cursor must follow.
-        let snap2 = snapshot(p, vec![task("p-1", "t-1", TaskStatus::Review, false)]);
-        app.update_projects(snap2);
-
-        assert_eq!(
-            app.projects.col, 2,
-            "cursor should follow t-1 into the Review column"
-        );
-        assert_eq!(
-            app.selected_project_task().map(|t| t.task_id.clone()),
-            Some("t-1".to_string()),
-            "selected task should still be t-1",
-        );
-    }
-
-    #[test]
-    fn approve_review_transitions_task_to_merging() {
-        use crate::test_util::HOME_TEST_LOCK;
-        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().expect("tempdir");
-        let prev = std::env::var_os("HOME");
-        std::env::set_var("HOME", home.path());
-
-        let p = project("p-app");
-        let mut t = task("p-app", "t-app", TaskStatus::Review, false);
-        t.project_root = Some(home.path().join("repo"));
-        std::fs::create_dir_all(t.project_root.as_deref().unwrap()).unwrap();
-        crate::orchestrator::write_task_state(&t).expect("write task");
-
-        // Hand-write a PR record so approve_review_task() can read it.
-        let pr = crate::pr::PullRequest {
-            id: 7,
-            task_id: "t-app".into(),
-            project_id: "p-app".into(),
-            branch: "cc-hub/t-app-feat".into(),
-            base: "main".into(),
-            title: "x".into(),
-            description: "x".into(),
-            review_state: crate::pr::ReviewState::Open,
-            comments: vec![],
-            approved_at_branch_sha: None,
-            approved_at_base_sha: None,
-            created_at: 0,
-            updated_at: 0,
-        };
-        crate::pr::write_pr(&pr).expect("write pr");
-
-        let mut app = App::new();
-        app.current_tab = Tab::Projects;
-        app.update_projects(snapshot(p, vec![t]));
-        // Cursor lands on the Review task (col 2, row 0).
-        assert_eq!(app.projects.col, 2);
-
-        assert_eq!(app.approve_review_task(), ApproveOutcome::PrApproved);
-
-        // Reload and verify status transitioned.
-        let reloaded = crate::orchestrator::read_task_state("p-app", "t-app").expect("read");
-        assert_eq!(reloaded.status, TaskStatus::Merging);
-        let pr_after = crate::pr::read_pr("p-app", "t-app")
-            .expect("read pr")
-            .expect("present");
-        assert_eq!(pr_after.review_state, crate::pr::ReviewState::Approved);
-
-        match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
-
-    #[test]
-    fn approve_review_pr_less_task_transitions_to_done() {
-        use crate::test_util::HOME_TEST_LOCK;
-        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().expect("tempdir");
-        let prev = std::env::var_os("HOME");
-        std::env::set_var("HOME", home.path());
-
-        let p = project("p-noPR");
-        let mut t = task("p-noPR", "t-noPR", TaskStatus::Review, false);
-        t.project_root = Some(home.path().join("repo"));
-        std::fs::create_dir_all(t.project_root.as_deref().unwrap()).unwrap();
-        crate::orchestrator::write_task_state(&t).expect("write task");
-        // Deliberately do NOT write a pr.json — this is the PR-less case.
-
-        let mut app = App::new();
-        app.current_tab = Tab::Projects;
-        app.update_projects(snapshot(p, vec![t]));
-        assert_eq!(app.projects.col, 2);
-
-        assert_eq!(app.approve_review_task(), ApproveOutcome::DoneNoPr);
-
-        let reloaded = crate::orchestrator::read_task_state("p-noPR", "t-noPR").expect("read");
-        assert_eq!(reloaded.status, TaskStatus::Done);
-        assert!(crate::pr::read_pr("p-noPR", "t-noPR")
-            .expect("read pr")
-            .is_none());
-
-        match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
-
-    #[test]
-    fn backlog_tasks_absent_from_every_kanban_column() {
-        let mut app = App::new();
-        app.current_tab = Tab::Projects;
-
-        let p = project("p-bl");
-        // One task in each column-producing status, plus two Backlog tasks.
-        let tasks = vec![
-            task("p-bl", "t-plan", TaskStatus::Running, false), // col 0 (Planning)
-            task("p-bl", "t-run", TaskStatus::Running, true),   // col 1 (Running)
-            task("p-bl", "t-rev", TaskStatus::Review, false),   // col 2 (Review)
-            task("p-bl", "t-mrg", TaskStatus::Merging, false),  // col 3 (Merging)
-            task("p-bl", "t-done", TaskStatus::Done, false),    // col 4 (Done)
-            task("p-bl", "t-bl1", TaskStatus::Backlog, false),
-            task("p-bl", "t-bl2", TaskStatus::Backlog, true),
-        ];
-        app.update_projects(snapshot(p, tasks));
-
-        // No backlog task may appear in any of the five kanban columns.
-        for col in 0..5 {
-            for t in app.kanban_column_tasks(col) {
-                assert_ne!(
-                    t.status,
-                    TaskStatus::Backlog,
-                    "backlog task {} leaked into column {}",
-                    t.task_id,
-                    col
-                );
-            }
-        }
-
-        // They live only in the Backlog popup's task list.
-        let backlog: Vec<_> = app
-            .backlog_tasks()
-            .iter()
-            .map(|t| t.task_id.clone())
-            .collect();
-        assert_eq!(backlog, vec!["t-bl1".to_string(), "t-bl2".to_string()]);
-    }
-
-    #[test]
-    fn rollback_merging_to_review_restores_actionable_status() {
-        use crate::test_util::HOME_TEST_LOCK;
-        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().expect("tempdir");
-        let prev = std::env::var_os("HOME");
-        std::env::set_var("HOME", home.path());
-
-        // A task stranded in Merging (e.g. approve wrote Merging but the
-        // orchestrator turned out to be dead).
-        let mut t = task("p-rb", "t-rb", TaskStatus::Merging, false);
-        t.project_root = Some(home.path().join("repo"));
-        std::fs::create_dir_all(t.project_root.as_deref().unwrap()).unwrap();
-        crate::orchestrator::write_task_state(&t).expect("write task");
-
-        let mut app = App::new();
-        app.rollback_merging_to_review("p-rb", "t-rb");
-
-        let reloaded = crate::orchestrator::read_task_state("p-rb", "t-rb").expect("read");
-        assert_eq!(reloaded.status, TaskStatus::Review);
-        assert!(reloaded
-            .note
-            .as_deref()
-            .is_some_and(|n| n.contains("resurrect")));
-
-        // Idempotent: a non-Merging task is left untouched.
-        app.rollback_merging_to_review("p-rb", "t-rb");
-        let again = crate::orchestrator::read_task_state("p-rb", "t-rb").expect("read");
-        assert_eq!(again.status, TaskStatus::Review);
-
-        match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
-
-    #[test]
-    fn projects_cursor_clamps_when_task_disappears() {
-        let mut app = App::new();
-        app.current_tab = Tab::Projects;
-
-        let p = project("p-1");
-        let snap1 = snapshot(
-            p.clone(),
-            vec![task("p-1", "t-1", TaskStatus::Running, true)],
-        );
-        app.update_projects(snap1);
-        assert_eq!(app.projects.col, 1);
-
-        // Task vanishes from the snapshot entirely.
-        let snap2 = snapshot(p, Vec::new());
-        app.update_projects(snap2);
-
-        assert!(app.selected_project_task().is_none());
-        assert_eq!(
-            app.projects.col, 1,
-            "column should stay where it was when task disappears",
-        );
-        assert_eq!(app.projects.task_sel, 0, "row should clamp to 0");
-    }
-
-    #[test]
-    fn project_chip_cycle_wraps_and_clamps_to_new_project_tasks() {
-        let mut app = App::new();
-        app.current_tab = Tab::Projects;
-
-        let p1 = project("p-1");
-        let p2 = project("p-2");
-        app.update_projects(snapshot_many(vec![
-            (p1, vec![task("p-1", "t-review", TaskStatus::Review, false)]),
-            (p2, vec![task("p-2", "t-plan", TaskStatus::Running, false)]),
-        ]));
-
-        assert_eq!(app.projects.sel, 0);
-        assert_eq!(app.projects.col, 2, "first project starts in Review");
-        assert_eq!(
-            app.selected_project_task().map(|t| t.task_id.as_str()),
-            Some("t-review")
-        );
-
-        app.projects.move_down();
-        assert_eq!(app.projects.sel, 1);
-        assert_eq!(
-            app.projects.col, 0,
-            "switching projects should jump from empty Review to Planning"
-        );
-        assert_eq!(
-            app.selected_project_task().map(|t| t.task_id.as_str()),
-            Some("t-plan")
-        );
-
-        app.projects.move_down();
-        assert_eq!(app.projects.sel, 0, "L/]/down wraps to first project");
-        assert_eq!(app.projects.col, 2);
-
-        app.projects.move_up();
-        assert_eq!(app.projects.sel, 1, "H/[/up wraps to last project");
-        assert_eq!(app.projects.col, 0);
-    }
-
-    #[test]
-    fn pending_focus_jumps_to_planning_when_task_appears() {
-        let mut app = App::new();
-        app.current_tab = Tab::Projects;
-        let p = project("p-1");
-        // Initial snapshot: empty (the task hasn't been written yet from
-        // the orchestrator's POV, or is still in Backlog).
-        app.update_projects(snapshot(p.clone(), Vec::new()));
-        app.projects.pending_focus_task_id = Some("t-new".to_string());
-        app.projects.pending_focus_budget = 5;
-        // New snapshot: task appears as Running with no workers → Planning column.
-        app.update_projects(snapshot(
-            p,
-            vec![task("p-1", "t-new", TaskStatus::Running, false)],
-        ));
-        assert_eq!(app.projects.col, 0, "cursor should land on Planning");
-        assert_eq!(app.projects.task_sel, 0);
-        assert!(
-            app.projects.pending_focus_task_id.is_none(),
-            "pending should clear after success"
-        );
-    }
-
-    #[test]
-    fn pending_focus_budget_runs_out_when_task_never_arrives() {
-        let mut app = App::new();
-        app.current_tab = Tab::Projects;
-        let p = project("p-1");
-        app.update_projects(snapshot(p.clone(), Vec::new()));
-        app.projects.pending_focus_task_id = Some("t-ghost".to_string());
-        app.projects.pending_focus_budget = 2;
-        // Two empty snapshots → budget exhausted, pending cleared.
-        app.update_projects(snapshot(p.clone(), Vec::new()));
-        assert!(
-            app.projects.pending_focus_task_id.is_some(),
-            "still pending after 1"
-        );
-        app.update_projects(snapshot(p, Vec::new()));
-        assert!(
-            app.projects.pending_focus_task_id.is_none(),
-            "cleared after budget=0"
-        );
-    }
-
-    /// Opening the to-do panel must pick up edits that landed on disk while
-    /// it was closed (another instance, the file hand-edited) — App::new()
-    /// deliberately starts with an empty list and defers I/O to panel open.
-    #[test]
-    #[cfg(unix)]
-    fn enter_todo_panel_reloads_from_disk() {
-        crate::test_util::with_temp_home(|| {
-            let mut app = App::new();
-            assert!(app.todo.list.is_empty(), "no disk I/O in App::new()");
-            // Simulate an external writer landing while the panel is closed.
-            let mut external = crate::todo::TodoList::load();
-            external.add("written elsewhere");
-            app.enter_todo_panel();
-            assert_eq!(app.todo.list.len(), 1);
-            assert_eq!(app.todo.list.items()[0].text, "written elsewhere");
-        });
-    }
-
     /// Three sessions in one group, in scanner order. `fake_session` keys
     /// session_id off the tmux name, so ids are the given names.
     fn seed_three(app: &mut App) {
@@ -5716,18 +4543,6 @@ mod tests {
         assert_eq!(app.sessions.sel_in_group, 0);
     }
 
-    #[test]
-    fn update_projects_identical_snapshot_reports_no_change() {
-        let mut app = App::new();
-        let p = project("p-1");
-        let t = task("p-1", "t-1", TaskStatus::Running, false);
-        assert!(app.update_projects(snapshot(p.clone(), vec![t.clone()])));
-        assert!(
-            !app.update_projects(snapshot(p, vec![t])),
-            "identical projects snapshot must not request a repaint"
-        );
-    }
-
     #[cfg(unix)]
     mod task_kind_picker {
         use super::*;
@@ -5797,17 +4612,20 @@ mod tests {
         use crate::test_util::with_temp_home;
 
         #[test]
-        fn known_places_orders_projects_bookmarks_recents_and_dedups() {
+        fn known_places_orders_bookmarks_recents_and_dedups() {
             with_temp_home(|| {
                 let mut app = App::new();
-                app.projects.snapshot = snapshot(project("cc-hub"), vec![]);
                 app.bookmarks.toggle(PathBuf::from("/tmp/bm"));
-                // Bookmark duplicating the project root must be swallowed.
-                app.bookmarks.toggle(PathBuf::from("/tmp/cc-hub"));
                 let id = app.tasks.board.add("t").unwrap().unwrap();
                 app.tasks
                     .board
                     .assign(&id, "/tmp/recent", "claude", "mux-1")
+                    .unwrap();
+                // A recent duplicating a bookmark must be swallowed.
+                let dup = app.tasks.board.add("t2").unwrap().unwrap();
+                app.tasks
+                    .board
+                    .assign(&dup, "/tmp/bm", "claude", "mux-2")
                     .unwrap();
 
                 let places = app.known_places();
@@ -5816,7 +4634,6 @@ mod tests {
                 assert_eq!(
                     got,
                     vec![
-                        ("cc-hub", PlaceSource::Project),
                         ("bm", PlaceSource::Bookmark),
                         ("recent", PlaceSource::Recent),
                     ]
@@ -5828,8 +4645,8 @@ mod tests {
         fn assign_picker_opens_places_and_preselects_previous_cwd() {
             with_temp_home(|| {
                 let mut app = App::new();
-                app.projects.snapshot =
-                    snapshot_many(vec![(project("p-a"), vec![]), (project("p-b"), vec![])]);
+                app.bookmarks.toggle(PathBuf::from("/tmp/p-a"));
+                app.bookmarks.toggle(PathBuf::from("/tmp/p-b"));
                 let id = app.tasks.board.add("do the thing").unwrap().unwrap();
                 // A previous assignment on p-b: reopening the picker must
                 // land the cursor there, not on the first candidate.
@@ -5851,8 +4668,8 @@ mod tests {
         fn assign_picker_promotes_last_assigned_project_to_front() {
             with_temp_home(|| {
                 let mut app = App::new();
-                app.projects.snapshot =
-                    snapshot_many(vec![(project("p-a"), vec![]), (project("p-b"), vec![])]);
+                app.bookmarks.toggle(PathBuf::from("/tmp/p-a"));
+                app.bookmarks.toggle(PathBuf::from("/tmp/p-b"));
                 // An earlier task went to p-b: a fresh task's picker must
                 // open with p-b first and selected, ready for plain Enter.
                 let prev = app.tasks.board.add("earlier").unwrap().unwrap();
@@ -5879,9 +4696,9 @@ mod tests {
         fn assign_picker_resurrects_last_cwd_missing_from_places() {
             with_temp_home(|| {
                 let mut app = App::new();
-                app.projects.snapshot = snapshot(project("p-a"), vec![]);
+                app.bookmarks.toggle(PathBuf::from("/tmp/p-a"));
                 // The assigned task is deleted, so /tmp/gone is in no
-                // project/bookmark/recent — it must still lead the list.
+                // bookmark/recent — it must still lead the list.
                 let prev = app.tasks.board.add("earlier").unwrap().unwrap();
                 app.tasks
                     .board
@@ -5914,7 +4731,7 @@ mod tests {
         fn tab_toggles_between_places_and_browse_in_assign_and_session_flows() {
             with_temp_home(|| {
                 let mut app = App::new();
-                app.projects.snapshot = snapshot(project("p-a"), vec![]);
+                app.bookmarks.toggle(PathBuf::from("/tmp/p-a"));
                 let id = app.tasks.board.add("t").unwrap().unwrap();
                 app.focus_task(&id);
                 assert!(app.enter_task_assign_picker());
@@ -5933,12 +4750,6 @@ mod tests {
                 assert_eq!(mode(&app), PickerMode::Browse);
                 app.toggle_places_picker_mode();
                 assert_eq!(mode(&app), PickerMode::Places);
-
-                // The Projects flows keep their plain browser: no flip.
-                app.close_folder_picker();
-                app.enter_folder_picker_for_register_only();
-                app.toggle_places_picker_mode();
-                assert_eq!(mode(&app), PickerMode::Browse);
             });
         }
 
@@ -5946,7 +4757,7 @@ mod tests {
         fn session_places_picker_opens_places_without_pending_assign() {
             with_temp_home(|| {
                 let mut app = App::new();
-                app.projects.snapshot = snapshot(project("p-a"), vec![]);
+                app.bookmarks.toggle(PathBuf::from("/tmp/p-a"));
                 app.enter_session_places_picker();
                 let picker = app.folder_picker.as_ref().unwrap();
                 assert_eq!(picker.mode, PickerMode::Places);
@@ -5968,8 +4779,8 @@ mod tests {
         fn assign_places_does_not_promote_home_quick_assign() {
             with_temp_home(|| {
                 let mut app = App::new();
-                app.projects.snapshot =
-                    snapshot_many(vec![(project("p-a"), vec![]), (project("p-b"), vec![])]);
+                app.bookmarks.toggle(PathBuf::from("/tmp/p-a"));
+                app.bookmarks.toggle(PathBuf::from("/tmp/p-b"));
                 let home = dirs::home_dir().unwrap().display().to_string();
                 let prev = app.tasks.board.add("broad question").unwrap().unwrap();
                 app.tasks
@@ -6330,7 +5141,7 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 let note = |text: &str| {
-                    crate::ops::task::task_artifact_add_text(None, &id, text, "test").unwrap();
+                    crate::ops::task::task_artifact_add_text(&id, text, "test").unwrap();
                 };
                 app.focus_task(&id);
                 note("Needs you: keep the duplicate or fold it in?");
@@ -6359,7 +5170,7 @@ mod tests {
             with_temp_home(|| {
                 let mut app = App::new();
                 let note = |id: &str, text: &str| {
-                    crate::ops::task::task_artifact_add_text(None, id, text, "test").unwrap();
+                    crate::ops::task::task_artifact_add_text(id, text, "test").unwrap();
                 };
                 let told = app.tasks.board.add("node 24").unwrap().unwrap();
                 note(&told, "Needs you: pin 24 or stay on 22?");

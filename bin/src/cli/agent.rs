@@ -2,8 +2,8 @@
 //!
 //! User-facing: `list`, `new`, `once`, `poke`, `pause`, `resume`, `reset`,
 //! `show`. Agent-facing (run from inside a tick, which sets
-//! `CC_HUB_AGENT`): `note`. Flags are parsed locally — the shared `Flags`
-//! is orchestrator-shaped and none of its fields fit.
+//! `CC_HUB_AGENT`): `note`. Flags are parsed locally — none of the shared
+//! `Flags` fields fit.
 
 use super::{print_json, CliError};
 use cc_hub_lib::harness::{self, spec, AgentSnapshot, Event};

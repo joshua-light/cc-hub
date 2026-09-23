@@ -1,7 +1,7 @@
 use crate::conversation::classify;
 use crate::conversation::{
-    parse_timestamp_ms, CurrentTool, EntrySummary, ExplanationStep, StateExplanation, Verdict,
-    NO_CONTENT, NO_TEXT_CONTENT, THINKING_MARKER, TOOL_MARKER_PREFIX,
+    parse_timestamp_ms, CurrentTool, NO_CONTENT, NO_TEXT_CONTENT, THINKING_MARKER,
+    TOOL_MARKER_PREFIX,
 };
 use crate::models::{ConversationMessage, SessionState};
 use serde_json::Value;
@@ -368,92 +368,6 @@ pub fn extract_token_totals(entries: &[Value]) -> (u64, u64) {
         }
     }
     (total_input, total_output)
-}
-
-pub fn explain_state(entries: &[Value], mtime_age_secs: Option<u64>) -> StateExplanation {
-    let last = entries
-        .iter()
-        .rev()
-        .find(|e| matches!(message_role(e), Some("user") | Some("assistant")));
-    let (final_state, details) = match last {
-        None => (
-            SessionState::Idle,
-            vec!["no user/assistant messages yet".to_string()],
-        ),
-        Some(entry) if message_role(entry) == Some("user") => (
-            SessionState::Processing,
-            vec!["last meaningful message is user → agent is working".to_string()],
-        ),
-        Some(entry) => {
-            let stop = assistant_stop_reason(entry).unwrap_or("");
-            let state = match stop {
-                "toolUse" => SessionState::Processing,
-                "stop" | "error" | "aborted" | "length" => SessionState::WaitingForInput,
-                _ => SessionState::Processing,
-            };
-            (
-                state.clone(),
-                vec![format!("last assistant stopReason={:?} → {}", stop, state)],
-            )
-        }
-    };
-
-    let tail = entries
-        .iter()
-        .enumerate()
-        .rev()
-        .take(12)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|(idx, entry)| EntrySummary {
-            idx,
-            kind: entry
-                .get("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or("?")
-                .to_string(),
-            timestamp: entry
-                .get("timestamp")
-                .and_then(|t| t.as_str())
-                .map(str::to_string),
-            stop_reason: assistant_stop_reason(entry).map(str::to_string),
-            blocks: summarize_blocks(entry),
-        })
-        .collect();
-
-    StateExplanation {
-        final_state: final_state.clone(),
-        mtime_age_secs,
-        entry_count: entries.len(),
-        steps: vec![ExplanationStep {
-            name: "pi_last_meaningful_message",
-            verdict: Verdict::Decided(final_state),
-            details,
-        }],
-        tail,
-    }
-}
-
-fn summarize_blocks(entry: &Value) -> Vec<String> {
-    let Some(arr) = entry
-        .get("message")
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_array())
-    else {
-        return Vec::new();
-    };
-    arr.iter()
-        .filter_map(|block| match block.get("type").and_then(|t| t.as_str()) {
-            Some("text") => Some("text".to_string()),
-            Some("thinking") => Some("thinking".to_string()),
-            Some("toolCall") => block
-                .get("name")
-                .and_then(|n| n.as_str())
-                .map(|n| format!("tool:{}", n)),
-            _ => None,
-        })
-        .collect()
 }
 
 fn extract_text_content(entry: &Value) -> String {

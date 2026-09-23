@@ -119,11 +119,6 @@ pub(crate) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let scroll = app.render.grid_scroll;
     let now = now_ms();
-    // Build the tmux→role index once per frame; per-card lookup was
-    // O(projects × tasks × workers) and dominated re-render cost on hosts
-    // with many tasks.
-    let roles_by_tmux = app.projects.snapshot.roles_by_tmux();
-
     for (gi, group) in app.sessions.groups.iter().enumerate() {
         let g_y = group_offsets[gi];
 
@@ -157,20 +152,8 @@ pub(crate) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
 
             let is_selected = gi == app.sessions.sel_group && si == app.sessions.sel_in_group;
             let cell_area = Rect::new(x, cy, w, cell_height());
-            let role = session
-                .tmux_session
-                .as_deref()
-                .and_then(|t| roles_by_tmux.get(t));
             let badge = app.task_badge(&session.session_id);
-            render_card(
-                frame,
-                cell_area,
-                session,
-                role,
-                badge.as_ref(),
-                is_selected,
-                now,
-            );
+            render_card(frame, cell_area, session, badge.as_ref(), is_selected, now);
         }
     }
 }
@@ -196,42 +179,10 @@ pub(crate) fn starting_frame(now: u64) -> &'static str {
     STARTING_FRAMES[((now / 120) % STARTING_FRAMES.len() as u64) as usize]
 }
 
-/// Role badge — prepended into a card/row title so a glance tells the user
-/// whether a session is an orchestrator or a worker, and which task it's
-/// attached to. Workers also get their worktree name (or "RO" for
-/// read-only). None for ordinary sessions. Shared by both layouts.
-pub(crate) fn role_prefix(role: Option<&crate::projects_scan::SessionRole>) -> Option<String> {
-    match role {
-        Some(crate::projects_scan::SessionRole::Orchestrator { task_id, .. }) => Some(format!(
-            "★ orch[{}] ",
-            crate::orchestrator::short_task_id(task_id)
-        )),
-        Some(crate::projects_scan::SessionRole::Worker {
-            task_id,
-            worktree,
-            readonly,
-            ..
-        }) => {
-            let suffix = if *readonly {
-                "RO".to_string()
-            } else {
-                worktree.clone().unwrap_or_else(|| "wt".into())
-            };
-            Some(format!(
-                "↳ wkr[{}/{}] ",
-                crate::orchestrator::short_task_id(task_id),
-                suffix
-            ))
-        }
-        None => None,
-    }
-}
-
 pub(crate) fn render_card(
     frame: &mut Frame,
     area: Rect,
     session: &SessionInfo,
-    role: Option<&crate::projects_scan::SessionRole>,
     badge: Option<&crate::models::TaskBadge>,
     selected: bool,
     now: u64,
@@ -268,8 +219,6 @@ pub(crate) fn render_card(
         BorderType::Rounded
     };
 
-    let role_prefix = role_prefix(role);
-    let prefix = role_prefix.as_deref().unwrap_or("");
     // Claude is the ~99% default — labelling every card "[Claude]" is pure
     // noise — so the badge is shown only for non-Claude agents.
     let agent_badge = if session.agent_id == "claude" {
@@ -302,10 +251,10 @@ pub(crate) fn render_card(
     };
     let title = match session.title.as_deref() {
         Some(t) if !t.is_empty() => {
-            format!("{}{}{} {}{}", prefix, agent_badge, indicator, cold_mark, t)
+            format!("{}{} {}{}", agent_badge, indicator, cold_mark, t)
         }
-        _ if session.titling => format!("{}{}{} {}✎ …", prefix, agent_badge, indicator, cold_mark),
-        _ => format!("{}{}{} {}", prefix, agent_badge, indicator, cold_mark),
+        _ if session.titling => format!("{}{} {}✎ …", agent_badge, indicator, cold_mark),
+        _ => format!("{}{} {}", agent_badge, indicator, cold_mark),
     };
     // Attention cards get a solid chip title (black on the state color) —
     // background fill is reserved exclusively for "needs you", so it can't
@@ -918,7 +867,7 @@ mod tests {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
-            .draw(|f| super::render_card(f, f.area(), s, None, None, false, NOW))
+            .draw(|f| super::render_card(f, f.area(), s, None, false, NOW))
             .expect("render");
         terminal.backend().buffer().clone()
     }
@@ -946,13 +895,13 @@ mod tests {
         let live = crate::models::TaskBadge {
             task_id: "tk-live".into(),
             title: "Fix auth".into(),
-            priority: Some(crate::orchestrator::TaskPriority::P1),
+            priority: Some(crate::task_store::TaskPriority::P1),
             stale: false,
         };
         let stale = crate::models::TaskBadge {
             task_id: "tk-gone".into(),
             title: "Old task".into(),
-            priority: Some(crate::orchestrator::TaskPriority::P2),
+            priority: Some(crate::task_store::TaskPriority::P2),
             stale: true,
         };
         let s = fake_session();
@@ -961,7 +910,7 @@ mod tests {
             let backend = TestBackend::new(42, 7);
             let mut terminal = Terminal::new(backend).expect("terminal");
             terminal
-                .draw(|f| super::render_card(f, f.area(), &s, None, Some(badge), false, NOW))
+                .draw(|f| super::render_card(f, f.area(), &s, Some(badge), false, NOW))
                 .expect("render");
             terminal.backend().buffer().clone()
         };

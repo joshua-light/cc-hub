@@ -30,7 +30,7 @@ use crate::ui::common::{
 use crate::ui::now_ms;
 use crate::ui::palette::{CONTEXT_GRAY, ICE_BLUE, MUTED_TEXT};
 use crate::ui::sessions::{
-    render_group_header, render_no_sessions, role_prefix, spinner_frame, starting_frame, GROUP_GAP,
+    render_group_header, render_no_sessions, spinner_frame, starting_frame, GROUP_GAP,
     GROUP_HEADER_HEIGHT,
 };
 use ratatui::layout::Rect;
@@ -185,7 +185,6 @@ pub(crate) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
         .map(|b| b.title.lines().next().unwrap_or("").chars().count() + 2)
         .max();
     let cols = plan_columns(area.width as usize, task_need);
-    let roles_by_tmux = app.projects.snapshot.roles_by_tmux();
 
     for (gi, group) in app.sessions.groups.iter().enumerate() {
         let g_y = group_offsets[gi];
@@ -203,16 +202,11 @@ pub(crate) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
             }
             let row_area = Rect::new(area.x, area.y + row_sy as u16, area.width, 1);
             let selected = gi == app.sessions.sel_group && si == app.sessions.sel_in_group;
-            let role = session
-                .tmux_session
-                .as_deref()
-                .and_then(|t| roles_by_tmux.get(t));
             let badge = app.task_badge(&session.session_id);
             render_row(
                 frame,
                 row_area,
                 session,
-                role,
                 badge.as_ref(),
                 &cols,
                 selected,
@@ -227,7 +221,6 @@ fn render_row(
     frame: &mut Frame,
     area: Rect,
     session: &SessionInfo,
-    role: Option<&crate::projects_scan::SessionRole>,
     badge: Option<&crate::models::TaskBadge>,
     cols: &ListColumns,
     selected: bool,
@@ -339,16 +332,15 @@ fn render_row(
     }
     let cluster_width: usize = cluster.iter().map(|c| c.target + COL_SEP).sum();
 
-    // Title region: role prefix + agent badge + Haiku title (falling back
+    // Title region: agent badge + Haiku title (falling back
     // to the last user message, same priority as the card body).
     let title_budget = width.saturating_sub(LEFT_FIXED + cluster_width);
-    let prefix = role_prefix(role).unwrap_or_default();
     let agent_badge = if session.agent_id == "claude" {
         String::new()
     } else {
         format!("[{}] ", session.agent_badge())
     };
-    let prefix_w = prefix.chars().count() + agent_badge.chars().count();
+    let prefix_w = agent_badge.chars().count();
 
     let attention = session.needs_attention();
     let (text, text_style) = match session.title.as_deref() {
@@ -387,10 +379,7 @@ fn render_row(
         Style::default().fg(ind_color),
     ));
     if prefix_w > 0 {
-        spans.push(Span::styled(
-            format!("{}{}", prefix, agent_badge),
-            Style::default().fg(MUTED_TEXT),
-        ));
+        spans.push(Span::styled(agent_badge, Style::default().fg(MUTED_TEXT)));
     }
     spans.push(Span::styled(text, text_style));
     spans.push(Span::raw(" ".repeat(title_budget.saturating_sub(used))));

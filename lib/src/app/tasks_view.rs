@@ -4,7 +4,7 @@
 
 use crate::config;
 use crate::fuzzy::fuzzy_match;
-use crate::orchestrator::{TaskState, TaskStatus};
+use crate::task_store::{TaskState, TaskStatus};
 use crate::tasks::PersonalBoard;
 
 /// Full board column order. Planning is optional at render time (see
@@ -132,10 +132,6 @@ pub struct TasksView {
 
 impl TasksView {
     pub(crate) fn new() -> Self {
-        // NOTE: no migration here. `App::new()` runs in dozens of tests (and
-        // hot-reload paths); the destructive tasks.json migration is invoked
-        // exactly once, explicitly, from the binary entry point — see
-        // `run()` in bin/src/main.rs.
         let (board, persistence_error) = match PersonalBoard::load_result() {
             Ok(board) => (board, None),
             Err(e) => (

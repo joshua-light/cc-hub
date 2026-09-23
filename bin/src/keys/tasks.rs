@@ -27,7 +27,7 @@ pub(super) fn map_tasks_command(app: &App, key: &KeyEvent, on_tasks: bool) -> Op
         (View::Grid, KeyCode::Char('t')) if on_tasks => T::OpenTags,
         (View::Grid, KeyCode::Char('T')) if on_tasks => T::OpenKindPicker,
         (View::Grid, KeyCode::Char(c @ ('1' | '2' | '3' | '4'))) if on_tasks => {
-            use cc_hub_lib::orchestrator::TaskPriority;
+            use cc_hub_lib::task_store::TaskPriority;
             let priority = match c {
                 '1' => TaskPriority::P1,
                 '2' => TaskPriority::P2,
@@ -38,7 +38,6 @@ pub(super) fn map_tasks_command(app: &App, key: &KeyEvent, on_tasks: bool) -> Op
         }
         (View::Grid, KeyCode::Char('x')) if on_tasks => T::DeleteSelected,
         (View::Grid, KeyCode::Char('c')) if on_tasks => T::ClearDone,
-        (View::Grid, KeyCode::Char('P')) if on_tasks => T::PromoteSelected,
         (View::Grid, KeyCode::Char('f') | KeyCode::Enter) if on_tasks => T::FocusAgent,
         (View::Grid, KeyCode::Char('v')) if on_tasks => T::OpenTaskInfo,
         (View::Grid, KeyCode::Char('A')) if on_tasks => T::OpenAttachInput { from_info: false },
@@ -78,8 +77,8 @@ pub(super) fn handle(app: &mut App, key: KeyEvent) -> bool {
         }
         (View::TaskAttachInput, KeyCode::Char(c)) => app.tasks.input.push(c),
         // Task Info popup: nav + per-attachment actions. `a`/`x` are commands
-        // (see `map_tasks_command`); copy/open stay bin arms like the
-        // Projects Result popup's — they need the clipboard / OS opener.
+        // (see `map_tasks_command`); copy/open stay bin arms — they need the
+        // clipboard / OS opener.
         (View::TaskInfo, KeyCode::Esc | KeyCode::Char('v') | KeyCode::Char('q')) => {
             app.close_task_info();
         }

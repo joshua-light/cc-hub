@@ -29,14 +29,11 @@ pub(crate) const SEP_GRAY: Color = Color::Rgb(60, 60, 70);
 /// Diff/context and tail-entry gray.
 pub(crate) const CONTEXT_GRAY: Color = Color::Rgb(160, 160, 170);
 
-/// Soft blue accent (cwd path, note icon, selected to-do marker).
+/// Soft blue accent (cwd path, note icon).
 pub(crate) const ACCENT_BLUE: Color = Color::Rgb(180, 200, 230);
 
 /// Planning/thinking purple accent.
 pub(crate) const PURPLE: Color = Color::Rgb(170, 140, 210);
-
-/// Faint purple-tinged gray for fallback/video bodies and artifact counts.
-pub(crate) const FAINT_PURPLE_GRAY: Color = Color::Rgb(160, 160, 180);
 
 /// Idle/overflow dot and narrow-board hint gray.
 pub(crate) const DOT_IDLE: Color = Color::Rgb(140, 140, 160);

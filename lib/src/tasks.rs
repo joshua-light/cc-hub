@@ -1,7 +1,5 @@
-//! Personal task board shown on the Tasks tab. Unlike the Projects-tab
-//! orchestrator tasks (heavyweight: orchestrator session, workers, PR
-//! pipeline), a board task is a plain to-do item that can optionally be
-//! handed to a single agent session: assigning spawns a detached agent in a
+//! Personal task board shown on the Tasks tab. A board task is a plain to-do
+//! item that can optionally be handed to a single agent session: assigning spawns a detached agent in a
 //! chosen cwd, prompted to investigate and plan first — the card sits in
 //! Planning until the user approves the plan (Space), which tells the agent
 //! to proceed and moves the card to In Progress. The binding is recorded so
@@ -10,18 +8,13 @@
 //! note carries the card to Review — the column for work that wants reading
 //! rather than answering.
 //!
-//! Since the task-model unification a board task IS an
-//! [`orchestrator::TaskState`] with `project_id: None`, stored one file per
-//! task at `~/.cc-hub/tasks/<task-id>/state.json` — the same per-task
-//! lock + tempfile-rename machinery as the Projects store, with the legal
-//! status edges enforced by the shared transition table. [`PersonalBoard`]
+//! A board task is a [`task_store::TaskState`], stored one file per task at
+//! `~/.cc-hub/tasks/<task-id>/state.json` behind a per-task lock, with the
+//! legal status edges enforced by the store's transition table. [`PersonalBoard`]
 //! is the in-memory snapshot the TUI mutates through; every mutation is a
 //! locked read-mutate-write of the task's own file, so concurrent cc-hub
 //! instances conflict per task, not per board. Board-level metadata
 //! (`last_assign_cwd`) lives in `~/.cc-hub/board.json`.
-//!
-//! The pre-unification single-file board (`~/.cc-hub/tasks.json`) is
-//! migrated automatically on first load — see [`migrate_legacy_board`].
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -30,11 +23,11 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::models::{SessionInfo, SessionState};
-use crate::orchestrator::{
-    self, personal_task_dir, personal_tasks_dir, read_task_state_for, update_personal_task,
-    write_task_state, TaskPriority, TaskState, TaskStatus,
-};
 use crate::platform::paths::cc_hub_home;
+use crate::task_store::{
+    self, read_task_state, task_dir, tasks_dir, update_task, write_task_state, TaskPriority,
+    TaskState, TaskStatus,
+};
 
 /// Longest a single tag may be after normalization; longer ones are truncated.
 const MAX_TAG_LEN: usize = 16;
@@ -188,7 +181,7 @@ impl PersonalBoard {
     /// mistake data loss for an intentionally empty board.
     pub fn load_result() -> io::Result<Self> {
         let mut tasks = Vec::new();
-        if let Some(dir) = personal_tasks_dir() {
+        if let Some(dir) = tasks_dir() {
             match fs::read_dir(&dir) {
                 Ok(entries) => {
                     for entry in entries {
@@ -197,7 +190,7 @@ impl PersonalBoard {
                             continue;
                         }
                         let task_id = entry.file_name().to_string_lossy().into_owned();
-                        tasks.push(read_task_state_for(None, &task_id)?);
+                        tasks.push(read_task_state(&task_id)?);
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -265,7 +258,7 @@ impl PersonalBoard {
         if text.is_empty() {
             return Ok(None);
         }
-        let mut state = TaskState::new_personal(text.to_string());
+        let mut state = TaskState::new(text.to_string());
         state.tags = tags;
         state.priority = priority;
         write_task_state(&state)?;
@@ -282,7 +275,7 @@ impl PersonalBoard {
         if text.is_empty() || self.get(id).is_none_or(|t| t.prompt == text) {
             return Ok(false);
         }
-        let updated = update_personal_task(id, |s| s.prompt = text.to_string())?;
+        let updated = update_task(id, |s| s.prompt = text.to_string())?;
         self.apply(updated);
         Ok(true)
     }
@@ -294,7 +287,7 @@ impl PersonalBoard {
         if self.get(id).is_none_or(|t| t.priority == priority) {
             return Ok(false);
         }
-        let updated = update_personal_task(id, |s| s.priority = priority)?;
+        let updated = update_task(id, |s| s.priority = priority)?;
         self.apply(updated);
         Ok(true)
     }
@@ -306,7 +299,7 @@ impl PersonalBoard {
         if self.get(id).is_none_or(|t| t.tags == tags) {
             return Ok(false);
         }
-        let updated = update_personal_task(id, |s| s.tags = tags)?;
+        let updated = update_task(id, |s| s.tags = tags)?;
         self.apply(updated);
         Ok(true)
     }
@@ -318,7 +311,7 @@ impl PersonalBoard {
         if self.get(id).is_none_or(|t| t.kind == kind) {
             return Ok(false);
         }
-        let updated = update_personal_task(id, |s| s.kind = kind)?;
+        let updated = update_task(id, |s| s.kind = kind)?;
         self.apply(updated);
         Ok(true)
     }
@@ -331,9 +324,9 @@ impl PersonalBoard {
         if self.get(id).is_none_or(|t| t.status == status) {
             return Ok(false);
         }
-        let updated = update_personal_task(id, |s| {
+        let updated = update_task(id, |s| {
             s.status = status;
-            s.done_at = (status == TaskStatus::Done).then(orchestrator::now_unix_secs);
+            s.done_at = (status == TaskStatus::Done).then(task_store::now_unix_secs);
         })?;
         self.apply(updated);
         Ok(true)
@@ -347,7 +340,7 @@ impl PersonalBoard {
         if self.get(id).is_none() {
             return Ok(false);
         }
-        let updated = update_personal_task(id, |s| {
+        let updated = update_task(id, |s| {
             s.cwd = Some(cwd.to_string());
             s.agent_id = Some(agent_id.to_string());
             s.tmux = Some(tmux.to_string());
@@ -372,7 +365,7 @@ impl PersonalBoard {
         if self.get(id).is_none_or(|t| t.tmux.as_deref() == Some(tmux)) {
             return Ok(false);
         }
-        let updated = update_personal_task(id, |s| s.tmux = Some(tmux.to_string()))?;
+        let updated = update_task(id, |s| s.tmux = Some(tmux.to_string()))?;
         self.apply(updated);
         Ok(true)
     }
@@ -389,7 +382,7 @@ impl PersonalBoard {
         if self.get(id).is_none() {
             return Ok(false);
         }
-        let updated = update_personal_task(id, |s| {
+        let updated = update_task(id, |s| {
             s.cwd = Some(cwd.into());
             s.agent_id = Some(agent.into());
             s.tmux = Some(tmux.into());
@@ -417,7 +410,7 @@ impl PersonalBoard {
             return Ok(false);
         }
         for (id, binding) in bindings {
-            let updated = update_personal_task(&id, |s| binding.apply(s))?;
+            let updated = update_task(&id, |s| binding.apply(s))?;
             self.apply(updated);
         }
         Ok(true)
@@ -435,7 +428,7 @@ impl PersonalBoard {
         // the task dir before a failed archive write would report failure
         // after the card had already disappeared.
         archive_tasks(std::slice::from_ref(&removed))?;
-        if let Some(dir) = personal_task_dir(id) {
+        if let Some(dir) = task_dir(id) {
             match fs::remove_dir_all(&dir) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -473,7 +466,7 @@ impl PersonalBoard {
         }
         archive_tasks(&done)?;
         for t in &done {
-            if let Some(dir) = personal_task_dir(&t.task_id) {
+            if let Some(dir) = task_dir(&t.task_id) {
                 match fs::remove_dir_all(&dir) {
                     Ok(()) => {}
                     Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -509,8 +502,7 @@ fn archive_path() -> Option<PathBuf> {
 /// array of unified [`TaskState`]s), so `x` and `c` are recoverable beyond
 /// the in-session undo slot. The archive is a log, not a ledger: an undone
 /// delete leaves its copy behind, and a corrupt file starts fresh — same
-/// policy as the board. The pre-unification `tasks-archive.json` (legacy
-/// `TaskItem` shape) is left untouched.
+/// policy as the board.
 fn archive_tasks(items: &[TaskState]) -> io::Result<()> {
     if items.is_empty() {
         return Ok(());
@@ -540,221 +532,6 @@ fn archive_tasks(items: &[TaskState]) -> io::Result<()> {
     crate::persist::save_json(&path, &archived)
 }
 
-/// Frozen serde shapes of the pre-unification board, kept only so
-/// [`migrate_legacy_board`] can parse an existing `~/.cc-hub/tasks.json`
-/// byte-for-byte the way the old code did. Never construct these outside
-/// migration.
-pub mod legacy {
-    use serde::Deserialize;
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    pub enum TaskItemStatus {
-        Todo,
-        Planning,
-        InProgress,
-        Done,
-    }
-
-    #[derive(Clone, Debug, Deserialize)]
-    pub struct TaskItem {
-        pub id: String,
-        pub text: String,
-        pub status: TaskItemStatus,
-        #[serde(default)]
-        pub priority: super::TaskPriority,
-        #[serde(default)]
-        pub tags: Vec<String>,
-        #[serde(default)]
-        pub created_at: u64,
-        #[serde(default)]
-        pub done_at: Option<u64>,
-        #[serde(default)]
-        pub cwd: Option<String>,
-        #[serde(default)]
-        pub agent_id: Option<String>,
-        #[serde(default)]
-        pub tmux: Option<String>,
-        #[serde(default)]
-        pub session_id: Option<String>,
-    }
-
-    #[derive(Default, Debug, Deserialize)]
-    pub struct TaskBoard {
-        #[serde(default)]
-        pub tasks: Vec<TaskItem>,
-        #[serde(default)]
-        pub last_assign_cwd: Option<String>,
-        #[serde(default)]
-        pub revision: u64,
-    }
-}
-
-fn legacy_tasks_path() -> Option<PathBuf> {
-    cc_hub_home().map(|h| h.join("tasks.json"))
-}
-
-fn legacy_item_to_state(item: legacy::TaskItem) -> TaskState {
-    let mut state = TaskState::new_personal(item.text);
-    state.task_id = item.id;
-    state.status = match item.status {
-        legacy::TaskItemStatus::Todo => TaskStatus::Backlog,
-        legacy::TaskItemStatus::Planning => TaskStatus::Planning,
-        legacy::TaskItemStatus::InProgress => TaskStatus::Running,
-        legacy::TaskItemStatus::Done => TaskStatus::Done,
-    };
-    state.priority = item.priority;
-    state.tags = item.tags;
-    state.created_at = item.created_at as i64;
-    state.done_at = item.done_at.map(|t| t as i64);
-    state.updated_at = (item.created_at.max(item.done_at.unwrap_or(0))) as i64;
-    state.cwd = item.cwd;
-    state.agent_id = item.agent_id;
-    state.tmux = item.tmux;
-    state.session_id = item.session_id;
-    state
-}
-
-/// Migrate a pre-unification `~/.cc-hub/tasks.json` into the per-task store.
-/// Lossless, idempotent, and abort-on-error:
-///
-/// 1. No `tasks.json` → nothing to do (the disarmed trigger).
-/// 2. The old board lock (`tasks.lock`) is held throughout, serializing
-///    against a concurrently running pre-unification binary.
-/// 3. A parse failure aborts touching nothing — the caller surfaces the
-///    error and the file stays exactly as it was.
-/// 4. Tasks whose directory already exists are skipped (re-run safety after
-///    a partial migration).
-/// 5. Only after every task is written: `last_assign_cwd` lands in
-///    `board.json` and `tasks.json` is renamed to `tasks.json.migrated-v1` —
-///    the backup doubles as the rollback story.
-///
-/// Returns the number of migrated tasks, or `None` when there was nothing
-/// to migrate.
-pub fn migrate_legacy_board() -> io::Result<Option<usize>> {
-    let Some(path) = legacy_tasks_path() else {
-        return Ok(None);
-    };
-    if !path.exists() {
-        return Ok(None);
-    }
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::other("tasks path has no parent"))?;
-    fs::create_dir_all(parent)?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(parent.join("tasks.lock"))?;
-    lock.lock_exclusive()?;
-
-    // Re-check under the lock: a concurrent instance may have finished the
-    // migration while we waited.
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    let board: legacy::TaskBoard = serde_json::from_str(&raw).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("migrate {}: {}", path.display(), e),
-        )
-    })?;
-
-    let mut migrated = 0usize;
-    let mut all_ids: Vec<String> = Vec::with_capacity(board.tasks.len());
-    for item in board.tasks {
-        all_ids.push(item.id.clone());
-        let exists = personal_task_dir(&item.id).is_some_and(|d| d.exists());
-        if exists {
-            continue;
-        }
-        write_task_state(&legacy_item_to_state(item))?;
-        migrated += 1;
-    }
-
-    // Paranoia gate before the destructive rename: re-verify every task is
-    // actually present in the store. Guards against anything that redirects
-    // path resolution mid-migration (observed: a parallel test flipping
-    // $HOME, sending the writes into a doomed tempdir) — better to leave the
-    // trigger armed and error than to disarm it with the data elsewhere.
-    for id in &all_ids {
-        let landed = personal_task_dir(id).is_some_and(|d| d.join("state.json").exists());
-        if !landed {
-            return Err(io::Error::other(format!(
-                "migration verify failed: task {} missing from the store; \
-                 leaving tasks.json in place",
-                id
-            )));
-        }
-    }
-
-    if let Some(cwd) = board.last_assign_cwd {
-        let mut meta = load_board_meta();
-        if meta.last_assign_cwd.is_none() {
-            meta.last_assign_cwd = Some(cwd);
-            save_board_meta(&meta)?;
-        }
-    }
-
-    // All writes landed; disarm the trigger, keeping the original as backup.
-    fs::rename(&path, parent.join("tasks.json.migrated-v1"))?;
-    Ok(Some(migrated))
-}
-
-/// Promote a personal-board task into a registered project's Backlog: the
-/// same record continues under `~/.cc-hub/projects/<pid>/tasks/<tid>/`, where
-/// triage, `task start`, and the Backlog popup pick it up like any
-/// orchestrated task. Prompt, tags, priority, created_at, cwd, and
-/// session_id travel along (history); `tmux` is cleared so a live board
-/// agent stays visible on the Sessions tab rather than being mistaken for an
-/// orchestrator. Write-then-delete: a crash between the two leaves a
-/// duplicate, never a loss.
-pub fn promote_task(task_id: &str, project_id: &str) -> io::Result<TaskState> {
-    let projects = orchestrator::load_projects();
-    let project = projects
-        .projects
-        .iter()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("project {} is not registered", project_id),
-            )
-        })?;
-
-    let mut state = read_task_state_for(None, task_id)?;
-    if state.project_id.is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("task {} already belongs to a project", task_id),
-        ));
-    }
-    state.project_id = Some(project.id.clone());
-    state.project_root = Some(project.root.clone());
-    // The orchestrated flow starts at Backlog regardless of which board
-    // column the card sat in; done_at would contradict Backlog.
-    state.status = TaskStatus::Backlog;
-    state.done_at = None;
-    state.tmux = None;
-    state.touch();
-    write_task_state(&state)?;
-
-    if let Some(dir) = personal_task_dir(task_id) {
-        match fs::remove_dir_all(&dir) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            // The project copy already landed; a leftover personal dir is a
-            // duplicate the user can delete, not data loss.
-            Err(e) => log::warn!("promote {}: personal dir cleanup failed: {}", task_id, e),
-        }
-    }
-    Ok(state)
-}
-
 // Unix-only for the same reason as todo.rs: isolation works by redirecting
 // `$HOME`, which `dirs::home_dir()` ignores on Windows.
 #[cfg(all(test, unix))]
@@ -774,7 +551,6 @@ mod tests {
             let t = reloaded.get(&id).unwrap();
             assert_eq!(t.prompt, "fix the flaky test");
             assert_eq!(t.status, TaskStatus::Backlog);
-            assert_eq!(t.flow(), orchestrator::TaskFlow::Personal);
             assert!(t.task_id.starts_with("tk-"));
         });
     }
@@ -799,8 +575,8 @@ mod tests {
         with_temp_home(|| {
             let mut b = PersonalBoard::load();
             let id = b.add("no PR flow here").unwrap().unwrap();
-            // Backlog → Review is orchestrated-only; the shared table must
-            // refuse it for a personal task.
+            // Backlog → Review skips the work; the transition table must
+            // refuse it.
             let err = b.set_status(&id, TaskStatus::Review).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
             assert_eq!(
@@ -1114,7 +890,7 @@ mod tests {
     #[test]
     fn malformed_task_file_is_reported_without_replacing_it() {
         with_temp_home(|| {
-            let dir = personal_task_dir("tk-broken").unwrap();
+            let dir = task_dir("tk-broken").unwrap();
             fs::create_dir_all(&dir).unwrap();
             fs::write(dir.join("state.json"), "{not-json").unwrap();
 
@@ -1144,147 +920,6 @@ mod tests {
         assert_eq!(q.text, "just words");
         assert!(q.tags.is_empty());
         assert_eq!(q.priority, None);
-    }
-
-    // ── migration ─────────────────────────────────────────────────────────
-
-    fn write_legacy_board(json: &str) {
-        let path = legacy_tasks_path().unwrap();
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, json).unwrap();
-    }
-
-    const LEGACY_BOARD: &str = r#"{
-        "tasks": [
-            {"id":"tk-1","text":"old todo","status":"todo","created_at":100},
-            {"id":"tk-2","text":"planned","status":"planning","priority":"p1",
-             "tags":["bug"],"created_at":200,"cwd":"/tmp/p","agent_id":"claude",
-             "tmux":"cchub-1-1","session_id":"sid-1"},
-            {"id":"tk-3","text":"working","status":"in_progress","created_at":300},
-            {"id":"tk-4","text":"shipped","status":"done","created_at":400,"done_at":450}
-        ],
-        "last_assign_cwd": "/tmp/p",
-        "revision": 9
-    }"#;
-
-    #[test]
-    fn migration_maps_every_field_and_disarms() {
-        with_temp_home(|| {
-            write_legacy_board(LEGACY_BOARD);
-            assert_eq!(migrate_legacy_board().unwrap(), Some(4));
-
-            let b = PersonalBoard::load_result().unwrap();
-            assert_eq!(b.tasks().len(), 4);
-            assert_eq!(b.last_assign_cwd(), Some("/tmp/p"));
-
-            let t1 = b.get("tk-1").unwrap();
-            assert_eq!(t1.status, TaskStatus::Backlog);
-            assert_eq!(t1.prompt, "old todo");
-            assert_eq!(t1.created_at, 100);
-            assert_eq!(t1.priority, TaskPriority::P3);
-            assert!(t1.project_id.is_none());
-
-            let t2 = b.get("tk-2").unwrap();
-            assert_eq!(t2.status, TaskStatus::Planning);
-            assert_eq!(t2.priority, TaskPriority::P1);
-            assert_eq!(t2.tags, vec!["bug"]);
-            assert_eq!(t2.cwd.as_deref(), Some("/tmp/p"));
-            assert_eq!(t2.session_id.as_deref(), Some("sid-1"));
-
-            assert_eq!(b.get("tk-3").unwrap().status, TaskStatus::Running);
-
-            let t4 = b.get("tk-4").unwrap();
-            assert_eq!(t4.status, TaskStatus::Done);
-            assert_eq!(t4.done_at, Some(450));
-            assert_eq!(t4.updated_at, 450);
-
-            // The trigger is disarmed and the backup preserved.
-            assert!(!legacy_tasks_path().unwrap().exists());
-            let backup = legacy_tasks_path()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .join("tasks.json.migrated-v1");
-            assert!(backup.exists());
-
-            // Re-running is a no-op.
-            assert_eq!(migrate_legacy_board().unwrap(), None);
-        });
-    }
-
-    #[test]
-    fn migration_skips_existing_dirs_on_rerun() {
-        with_temp_home(|| {
-            write_legacy_board(LEGACY_BOARD);
-            // Simulate a partial earlier run: tk-1 already migrated (with an
-            // edit the re-run must not clobber).
-            let mut pre = TaskState::new_personal("edited after partial run".into());
-            pre.task_id = "tk-1".into();
-            write_task_state(&pre).unwrap();
-
-            assert_eq!(migrate_legacy_board().unwrap(), Some(3));
-            let b = PersonalBoard::load_result().unwrap();
-            assert_eq!(b.tasks().len(), 4);
-            assert_eq!(b.get("tk-1").unwrap().prompt, "edited after partial run");
-        });
-    }
-
-    #[test]
-    fn corrupt_legacy_board_aborts_untouched() {
-        with_temp_home(|| {
-            write_legacy_board("{not-json");
-            let error = migrate_legacy_board().unwrap_err();
-            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-            // Nothing migrated, file untouched, trigger still armed.
-            assert!(PersonalBoard::load_result().unwrap().tasks().is_empty());
-            assert_eq!(
-                fs::read_to_string(legacy_tasks_path().unwrap()).unwrap(),
-                "{not-json"
-            );
-        });
-    }
-
-    #[test]
-    fn promote_moves_task_into_project_backlog() {
-        with_temp_home(|| {
-            let root = std::env::temp_dir().join("promote-fixture");
-            fs::create_dir_all(&root).unwrap();
-            let project_id =
-                orchestrator::ensure_project_registered(&root, "promote-fixture").unwrap();
-
-            let mut b = PersonalBoard::load();
-            let id = b.add("grow into a project task").unwrap().unwrap();
-            b.assign(&id, "/tmp/p", "claude", "cchub-1-9").unwrap();
-
-            let promoted = promote_task(&id, &project_id).unwrap();
-            assert_eq!(promoted.project_id.as_deref(), Some(project_id.as_str()));
-            assert_eq!(promoted.status, TaskStatus::Backlog);
-            assert_eq!(promoted.tmux, None, "board tmux must not travel");
-            assert_eq!(promoted.cwd.as_deref(), Some("/tmp/p"), "history travels");
-
-            // Off the board, present in the project store.
-            assert!(PersonalBoard::load().get(&id).is_none());
-            let in_project = orchestrator::read_task_state(&project_id, &id).unwrap();
-            assert_eq!(in_project.prompt, "grow into a project task");
-
-            // Unknown project and double-promotion are refused.
-            assert!(promote_task(&id, "nope").is_err());
-        });
-    }
-
-    #[test]
-    fn migrated_task_round_trips_through_the_store() {
-        with_temp_home(|| {
-            write_legacy_board(LEGACY_BOARD);
-            migrate_legacy_board().unwrap();
-            // A migrated Planning card approves to Running like a native one.
-            let mut b = PersonalBoard::load_result().unwrap();
-            b.set_status("tk-2", TaskStatus::Running).unwrap();
-            assert_eq!(
-                PersonalBoard::load().get("tk-2").unwrap().status,
-                TaskStatus::Running
-            );
-        });
     }
 
     #[test]

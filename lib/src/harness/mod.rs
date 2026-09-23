@@ -39,7 +39,7 @@ pub const MAX_FAILURES_IN_A_ROW: u32 = 5;
 
 /// `~/.cc-hub/agents/`
 pub fn root() -> Option<PathBuf> {
-    crate::orchestrator::cc_hub_home().map(|h| h.join("agents"))
+    crate::platform::paths::cc_hub_home().map(|h| h.join("agents"))
 }
 
 /// Whether the agents root existed at process start. Cached because

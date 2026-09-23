@@ -4,6 +4,7 @@
 //! the same behaviour as shipped defaults.
 
 use crate::agent::{default_claude_models, AgentConfig, AgentKind, AgentModel};
+use serde::de::IgnoredAny;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -26,9 +27,14 @@ pub struct Config {
     pub scan: ScanConfig,
     pub ui: UiConfig,
     pub metrics: MetricsConfig,
-    pub backlog: BacklogConfig,
-    pub auto_review: AutoReviewConfig,
     pub harness: HarnessConfig,
+    /// Retired with the Projects layer. Accepted and ignored so an old
+    /// config keeps loading: `deny_unknown_fields` would otherwise fail the
+    /// parse and drop every other setting back to defaults.
+    #[serde(rename = "backlog")]
+    _backlog: Option<IgnoredAny>,
+    #[serde(rename = "auto_review")]
+    _auto_review: Option<IgnoredAny>,
 }
 
 impl Config {
@@ -75,13 +81,6 @@ impl Config {
             .into_values()
             .map(|a| a.kind)
             .collect()
-    }
-
-    pub fn default_orchestrator_agent_id(&self) -> String {
-        self.projects
-            .default_orchestrator_agent
-            .clone()
-            .unwrap_or_else(|| "claude".into())
     }
 
     pub fn default_session_agent_id(&self) -> String {
@@ -210,8 +209,11 @@ pub struct ConfiguredModelDetails {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectsConfig {
-    pub default_orchestrator_agent: Option<String>,
     pub default_session_agent: Option<String>,
+    /// Retired with the Projects layer; accepted and ignored (see
+    /// [`Config`]'s `_backlog`).
+    #[serde(rename = "default_orchestrator_agent")]
+    _default_orchestrator_agent: Option<IgnoredAny>,
 }
 
 /// `[tasks]` — the personal board's own knobs.
@@ -343,14 +345,15 @@ pub struct UiConfig {
     pub pending_dispatch_timeout_secs: u64,
     pub cell_height: u16,
     pub cell_width: u16,
-    /// The Projects tab (orchestrator kanban) is WIP and hidden from the
-    /// tab strip + ⇥ cycle by default. Set true to bring it back.
-    pub show_projects_tab: bool,
     /// The Planning column on the Tasks board. Off by default; set true to
     /// show it. When off, its cards fold into In Progress, so plan-ready work
     /// stays visible and Space still approves it (the action keys off the
     /// card's status, not the column it renders in).
     pub show_planning_column: bool,
+    /// Retired with the Projects layer; accepted and ignored (see
+    /// [`Config`]'s `_backlog`).
+    #[serde(rename = "show_projects_tab")]
+    _show_projects_tab: Option<IgnoredAny>,
 }
 
 impl UiConfig {
@@ -373,7 +376,7 @@ impl Default for UiConfig {
             // branch/model/id into one compact row.
             cell_height: 6,
             cell_width: 42,
-            show_projects_tab: false,
+            _show_projects_tab: None,
             show_planning_column: false,
         }
     }
@@ -397,89 +400,6 @@ impl Default for MetricsConfig {
             top_interruptions: 10,
             top_growth_findings: 10,
             top_peak_context_findings: 10,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct BacklogConfig {
-    pub enabled: bool,
-    pub model: String,
-    pub interval_secs: u64,
-    pub run_timeout_secs: u64,
-    pub ttl_secs: u64,
-}
-
-impl BacklogConfig {
-    pub fn interval(&self) -> Duration {
-        Duration::from_secs(self.interval_secs)
-    }
-    pub fn run_timeout(&self) -> Duration {
-        Duration::from_secs(self.run_timeout_secs)
-    }
-}
-
-impl Default for BacklogConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            model: "sonnet".into(),
-            interval_secs: 8,
-            run_timeout_secs: 120,
-            ttl_secs: 300,
-        }
-    }
-}
-
-/// Background auto-review tick. When enabled, every `interval_secs` cc-hub
-/// scans for tasks in Review state with an Open / ChangesRequested PR that
-/// haven't been auto-reviewed this round yet, and spawns ONE reviewer
-/// session for the oldest eligible task. The reviewer is a real agent
-/// session (read-only) that can build, test, post comments, and either
-/// approve or request changes via the existing `cc-hub pr ...` CLI verbs —
-/// closing the orchestrator → review → iterate → re-review loop without a
-/// human in the path.
-///
-/// Off by default: each tick spawns a billed agent session.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct AutoReviewConfig {
-    pub enabled: bool,
-    /// Agent backend to use for reviewer sessions. Resolved against
-    /// `[agents.*]`; falls back to the default orchestrator agent if unset.
-    pub agent: Option<String>,
-    pub interval_secs: u64,
-    /// Per-tick eligibility cap: don't re-review a task whose
-    /// `last_auto_reviewed_at` is within this many seconds. Belt-and-braces
-    /// alongside the per-round clear-on-re-entry gate.
-    pub ttl_secs: u64,
-    pub run_timeout_secs: u64,
-    /// Cap on PR comments rendered into the reviewer briefing. Long iterative
-    /// review rounds otherwise grow the prompt without bound; older comments
-    /// are dropped with a `(+N older comments not shown)` footer so the
-    /// reviewer knows context exists.
-    pub max_comments_in_prompt: u32,
-}
-
-impl AutoReviewConfig {
-    pub fn interval(&self) -> Duration {
-        Duration::from_secs(self.interval_secs)
-    }
-    pub fn run_timeout(&self) -> Duration {
-        Duration::from_secs(self.run_timeout_secs)
-    }
-}
-
-impl Default for AutoReviewConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            agent: None,
-            interval_secs: 30,
-            ttl_secs: 600,
-            run_timeout_secs: 1800,
-            max_comments_in_prompt: 8,
         }
     }
 }
@@ -568,8 +488,30 @@ mod tests {
         assert_eq!(cfg.title.model, def.title.model);
         assert_eq!(cfg.inactive.window_secs, def.inactive.window_secs);
         assert_eq!(cfg.inactive.orphan_relist_secs, 30);
-        assert_eq!(cfg.default_orchestrator_agent_id(), "claude");
         assert!(!cfg.ui.show_planning_column);
+    }
+
+    /// Keys the Projects layer owned must not fail the parse: a parse error
+    /// drops the whole config back to defaults.
+    #[test]
+    fn retired_projects_keys_are_ignored() {
+        let src = r#"
+            [backlog]
+            enabled = true
+
+            [auto_review]
+            enabled = true
+            interval_secs = 30
+
+            [ui]
+            show_projects_tab = true
+            cell_width = 50
+
+            [projects]
+            default_orchestrator_agent = "claude"
+        "#;
+        let cfg: Config = toml::from_str(src).unwrap();
+        assert_eq!(cfg.ui.cell_width, 50);
     }
 
     #[test]
@@ -652,7 +594,6 @@ mod tests {
         assert_eq!(pi.models[0].label, "GPT-5.6");
         assert_eq!(pi.models[0].id, "gpt-5.6");
         assert_eq!(pi.models[1].id, "sol");
-        assert_eq!(cfg.default_orchestrator_agent_id(), "claude");
         assert_eq!(cfg.default_session_agent_id(), "pi-codex");
     }
 

@@ -1,8 +1,7 @@
 //! In-memory incremental cache for transcript tool-use counts.
 //!
-//! Counting `tool_use` / `toolCall` blocks across whole orchestrator
-//! transcripts on every scan tick is wasteful — these files grow into
-//! the megabytes. We cache the last seen file size + count per path:
+//! Counting `tool_use` / `toolCall` blocks across whole transcripts on
+//! every scan tick is wasteful — these files grow into the megabytes. We cache the last seen file size + count per path:
 //! on a second hit, if the file hasn't grown we return the cached count
 //! immediately; if it grew, we seek to the old size and only count the
 //! suffix; if it shrank (rewrite), we recount from scratch.

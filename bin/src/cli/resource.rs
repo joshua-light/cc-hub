@@ -49,7 +49,6 @@ pub(crate) fn resource(args: &[String]) -> Result<(), CliError> {
                 sid,
                 cc_hub_lib::session_tasks::TaskLink {
                     task_id: task.into(),
-                    project_id: None,
                     title: format!("{} / {}", task, field("role")?),
                 },
             )

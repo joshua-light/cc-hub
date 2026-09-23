@@ -12,50 +12,45 @@ cc-hub is a single Cargo workspace with two crates:
 Cargo.toml          # workspace root; pins ratatui/crossterm/tokio/chrono
 bin/                # cc-hub binary — TUI driver + CLI subcommands
   src/main.rs       # tokio runtime, terminal setup, scan/event loop
-  src/cli/          # `cc-hub spawn-worker | merge-worktree | task | orchestrate | pr`
+  src/cli/          # `cc-hub board | open | agent | resource | usage | wake`
 lib/                # cc-hub-lib — everything else, behind a stable API
-  src/lib.rs        # module wiring + #[no_mangle] render() for hot-reload
-  src/*.rs          # state, scanners, UI, platform, agents, orchestrator…
+  src/lib.rs        # module wiring
+  src/*.rs          # state, scanners, UI, platform, agents, task store…
   src/platform/     # OS-specific shims (process, mux, window, paths, terminal)
-  tests/            # integration tests for orchestrator git ops + tmux pane
+  tests/            # tmux smoke tests
 ```
 
-Why split? `bin/` owns the runtime; `lib/` is rebuildable as a `cdylib` so
-`cargo run --features hot-reload` can swap rendering code without restarting
-the TUI. `bin/src/main.rs` calls `hot::render(...)` which routes to
-`cc_hub_lib::render` — see `lib/src/lib.rs:46`.
+Why split? `bin/` owns the runtime (tokio, terminal, key dispatch); `lib/`
+owns state and rendering, so tests can build an `App` and draw it without a
+terminal. `bin/src/main.rs` draws through `cc_hub_lib::ui::render`.
 
 ## Runtime flow (TUI)
 
-`bin/src/main.rs` is the orchestrator of everything that happens at runtime:
+`bin/src/main.rs` drives everything that happens at runtime:
 
 1. **Bootstrap** (`main` at `bin/src/main.rs:377`). Parse argv; if it's a CLI
    verb, hand off to `cli::dispatch` and exit. Otherwise enable raw mode +
-   alt screen, push kitty keyboard flags + bracketed paste, query the image
-   picker for cell size, install a panic hook that restores the terminal.
+   alt screen, push kitty keyboard flags + bracketed paste, install a panic
+   hook that restores the terminal.
 2. **Background workers** (`run` at `bin/src/main.rs:455`). Spawn tokio
    tasks for:
    - `usage::fetch_usage` on `[scan].usage_refresh_interval_secs`
-   - `triage::tick` on `[backlog].interval_secs` (gated by config)
-   - `watcher::spawn_fs_watcher` (notify-debouncer on agent and project state),
-     which classifies invalidations into independent Sessions and Projects
-     workers. Sessions use cheap process-liveness fallback ticks plus a slower
-     full recovery scan; Projects scan only on project changes or their own
-     recovery interval
+   - `watcher::spawn_fs_watcher` (notify-debouncer on agent state), which
+     invalidates the Sessions scan. Sessions also use cheap process-liveness
+     fallback ticks plus a slower full recovery scan
    - on-demand `metrics::analyze_with_progress` when the user opens the
      Metrics tab
-   - per-session/per-task `title::generate_title_blocking` workers, gated
+   - per-session `title::generate_title_blocking` workers, gated
      by a shared semaphore (`config.title.concurrency`)
 3. **Event loop** (`bin/src/main.rs:619`). Each iteration: poll `LiveView`,
    reap exited tmux panes, toggle mouse capture if the embedded pane is
-   visible, draw via `hot::render`, then `event::poll(50ms)` (16 ms when a
+   visible, draw via `ui::render`, then `event::poll(50ms)` (16 ms when a
    tmux pane is foregrounded). Keys are matched against `(View, KeyCode)`
    tuples. Dominant feature handlers such as Tasks live under `bin/src/keys/`
    instead of adding workflow logic to the root dispatcher.
 4. **State updates**. Channel messages (`ScanMsg::SessionList`,
-   `Detail`, `Projects`, `Usage`, `Metrics`, `BacklogTriage`, …) are
-   drained and applied to `App` via methods like `update_sessions`,
-   `update_projects`, `set_usage`.
+   `Detail`, `Usage`, `Metrics`, `Harness`, …) are drained and applied to
+   `App` via methods like `update_sessions` and `update_usage`.
 
 The TUI runs entirely off these snapshots — disk is the source of truth, and
 every keystroke that mutates state writes through to disk so the next scan
@@ -63,35 +58,22 @@ re-derives a fresh snapshot.
 
 ## Major modules
 
-### Two layers of state
+### Sessions and tasks
 
-cc-hub has two coexisting layers, each with its own scanner and snapshot:
+Sessions come from scanners over the agents' own files (`~/.claude/sessions`,
+`~/.pi/agent/sessions`, `~/.codex/sessions`, JSONL transcripts) and land in
+`App` (`lib/src/app/`) as `Vec<SessionInfo>` (`lib/src/models.rs`). `App`
+groups per-tab state into `SessionsView` / `TasksView` / `MetricsView` /
+`HarnessView` sub-structs — cursor mutations go through their clamping
+methods.
 
-| Layer | Owner of truth | Scanner | Snapshot type |
-|---|---|---|---|
-| **Sessions** (one agent process at a time) | `~/.claude/sessions`, `~/.pi/agent/sessions`, JSONL transcripts | `lib/src/scanner.rs`, `lib/src/pi_scanner.rs` | `Vec<SessionInfo>` (`lib/src/models.rs`) |
-| **Projects/Tasks** (orchestrator + workers) | `~/.cc-hub/projects.toml`, `~/.cc-hub/projects/<pid>/tasks/<tid>/state.json` | `lib/src/projects_scan.rs` | `ProjectsSnapshot` |
-
-Both feed into `App` (`lib/src/app/`), which groups per-tab state into
-`SessionsView` / `ProjectsView` / `MetricsView` / `TodoPanelState`
-sub-structs — cursor mutations go through their clamping methods. The
-Sessions tab shows raw agent processes; the Projects tab is the
-higher-level kanban over tasks.
-A session can be cross-referenced as an "orchestrator" or "worker" by
-matching its tmux name against `ProjectsSnapshot::roles_by_tmux`.
-
-The personal **Tasks** board shares the unified task model: a board card IS
-an `orchestrator::TaskState` with `project_id: None`, stored per task at
-`~/.cc-hub/tasks/<tid>/state.json` with the same lock + atomic-write
-machinery and the same legal-transition table as orchestrated tasks (the
-table's kind axis gives the board its plan/reopen edges).
+A Tasks-board card is a `task_store::TaskState`, stored per task at
+`~/.cc-hub/tasks/<tid>/state.json` behind a per-task lock and atomic writes,
+with every status change gated by `task_store::validate_status_transition`.
 `PersonalBoard` in `lib/src/tasks.rs` is the in-memory snapshot the TUI
-mutates through; board-level metadata lives in `~/.cc-hub/board.json`, and
-`tasks::promote_task` moves a card into a registered project's Backlog.
-A pre-unification `tasks.json` migrates at startup (`migrate_legacy_board`,
-called once from `run()` in `bin/src/main.rs` — deliberately not from
-`App::new()`, which tests construct freely). Malformed files are surfaced to
-the Tasks status bar instead of silently overwriting or resetting state.
+mutates through; board-level metadata lives in `~/.cc-hub/board.json`.
+Malformed files are surfaced to the Tasks status bar instead of silently
+overwriting or resetting state.
 
 ### Sessions layer
 
@@ -119,48 +101,22 @@ the Tasks status bar instead of silently overwriting or resetting state.
 - **`models.rs`** — `SessionInfo`, `SessionState`, `SessionDetail`,
   `ProjectGroup`, plus `short_sid` truncation.
 - **`title.rs`** — background `claude -p` (Haiku) titler. Concurrency-gated
-  by a semaphore. Persists results onto `SessionInfo.title` (sessions) or
-  `TaskState.title` (tasks). Cooldowns prevent re-titling.
+  by a semaphore. Persists results onto `SessionInfo.title`. Cooldowns
+  prevent re-titling.
 
-### Projects/Tasks layer
+### Tasks
 
-- **`orchestrator/`** — schema + on-disk helpers for the Projects layer.
-  See the module docstring at `lib/src/orchestrator/mod.rs:1`. Owns:
-  - `Project` (registered directory) + `TaskState` (one task)
-  - `TaskStatus`: `Backlog → Running → Review → Merging → Done`
-  - `Worker`, `Artifact`, `TodoItem`, `MergeRecord`
-  - File layout: `~/.cc-hub/projects.toml` (registry) and
-    `~/.cc-hub/projects/<pid>/tasks/<tid>/state.json` (per-task)
-  - Atomic IO: `read_task_state` / `write_task_state` (tempfile + rename)
-    and `update_task_state(pid, tid, |s| ...)` for read-mutate-write.
-    Updates are serialized by a per-task `state.lock` (fs2 advisory lock —
-    TUI, CLI verbs, and daemons can't lose each other's writes; daemons
-    stamp via `update_task_state_no_touch` to avoid kanban reshuffles)
-    and status changes are gated by `validate_status_transition`, the
-    single legal-edge table for the kanban state machine
-  - Project id derivation: canonical-path, non-alphanumeric → dashes
-  - Task id format: `t-<unix-nanos>`
-  - Worktree convention: `<project-root>/.cc-hub-wt/<task-id>-<name>`
-- **`projects_scan.rs`** — process-global mtime cache over every task's
-  `state.json`. Each scan tick stat()s every file, only re-parses on
-  mtime change, and evicts entries no longer on disk. Builds
-  `ProjectsSnapshot::roles_by_tmux` so Sessions can look up "is this
-  tmux session an orchestrator/worker?" in O(1).
-- **`ops/`** — the single implementation of the compound task/PR/worker
-  operations (`task report/delete/gc`, `pr create/approve/request-changes/
-  merge/finalize`, `spawn-worker`, `merge-worktree`, `worker wait`). Typed
-  parameters in, typed outcome enums/structs out; `OpError` maps 1:1 onto
-  the CLI's `CliError`. Both `bin/src/cli/` and the TUI (`app/`) call
-  these, so the two front-ends cannot drift.
-- **`pr.rs`** — PR schema (`pr.json` next to `state.json`). Sequential
-  per-project counter at `~/.cc-hub/projects/<pid>/pr-counter`. Review
-  states: `Open → ChangesRequested → Approved → Merged | Closed`.
-- **`merge_lock.rs`** — project-level lockfile so only one task can be in
-  `Merging` per project at a time. fs2 advisory lock + `MergeLock`
-  metadata file with the holding task id.
-- **`triage.rs`** — optional background backlog promoter. Runs `claude -p`
-  on each dormant backlog task and decides whether it's ready to be
-  promoted to Running. Off by default.
+- **`task_store.rs`** — schema + on-disk helpers for board cards:
+  `TaskState`, `TaskStatus` (`Backlog → Planning → Running → Review →
+  Done`), `Artifact` (notes and attachments). `read_task_state` /
+  `write_task_state` (tempfile + rename) and `update_task(tid, |s| ...)`
+  for locked read-mutate-write. Task id format: `tk-<unix-nanos>`.
+- **`tasks.rs`** — `PersonalBoard`, the board snapshot the TUI mutates.
+- **`ops/`** — the single implementation of compound task and link
+  operations (attach a note, `cc-hub open`). Typed parameters in, typed
+  outcome out; `OpError` maps 1:1 onto the CLI's `CliError`. Both
+  `bin/src/cli/` and the TUI (`app/`) call these, so the two front-ends
+  cannot drift.
 
 - **`harness/`** — persistent agents (the Agents tab). `spec.rs` loads
   `~/.cc-hub/agents/<name>/agent.toml`; `tools.rs` turns a tool allow-list
@@ -196,45 +152,28 @@ the Tasks status bar instead of silently overwriting or resetting state.
   resource broker's worker-replacement rules.
 - **`send.rs`** — dispatches a prompt into a running agent. Walks the
   PID's ancestor chain to find the tmux pane, then `tmux send-keys`. Used
-  for the Sessions-tab `p` prompt and for the orchestrator's "queued
-  prompt" delivered after a fresh session reaches Idle.
+  for the "queued prompt" delivered after a fresh session reaches Idle.
 - **`platform/mux.rs`** — single CLI shim that calls `tmux` (or psmux's
   `tmux.exe` on Windows). Module docstring (`lib/src/platform/mux.rs:1`)
   explains the two real divergences: Windows can't take an initial
   command in `new-session` and ignores `list-clients -F` format strings.
 
-### CLI subcommands (orchestrator-facing)
+### CLI subcommands
 
-`bin/src/cli/` implements verbs the orchestrator session calls from a
-shell to mutate task state — one module per top-level verb (`task.rs`,
-`pr.rs`, `worker.rs`, …) with dispatch, `Flags` parsing, and the
-`CliError` JSON contract in `mod.rs`. Argument parsing is hand-rolled;
-the verb *bodies* live in `lib/src/ops/` — the CLI modules only parse
-flags, call the op, and render one JSON line so the orchestrator can
-parse the outcome programmatically.
-
-| Verb | Purpose |
-|---|---|
-| `cc-hub task create --prompt "…"` | Register the task in the current project (creating it if needed), put it in Backlog |
-| `cc-hub orchestrate start --task ID [--agent A]` | Spawn the orchestrator session; flips Backlog → Running |
-| `cc-hub spawn-worker --task ID [--agent A] [--worktree NAME \| --readonly] [--prompt P]` | Spawn a worker session under the orchestrator. `--worktree` does `git -C <root> worktree add -b cc-hub/<branch> <path> main` |
-| `cc-hub merge-worktree --task ID --worktree NAME` | Merge the worker's branch back into main; appends `MergeRecord` |
-| `cc-hub task report --task ID [--status S] [--note N]` | Update the one-line note + optional status transition |
-| `cc-hub task artifact add ...` / `cc-hub task todos ...` | Append evidence / mutate the task checklist |
-| `cc-hub pr {create,show,approve,merge,...}` | PR-flow CLI; pairs with `lib/src/pr.rs` schema |
-
-The TUI never shells out to these — it calls the same `lib/src/ops/`
-functions in-process. The CLI exists so the orchestrator (a Claude or Pi
-session running under bash) can drive the same state from its tools.
+`bin/src/cli/` holds one module per top-level verb (`board.rs`, `link.rs`,
+`agent.rs`, …) with dispatch, `Flags` parsing, and the `CliError` JSON
+contract in `mod.rs`. Argument parsing is hand-rolled; compound verb bodies
+live in `lib/src/ops/` — the CLI modules parse flags, call the op, and
+render one JSON line so a calling agent can parse the outcome. `cc-hub help
+<verb>` documents each verb.
 
 ### TUI rendering
 
 - **`ui/`** — `render(frame, app)` entry in `ui/mod.rs` (the function
-  `bin/main.rs` resolves through hot-reload), dispatched on `app.view`
+  `bin/main.rs` draws through), dispatched on `app.view`
   and `app.current_tab` into `sessions.rs` (grid + cards + detail popup),
-  `projects.rs` (chips, kanban, task/artifact cards, result + backlog
-  popups), `metrics.rs`, and `popups.rs` (pickers, inputs, live tail,
-  state debug, embedded tmux pane). Shared helpers live in `common.rs`,
+  `tasks.rs` (board + Task Info popup), `agents.rs`, `metrics.rs`, and
+  `popups.rs` (pickers, inputs, live tail, embedded tmux pane). Shared helpers live in `common.rs`,
   named colors in `palette.rs`. Reads from `App`; the only render-time
   writes are scroll clamping and the documented renderer-synced metrics
   fields.
@@ -243,7 +182,7 @@ session running under bash) can drive the same state from its tools.
   Windows attach doesn't deadlock (`lib/src/tmux_pane.rs:11`).
 - **`live_view.rs`** — incremental-tail JSONL viewer for the LiveTail
   popup. Polls only while visible.
-- **`folder_picker.rs`** — for `N` / register-project / spawn-in-cwd flows.
+- **`folder_picker.rs`** — places / bookmarks / browse picker for the task-assign and spawn-in-cwd flows.
 - **`focus.rs`** + **`platform/window.rs`** — window-manager shims for
   `f` (focus the OS window hosting a session) and `x` (close it).
   Hyprland via socket, X11 via `xdotool`, no-op elsewhere.
@@ -258,23 +197,13 @@ session running under bash) can drive the same state from its tools.
 | What | Where | Owner |
 |---|---|---|
 | Compiled config | `~/.cc-hub/config.toml` | `lib/src/config.rs` (loads once, deny-unknown) |
-| Registered projects | `~/.cc-hub/projects.toml` | `orchestrator::ensure_project_registered` |
-| Per-task state (orchestrated) | `~/.cc-hub/projects/<pid>/tasks/<tid>/state.json` | `orchestrator::write_task_state` |
-| Per-task state (personal board) | `~/.cc-hub/tasks/<tid>/state.json` (+ `board.json`, `tasks-archive-v2.json`) | `tasks::PersonalBoard` over the same store |
-| Per-task PR | `~/.cc-hub/projects/<pid>/tasks/<tid>/pr.json` | `lib/src/pr.rs` |
-| Per-project PR counter | `~/.cc-hub/projects/<pid>/pr-counter` | `lib/src/pr.rs` |
-| Per-project merge lock | `~/.cc-hub/projects/<pid>/merge.lock` (+ `.json`) | `lib/src/merge_lock.rs` |
+| Per-task state | `~/.cc-hub/tasks/<tid>/state.json` (+ `board.json`, `tasks-archive-v2.json`) | `task_store`, `tasks::PersonalBoard` |
 | Persistent agent spec / state | `~/.cc-hub/agents/<name>/{agent.toml,state.json,notes.jsonl,inbox/,log/,work/}` | `lib/src/harness/` (`state.lock` guards `state.json`) |
 | Pi bridge heartbeats | `~/.cc-hub/pi-heartbeats/<sid>.json` | `lib/src/pi_bridge.rs` |
-| Orchestrator log per task | `~/.cc-hub/projects/<pid>/tasks/<tid>/orchestrator.log` | `orchestrator::task_orchestrator_log_path` |
 | Claude sessions | `~/.claude/sessions/*.json` | (Claude Code, read-only) |
 | Claude transcripts | `~/.claude/projects/<encoded-cwd>/<sid>.jsonl` | (Claude Code, read-only) |
 | Pi sessions | `~/.pi/agent/sessions/*` | (Pi, read-only) |
-| Worktrees | `<project-root>/.cc-hub-wt/<task-id>-<name>` | git via `bin/src/cli/` |
 | Logs | `$XDG_CACHE_HOME/cc-hub/cc-hub_*.log` (Linux) | `bin/src/main.rs:init_logging` |
-
-`.cc-hub-wt/` is in the project's `.gitignore` so worktrees never get
-committed to feature branches.
 
 ## Key integration points (for changes)
 
@@ -285,11 +214,11 @@ committed to feature branches.
   renders backends generically via `agent_badge()`.
 - **Adding a new CLI verb.** Put the body in `lib/src/ops/` (typed
   parameters in, typed outcome out, mutate state via
-  `orchestrator::update_task_state`), then add a branch to
+  `task_store::update_task`), then add a branch to
   `cli::dispatch` (`bin/src/cli/mod.rs:35`) with a thin parse → call →
   print-JSON wrapper in the matching `bin/src/cli/<verb>.rs` module.
 - **Adding a new task field.** Extend `TaskState` in
-  `lib/src/orchestrator/mod.rs:252` with `#[serde(default)]` for back-compat
+  `lib/src/task_store.rs` with `#[serde(default)]` for back-compat
   with older `state.json` files; `read_task_state` returns `InvalidData`
   on parse errors so schema drift is loud.
 - **Adding a new view / popup.** Add a `View` variant in
@@ -316,17 +245,11 @@ committed to feature branches.
   `bin/src/main.rs:run`; emit a `ScanMsg` variant for results; drain it in
   the same big `select!`. The fs-watcher fallback timer is the reference
   pattern.
-- **Hot-reload-safe code.** `lib/src/lib.rs` re-exports the `render`
-  entry point with `#[no_mangle]`. Anything reachable from `render` will
-  swap on rebuild; anything in `bin/` will not (the TUI process holds
-  state across reloads, and `App` is in `lib/`).
 
 ## Tests
 
 `lib/tests/`:
 
-- `orchestrator_git.rs` — exercises `git worktree` ops via real git in a
-  tempdir.
 - `mux_smoke.rs`, `pane_smoke.rs` — smoke-test that the multiplexer is
   callable and that an embedded pane can be spawned (skipped when tmux
   isn't available).

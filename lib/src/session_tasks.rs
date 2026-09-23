@@ -21,10 +21,6 @@ use crate::platform::paths::cc_hub_home;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskLink {
     pub task_id: String,
-    /// `None` for a personal-board task, `Some` for an orchestrated one —
-    /// mirrors `TaskState::project_id`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
     /// Task title snapshot; the grid's fallback label once the task is gone.
     #[serde(default)]
     pub title: String,
@@ -99,7 +95,6 @@ mod tests {
     fn sample(task_id: &str) -> TaskLink {
         TaskLink {
             task_id: task_id.into(),
-            project_id: None,
             title: "Fix auth".into(),
         }
     }

@@ -1,7 +1,7 @@
 //! Tasks-tab body: a kanban board (To-Do · In Progress · Review · Done by
-//! default) over the personal task store. Visually a sibling of the Projects
-//! kanban, but each card is a flat task, optionally annotated with its bound
-//! agent session's live state (resolved by tmux name, same as project cards).
+//! default) over the personal task store. Each card is a flat task,
+//! optionally annotated with its bound agent session's live state (resolved
+//! by tmux name).
 //! Planning holds cards whose agent is drafting a plan; Space approves it and
 //! the card moves to In Progress. The Planning column is opt-in
 //! (`ui.show_planning_column = true`); when hidden its cards fold into In
@@ -10,15 +10,15 @@
 
 use crate::app::{visible_task_columns, App, View};
 use crate::models::{self, SessionInfo, SessionState};
-use crate::orchestrator::{TaskState, TaskStatus};
 use crate::task_activity::Errand;
+use crate::task_store::{TaskState, TaskStatus};
+use crate::ui::artifacts::{
+    classify_artifact, evidence_card_header, read_text_excerpt, truncated_footer, CardKind,
+};
 use crate::ui::common::{centered_rect, popup_block, priority_color};
 use crate::ui::now_ms;
 use crate::ui::palette::{
     ACCENT_BLUE, DIM_TEXT, DOT_IDLE, FAINT_TEXT, KIND_TEAL, LABEL_GRAY, META_GRAY, TAG_SLATE,
-};
-use crate::ui::projects::{
-    classify_artifact, evidence_card_header, read_text_excerpt, truncated_footer, CardKind,
 };
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -138,13 +138,10 @@ pub(crate) fn render_task_info(frame: &mut Frame, area: Rect, app: &mut App) {
     let title = match t.title.as_deref().filter(|s| !s.is_empty()) {
         Some(name) => format!(
             " Task · {} · {} ",
-            crate::orchestrator::short_task_id(&t.task_id),
+            crate::task_store::short_task_id(&t.task_id),
             name,
         ),
-        None => format!(
-            " Task · {} ",
-            crate::orchestrator::short_task_id(&t.task_id)
-        ),
+        None => format!(" Task · {} ", crate::task_store::short_task_id(&t.task_id)),
     };
     let block = popup_block(Span::styled(
         title,
@@ -362,17 +359,10 @@ pub(crate) fn render_task_info(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn column_meta(status: TaskStatus) -> (&'static str, &'static str, Color) {
-    match status {
-        // Merging belongs to the orchestrated PR pipeline and never renders
-        // as a board column.
-        TaskStatus::Merging => ("", "", Color::DarkGray),
-        // Icon/accent come from the shared status palette so the columns,
-        // the Projects kanban, and the task-link picker read the same.
-        _ => {
-            let (icon, accent) = crate::ui::common::task_status_meta(status);
-            (status.board_label(), icon, accent)
-        }
-    }
+    // Icon/accent come from the shared status palette so the columns and
+    // the task-link picker read the same.
+    let (icon, accent) = crate::ui::common::task_status_meta(status);
+    (status.board_label(), icon, accent)
 }
 
 fn render_task_column(
@@ -456,8 +446,6 @@ fn render_task_column(
             TaskStatus::Running => "Nothing running — Space approves a plan",
             TaskStatus::Review => "No PR waiting on you",
             TaskStatus::Done => "Nothing done yet",
-            // Merging is orchestrated-only, so it never renders a column.
-            TaskStatus::Merging => "",
         };
         let hint = Paragraph::new(Line::from(Span::styled(
             empty_hint,
@@ -766,9 +754,7 @@ fn dir_basename(cwd: &str) -> String {
         .unwrap_or_else(|| cwd.to_string())
 }
 
-/// Greedy word wrap to `width` columns (char-counted). Local copy of the
-/// to-do panel's helper — popups' is private and this one doesn't need the
-/// continuation-indent variant.
+/// Greedy word wrap to `width` columns (char-counted).
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![String::new()];
@@ -804,14 +790,14 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orchestrator::{TaskPriority, TaskStatus};
+    use crate::task_store::{TaskPriority, TaskStatus};
     use crate::ui::common::buffer_to_string;
     use crate::ui::palette::BACKLOG_BLUE;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
     fn card(priority: TaskPriority) -> TaskState {
-        let mut t = TaskState::new_personal("fix the parser".into());
+        let mut t = TaskState::new("fix the parser".into());
         t.task_id = "tk-1".into();
         t.priority = priority;
         t.created_at = 1;
@@ -876,7 +862,7 @@ mod tests {
     #[test]
     fn card_shows_attachment_chip() {
         let mut t = card(TaskPriority::P3);
-        t.artifacts.push(crate::orchestrator::Artifact {
+        t.artifacts.push(crate::task_store::Artifact {
             kind: "file".into(),
             path: "/tmp/store/1-doc.md".into(),
             original: "/tmp/doc.md".into(),
@@ -1033,9 +1019,8 @@ mod tests {
             let mut board = crate::tasks::PersonalBoard::load();
             let id = board.add("ship the linter").unwrap().unwrap();
             board.assign(&id, "/tmp", "claude", "mux-pr").unwrap();
-            crate::ops::task::task_artifact_add_text(None, &id, "PR: sample-project#42", "cli")
-                .unwrap();
-            let t = crate::orchestrator::read_task_state_for(None, &id).unwrap();
+            crate::ops::task::task_artifact_add_text(&id, "PR: sample-project#42", "cli").unwrap();
+            let t = crate::task_store::read_task_state(&id).unwrap();
             assert_eq!(t.status, TaskStatus::Review, "the note moved the card");
 
             let mut session = idle_session("mux-pr");
@@ -1091,7 +1076,6 @@ mod task_info_tests {
             let doc = dir.join("notes.md");
             std::fs::write(&doc, "alpha finding\nbeta finding\n").unwrap();
             crate::ops::task::task_artifact_add(
-                None,
                 &id,
                 doc.to_str().unwrap(),
                 None,
@@ -1099,15 +1083,8 @@ mod task_info_tests {
                 false,
             )
             .unwrap();
-            crate::ops::task::task_artifact_add(
-                None,
-                &id,
-                "https://example.com/spec",
-                None,
-                None,
-                false,
-            )
-            .unwrap();
+            crate::ops::task::task_artifact_add(&id, "https://example.com/spec", None, None, false)
+                .unwrap();
             app.tasks.reload();
             app.focus_task(&id);
             assert!(app.enter_task_info());

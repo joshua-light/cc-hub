@@ -32,11 +32,6 @@ pub struct SessionsView {
     pub sel_in_group: usize,
     pub layout: SessionsLayout,
     pub show_inactive: bool,
-    /// When false, the Sessions view hides any session whose tmux name is
-    /// claimed by an orchestrator or worker in the current projects
-    /// snapshot. Toggled with `W` so the user can drop into the raw view
-    /// when something looks off.
-    pub show_orch_workers: bool,
     pub acks: Acks,
     /// Latest scan snapshot; drives [`App::rebuild_groups`].
     pub(crate) last_sessions: Vec<SessionInfo>,
@@ -53,7 +48,6 @@ impl SessionsView {
             sel_in_group: 0,
             layout: SessionsLayout::default(),
             show_inactive: false,
-            show_orch_workers: false,
             acks: Acks::new(),
             last_sessions: Vec::new(),
             known_session_ids: None,
