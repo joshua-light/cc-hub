@@ -132,9 +132,6 @@ pub struct TasksView {
 
 impl TasksView {
     pub(crate) fn new() -> Self {
-        // NOTE: no migration here. `App::new()` runs in dozens of tests; the destructive tasks.json migration is invoked
-        // exactly once, explicitly, from the binary entry point — see
-        // `run()` in bin/src/main.rs.
         let (board, persistence_error) = match PersonalBoard::load_result() {
             Ok(board) => (board, None),
             Err(e) => (

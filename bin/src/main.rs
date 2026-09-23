@@ -784,31 +784,12 @@ async fn run(
     image_picker: cc_hub_lib::ratatui_image::picker::Picker,
     frame_bytes: Arc<AtomicU64>,
 ) -> io::Result<()> {
-    // Migrate a pre-unification ~/.cc-hub/tasks.json into the per-task store
-    // BEFORE the board's first load. Deliberately here, not in App::new():
-    // this is the one destructive startup step, and App::new() also runs in
-    // tests and hot-reload paths that must never touch the real home.
-    let migration_error = match cc_hub_lib::tasks::migrate_legacy_board() {
-        Ok(Some(n)) => {
-            log::info!("task board: migrated {} task(s) from tasks.json", n);
-            None
-        }
-        Ok(None) => None,
-        Err(e) => {
-            log::error!("task board migration failed: {}", e);
-            Some(format!("task board migration failed: {e}"))
-        }
-    };
-
     let mut app = App::new();
     // Swap in the persisted ack tracker so Space-idled cards survive a
-    // restart. Same rationale as the migration above for living here and not
-    // in App::new(): tests must never touch the real home, so App::new() constructs a purely in-memory tracker.
+    // restart. Loaded here, not in App::new(): tests must never touch the
+    // real home, so App::new() constructs a purely in-memory tracker.
     app.sessions.acks = cc_hub_lib::acks::Acks::load();
     app.image_picker = Some(image_picker);
-    if let Some(msg) = migration_error {
-        app.tasks.persistence_error = Some(msg);
-    }
 
     let inflight_titles: Arc<Mutex<HashMap<String, Instant>>> =
         Arc::new(Mutex::new(HashMap::new()));

@@ -23,10 +23,7 @@ From the grid you can:
 ## Tasks board
 
 The personal layer: a board — **To-Do · In Progress · Review · Done** —
-stored one file per task under `~/.cc-hub/tasks/` (a pre-existing
-`tasks.json` migrates automatically on first launch; the original is kept as
-`tasks.json.migrated-v1` — don't run pre-migration builds against the same
-home afterwards, or you'll get a second, empty board). Jot tasks and check
+stored one file per task under `~/.cc-hub/tasks/`. Jot tasks and check
 them off by hand, or hand one to an agent:
 
 1. `s` picks a folder and spawns a detached agent session there, prompted to

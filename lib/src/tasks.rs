@@ -19,9 +19,6 @@
 //! locked read-mutate-write of the task's own file, so concurrent cc-hub
 //! instances conflict per task, not per board. Board-level metadata
 //! (`last_assign_cwd`) lives in `~/.cc-hub/board.json`.
-//!
-//! The pre-unification single-file board (`~/.cc-hub/tasks.json`) is
-//! migrated automatically on first load — see [`migrate_legacy_board`].
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -509,8 +506,7 @@ fn archive_path() -> Option<PathBuf> {
 /// array of unified [`TaskState`]s), so `x` and `c` are recoverable beyond
 /// the in-session undo slot. The archive is a log, not a ledger: an undone
 /// delete leaves its copy behind, and a corrupt file starts fresh — same
-/// policy as the board. The pre-unification `tasks-archive.json` (legacy
-/// `TaskItem` shape) is left untouched.
+/// policy as the board.
 fn archive_tasks(items: &[TaskState]) -> io::Result<()> {
     if items.is_empty() {
         return Ok(());
@@ -538,171 +534,6 @@ fn archive_tasks(items: &[TaskState]) -> io::Result<()> {
     };
     archived.extend(items.iter().cloned());
     crate::persist::save_json(&path, &archived)
-}
-
-/// Frozen serde shapes of the pre-unification board, kept only so
-/// [`migrate_legacy_board`] can parse an existing `~/.cc-hub/tasks.json`
-/// byte-for-byte the way the old code did. Never construct these outside
-/// migration.
-pub mod legacy {
-    use serde::Deserialize;
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    pub enum TaskItemStatus {
-        Todo,
-        Planning,
-        InProgress,
-        Done,
-    }
-
-    #[derive(Clone, Debug, Deserialize)]
-    pub struct TaskItem {
-        pub id: String,
-        pub text: String,
-        pub status: TaskItemStatus,
-        #[serde(default)]
-        pub priority: super::TaskPriority,
-        #[serde(default)]
-        pub tags: Vec<String>,
-        #[serde(default)]
-        pub created_at: u64,
-        #[serde(default)]
-        pub done_at: Option<u64>,
-        #[serde(default)]
-        pub cwd: Option<String>,
-        #[serde(default)]
-        pub agent_id: Option<String>,
-        #[serde(default)]
-        pub tmux: Option<String>,
-        #[serde(default)]
-        pub session_id: Option<String>,
-    }
-
-    #[derive(Default, Debug, Deserialize)]
-    pub struct TaskBoard {
-        #[serde(default)]
-        pub tasks: Vec<TaskItem>,
-        #[serde(default)]
-        pub last_assign_cwd: Option<String>,
-        #[serde(default)]
-        pub revision: u64,
-    }
-}
-
-fn legacy_tasks_path() -> Option<PathBuf> {
-    cc_hub_home().map(|h| h.join("tasks.json"))
-}
-
-fn legacy_item_to_state(item: legacy::TaskItem) -> TaskState {
-    let mut state = TaskState::new_personal(item.text);
-    state.task_id = item.id;
-    state.status = match item.status {
-        legacy::TaskItemStatus::Todo => TaskStatus::Backlog,
-        legacy::TaskItemStatus::Planning => TaskStatus::Planning,
-        legacy::TaskItemStatus::InProgress => TaskStatus::Running,
-        legacy::TaskItemStatus::Done => TaskStatus::Done,
-    };
-    state.priority = item.priority;
-    state.tags = item.tags;
-    state.created_at = item.created_at as i64;
-    state.done_at = item.done_at.map(|t| t as i64);
-    state.updated_at = (item.created_at.max(item.done_at.unwrap_or(0))) as i64;
-    state.cwd = item.cwd;
-    state.agent_id = item.agent_id;
-    state.tmux = item.tmux;
-    state.session_id = item.session_id;
-    state
-}
-
-/// Migrate a pre-unification `~/.cc-hub/tasks.json` into the per-task store.
-/// Lossless, idempotent, and abort-on-error:
-///
-/// 1. No `tasks.json` → nothing to do (the disarmed trigger).
-/// 2. The old board lock (`tasks.lock`) is held throughout, serializing
-///    against a concurrently running pre-unification binary.
-/// 3. A parse failure aborts touching nothing — the caller surfaces the
-///    error and the file stays exactly as it was.
-/// 4. Tasks whose directory already exists are skipped (re-run safety after
-///    a partial migration).
-/// 5. Only after every task is written: `last_assign_cwd` lands in
-///    `board.json` and `tasks.json` is renamed to `tasks.json.migrated-v1` —
-///    the backup doubles as the rollback story.
-///
-/// Returns the number of migrated tasks, or `None` when there was nothing
-/// to migrate.
-pub fn migrate_legacy_board() -> io::Result<Option<usize>> {
-    let Some(path) = legacy_tasks_path() else {
-        return Ok(None);
-    };
-    if !path.exists() {
-        return Ok(None);
-    }
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::other("tasks path has no parent"))?;
-    fs::create_dir_all(parent)?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(parent.join("tasks.lock"))?;
-    lock.lock_exclusive()?;
-
-    // Re-check under the lock: a concurrent instance may have finished the
-    // migration while we waited.
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    let board: legacy::TaskBoard = serde_json::from_str(&raw).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("migrate {}: {}", path.display(), e),
-        )
-    })?;
-
-    let mut migrated = 0usize;
-    let mut all_ids: Vec<String> = Vec::with_capacity(board.tasks.len());
-    for item in board.tasks {
-        all_ids.push(item.id.clone());
-        let exists = personal_task_dir(&item.id).is_some_and(|d| d.exists());
-        if exists {
-            continue;
-        }
-        write_task_state(&legacy_item_to_state(item))?;
-        migrated += 1;
-    }
-
-    // Paranoia gate before the destructive rename: re-verify every task is
-    // actually present in the store. Guards against anything that redirects
-    // path resolution mid-migration (observed: a parallel test flipping
-    // $HOME, sending the writes into a doomed tempdir) — better to leave the
-    // trigger armed and error than to disarm it with the data elsewhere.
-    for id in &all_ids {
-        let landed = personal_task_dir(id).is_some_and(|d| d.join("state.json").exists());
-        if !landed {
-            return Err(io::Error::other(format!(
-                "migration verify failed: task {} missing from the store; \
-                 leaving tasks.json in place",
-                id
-            )));
-        }
-    }
-
-    if let Some(cwd) = board.last_assign_cwd {
-        let mut meta = load_board_meta();
-        if meta.last_assign_cwd.is_none() {
-            meta.last_assign_cwd = Some(cwd);
-            save_board_meta(&meta)?;
-        }
-    }
-
-    // All writes landed; disarm the trigger, keeping the original as backup.
-    fs::rename(&path, parent.join("tasks.json.migrated-v1"))?;
-    Ok(Some(migrated))
 }
 
 /// Promote a personal-board task into a registered project's Backlog: the
@@ -1146,104 +977,6 @@ mod tests {
         assert_eq!(q.priority, None);
     }
 
-    // ── migration ─────────────────────────────────────────────────────────
-
-    fn write_legacy_board(json: &str) {
-        let path = legacy_tasks_path().unwrap();
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, json).unwrap();
-    }
-
-    const LEGACY_BOARD: &str = r#"{
-        "tasks": [
-            {"id":"tk-1","text":"old todo","status":"todo","created_at":100},
-            {"id":"tk-2","text":"planned","status":"planning","priority":"p1",
-             "tags":["bug"],"created_at":200,"cwd":"/tmp/p","agent_id":"claude",
-             "tmux":"cchub-1-1","session_id":"sid-1"},
-            {"id":"tk-3","text":"working","status":"in_progress","created_at":300},
-            {"id":"tk-4","text":"shipped","status":"done","created_at":400,"done_at":450}
-        ],
-        "last_assign_cwd": "/tmp/p",
-        "revision": 9
-    }"#;
-
-    #[test]
-    fn migration_maps_every_field_and_disarms() {
-        with_temp_home(|| {
-            write_legacy_board(LEGACY_BOARD);
-            assert_eq!(migrate_legacy_board().unwrap(), Some(4));
-
-            let b = PersonalBoard::load_result().unwrap();
-            assert_eq!(b.tasks().len(), 4);
-            assert_eq!(b.last_assign_cwd(), Some("/tmp/p"));
-
-            let t1 = b.get("tk-1").unwrap();
-            assert_eq!(t1.status, TaskStatus::Backlog);
-            assert_eq!(t1.prompt, "old todo");
-            assert_eq!(t1.created_at, 100);
-            assert_eq!(t1.priority, TaskPriority::P3);
-            assert!(t1.project_id.is_none());
-
-            let t2 = b.get("tk-2").unwrap();
-            assert_eq!(t2.status, TaskStatus::Planning);
-            assert_eq!(t2.priority, TaskPriority::P1);
-            assert_eq!(t2.tags, vec!["bug"]);
-            assert_eq!(t2.cwd.as_deref(), Some("/tmp/p"));
-            assert_eq!(t2.session_id.as_deref(), Some("sid-1"));
-
-            assert_eq!(b.get("tk-3").unwrap().status, TaskStatus::Running);
-
-            let t4 = b.get("tk-4").unwrap();
-            assert_eq!(t4.status, TaskStatus::Done);
-            assert_eq!(t4.done_at, Some(450));
-            assert_eq!(t4.updated_at, 450);
-
-            // The trigger is disarmed and the backup preserved.
-            assert!(!legacy_tasks_path().unwrap().exists());
-            let backup = legacy_tasks_path()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .join("tasks.json.migrated-v1");
-            assert!(backup.exists());
-
-            // Re-running is a no-op.
-            assert_eq!(migrate_legacy_board().unwrap(), None);
-        });
-    }
-
-    #[test]
-    fn migration_skips_existing_dirs_on_rerun() {
-        with_temp_home(|| {
-            write_legacy_board(LEGACY_BOARD);
-            // Simulate a partial earlier run: tk-1 already migrated (with an
-            // edit the re-run must not clobber).
-            let mut pre = TaskState::new_personal("edited after partial run".into());
-            pre.task_id = "tk-1".into();
-            write_task_state(&pre).unwrap();
-
-            assert_eq!(migrate_legacy_board().unwrap(), Some(3));
-            let b = PersonalBoard::load_result().unwrap();
-            assert_eq!(b.tasks().len(), 4);
-            assert_eq!(b.get("tk-1").unwrap().prompt, "edited after partial run");
-        });
-    }
-
-    #[test]
-    fn corrupt_legacy_board_aborts_untouched() {
-        with_temp_home(|| {
-            write_legacy_board("{not-json");
-            let error = migrate_legacy_board().unwrap_err();
-            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-            // Nothing migrated, file untouched, trigger still armed.
-            assert!(PersonalBoard::load_result().unwrap().tasks().is_empty());
-            assert_eq!(
-                fs::read_to_string(legacy_tasks_path().unwrap()).unwrap(),
-                "{not-json"
-            );
-        });
-    }
-
     #[test]
     fn promote_moves_task_into_project_backlog() {
         with_temp_home(|| {
@@ -1269,21 +1002,6 @@ mod tests {
 
             // Unknown project and double-promotion are refused.
             assert!(promote_task(&id, "nope").is_err());
-        });
-    }
-
-    #[test]
-    fn migrated_task_round_trips_through_the_store() {
-        with_temp_home(|| {
-            write_legacy_board(LEGACY_BOARD);
-            migrate_legacy_board().unwrap();
-            // A migrated Planning card approves to Running like a native one.
-            let mut b = PersonalBoard::load_result().unwrap();
-            b.set_status("tk-2", TaskStatus::Running).unwrap();
-            assert_eq!(
-                PersonalBoard::load().get("tk-2").unwrap().status,
-                TaskStatus::Running
-            );
         });
     }
 

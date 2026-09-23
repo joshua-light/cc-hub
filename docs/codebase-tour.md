@@ -87,9 +87,7 @@ table's kind axis gives the board its plan/reopen edges).
 `PersonalBoard` in `lib/src/tasks.rs` is the in-memory snapshot the TUI
 mutates through; board-level metadata lives in `~/.cc-hub/board.json`, and
 `tasks::promote_task` moves a card into a registered project's Backlog.
-A pre-unification `tasks.json` migrates at startup (`migrate_legacy_board`,
-called once from `run()` in `bin/src/main.rs` — deliberately not from
-`App::new()`, which tests construct freely). Malformed files are surfaced to
+Malformed files are surfaced to
 the Tasks status bar instead of silently overwriting or resetting state.
 
 ### Sessions layer

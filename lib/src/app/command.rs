@@ -852,8 +852,8 @@ fn resolve_project_for_cwd(cwd: &str) -> Option<(String, String)> {
 
 // Unix-only: every test constructs an App, which touches the on-disk task
 // store — with_temp_home isolation redirects $HOME, which only works on
-// unix. Constructing an App in a test WITHOUT with_temp_home is how the
-// board migration once ran against a developer's real ~/.cc-hub.
+// unix. An App built WITHOUT with_temp_home reads and writes the
+// developer's real ~/.cc-hub.
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
