@@ -55,16 +55,15 @@ impl StateDerivation {
     }
 }
 
-/// Mtime-keyed map of JSONL path → last-derived state. Mirrors
-/// `projects_scan::TaskStateCache`.
+/// Mtime-keyed map of JSONL path → last-derived state.
 type StateCache = HashMap<PathBuf, (SystemTime, Arc<StateDerivation>)>;
 
 /// Process-global mtime-keyed cache of derived transcript state. Keyed by the
 /// JSONL's absolute path; value is `(mtime, derived)`. Every scan stat()s each
 /// file and only re-reads + re-derives on an mtime change — otherwise it hands
 /// back the `Arc` clone, short-circuiting the read_jsonl_tail_for_state +
-/// extract_* pipeline entirely. Mirrors the mtime-keyed cache in
-/// [`crate::projects_scan`] and the size-keyed one in [`crate::tool_use_count`].
+/// extract_* pipeline entirely. Compare the size-keyed cache in
+/// [`crate::tool_use_count`].
 fn state_cache() -> &'static Mutex<StateCache> {
     static CACHE: OnceLock<Mutex<StateCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -172,8 +171,7 @@ pub fn first_user_message_cached(path: &Path) -> Option<String> {
 }
 
 /// Evict cache entries for transcripts not present in `visited` this scan
-/// (sessions that aged out of the window, deleted files). Mirrors the
-/// `retain`-by-visited-set eviction in [`crate::projects_scan`]. Call once at
+/// (sessions that aged out of the window, deleted files). Call once at
 /// the end of a scan with the set of paths actually parsed this tick.
 pub fn retain_cached(visited: &HashSet<PathBuf>) {
     {

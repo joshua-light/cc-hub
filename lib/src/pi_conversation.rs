@@ -1,7 +1,7 @@
 use crate::conversation::classify;
 use crate::conversation::{
-    parse_timestamp_ms, CurrentTool,
-    NO_CONTENT, NO_TEXT_CONTENT, THINKING_MARKER, TOOL_MARKER_PREFIX,
+    parse_timestamp_ms, CurrentTool, NO_CONTENT, NO_TEXT_CONTENT, THINKING_MARKER,
+    TOOL_MARKER_PREFIX,
 };
 use crate::models::{ConversationMessage, SessionState};
 use serde_json::Value;

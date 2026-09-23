@@ -4,7 +4,7 @@
 
 use crate::models;
 use crate::models::SessionState;
-use crate::orchestrator::{TaskPriority, TaskStatus};
+use crate::task_store::{TaskPriority, TaskStatus};
 use crate::ui::palette::{BACKLOG_BLUE, GRAY_80, MUTED_TEXT, PURPLE, SEP_GRAY};
 use crate::usage::UsageInfo;
 use chrono::{DateTime, Local, TimeZone};
@@ -14,8 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders};
 
 /// Canonical (icon, accent color) for a task status: the Tasks-board column
-/// palette, extended with the Projects kanban's Review/Merging accents.
-/// Every surface that colors a status (board columns, the task-link picker)
+/// palette. Every surface that colors a status (board columns, the task-link picker)
 /// goes through here so the hues can't drift apart. The display label lives
 /// on [`TaskStatus::board_label`].
 pub(crate) fn task_status_meta(status: TaskStatus) -> (&'static str, Color) {
@@ -24,7 +23,6 @@ pub(crate) fn task_status_meta(status: TaskStatus) -> (&'static str, Color) {
         TaskStatus::Planning => ("󰟶", PURPLE),
         TaskStatus::Running => ("󰒓", Color::LightYellow),
         TaskStatus::Review => ("󱋲", Color::LightCyan),
-        TaskStatus::Merging => ("", Color::LightMagenta),
         TaskStatus::Done => ("󰸞", Color::LightGreen),
     }
 }

@@ -332,7 +332,7 @@ fn ensure_path_trusted_at(cwd: &str, config_path: PathBuf) -> io::Result<()> {
         return Ok(());
     }
     // Serialize cc-hub's own read-modify-write of this account-wide file so a
-    // concurrent spawn (e.g. an auto_review tick racing a keypress spawn) can't
+    // concurrent spawn (e.g. a deep link racing a keypress spawn) can't
     // clobber another project's freshly written trust entry via last-writer-
     // wins. The lock lives in a sidecar file because the store is tempfile+
     // rename — flock follows the inode, so the target itself can't be locked
@@ -442,15 +442,6 @@ fn stalled_spawn_message(agent: &str, tmux_name: &str, pane: &str) -> String {
 pub fn spawn_shell_tmux_session(cwd: &str) -> io::Result<String> {
     let name = unique_session_name("cchub-sh");
     mux::spawn_detached(&name, cwd, None)?;
-    Ok(name)
-}
-
-pub fn spawn_log_viewer_tmux_session(log_path: &Path) -> io::Result<String> {
-    let name = unique_session_name("cchub-log");
-    let cwd = log_path.parent().and_then(|p| p.to_str()).unwrap_or(".");
-    let quoted = format!("'{}'", log_path.to_string_lossy().replace('\'', "'\\''"));
-    let cmd = format!("less +G -R -- {}", quoted);
-    mux::spawn_detached(&name, cwd, Some(&cmd))?;
     Ok(name)
 }
 

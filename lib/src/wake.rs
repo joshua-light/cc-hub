@@ -38,7 +38,9 @@ impl Wake {
         }
         Some(Self {
             name: name.to_string(),
-            path: crate::orchestrator::cc_hub_home()?.join("wake").join(name),
+            path: crate::platform::paths::cc_hub_home()?
+                .join("wake")
+                .join(name),
         })
     }
 

@@ -1,5 +1,3 @@
-use std::collections::{HashMap, HashSet};
-
 /// Layout state computed (and clamp-written) by `ui/` during draw.
 ///
 /// `ui/` is the only writer during render; `App` nav methods may read and
@@ -15,10 +13,6 @@ use std::collections::{HashMap, HashSet};
 ///   `ui/sessions.rs` also clamps [`Self::popup_scroll`].
 /// - `ui/metrics.rs` writes [`Self::metrics_view_height`],
 ///   [`Self::metrics_row_lines`], and [`Self::metrics_scroll`].
-/// - `ui/projects/result_popup.rs` clamps [`Self::result_scroll`] and reads
-///   [`Self::result_artifact_expanded`].
-/// - `ui/projects/cards.rs` (`ensure_image_decoded`) populates
-///   [`Self::artifact_images`] and [`Self::artifact_image_failed`].
 pub struct RenderState {
     /// Vertical scroll offset of the Sessions grid, in rows. The renderer
     /// keeps the selected card visible by writing this each frame.
@@ -39,13 +33,6 @@ pub struct RenderState {
     /// Logical-line offset of every selectable metrics session row, synced by
     /// the renderer for the same selection engagement decision.
     pub metrics_row_lines: Vec<usize>,
-    /// Scroll offset (unwrapped lines) of the Projects "Result" popup body.
-    /// Clamped by the renderer to keep the selected card visible.
-    pub result_scroll: u16,
-    /// When true, the selected evidence card in the Result popup renders
-    /// enlarged. Read by the renderer; toggled via
-    /// [`App::toggle_result_artifact_expanded`].
-    pub result_artifact_expanded: bool,
     /// Scroll offset (lines) of the Tasks-tab Task Info popup body. Clamped
     /// by the renderer (`ui/tasks.rs`) to keep the selected attachment
     /// visible.
@@ -55,14 +42,6 @@ pub struct RenderState {
     pub agents_scroll: u16,
     /// Scroll offset of the agent-detail popup's tick timeline.
     pub agent_detail_scroll: u16,
-    /// Per-artifact decoded image cache, keyed by `Artifact::path`. Populated
-    /// lazily on first popup render so non-image work doesn't pay decode cost;
-    /// entries persist for the App lifetime since artifact paths are
-    /// content-addressed and don't mutate.
-    pub artifact_images: HashMap<String, ratatui_image::protocol::StatefulProtocol>,
-    /// Paths whose decode failed once — never retry, since decoding the same
-    /// bytes will keep failing and we'd burn CPU on every redraw.
-    pub artifact_image_failed: HashSet<String>,
 }
 
 impl Default for RenderState {
@@ -74,13 +53,9 @@ impl Default for RenderState {
             metrics_scroll: 0,
             metrics_view_height: 0,
             metrics_row_lines: Vec::new(),
-            result_scroll: 0,
-            result_artifact_expanded: false,
             task_info_scroll: 0,
             agents_scroll: 0,
             agent_detail_scroll: 0,
-            artifact_images: HashMap::new(),
-            artifact_image_failed: HashSet::new(),
         }
     }
 }

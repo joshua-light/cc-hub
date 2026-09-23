@@ -6,7 +6,6 @@ use crate::models::{short_sid, RawSession, SessionDetail, SessionInfo, SessionSt
 use crate::pi_scanner;
 use crate::platform::paths;
 use crate::platform::process::{Process, ProcessInfo};
-use crate::spawn::SessionTarget;
 use log::{debug, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -83,110 +82,6 @@ pub fn find_jsonl_anywhere(session_id: &str) -> Option<PathBuf> {
         }
     }
     None
-}
-
-/// Last-ditch search: scan JSONL heads under `~/.claude/projects/` and
-/// return the newest one containing this task's orchestrator prompt prefix.
-///
-/// The normal path parses the first user message, but Claude can leave only
-/// early system/bootstrap entries behind if a session crashes immediately.
-/// Raw prefix search recovers those sessions while avoiding the broad
-/// `task_id` substring false positives caused by parent sessions mentioning
-/// worker or child task ids in tool output.
-pub fn find_orchestrator_jsonl_by_prompt_prefix(task_id: &str) -> Option<PathBuf> {
-    use std::io::Read;
-
-    let projects = projects_dir()?;
-    let needle = crate::orchestrator::orchestrator_prompt_prefix(task_id);
-    let mut best: Option<(SystemTime, PathBuf)> = None;
-    for proj_entry in std::fs::read_dir(&projects).ok()?.flatten() {
-        let proj_path = proj_entry.path();
-        if !proj_path.is_dir() {
-            continue;
-        }
-        let Ok(jsonl_iter) = std::fs::read_dir(&proj_path) else {
-            continue;
-        };
-        for entry in jsonl_iter.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let Ok(mtime) = path.metadata().and_then(|m| m.modified()) else {
-                continue;
-            };
-            if best.as_ref().is_some_and(|(t, _)| mtime <= *t) {
-                continue;
-            }
-            let mut buf = vec![0u8; 32 * 1024];
-            let Ok(n) = std::fs::File::open(&path).and_then(|mut f| f.read(&mut buf)) else {
-                continue;
-            };
-            buf.truncate(n);
-            if String::from_utf8_lossy(&buf).contains(&needle) {
-                best = Some((mtime, path));
-            }
-        }
-    }
-    best.map(|(_, p)| p)
-}
-
-/// Recover the orchestrator's Claude session id for a task whose `state.json`
-/// lost the field (or never had it written). Returns the JSONL in
-/// `~/.claude/projects/<encoded_cwd>/` whose first user message starts with
-/// the orchestrator prompt for `task_id` — that prefix is unique to
-/// orchestrator sessions, so a hit is not a sibling Claude session running in
-/// the same cwd. Newest mtime wins; bails on the first match so a project
-/// with hundreds of JSONLs only parses one in the common case.
-pub fn find_orchestrator_session_id(
-    project_root: &Path,
-    task_id: &str,
-    stored_sid: Option<&str>,
-) -> Option<String> {
-    let cwd = project_root.to_string_lossy();
-    // Fast path: trust the sid the task already recorded. Try the direct
-    // path first, then any project dir — the encoded cwd can drift from
-    // `task.project_root` (symlinks, renames, `/` differences) which is the
-    // common reason the prompt-prefix scan below comes up empty.
-    if let Some(sid) = stored_sid {
-        if find_jsonl(&cwd, sid).is_some() || find_jsonl_anywhere(sid).is_some() {
-            return Some(sid.to_string());
-        }
-    }
-    let needle = crate::orchestrator::orchestrator_prompt_prefix(task_id);
-    if let Some(dir) = projects_dir().map(|p| p.join(encode_path(&cwd))) {
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            let mut candidates: Vec<(SystemTime, PathBuf)> = entries
-                .flatten()
-                .filter_map(|entry| {
-                    let path = entry.path();
-                    if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                        return None;
-                    }
-                    let mtime = path.metadata().ok()?.modified().ok()?;
-                    Some((mtime, path))
-                })
-                .collect();
-            candidates.sort_by_key(|b| std::cmp::Reverse(b.0));
-            for (_, path) in candidates {
-                let head = conversation::read_jsonl_head(&path, 4096);
-                let Some(first) = conversation::extract_first_user_message(&head) else {
-                    continue;
-                };
-                if !first.starts_with(&needle) {
-                    continue;
-                }
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    return Some(stem.to_string());
-                }
-            }
-        }
-    }
-    // Final fallback: raw prompt-prefix search. This recovers crashed
-    // sessions where structured first-user-message extraction returns None,
-    // without falling back to broad task-id substring matches.
-    find_orchestrator_jsonl_by_prompt_prefix(task_id)
-        .and_then(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
 }
 
 /// Check if a process has a real parent (not reparented to init).
@@ -729,8 +624,8 @@ fn is_scratch_cwd(cwd: &str) -> bool {
 
 /// The `~/.claude/projects/` subdirectory name that the titler's scratch cwd
 /// encodes to (e.g. `-tmp-cc-hub-summaries`), or `None` when that path isn't
-/// valid UTF-8. Every JSONL under this dir is a one-shot `cc-hub-new -p` /
-/// triage run — not a real session — so callers walking the projects tree skip
+/// valid UTF-8. Every JSONL under this dir is a one-shot `cc-hub-new -p`
+/// run — not a real session — so callers walking the projects tree skip
 /// it. Shared with [`crate::session_count`] so the exclusion can't drift.
 pub fn scratch_project_dir_name() -> Option<String> {
     crate::title::scratch_cwd().to_str().map(encode_path)
@@ -1026,8 +921,7 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
 
     // Evict derived-state / summary cache entries for transcripts that didn't
     // surface this scan (sessions aged out of the window, deleted JSONLs), so
-    // the caches don't grow unbounded. Mirrors projects_scan's retain-by-
-    // visited-set eviction.
+    // the caches don't grow unbounded.
     let visited: HashSet<PathBuf> = sessions
         .iter()
         .filter_map(|s| s.jsonl_path.clone())
@@ -1059,43 +953,6 @@ fn sort_stable(sessions: &mut [SessionInfo]) {
             .then_with(|| b.started_at.cmp(&a.started_at))
             .then_with(|| a.session_id.cmp(&b.session_id))
     });
-}
-
-#[derive(Clone, Debug)]
-pub struct ResumableSession {
-    pub session_id: String,
-    pub resume: SessionTarget,
-}
-
-pub fn find_orchestrator_session(
-    project_root: &Path,
-    task_id: &str,
-    kind: AgentKind,
-    stored_sid: Option<&str>,
-) -> Option<ResumableSession> {
-    match kind {
-        AgentKind::Claude => {
-            find_orchestrator_session_id(project_root, task_id, stored_sid).map(|sid| {
-                ResumableSession {
-                    session_id: sid.clone(),
-                    resume: SessionTarget::Resume(sid),
-                }
-            })
-        }
-        AgentKind::Pi => pi_scanner::find_orchestrator_session(project_root, task_id, stored_sid)
-            .map(|(sid, path)| ResumableSession {
-                session_id: sid,
-                resume: SessionTarget::ResumeFile(path),
-            }),
-        AgentKind::Codex => {
-            codex_scanner::find_orchestrator_session(project_root, task_id, stored_sid).map(|sid| {
-                ResumableSession {
-                    session_id: sid.clone(),
-                    resume: SessionTarget::Resume(sid),
-                }
-            })
-        }
-    }
 }
 
 pub fn scan_sessions() -> Vec<SessionInfo> {
@@ -1342,35 +1199,6 @@ mod tests {
         sort_stable(&mut sessions);
         let order: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
         assert_eq!(order, vec!["processing", "waiting", "question"]);
-    }
-
-    #[test]
-    fn orchestrator_fallback_matches_prompt_prefix_not_task_id_mentions() {
-        with_temp_home(|home| {
-            let task_id = "t-scan-1";
-            let projects = home.join(".claude/projects");
-            let parent_dir = projects.join("parent");
-            let orch_dir = projects.join("orch");
-            fs::create_dir_all(&parent_dir).unwrap();
-            fs::create_dir_all(&orch_dir).unwrap();
-            fs::write(
-                parent_dir.join("parent-session.jsonl"),
-                format!(r#"{{"type":"assistant","message":"mentioned {task_id} in tool output"}}"#),
-            )
-            .unwrap();
-            fs::write(
-                orch_dir.join("good-session.jsonl"),
-                format!(
-                    r#"{{"type":"system","message":"{} crashed before first user"}}"#,
-                    crate::orchestrator::orchestrator_prompt_prefix(task_id)
-                ),
-            )
-            .unwrap();
-
-            let sid =
-                find_orchestrator_session_id(std::path::Path::new("/tmp/project"), task_id, None);
-            assert_eq!(sid.as_deref(), Some("good-session"));
-        });
     }
 
     // While an AskUserQuestion / permission prompt is open, Claude Code sets

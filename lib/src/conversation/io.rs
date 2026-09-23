@@ -145,8 +145,7 @@ pub fn read_jsonl_all(path: &Path) -> Vec<Value> {
 /// Count assistant `tool_use` blocks across an entire JSONL transcript.
 ///
 /// Streams line-by-line and parses each line independently — never holds the
-/// whole file in memory, so it stays cheap on long-running orchestrator
-/// transcripts. Returns 0 if the file is missing or unreadable.
+/// whole file in memory, so it stays cheap on long transcripts. Returns 0 if the file is missing or unreadable.
 pub fn count_tool_uses(path: &Path) -> usize {
     let file = match File::open(path) {
         Ok(f) => f,

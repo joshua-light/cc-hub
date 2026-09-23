@@ -401,10 +401,8 @@ impl TaskLink {
     }
 }
 
-/// A personal-board task id. The board mints `tk-<nanos>`; requiring the
-/// prefix here means a link can only ever address a board card, never an
-/// orchestrated `t-…` task that lives under a project and plays by other
-/// rules.
+/// A board task id. The board mints `tk-<nanos>`; requiring the prefix here
+/// means a link can only ever address a board card.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoardTaskId(String);
 

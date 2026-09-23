@@ -1,8 +1,8 @@
 #![allow(clippy::collapsible_match)]
 
 use cc_hub_lib::{
-    app, auto_review, config, harness, metrics, models, platform, projects_scan,
-    scanner, send, session_count, spawn, title, triage, ui, usage, watcher,
+    app, config, harness, metrics, models, platform, scanner, send, session_count, spawn, title,
+    ui, usage, watcher,
 };
 
 use app::{App, Tab, View};
@@ -81,10 +81,10 @@ fn log_loadavg() {
 #[cfg(not(unix))]
 fn log_loadavg() {}
 
-/// How long to suppress re-titling a session/task after a successful run.
-/// Long enough to outlast any in-flight `projects_scan::scan` snapshot
-/// captured before the title hit disk, so the same id doesn't get titled
-/// twice when the snap is drained after the persist.
+/// How long to suppress re-titling a session after a successful run. Long
+/// enough to outlast any in-flight scan snapshot captured before the title
+/// hit disk, so the same id doesn't get titled twice when the snap is
+/// drained after the persist.
 const TITLE_SUCCESS_COOLDOWN: Duration = Duration::from_secs(30);
 /// How long to suppress re-titling after a failed run. Long enough to
 /// avoid re-spawning a failing subprocess every scan tick, short enough
@@ -208,109 +208,6 @@ fn queue_missing_titles(
     }
 }
 
-/// Mirror of [`queue_missing_titles`] for project tasks: kick off a Haiku
-/// titler per task whose `prompt` is set but `title` is still `None`, and
-/// stamp `snap.titling` with the in-flight task ids so the UI can render a
-/// spinner. Shares the session title concurrency semaphore — both come from
-/// the same Haiku subprocess pool, so a second gate would only let twice as
-/// many `cc-hub-new -p` children run concurrently for no real win.
-fn queue_missing_task_titles(
-    snap: &mut projects_scan::ProjectsSnapshot,
-    inflight: &Arc<Mutex<HashMap<String, Instant>>>,
-    active: &Arc<Mutex<HashSet<String>>>,
-    gate: &Arc<tokio::sync::Semaphore>,
-) {
-    for tasks in snap.tasks.values() {
-        for t in tasks {
-            if t.title.is_some() {
-                continue;
-            }
-            if t.prompt.trim().is_empty() {
-                continue;
-            }
-            let task_id = t.task_id.clone();
-            let project_id = t.project_id.clone();
-            let prompt = t.prompt.clone();
-            {
-                let mut lock = inflight.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(&deadline) = lock.get(&task_id) {
-                    if deadline > Instant::now() {
-                        continue;
-                    }
-                }
-                lock.insert(task_id.clone(), Instant::now() + TITLE_INFLIGHT_SENTINEL);
-            }
-            let inflight = Arc::clone(inflight);
-            let active = Arc::clone(active);
-            let gate = Arc::clone(gate);
-            tokio::spawn(async move {
-                let _permit = gate.acquire_owned().await.ok();
-
-                active
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(task_id.clone());
-
-                let title_result = tokio::task::spawn_blocking({
-                    let p = prompt.clone();
-                    move || title::generate_title_blocking(&p)
-                })
-                .await
-                .ok()
-                .flatten();
-
-                active
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&task_id);
-
-                let Some(t) = title_result else {
-                    log::warn!(
-                        "title: task generation failed for {}, retrying after cooldown",
-                        task_id
-                    );
-                    inflight
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(task_id.clone(), Instant::now() + TITLE_FAILURE_COOLDOWN);
-                    return;
-                };
-
-                let project_id_for_persist = project_id.clone();
-                let task_id_for_persist = task_id.clone();
-                let title_for_persist = t.clone();
-                let persist = tokio::task::spawn_blocking(move || {
-                    cc_hub_lib::orchestrator::set_task_title(
-                        project_id_for_persist.as_deref(),
-                        &task_id_for_persist,
-                        &title_for_persist,
-                    )
-                })
-                .await;
-                match persist {
-                    Ok(Ok(_)) => log::info!("title: task={} → {:?}", task_id, t),
-                    Ok(Err(e)) => {
-                        log::warn!("title: persist task title failed for {}: {}", task_id, e)
-                    }
-                    Err(e) => log::warn!(
-                        "title: persist task title task panicked for {}: {}",
-                        task_id,
-                        e
-                    ),
-                }
-
-                inflight
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(task_id.clone(), Instant::now() + TITLE_SUCCESS_COOLDOWN);
-            });
-        }
-    }
-
-    let set = active.lock().unwrap_or_else(|e| e.into_inner());
-    snap.titling = set.clone();
-}
-
 pub(crate) enum ScanMsg {
     SessionList(Vec<models::SessionInfo>),
     /// The full transcript archive for the session finder, built off the
@@ -328,15 +225,6 @@ pub(crate) enum ScanMsg {
     GhCreateDone {
         name: String,
         result: Result<String, String>,
-    },
-    Projects(projects_scan::ProjectsSnapshot),
-    BacklogTriage {
-        promotion: Option<triage::Promotion>,
-        status: Option<String>,
-    },
-    AutoReview {
-        spawn: Option<auto_review::Spawn>,
-        status: Option<String>,
     },
     /// Fresh on-disk snapshot of every persistent agent (Agents tab).
     Harness(Vec<harness::AgentSnapshot>),
@@ -383,22 +271,12 @@ pub(crate) fn open_path_detached(path: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Spawn a session / project task at `cwd` from the folder picker,
-/// routing through the right App method based on the picker mode flags.
-/// Closes the picker on completion (the App helpers handle that for the
-/// register/projects branches).
+/// Act on a folder-picker pick at `cwd`: assign the pending board task
+/// there, or spawn a session.
 pub(crate) fn dispatch_picked_cwd(app: &mut App, cwd: &str) {
     if app.tasks.pending_assign.is_some() {
         let status = app.assign_task_agent(cwd);
         app.set_status(status);
-    } else if app.projects.registering_only {
-        let status = match app.register_picked_project(cwd) {
-            Ok(name) => format!("registered project: {}", name),
-            Err(e) => format!("register failed: {}", e),
-        };
-        app.set_status(status);
-    } else if app.projects.creating_task {
-        app.enter_project_task_prompt(cwd.to_string());
     } else {
         app.close_folder_picker();
         let agent_id = app.default_session_agent_id().to_string();
@@ -532,7 +410,7 @@ fn install_panic_hook() {
 /// Pull a global `--claude-config-dir <path>` (or `--claude-config-dir=<path>`)
 /// out of argv and export it as `CLAUDE_CONFIG_DIR` for this process. Setting
 /// the env var — rather than threading a value through — means the directly
-/// spawned `claude -p` helpers (titles, backlog, auto-review) inherit the right
+/// spawned `claude -p` helpers (titles) inherit the right
 /// account for free; mux-spawned sessions get it re-applied explicitly in
 /// `spawn`. Returns argv with the flag (and its value) removed so per-verb flag
 /// parsers don't choke on it.
@@ -615,22 +493,13 @@ async fn main() -> io::Result<()> {
     // forces every cell out again. Terminals without focus reporting ignore
     // the request; tmux forwards it only with `focus-events on`.
     let focus_events = crossterm::execute!(stdout, EnableFocusChange).is_ok();
-    // Querying the terminal must happen on the alt screen but before we
-    // hand stdout to ratatui's backend. On terminals that don't reply (or
-    // swallow the probe — e.g. tmux without passthrough), fall back to a
-    // sensible 8x16 cell so image cards still render via halfblocks instead
-    // of crashing. `from_fontsize` is deprecated upstream in favour of
-    // `halfblocks`, but we want the explicit cell size to drive sizing.
-    #[allow(deprecated)]
-    let image_picker = cc_hub_lib::ratatui_image::picker::Picker::from_query_stdio()
-        .unwrap_or_else(|_| cc_hub_lib::ratatui_image::picker::Picker::from_fontsize((8, 16)));
     // Frame-diff byte counter, drained once per draw by `run()` for the
     // `bytes=` field of the draw trace.
     let frame_bytes = Arc::new(AtomicU64::new(0));
     let backend = CrosstermBackend::new(CountingWriter::new(stdout, Arc::clone(&frame_bytes)));
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run(&mut terminal, image_picker, frame_bytes).await;
+    let result = run(&mut terminal, frame_bytes).await;
 
     // Ask any still-running title subprocesses to kill themselves so the
     // tokio runtime's shutdown doesn't wait up to ~45s on a hung `claude
@@ -674,11 +543,11 @@ fn run_no_tui() -> io::Result<()> {
 
 /// Apply one drained [`ScanMsg`] to `app`. Extracted verbatim from the
 /// `run()` channel-drain loop; the `title`-tracking maps/gate are threaded
-/// through so the `SessionList` / `Projects` arms can kick off missing-title
-/// subprocesses exactly as they did inline.
+/// through so the `SessionList` arm can kick off missing-title subprocesses
+/// exactly as it did inline.
 ///
 /// Returns true when the message changed anything the renderer shows. The
-/// periodic scan arms (`SessionList` / `Projects`) report no-change for the
+/// periodic `SessionList` scan arm reports no-change for the
 /// common all-idle tick so the caller can skip the repaint; every other
 /// message exists only to mutate visible state, so they always return true.
 fn apply_scan_msg(
@@ -686,8 +555,6 @@ fn apply_scan_msg(
     msg: ScanMsg,
     inflight_titles: &Arc<Mutex<HashMap<String, Instant>>>,
     active_titles: &Arc<Mutex<HashSet<String>>>,
-    inflight_task_titles: &Arc<Mutex<HashMap<String, Instant>>>,
-    active_task_titles: &Arc<Mutex<HashSet<String>>>,
     title_gate: &Arc<tokio::sync::Semaphore>,
 ) -> bool {
     match msg {
@@ -711,15 +578,6 @@ fn apply_scan_msg(
         ScanMsg::MetricsProgress { scanned, total } => {
             app.update_metrics_progress(scanned, total);
         }
-        ScanMsg::Projects(mut snap) => {
-            queue_missing_task_titles(
-                &mut snap,
-                inflight_task_titles,
-                active_task_titles,
-                title_gate,
-            );
-            return app.update_projects(snap);
-        }
         ScanMsg::GhCreateDone { name, result } => {
             if let Some(picker) = app.folder_picker.as_mut() {
                 picker.reload();
@@ -738,30 +596,6 @@ fn apply_scan_msg(
             };
             app.set_status(status);
         }
-        ScanMsg::BacklogTriage { promotion, status } => {
-            if let Some(p) = promotion {
-                if let Some(prompt) = p.orchestrator_prompt {
-                    app.queue_pending_dispatch(p.tmux, prompt);
-                }
-            }
-            if let Some(s) = status {
-                app.set_status(s);
-            }
-        }
-        ScanMsg::AutoReview { spawn, status } => {
-            // Claude ignores spawn-time initial prompts, so the
-            // briefing is delivered via tmux send-keys after the
-            // session reaches Idle — same pattern the backlog
-            // triager uses for orchestrator prompts.
-            if let Some(s) = spawn {
-                if let Some(prompt) = s.prompt_to_dispatch {
-                    app.queue_pending_dispatch(s.tmux, prompt);
-                }
-            }
-            if let Some(s) = status {
-                app.set_status(s);
-            }
-        }
         ScanMsg::Harness(agents) => app.update_harness(agents),
         ScanMsg::HarnessTick(report) => {
             if !report.ok {
@@ -779,31 +613,18 @@ fn apply_scan_msg(
     true
 }
 
-async fn run(
-    terminal: &mut Term,
-    image_picker: cc_hub_lib::ratatui_image::picker::Picker,
-    frame_bytes: Arc<AtomicU64>,
-) -> io::Result<()> {
+async fn run(terminal: &mut Term, frame_bytes: Arc<AtomicU64>) -> io::Result<()> {
     let mut app = App::new();
     // Swap in the persisted ack tracker so Space-idled cards survive a
     // restart. Loaded here, not in App::new(): tests must never touch the
     // real home, so App::new() constructs a purely in-memory tracker.
     app.sessions.acks = cc_hub_lib::acks::Acks::load();
-    app.image_picker = Some(image_picker);
 
     let inflight_titles: Arc<Mutex<HashMap<String, Instant>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let active_titles: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     let title_gate: Arc<tokio::sync::Semaphore> =
         Arc::new(tokio::sync::Semaphore::new(config::get().title.concurrency));
-    // Task titles share the session title's Haiku subprocess pool — both
-    // hit the same `cc-hub-new -p` resource, so doubling the concurrency
-    // would buy nothing. Inflight + active sets are scoped per-domain so a
-    // session and a task with the same id (impossible in practice, but
-    // cheap to keep separate) can't collide.
-    let inflight_task_titles: Arc<Mutex<HashMap<String, Instant>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let active_task_titles: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
     let (scan_tx, mut scan_rx) = mpsc::channel::<ScanMsg>(16);
     let (detail_tx, mut detail_rx) = mpsc::channel::<String>(4);
@@ -825,68 +646,6 @@ async fn run(
             }
         }
     });
-
-    // Background backlog triage. Off unless [backlog].enabled — the tick
-    // spawns a Claude subprocess and we don't want to surprise users with
-    // billed calls.
-    if config::get().backlog.enabled {
-        let triage_tx = scan_tx.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(config::get().backlog.interval());
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                interval.tick().await;
-                let outcome = match tokio::task::spawn_blocking(triage::tick).await {
-                    Ok(o) => o,
-                    Err(e) => {
-                        log::warn!("triage: spawn_blocking joined with error: {}", e);
-                        continue;
-                    }
-                };
-                if outcome.promotion.is_none() && outcome.status.is_none() {
-                    continue;
-                }
-                let _ = triage_tx
-                    .send(ScanMsg::BacklogTriage {
-                        promotion: outcome.promotion,
-                        status: outcome.status,
-                    })
-                    .await;
-            }
-        });
-    }
-
-    // Background auto-reviewer. Off unless [auto_review].enabled — every
-    // tick may spawn a full reviewer agent session (billed). Mirrors the
-    // backlog triage shape: at most one reviewer per tick, eligibility
-    // gated by per-task `last_auto_reviewed_at` so each Review round gets
-    // exactly one auto-review pass.
-    if config::get().auto_review.enabled {
-        let review_tx = scan_tx.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(config::get().auto_review.interval());
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                interval.tick().await;
-                let outcome = match tokio::task::spawn_blocking(auto_review::tick).await {
-                    Ok(o) => o,
-                    Err(e) => {
-                        log::warn!("auto_review: spawn_blocking joined with error: {}", e);
-                        continue;
-                    }
-                };
-                if outcome.spawn.is_none() && outcome.status.is_none() {
-                    continue;
-                }
-                let _ = review_tx
-                    .send(ScanMsg::AutoReview {
-                        spawn: outcome.spawn,
-                        status: outcome.status,
-                    })
-                    .await;
-            }
-        });
-    }
 
     // Persistent agents. The supervisor loops live in this process (one
     // tokio task per agent dir); the TUI reads their state back from disk on
@@ -932,24 +691,8 @@ async fn run(
     // Fallback timer catches PID deaths (not a filesystem event) and events
     // missed when a watched dir is rotated or recreated. Its initial tick
     // fires immediately, serving as the startup scan.
-    let (watch_tx, mut watch_rx) = mpsc::channel::<watcher::WatchBatch>(8);
-    watcher::spawn_fs_watcher(watch_tx);
     let (session_invalidate_tx, mut session_invalidate_rx) = mpsc::channel::<()>(1);
-    let (project_invalidate_tx, mut project_invalidate_rx) = mpsc::channel::<()>(1);
-    tokio::spawn(async move {
-        while let Some(mut batch) = watch_rx.recv().await {
-            while let Ok(next) = watch_rx.try_recv() {
-                batch.sessions |= next.sessions;
-                batch.projects |= next.projects;
-            }
-            if batch.sessions {
-                let _ = session_invalidate_tx.try_send(());
-            }
-            if batch.projects {
-                let _ = project_invalidate_tx.try_send(());
-            }
-        }
-    });
+    watcher::spawn_fs_watcher(session_invalidate_tx);
 
     let session_scan_tx = scan_tx.clone();
     tokio::spawn(async move {
@@ -1004,28 +747,6 @@ async fn run(
                     }
                 }
             }
-        }
-    });
-
-    // Project state has its own invalidation and blocking worker. A large
-    // project scan can no longer delay Sessions refreshes or detail requests.
-    let project_scan_tx = scan_tx.clone();
-    tokio::spawn(async move {
-        let project_fallback = config::get()
-            .scan
-            .fs_fallback_interval()
-            .max(Duration::from_secs(10));
-        let mut fallback = tokio::time::interval(project_fallback);
-        fallback.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                _ = fallback.tick() => {}
-                Some(()) = project_invalidate_rx.recv() => {}
-            }
-            let snap = tokio::task::spawn_blocking(projects_scan::scan)
-                .await
-                .unwrap_or_else(|_| projects_scan::ProjectsSnapshot::empty());
-            let _ = project_scan_tx.send(ScanMsg::Projects(snap)).await;
         }
     });
 
@@ -1358,8 +1079,6 @@ async fn run(
                                 app.view == View::Grid && app.current_tab == Tab::Sessions;
                             let on_metrics =
                                 app.view == View::Grid && app.current_tab == Tab::Metrics;
-                            let on_projects =
-                                app.view == View::Grid && app.current_tab == Tab::Projects;
                             let on_tasks = app.view == View::Grid && app.current_tab == Tab::Tasks;
                             let on_agents =
                                 app.view == View::Grid && app.current_tab == Tab::Agents;
@@ -1378,7 +1097,6 @@ async fn run(
                                 &spawn_metrics,
                                 on_sessions,
                                 on_metrics,
-                                on_projects,
                                 on_tasks,
                                 on_agents,
                             )
@@ -1423,15 +1141,7 @@ async fn run(
         // (and its selection) untouched between real changes.
         let t_drain = Instant::now();
         while let Ok(msg) = scan_rx.try_recv() {
-            if apply_scan_msg(
-                &mut app,
-                msg,
-                &inflight_titles,
-                &active_titles,
-                &inflight_task_titles,
-                &active_task_titles,
-                &title_gate,
-            ) {
+            if apply_scan_msg(&mut app, msg, &inflight_titles, &active_titles, &title_gate) {
                 dirty = true;
             }
         }

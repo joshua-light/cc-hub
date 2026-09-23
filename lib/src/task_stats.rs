@@ -60,7 +60,7 @@ pub fn refresh() -> Vec<(String, TaskStats)> {
         ids.extend(
             links
                 .iter()
-                .filter(|(_, link)| link.project_id.is_none() && link.task_id == task.task_id)
+                .filter(|(_, link)| link.task_id == task.task_id)
                 .map(|(id, _)| id.clone()),
         );
         ids.retain(|id| !id.is_empty());
@@ -81,7 +81,7 @@ pub fn refresh() -> Vec<(String, TaskStats)> {
         if task.stats.as_ref() == Some(&stats) {
             result.push((task.task_id.clone(), stats));
         } else {
-            match crate::orchestrator::set_task_stats(&task.task_id, stats.clone()) {
+            match crate::task_store::set_task_stats(&task.task_id, stats.clone()) {
                 Ok(_) => result.push((task.task_id.clone(), stats)),
                 Err(error) => log::warn!("task stats {}: {error}", task.task_id),
             }
@@ -183,7 +183,7 @@ mod tests {
             board
                 .bind_resource(&id, "/tmp", "claude", "mux2", Some("second"))
                 .unwrap();
-            let before = crate::orchestrator::read_task_state_for(None, &id).unwrap();
+            let before = crate::task_store::read_task_state(&id).unwrap();
             assert_eq!(before.usage_session_ids, ["first", "second"]);
             let project = crate::platform::paths::claude_home()
                 .unwrap()
@@ -192,15 +192,13 @@ mod tests {
             claude(&project.join("second.jsonl"), "request-b");
             let refreshed = refresh();
             assert_eq!(refreshed.len(), 1);
-            let saved = crate::orchestrator::read_task_state_for(None, &id).unwrap();
+            let saved = crate::task_store::read_task_state(&id).unwrap();
             assert_eq!(saved.updated_at, before.updated_at);
             assert_eq!(saved.stats.as_ref().unwrap().total_tokens(), 360);
             std::fs::remove_file(project.join("first.jsonl")).unwrap();
             refresh();
             assert_eq!(
-                crate::orchestrator::read_task_state_for(None, &id)
-                    .unwrap()
-                    .stats,
+                crate::task_store::read_task_state(&id).unwrap().stats,
                 saved.stats
             );
         });

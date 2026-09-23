@@ -16,7 +16,7 @@
 use super::{App, RenameSubmit, SessionsLayout, Tab};
 use crate::agent::AgentKind;
 use crate::config;
-use crate::orchestrator::TaskPriority;
+use crate::task_store::TaskPriority;
 use crate::{models, spawn, title};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,8 +70,6 @@ pub enum SessionsCommand {
     OpenDetailPopup,
     /// `H` — toggle inactive sessions.
     ToggleShowInactive,
-    /// `W` — toggle orchestrator/worker sessions.
-    ToggleShowOrchWorkers,
     /// `v` — cycle the Sessions layout (card grid ↔ compact list).
     ToggleLayout,
     /// `f`/Enter — resume inactive, attach live tmux, or focus the window.
@@ -156,8 +154,6 @@ pub enum TasksCommand {
     ClearDone,
     /// `f`/Enter — attach a live agent, resume a dead one, or explain.
     FocusAgent,
-    /// `P` — promote the focused card into a registered project's Backlog.
-    PromoteSelected,
     /// `v` — open the Task Info popup (prompt + attachments) for the
     /// focused card.
     OpenTaskInfo,
@@ -360,16 +356,6 @@ impl App {
                     "hidden"
                 };
                 self.set_status(format!("inactive sessions {}", state));
-                Vec::new()
-            }
-            ToggleShowOrchWorkers => {
-                self.toggle_show_orch_workers();
-                let state = if self.sessions.show_orch_workers {
-                    "shown"
-                } else {
-                    "hidden"
-                };
-                self.set_status(format!("orchestrator/worker sessions {}", state));
                 Vec::new()
             }
             ToggleLayout => {
@@ -692,7 +678,6 @@ impl App {
                 Vec::new()
             }
             FocusAgent => self.focus_task_agent(),
-            PromoteSelected => self.promote_selected_task(),
             OpenTaskInfo => {
                 if !self.enter_task_info() {
                     self.set_status("no task focused".into());
@@ -796,58 +781,6 @@ impl App {
             Vec::new()
         }
     }
-
-    /// `P` on a board card: promote it into the registered project whose root
-    /// owns the card's `cwd`. Resolution canonicalizes both sides and accepts
-    /// a card sitting *inside* a project root, picking the longest (most
-    /// specific) matching root when several nest. On success the on-disk store
-    /// already moved the record (`tasks::promote_task` write-then-delete); the
-    /// in-memory board reloads to drop the promoted card and the cursor clamps.
-    fn promote_selected_task(&mut self) -> Vec<Effect> {
-        let Some(task) = self.selected_board_task().cloned() else {
-            return Vec::new();
-        };
-        let Some(cwd) = task.cwd.as_deref() else {
-            self.set_status(
-                "no registered project matches this card's cwd — register one in the Projects tab first"
-                    .into(),
-            );
-            return Vec::new();
-        };
-        let Some((project_id, project_name)) = resolve_project_for_cwd(cwd) else {
-            self.set_status(
-                "no registered project matches this card's cwd — register one in the Projects tab first"
-                    .into(),
-            );
-            return Vec::new();
-        };
-        match crate::tasks::promote_task(&task.task_id, &project_id) {
-            Ok(_) => {
-                self.tasks.reload();
-                self.tasks.clamp_row();
-                self.set_status(format!("promoted to {} backlog", project_name));
-            }
-            Err(e) => self.set_status(format!("promote failed: {e}")),
-        }
-        Vec::new()
-    }
-}
-
-/// Match `cwd` to a registered project: exact canonical-root match, or `cwd`
-/// nested under a root. When roots nest, the longest match wins. Returns the
-/// project `(id, name)`.
-fn resolve_project_for_cwd(cwd: &str) -> Option<(String, String)> {
-    let cwd_canon = std::fs::canonicalize(cwd).unwrap_or_else(|_| std::path::PathBuf::from(cwd));
-    let projects = crate::orchestrator::load_projects().projects;
-    projects
-        .into_iter()
-        .filter_map(|p| {
-            let root_canon = std::fs::canonicalize(&p.root).unwrap_or_else(|_| p.root.clone());
-            (cwd_canon == root_canon || cwd_canon.starts_with(&root_canon))
-                .then(|| (root_canon.components().count(), p.id, p.name))
-        })
-        .max_by_key(|(depth, _, _)| *depth)
-        .map(|(_, id, name)| (id, name))
 }
 
 // Unix-only: every test constructs an App, which touches the on-disk task
@@ -1492,11 +1425,6 @@ mod tests {
             app.execute(Command::Sessions(SessionsCommand::ToggleShowInactive));
             assert_eq!(app.sessions.show_inactive, !before);
             assert!(status(&app).starts_with("inactive sessions"));
-
-            let before = app.sessions.show_orch_workers;
-            app.execute(Command::Sessions(SessionsCommand::ToggleShowOrchWorkers));
-            assert_eq!(app.sessions.show_orch_workers, !before);
-            assert!(status(&app).starts_with("orchestrator/worker sessions"));
         });
     }
 
@@ -1535,7 +1463,7 @@ mod tests {
     // ---- Tasks-tab command flows ----
 
     use crate::app::PROCEED_PROMPT;
-    use crate::orchestrator::TaskStatus;
+    use crate::task_store::TaskStatus;
 
     /// App on the Tasks tab wired to a recording runtime, no seeded sessions.
     fn task_app() -> (App, Arc<RecordingRuntime>) {
@@ -1720,47 +1648,6 @@ mod tests {
                 app.tasks.board.get(&id).unwrap().status,
                 TaskStatus::Backlog
             );
-        });
-    }
-
-    #[test]
-    fn promote_selected_moves_card_into_project_backlog() {
-        crate::test_util::with_temp_home(|| {
-            let (mut app, _rt) = task_app();
-            // Register a project rooted at a real temp dir so canonicalize
-            // resolves both sides identically.
-            let root = std::env::temp_dir().join(format!("cchub-promote-{}", std::process::id()));
-            std::fs::create_dir_all(&root).unwrap();
-            let root_str = root.display().to_string();
-            let pid = crate::orchestrator::ensure_project_registered(&root, "promoteproj").unwrap();
-
-            let id = app.tasks.board.add("promote me").unwrap().unwrap();
-            app.tasks
-                .board
-                .assign(&id, &root_str, "claude", "mux-p")
-                .unwrap();
-            app.focus_task(&id);
-
-            let effects = tasks(&mut app, TasksCommand::PromoteSelected);
-            assert!(effects.is_empty());
-            // Off the personal board.
-            assert!(app.tasks.board.get(&id).is_none());
-            // state.json landed under the project.
-            let state_json = dirs::home_dir()
-                .unwrap()
-                .join(".cc-hub/projects")
-                .join(&pid)
-                .join("tasks")
-                .join(&id)
-                .join("state.json");
-            assert!(state_json.exists(), "missing {}", state_json.display());
-            assert!(
-                status(&app).contains("promoteproj"),
-                "status: {}",
-                status(&app)
-            );
-
-            std::fs::remove_dir_all(&root).ok();
         });
     }
 
@@ -1949,7 +1836,7 @@ mod tests {
             }
             // Mark the second attachment as lead directly in the store; the
             // removal below must shift the designation, not drop it.
-            crate::orchestrator::update_personal_task(&id, |s| s.lead_artifact = Some(1)).unwrap();
+            crate::task_store::update_task(&id, |s| s.lead_artifact = Some(1)).unwrap();
             app.tasks.reload();
             app.focus_task(&id);
 
@@ -2245,29 +2132,6 @@ home = "~/.codex-personal"
             assert!(
                 status(&app).starts_with("no accounts configured"),
                 "got: {}",
-                status(&app)
-            );
-        });
-    }
-
-    #[test]
-    fn promote_selected_without_matching_project_keeps_card() {
-        crate::test_util::with_temp_home(|| {
-            let (mut app, _rt) = task_app();
-            let id = app.tasks.board.add("nowhere to go").unwrap().unwrap();
-            // Assigned to a cwd no registered project owns.
-            app.tasks
-                .board
-                .assign(&id, "/tmp/unregistered", "claude", "mux-x")
-                .unwrap();
-            app.focus_task(&id);
-            let effects = tasks(&mut app, TasksCommand::PromoteSelected);
-            assert!(effects.is_empty());
-            // Card stays on the board.
-            assert!(app.tasks.board.get(&id).is_some());
-            assert!(
-                status(&app).contains("no registered project"),
-                "status: {}",
                 status(&app)
             );
         });

@@ -5,8 +5,8 @@
 //! Also supports two flat modes where descend/ascend are no-ops and picking
 //! just selects the entry: [`PickerMode::Bookmarks`] over `entries`
 //! (absolute paths from [`crate::bookmarks::Bookmarks`]), and
-//! [`PickerMode::Places`] over `places` — a labelled candidate list
-//! (registered projects, bookmarks, recent cwds) narrowed live by a fuzzy
+//! [`PickerMode::Places`] over `places` — a candidate list (bookmarks,
+//! recent cwds) narrowed live by a fuzzy
 //! `filter` the user types into.
 
 use crate::fuzzy;
@@ -23,7 +23,6 @@ pub enum PickerMode {
 /// Where a [`Place`] candidate came from, for the badge in the list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlaceSource {
-    Project,
     Bookmark,
     Recent,
 }
@@ -34,7 +33,7 @@ pub enum PlaceSource {
 /// `~`-abbreviated one would misalign the highlight indices.
 #[derive(Clone, Debug)]
 pub struct Place {
-    /// Project name when registered, else the path's basename.
+    /// The path's basename.
     pub name: String,
     /// `~`-abbreviated path, shown dimmed next to the name.
     pub display_path: String,
@@ -44,12 +43,11 @@ pub struct Place {
 }
 
 impl Place {
-    pub fn new(label: Option<String>, path: PathBuf, source: PlaceSource) -> Self {
-        let name = label.unwrap_or_else(|| {
-            path.file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string())
-        });
+    pub fn new(path: PathBuf, source: PlaceSource) -> Self {
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
         let display_path = abbrev_home(&path);
         Self {
             name,
@@ -343,17 +341,9 @@ mod tests {
 
     fn places() -> Vec<Place> {
         vec![
-            Place::new(
-                Some("cc-hub".into()),
-                PathBuf::from("/g/self/cc-hub"),
-                PlaceSource::Project,
-            ),
-            Place::new(None, PathBuf::from("/g/self/reddit"), PlaceSource::Bookmark),
-            Place::new(
-                None,
-                PathBuf::from("/g/work/hub-tools"),
-                PlaceSource::Recent,
-            ),
+            Place::new(PathBuf::from("/g/self/cc-hub"), PlaceSource::Bookmark),
+            Place::new(PathBuf::from("/g/self/reddit"), PlaceSource::Bookmark),
+            Place::new(PathBuf::from("/g/work/hub-tools"), PlaceSource::Recent),
         ]
     }
 
@@ -392,12 +382,8 @@ mod tests {
     fn name_match_outranks_path_only_match() {
         with_temp_home(|| {
             let mut p = FolderPicker::new_places(vec![
-                Place::new(
-                    None,
-                    PathBuf::from("/g/alpha-archive/beta"),
-                    PlaceSource::Recent,
-                ),
-                Place::new(None, PathBuf::from("/g/x/alpha"), PlaceSource::Recent),
+                Place::new(PathBuf::from("/g/alpha-archive/beta"), PlaceSource::Recent),
+                Place::new(PathBuf::from("/g/x/alpha"), PlaceSource::Recent),
             ]);
             for c in "alpha".chars() {
                 p.push_filter(c);
@@ -443,9 +429,9 @@ mod tests {
     }
 
     #[test]
-    fn place_name_falls_back_to_basename() {
+    fn place_name_is_the_basename() {
         with_temp_home(|| {
-            let p = Place::new(None, PathBuf::from("/g/self/reddit"), PlaceSource::Recent);
+            let p = Place::new(PathBuf::from("/g/self/reddit"), PlaceSource::Recent);
             assert_eq!(p.name, "reddit");
         });
     }
@@ -454,9 +440,9 @@ mod tests {
     fn display_path_abbreviates_home() {
         with_temp_home(|| {
             let home = dirs::home_dir().unwrap();
-            let p = Place::new(None, home.join("git/x"), PlaceSource::Recent);
+            let p = Place::new(home.join("git/x"), PlaceSource::Recent);
             assert_eq!(p.display_path, "~/git/x");
-            let outside = Place::new(None, PathBuf::from("/srv/y"), PlaceSource::Recent);
+            let outside = Place::new(PathBuf::from("/srv/y"), PlaceSource::Recent);
             assert_eq!(outside.display_path, "/srv/y");
         });
     }

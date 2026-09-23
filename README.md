@@ -53,31 +53,6 @@ not go to Done on the first press: the status line repeats the question, and
 either a note answers it (`Decided: …`) or a second press closes the card
 anyway — a task nobody answered is not a task done by accident.
 
-## Projects layer (WIP)
-
-Hidden by default; enable with `[ui] show_projects_tab = true`. This is the
-higher-level layer: register a directory as a project and file a free-form
-*task* against it. cc-hub spawns an *orchestrator* session that breaks the
-task down and dispatches *worker* sessions — read-only research workers, or
-worktree-isolated edit workers — through scriptable CLI commands:
-
-- `cc-hub task create --prompt "…" [--backlog]` / `cc-hub task start --task ID [--agent AGENT]`
-- `cc-hub orchestrate start --task ID [--agent AGENT] [--dry-run]`
-- `cc-hub spawn-worker --task ID [--agent AGENT] [--worktree NAME | --readonly] [--prompt P]`
-- `cc-hub worker wait --task ID [--tmux NAME ... | --worktree NAME ... | --all]`
-- `cc-hub task report --task ID [--status S] [--note N] [--summary S]`
-- `cc-hub task show --task ID [--json]` / `cc-hub task list [--status S] [--json]`
-- `cc-hub task delete --task ID [--force]` (kills the orchestrator, removes worktrees + state)
-- `cc-hub task gc [--project-id ID] [--dry-run]` (prune worktrees + branches no live task still owns)
-- `cc-hub task auto-review --task ID` (re-arm the background auto-reviewer for the current Review round)
-- `cc-hub task artifact add/list ...` and `cc-hub task todos set/check/uncheck/clear ...`
-- `cc-hub pr create/show/approve/request-changes/reopen/comment/close/merge/lock-phase/continue/finalize ...` (`continue` re-pings a stuck orchestrator)
-- `cc-hub project list [--json]`
-
-Project state lives at `~/.cc-hub/projects.toml` and
-`~/.cc-hub/projects/<id>/tasks/<id>/state.json`. Worktrees go under
-`<project-root>/.cc-hub-wt/` — add that to `.gitignore`.
-
 ## Deep links
 
 cc-hub owns the `cc-hub://` URL scheme, so a browser button, a shell `open`
@@ -92,8 +67,8 @@ cc-hub://task?id=<task id>[&dir=<path>][&kind=<word>]
 `cc-hub open <url>` spawns the default session agent in the local checkout of
 the pull request's repository, names the session `PR: <title>` (from the
 optional `title` parameter, else `PR: <repo>#<n>`) before it starts, and opens
-it with `Let's do <depth> review of this PR: <url>`. The checkout is found by repo name among registered projects,
-bookmarks, and the cwds of known sessions; a repository none of them names is
+it with `Let's do <depth> review of this PR: <url>`. The checkout is found by repo name among bookmarks and the cwds of
+known sessions; a repository none of them names is
 reviewed from the home directory, off the pull request alone. `--dry-run`
 shows where a link would land without spawning anything. `--agent <id>` runs the review under a
 backend other than the default one.
@@ -241,8 +216,8 @@ environment variable. When set, Claude moves its whole user-data tree
 (`sessions/`, `projects/`, `history.jsonl`, `.credentials.json`) and its
 `.claude.json` state file into that directory. cc-hub honours the same
 variable for both reading (the session grid, usage, metrics, weekly counts)
-and spawning (every launched `claude` — interactive sessions, titles,
-backlog, auto-review — runs against that account). One cc-hub instance maps
+and spawning (every launched `claude` — interactive sessions, titles —
+runs against that account). One cc-hub instance maps
 to one account.
 
 To run two accounts side by side, launch one cc-hub per account:
@@ -322,7 +297,6 @@ models = [{ label = "GPT 5.6 Sol", id = "gpt-5.6-sol" }]
 hotkey = "C"
 
 [projects]
-default_orchestrator_agent = "claude"
 default_session_agent = "claude"
 
 [title]
@@ -371,9 +345,6 @@ pending_dispatch_timeout_secs = 60
 # identity rows into one compact line.
 cell_height = 6
 cell_width = 42
-# The Projects tab (orchestrator kanban) is WIP and hidden from the tab
-# strip + Tab cycle by default. Set true to bring it back.
-show_projects_tab = false
 # The Planning column on the Tasks board. Off by default. Set true to show
 # it; otherwise its cards fold into In Progress (Space still approves a
 # plan-ready card — the action keys off the card's status, not the column).
@@ -389,46 +360,6 @@ growth_threshold = 6.0
 top_interruptions = 10
 top_growth_findings = 10
 top_peak_context_findings = 10
-
-[backlog]
-# Background backlog triager. Every interval, cc-hub asks a short Claude
-# session whether a pending backlog task is ready to be promoted to Running.
-# Off by default — each tick spawns a billed Claude subprocess.
-enabled = false
-# Passed as `--model <model>` to the resolved spawn command.
-model = "sonnet"
-# How often the triager runs.
-interval_secs = 8
-# Per-call subprocess timeout for the triage Claude call.
-run_timeout_secs = 120
-# How long a triage decision sticks before a task becomes eligible again.
-# Caps the worst-case re-ask cadence per dormant task to one per ttl_secs.
-ttl_secs = 300
-
-[auto_review]
-# Background autonomous reviewer. Every interval, cc-hub picks the oldest
-# task in Review whose current round hasn't been auto-reviewed yet and spawns
-# a read-only reviewer session. The reviewer inspects the diff, runs
-# build/tests, and either approves the PR (`cc-hub pr approve`) or asks for
-# changes (`cc-hub pr request-changes`, which flips the task back to Running
-# so the orchestrator iterates). Each Review round gets exactly one
-# auto-review pass; when the orchestrator addresses feedback and re-enters
-# Review, the next tick reviews again. Off by default — each tick may spawn
-# a billed agent session.
-enabled = false
-# Reviewer backend. None → fall back to [projects].default_orchestrator_agent.
-# agent = "claude"
-# How often the auto-reviewer runs.
-interval_secs = 30
-# Belt-and-braces gate alongside the per-round clear-on-re-entry: don't
-# re-review a task whose last_auto_reviewed_at is within this many seconds.
-ttl_secs = 600
-# Reviewer session has up to this long to issue its verdict before cc-hub
-# forgets it (the session itself is not killed; this only bounds the
-# blocking-spawn timeout when applicable).
-run_timeout_secs = 1800
-# Max PR comments rendered into the reviewer briefing.
-max_comments_in_prompt = 8
 ```
 
 Only include the sections and fields you want to override — everything else
@@ -449,14 +380,14 @@ cc-hub behaves the same everywhere it can, but a few things genuinely differ:
 
 ## Keybindings
 
-`Tab` / `BackTab` cycles the top-level tabs: **Tasks → Sessions → Metrics**
-(plus **Projects**, after Tasks, when `[ui] show_projects_tab = true`).
+`Tab` / `BackTab` cycles the top-level tabs: **Tasks → Sessions → Agents →
+Metrics** (Agents only once `~/.cc-hub/agents/` exists).
 
 ### Tasks tab
 
 A personal task board: **To-Do · In Progress · Done** by default. Each card
-is a `state.json` under `~/.cc-hub/tasks/<task-id>/` — the same per-task
-format the Projects layer uses, hand-editable — with board-level metadata in
+is a hand-editable `state.json` under `~/.cc-hub/tasks/<task-id>/`, with
+board-level metadata in
 `~/.cc-hub/board.json`.
 
 Assigning a task to an agent spawns a detached session and delivers the task
@@ -532,7 +463,7 @@ the plan, so the plan-first workflow works with one fewer column.
 | `/` | Filter the board (fuzzy over text and `#tag`s; Enter keeps it applied, Esc clears — also from the board) |
 | `1` – `4` | Set priority P1–P4 (sorts the column P1-first; P1 red · P2 yellow · P3 green · P4 blue) |
 | `T` | Pick the card's **kind** — the deliverable it produces (`[tasks].kinds`). The task router places the card by that word instead of guessing one, and can no longer hand it back asking which kind it is; the first row clears it back to router-chosen |
-| `s` | Assign an agent: project picker (registered projects · bookmarks · recent dirs, fuzzy-filtered by typing — `Tab` flips to a plain folder browser; the last-assigned folder is preselected) → spawn session there prompted to plan first → card moves to Planning |
+| `s` | Assign an agent: places picker (bookmarks · recent dirs, fuzzy-filtered by typing — `Tab` flips to a plain folder browser; the last-assigned folder is preselected) → spawn session there prompted to plan first → card moves to Planning |
 | `Enter` / `f` | Attach the bound agent's pane (embedded); resumes the session if its tmux died; hints `s` when unassigned |
 | `Space` | On a Planning card: approve the plan — the agent is told to proceed and the card moves to In Progress (resumes the session first if its tmux died). Elsewhere: toggle Done / reopen (completing closes the live agent session; the transcript binding is kept) |
 | `x` | Delete the task (a bound agent session is left running — close it from Sessions); archived to `tasks-archive-v2.json` |
@@ -547,13 +478,12 @@ the plan, so the plan-first workflow works with one fewer column.
 | `i` | Session info popup |
 | `Enter` / `f` | Attach: embedded pane if the session is in a mux, else focus its terminal window. For an inactive session, spawn a new tmux session running `cc-hub-new --resume <id>` |
 | `H` | Toggle visibility of inactive sessions (hidden by default; window is 3 days) |
-| `W` | Toggle visibility of orchestrator/worker sessions (hidden by default — these belong to the Projects tab) |
 | `o` | Open an embedded shell pane in the selected session's cwd |
 | `n` | Spawn a new session with the current default agent in the selected session's cwd |
 | `A` | Choose the default agent used by subsequent `n` and folder-picker session spawns (for the current run) |
 | `[agents.<id>].hotkey` | User-defined per-agent keys (e.g. `C` → Codex): spawn that agent in the selected session's cwd regardless of the `A` default. Shadows the built-in key it collides with |
 | `N` | Fuzzy model/agent picker → choose a model, use `Tab` to cycle configured coding agents/providers, and spawn in the selected session's cwd |
-| `p` | Project/folder picker → spawn the current default agent there (`c` / `C` in the picker creates a public/private GitHub repo via `gh`) |
+| `p` | Places picker → spawn the current default agent there (`c` / `C` in the picker creates a public/private GitHub repo via `gh`) |
 | `M` | Bookmarks picker → spawn the current default agent in a bookmarked folder (add one with `m` on a folder in the `p` picker) |
 | `L` | Link the selected session to a task from the Tasks board (fuzzy picker, banded by status in board-column order with the board's status colors; tasks assigned to the session's cwd lead their band). A linked session's card carries a `󰓹 task` badge on its bottom border, colored per task (stable hash of the task id), so cards of the same task share a mark without regrouping the grid; press `L` again to switch tasks or pick `✕ unlink`. A Done/deleted task keeps the group but dims the header. Links live in `~/.cc-hub/session-tasks.json` |
 | `x` | Close the selected session's window (Unix WM only) |
@@ -584,33 +514,6 @@ flight (or the last one), tailing live while it runs.
 | `p` | Poke: drop an empty event into the agent's inbox |
 | `Space` | Pause a running agent; resume a paused or halted one |
 | `R` | Reset the harness bookkeeping (ticks, spend); the workdir is untouched |
-
-### Projects tab
-
-> WIP — hidden by default; enable with `[ui] show_projects_tab = true`.
-
-A horizontal strip of project chips sits above a five-column kanban:
-**Planning · Running · Review · Merging · Done**. Backlog tasks live off the
-kanban — press `b` to open the Backlog popup and start them. A chip shows a
-small amber `󰒲 N` token after its kanban counts when the project has `N`
-queued backlog tasks, so pending work is visible at chip level.
-
-| Key | Action |
-|---|---|
-| `H` / `L` (or `[` / `]`) | Cycle the focused project chip |
-| `h` / `l` (or arrows) | Switch kanban column |
-| `j` / `k` (or arrows) | Move the cursor within the focused column |
-| `Enter` | Focus the orchestrator session for the selected task |
-| `f` | Embed the orchestrator's tmux pane; if the pane died (PC reboot), resume the orchestrator's Claude/Pi session from disk and embed the new pane |
-| `R` | Confirm, then restart the selected Running/Backlog task's orchestrator from the original prompt (blocked for Review/Done/Merging tasks) |
-| `Space` | Approve the focused Review PR → Merging/queued; PR-less Review tasks go Done |
-| `r` | Open the Result popup (artifacts + summary) for the focused task |
-| `c` | Copy the selected task's id to the clipboard |
-| `b` | Open the Backlog popup (`s`/`Enter` starts the selected backlog task; `x` deletes it) |
-| `n` | New task in the current project (prompt input — `Tab` cycles the orchestrator agent when more than one is configured) |
-| `N` | Folder picker → register a project, then prompt for a task |
-| `x` | Delete the selected task (also works in the Backlog popup; kills its orchestrator, removes state) |
-| `X` | Remove the focused project from the hub (does not delete the repo) |
 
 ## Known limitations
 

@@ -2,7 +2,6 @@
 //! dialogs, the embedded tmux pane, and the live transcript tail.
 
 use crate::app::{App, PendingConfirm, TaskField};
-use crate::config;
 use crate::folder_picker::{FolderPicker, PickerMode, PlaceSource};
 use crate::ui::common::{centered_fixed, centered_rect, format_tokens, popup_block};
 use crate::ui::palette::{ACCENT_BLUE, DIM_TEXT};
@@ -35,7 +34,7 @@ pub(crate) fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
     } else if assigning {
         (
             " Assign task · pick folder ",
-            " enter:descend · bksp:parent · space/.:pick · tab:projects · esc:cancel ",
+            " enter:descend · bksp:parent · space/.:pick · tab:places · esc:cancel ",
             "  (no subdirectories)",
         )
     } else {
@@ -139,7 +138,7 @@ pub(crate) fn render_folder_picker(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// Places mode of the assign / new-session picker: a flat, fuzzy-filterable
-/// list of known directories (registered projects, bookmarks, recent cwds).
+/// list of known directories (bookmarks, recent cwds).
 /// The top row is the live filter; matched chars are highlighted in each row.
 fn render_places_picker(frame: &mut Frame, area: Rect, picker: &FolderPicker, assigning: bool) {
     let popup = centered_fixed(area, 80, 24);
@@ -242,7 +241,6 @@ fn render_places_picker(frame: &mut Frame, area: Rect, picker: &FolderPicker, as
                 bar.fg(Color::Black).add_modifier(Modifier::BOLD),
             );
             let badge = match place.source {
-                PlaceSource::Project => Span::styled("◆ ", bar.fg(Color::Cyan)),
                 PlaceSource::Bookmark => Span::styled("★ ", bar.fg(Color::Yellow)),
                 PlaceSource::Recent => Span::styled("· ", bar.fg(Color::DarkGray)),
             };
@@ -349,109 +347,6 @@ pub(crate) fn render_gh_create_input(frame: &mut Frame, area: Rect, app: &App) {
     ]);
 
     let lines = vec![cwd_line, Line::raw(""), name_line, vis_line];
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-}
-
-pub(crate) fn render_prompt_input(frame: &mut Frame, area: Rect, app: &App) {
-    let mut input_line = app.prompt_buffer.clone();
-    input_line.push('▎');
-
-    let desired_w = 80u16.min(area.width);
-    let wrap_width = desired_w.saturating_sub(4) as usize;
-    let prompt_lines: u16 = if wrap_width == 0 {
-        1
-    } else {
-        let total: usize = input_line
-            .split('\n')
-            .map(|seg| {
-                let w = seg.chars().count();
-                w.div_ceil(wrap_width).max(1)
-            })
-            .sum();
-        total.try_into().unwrap_or(u16::MAX)
-    };
-    let desired_h = 5u16.saturating_add(prompt_lines).max(9).min(area.height);
-
-    let popup = centered_fixed(area, desired_w, desired_h);
-    frame.render_widget(Clear, popup);
-
-    let cwd = app
-        .projects
-        .pending_cwd
-        .clone()
-        .unwrap_or_else(|| "?".into());
-    let agent = app.pending_agent_label().unwrap_or_else(|| "?".into());
-    let (title, target_label, title_color) = (
-        " New project task ",
-        format!(" → {} orchestrator in {} ", agent, cwd),
-        Color::Cyan,
-    );
-
-    let block = popup_block(Span::styled(
-        title,
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    ))
-    .title_bottom(Span::styled(
-        target_label,
-        Style::default()
-            .fg(title_color)
-            .add_modifier(Modifier::BOLD),
-    ));
-
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
-    if inner.height == 0 || inner.width == 0 {
-        return;
-    }
-
-    let mut footer_spans = vec![
-        Span::raw("  "),
-        Span::styled(
-            "[enter]",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" create task   ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            "[esc]",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
-    ];
-    if config::get().resolved_agents().len() > 1 {
-        footer_spans.push(Span::styled("   ", Style::default().fg(Color::DarkGray)));
-        footer_spans.push(Span::styled(
-            "[tab]",
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD),
-        ));
-        footer_spans.push(Span::styled(
-            " cycle agent",
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-    let lines = vec![
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled("  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                input_line,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::raw(""),
-        Line::from(footer_spans),
-    ];
-
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
@@ -1663,29 +1558,7 @@ pub(crate) fn render_tmux_pane(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 pub(crate) fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
-    // The same view handles destructive/interrupting confirmations:
-    // registry-level project removal, project-task deletion, orchestrator
-    // restart, and session close. Project-delete wins precedence because
-    // it's the biggest blast radius if multiple actions somehow got staged.
     let (title, display, consequence, action_color) = match app.pending_confirm.as_ref() {
-        Some(PendingConfirm::ProjectDelete(pending)) => (
-            " Delete project? ",
-            pending.display.clone(),
-            "Removes this project from cc-hub and deletes its hub state. The repository directory is not deleted.",
-            Color::Red,
-        ),
-        Some(PendingConfirm::TaskDelete(pending)) => (
-            " Delete task? ",
-            pending.display.clone(),
-            "Kills the orchestrator if it is live and removes this task's state directory. Worker sessions are left alone.",
-            Color::Red,
-        ),
-        Some(PendingConfirm::TaskRestart(pending)) => (
-            " Restart orchestrator? ",
-            pending.display.clone(),
-            "Kills the current orchestrator if it is live, then starts a new one from the original task prompt. Task history is preserved.",
-            Color::Yellow,
-        ),
         Some(PendingConfirm::Close(pending)) => (
             " Close terminal? ",
             pending.display.clone(),
@@ -2253,12 +2126,8 @@ mod places_picker_tests {
         with_temp_home(|| {
             let mut app = App::new();
             let mut picker = FolderPicker::new_places(vec![
-                Place::new(
-                    Some("cc-hub".into()),
-                    PathBuf::from("/g/self/cc-hub"),
-                    PlaceSource::Project,
-                ),
-                Place::new(None, PathBuf::from("/g/self/reddit"), PlaceSource::Recent),
+                Place::new(PathBuf::from("/g/self/cc-hub"), PlaceSource::Bookmark),
+                Place::new(PathBuf::from("/g/self/reddit"), PlaceSource::Recent),
             ]);
             for c in "hub".chars() {
                 picker.push_filter(c);
@@ -2289,7 +2158,7 @@ mod places_picker_tests {
 #[cfg(all(test, unix))]
 mod task_link_picker_tests {
     use crate::app::{App, TaskLinkAction, TaskLinkChoice, TaskLinkPickerState, View};
-    use crate::orchestrator::TaskStatus;
+    use crate::task_store::TaskStatus;
     use crate::test_util::with_temp_home;
     use crate::ui::common::buffer_to_string;
     use ratatui::backend::TestBackend;
@@ -2303,7 +2172,6 @@ mod task_link_picker_tests {
             status: Some(status),
             action: TaskLinkAction::Link {
                 task_id: format!("tk-{label}"),
-                project_id: None,
                 title: label.into(),
             },
         }

@@ -11,11 +11,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-fn encode_path(path: &str) -> String {
-    let trimmed = path.trim_matches('/');
-    format!("--{}--", trimmed.replace('/', "-"))
-}
-
 fn project_name(cwd: &str) -> String {
     Path::new(cwd)
         .file_name()
@@ -426,109 +421,9 @@ pub fn load_detail(info: &SessionInfo) -> Option<SessionDetail> {
     })
 }
 
-pub fn find_orchestrator_session(
-    project_root: &Path,
-    task_id: &str,
-    stored_sid: Option<&str>,
-) -> Option<(String, PathBuf)> {
-    // Fast path: trust the sid the task already recorded. Look up the file
-    // directly under the encoded project dir, then anywhere under the Pi
-    // sessions root — same drift-tolerance reasoning as the Claude scanner.
-    if let Some(sid) = stored_sid {
-        let target = format!("{}.jsonl", sid);
-        if let Some(root) = session_dirs() {
-            let direct = root
-                .join(encode_path(&project_root.to_string_lossy()))
-                .join(&target);
-            if direct.exists() {
-                return Some((sid.to_string(), direct));
-            }
-            if let Ok(entries) = std::fs::read_dir(&root) {
-                for entry in entries.flatten() {
-                    let candidate = entry.path().join(&target);
-                    if candidate.exists() {
-                        return Some((sid.to_string(), candidate));
-                    }
-                }
-            }
-        }
-    }
-    // Final fallback: raw prompt-prefix search. Pi orchestrators run in the
-    // project root (not a task worktree), so the task id is not present in the
-    // encoded session directory. Searching for the stable orchestrator prompt
-    // prefix recovers sessions that crashed before structured message parsing
-    // can identify the first user turn, without broad task-id false positives.
-    use std::io::Read;
-
-    let root = session_dirs()?;
-    let needle = crate::orchestrator::orchestrator_prompt_prefix(task_id);
-    let mut best: Option<(SystemTime, String, PathBuf)> = None;
-    let Ok(project_dirs) = std::fs::read_dir(&root) else {
-        return None;
-    };
-    for proj_entry in project_dirs.flatten() {
-        let proj_path = proj_entry.path();
-        if !proj_path.is_dir() {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(&proj_path) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let Ok(mtime) = path.metadata().and_then(|m| m.modified()) else {
-                continue;
-            };
-            if best.as_ref().is_some_and(|(t, _, _)| mtime <= *t) {
-                continue;
-            }
-            let mut buf = vec![0u8; 32 * 1024];
-            let Ok(n) = std::fs::File::open(&path).and_then(|mut f| f.read(&mut buf)) else {
-                continue;
-            };
-            buf.truncate(n);
-            if !String::from_utf8_lossy(&buf).contains(&needle) {
-                continue;
-            }
-            let parsed_head = conversation::read_jsonl_head(&path, 4096);
-            let sid = parsed_head
-                .iter()
-                .find_map(|e| e.get("id").and_then(|v| v.as_str()))
-                .map(str::to_string)
-                .or_else(|| {
-                    path.file_stem()
-                        .and_then(|s| s.to_str())
-                        .map(str::to_string)
-                });
-            if let Some(sid) = sid {
-                best = Some((mtime, sid, path));
-            }
-        }
-    }
-    best.map(|(_, sid, p)| (sid, p))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::HOME_TEST_LOCK;
-    use std::fs;
-
-    fn with_temp_home<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
-        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().expect("tempdir");
-        let prev = std::env::var_os("HOME");
-        std::env::set_var("HOME", home.path());
-        let out = f(home.path());
-        match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        out
-    }
 
     #[test]
     fn session_from_heartbeat_builds_card_without_transcript_on_disk() {
@@ -561,34 +456,5 @@ mod tests {
             info.jsonl_path,
             Some(PathBuf::from("/does/not/exist/019f9356.jsonl"))
         );
-    }
-
-    #[test]
-    fn orchestrator_fallback_matches_prompt_prefix_not_task_id_mentions() {
-        with_temp_home(|home| {
-            let task_id = "t-pi-scan-1";
-            let sessions = home.join(".pi/agent/sessions");
-            let parent_dir = sessions.join("parent");
-            let orch_dir = sessions.join("orch");
-            fs::create_dir_all(&parent_dir).unwrap();
-            fs::create_dir_all(&orch_dir).unwrap();
-            fs::write(
-                parent_dir.join("parent-session.jsonl"),
-                format!(r#"{{"id":"pi-parent","type":"assistant","message":"mentioned {task_id} in output"}}"#),
-            )
-            .unwrap();
-            fs::write(
-                orch_dir.join("good-session.jsonl"),
-                format!(
-                    r#"{{"id":"pi-good","type":"system","message":"{} crashed early"}}"#,
-                    crate::orchestrator::orchestrator_prompt_prefix(task_id)
-                ),
-            )
-            .unwrap();
-
-            let found =
-                find_orchestrator_session(std::path::Path::new("/tmp/project"), task_id, None);
-            assert_eq!(found.as_ref().map(|(sid, _)| sid.as_str()), Some("pi-good"));
-        });
     }
 }

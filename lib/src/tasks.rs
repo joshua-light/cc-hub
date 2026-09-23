@@ -1,7 +1,5 @@
-//! Personal task board shown on the Tasks tab. Unlike the Projects-tab
-//! orchestrator tasks (heavyweight: orchestrator session, workers, PR
-//! pipeline), a board task is a plain to-do item that can optionally be
-//! handed to a single agent session: assigning spawns a detached agent in a
+//! Personal task board shown on the Tasks tab. A board task is a plain to-do
+//! item that can optionally be handed to a single agent session: assigning spawns a detached agent in a
 //! chosen cwd, prompted to investigate and plan first — the card sits in
 //! Planning until the user approves the plan (Space), which tells the agent
 //! to proceed and moves the card to In Progress. The binding is recorded so
@@ -10,11 +8,9 @@
 //! note carries the card to Review — the column for work that wants reading
 //! rather than answering.
 //!
-//! Since the task-model unification a board task IS an
-//! [`orchestrator::TaskState`] with `project_id: None`, stored one file per
-//! task at `~/.cc-hub/tasks/<task-id>/state.json` — the same per-task
-//! lock + tempfile-rename machinery as the Projects store, with the legal
-//! status edges enforced by the shared transition table. [`PersonalBoard`]
+//! A board task is a [`task_store::TaskState`], stored one file per task at
+//! `~/.cc-hub/tasks/<task-id>/state.json` behind a per-task lock, with the
+//! legal status edges enforced by the store's transition table. [`PersonalBoard`]
 //! is the in-memory snapshot the TUI mutates through; every mutation is a
 //! locked read-mutate-write of the task's own file, so concurrent cc-hub
 //! instances conflict per task, not per board. Board-level metadata
@@ -27,11 +23,11 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::models::{SessionInfo, SessionState};
-use crate::orchestrator::{
-    self, personal_task_dir, personal_tasks_dir, read_task_state_for, update_personal_task,
-    write_task_state, TaskPriority, TaskState, TaskStatus,
-};
 use crate::platform::paths::cc_hub_home;
+use crate::task_store::{
+    self, read_task_state, task_dir, tasks_dir, update_task, write_task_state, TaskPriority,
+    TaskState, TaskStatus,
+};
 
 /// Longest a single tag may be after normalization; longer ones are truncated.
 const MAX_TAG_LEN: usize = 16;
@@ -185,7 +181,7 @@ impl PersonalBoard {
     /// mistake data loss for an intentionally empty board.
     pub fn load_result() -> io::Result<Self> {
         let mut tasks = Vec::new();
-        if let Some(dir) = personal_tasks_dir() {
+        if let Some(dir) = tasks_dir() {
             match fs::read_dir(&dir) {
                 Ok(entries) => {
                     for entry in entries {
@@ -194,7 +190,7 @@ impl PersonalBoard {
                             continue;
                         }
                         let task_id = entry.file_name().to_string_lossy().into_owned();
-                        tasks.push(read_task_state_for(None, &task_id)?);
+                        tasks.push(read_task_state(&task_id)?);
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -262,7 +258,7 @@ impl PersonalBoard {
         if text.is_empty() {
             return Ok(None);
         }
-        let mut state = TaskState::new_personal(text.to_string());
+        let mut state = TaskState::new(text.to_string());
         state.tags = tags;
         state.priority = priority;
         write_task_state(&state)?;
@@ -279,7 +275,7 @@ impl PersonalBoard {
         if text.is_empty() || self.get(id).is_none_or(|t| t.prompt == text) {
             return Ok(false);
         }
-        let updated = update_personal_task(id, |s| s.prompt = text.to_string())?;
+        let updated = update_task(id, |s| s.prompt = text.to_string())?;
         self.apply(updated);
         Ok(true)
     }
@@ -291,7 +287,7 @@ impl PersonalBoard {
         if self.get(id).is_none_or(|t| t.priority == priority) {
             return Ok(false);
         }
-        let updated = update_personal_task(id, |s| s.priority = priority)?;
+        let updated = update_task(id, |s| s.priority = priority)?;
         self.apply(updated);
         Ok(true)
     }
@@ -303,7 +299,7 @@ impl PersonalBoard {
         if self.get(id).is_none_or(|t| t.tags == tags) {
             return Ok(false);
         }
-        let updated = update_personal_task(id, |s| s.tags = tags)?;
+        let updated = update_task(id, |s| s.tags = tags)?;
         self.apply(updated);
         Ok(true)
     }
@@ -315,7 +311,7 @@ impl PersonalBoard {
         if self.get(id).is_none_or(|t| t.kind == kind) {
             return Ok(false);
         }
-        let updated = update_personal_task(id, |s| s.kind = kind)?;
+        let updated = update_task(id, |s| s.kind = kind)?;
         self.apply(updated);
         Ok(true)
     }
@@ -328,9 +324,9 @@ impl PersonalBoard {
         if self.get(id).is_none_or(|t| t.status == status) {
             return Ok(false);
         }
-        let updated = update_personal_task(id, |s| {
+        let updated = update_task(id, |s| {
             s.status = status;
-            s.done_at = (status == TaskStatus::Done).then(orchestrator::now_unix_secs);
+            s.done_at = (status == TaskStatus::Done).then(task_store::now_unix_secs);
         })?;
         self.apply(updated);
         Ok(true)
@@ -344,7 +340,7 @@ impl PersonalBoard {
         if self.get(id).is_none() {
             return Ok(false);
         }
-        let updated = update_personal_task(id, |s| {
+        let updated = update_task(id, |s| {
             s.cwd = Some(cwd.to_string());
             s.agent_id = Some(agent_id.to_string());
             s.tmux = Some(tmux.to_string());
@@ -369,7 +365,7 @@ impl PersonalBoard {
         if self.get(id).is_none_or(|t| t.tmux.as_deref() == Some(tmux)) {
             return Ok(false);
         }
-        let updated = update_personal_task(id, |s| s.tmux = Some(tmux.to_string()))?;
+        let updated = update_task(id, |s| s.tmux = Some(tmux.to_string()))?;
         self.apply(updated);
         Ok(true)
     }
@@ -386,7 +382,7 @@ impl PersonalBoard {
         if self.get(id).is_none() {
             return Ok(false);
         }
-        let updated = update_personal_task(id, |s| {
+        let updated = update_task(id, |s| {
             s.cwd = Some(cwd.into());
             s.agent_id = Some(agent.into());
             s.tmux = Some(tmux.into());
@@ -414,7 +410,7 @@ impl PersonalBoard {
             return Ok(false);
         }
         for (id, binding) in bindings {
-            let updated = update_personal_task(&id, |s| binding.apply(s))?;
+            let updated = update_task(&id, |s| binding.apply(s))?;
             self.apply(updated);
         }
         Ok(true)
@@ -432,7 +428,7 @@ impl PersonalBoard {
         // the task dir before a failed archive write would report failure
         // after the card had already disappeared.
         archive_tasks(std::slice::from_ref(&removed))?;
-        if let Some(dir) = personal_task_dir(id) {
+        if let Some(dir) = task_dir(id) {
             match fs::remove_dir_all(&dir) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -470,7 +466,7 @@ impl PersonalBoard {
         }
         archive_tasks(&done)?;
         for t in &done {
-            if let Some(dir) = personal_task_dir(&t.task_id) {
+            if let Some(dir) = task_dir(&t.task_id) {
                 match fs::remove_dir_all(&dir) {
                     Ok(()) => {}
                     Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -536,56 +532,6 @@ fn archive_tasks(items: &[TaskState]) -> io::Result<()> {
     crate::persist::save_json(&path, &archived)
 }
 
-/// Promote a personal-board task into a registered project's Backlog: the
-/// same record continues under `~/.cc-hub/projects/<pid>/tasks/<tid>/`, where
-/// triage, `task start`, and the Backlog popup pick it up like any
-/// orchestrated task. Prompt, tags, priority, created_at, cwd, and
-/// session_id travel along (history); `tmux` is cleared so a live board
-/// agent stays visible on the Sessions tab rather than being mistaken for an
-/// orchestrator. Write-then-delete: a crash between the two leaves a
-/// duplicate, never a loss.
-pub fn promote_task(task_id: &str, project_id: &str) -> io::Result<TaskState> {
-    let projects = orchestrator::load_projects();
-    let project = projects
-        .projects
-        .iter()
-        .find(|p| p.id == project_id)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("project {} is not registered", project_id),
-            )
-        })?;
-
-    let mut state = read_task_state_for(None, task_id)?;
-    if state.project_id.is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("task {} already belongs to a project", task_id),
-        ));
-    }
-    state.project_id = Some(project.id.clone());
-    state.project_root = Some(project.root.clone());
-    // The orchestrated flow starts at Backlog regardless of which board
-    // column the card sat in; done_at would contradict Backlog.
-    state.status = TaskStatus::Backlog;
-    state.done_at = None;
-    state.tmux = None;
-    state.touch();
-    write_task_state(&state)?;
-
-    if let Some(dir) = personal_task_dir(task_id) {
-        match fs::remove_dir_all(&dir) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            // The project copy already landed; a leftover personal dir is a
-            // duplicate the user can delete, not data loss.
-            Err(e) => log::warn!("promote {}: personal dir cleanup failed: {}", task_id, e),
-        }
-    }
-    Ok(state)
-}
-
 // Unix-only for the same reason as todo.rs: isolation works by redirecting
 // `$HOME`, which `dirs::home_dir()` ignores on Windows.
 #[cfg(all(test, unix))]
@@ -605,7 +551,6 @@ mod tests {
             let t = reloaded.get(&id).unwrap();
             assert_eq!(t.prompt, "fix the flaky test");
             assert_eq!(t.status, TaskStatus::Backlog);
-            assert_eq!(t.flow(), orchestrator::TaskFlow::Personal);
             assert!(t.task_id.starts_with("tk-"));
         });
     }
@@ -630,8 +575,8 @@ mod tests {
         with_temp_home(|| {
             let mut b = PersonalBoard::load();
             let id = b.add("no PR flow here").unwrap().unwrap();
-            // Backlog → Review is orchestrated-only; the shared table must
-            // refuse it for a personal task.
+            // Backlog → Review skips the work; the transition table must
+            // refuse it.
             let err = b.set_status(&id, TaskStatus::Review).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
             assert_eq!(
@@ -945,7 +890,7 @@ mod tests {
     #[test]
     fn malformed_task_file_is_reported_without_replacing_it() {
         with_temp_home(|| {
-            let dir = personal_task_dir("tk-broken").unwrap();
+            let dir = task_dir("tk-broken").unwrap();
             fs::create_dir_all(&dir).unwrap();
             fs::write(dir.join("state.json"), "{not-json").unwrap();
 
@@ -975,34 +920,6 @@ mod tests {
         assert_eq!(q.text, "just words");
         assert!(q.tags.is_empty());
         assert_eq!(q.priority, None);
-    }
-
-    #[test]
-    fn promote_moves_task_into_project_backlog() {
-        with_temp_home(|| {
-            let root = std::env::temp_dir().join("promote-fixture");
-            fs::create_dir_all(&root).unwrap();
-            let project_id =
-                orchestrator::ensure_project_registered(&root, "promote-fixture").unwrap();
-
-            let mut b = PersonalBoard::load();
-            let id = b.add("grow into a project task").unwrap().unwrap();
-            b.assign(&id, "/tmp/p", "claude", "cchub-1-9").unwrap();
-
-            let promoted = promote_task(&id, &project_id).unwrap();
-            assert_eq!(promoted.project_id.as_deref(), Some(project_id.as_str()));
-            assert_eq!(promoted.status, TaskStatus::Backlog);
-            assert_eq!(promoted.tmux, None, "board tmux must not travel");
-            assert_eq!(promoted.cwd.as_deref(), Some("/tmp/p"), "history travels");
-
-            // Off the board, present in the project store.
-            assert!(PersonalBoard::load().get(&id).is_none());
-            let in_project = orchestrator::read_task_state(&project_id, &id).unwrap();
-            assert_eq!(in_project.prompt, "grow into a project task");
-
-            // Unknown project and double-promotion are refused.
-            assert!(promote_task(&id, "nope").is_err());
-        });
     }
 
     #[test]

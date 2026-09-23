@@ -1,27 +1,24 @@
-//! Shared domain logic for the orchestrator layer's compound operations.
+//! Shared domain logic for compound operations on tasks and deep links.
 //!
-//! These functions are the single implementation of the task/PR/worker state
-//! transitions that both the CLI (`bin/src/cli/`) and the TUI
-//! (`lib/src/app/`) drive. The CLI keeps argument parsing, JSON rendering,
+//! These functions are the single implementation that both the CLI
+//! (`bin/src/cli/`) and the TUI (`lib/src/app/`) drive. The CLI keeps argument parsing, JSON rendering,
 //! and exit-code mapping; everything that mutates on-disk state lives here.
 //!
 //! Conventions:
-//!   * Ops take explicit typed parameters (`project_id: &str`, …), grouped
+//!   * Ops take explicit typed parameters (`task_id: &str`, …), grouped
 //!     into small option structs for many-arg verbs — never the CLI's
 //!     `Flags`.
-//!   * Ops return typed results (the `TaskState` / `PullRequest` they produce,
+//!   * Ops return typed results (the `TaskState` they produce,
 //!     or a small outcome enum when a verb has multiple result shapes). The
 //!     caller reconstructs its JSON / human output from the returned data.
 //!   * Presentation side effects (`println!`, `print_json`, `eprintln!`
 //!     warnings) stay in the caller. `log::*` diagnostics may live here.
-//!   * Ops keep using `orchestrator::update_task_state` / `pr::update_pr` /
-//!     `merge_lock::*` — the per-task lock and transition validation live
-//!     inside those helpers.
+//!   * Ops mutate tasks through `task_store::update_task` — the per-task
+//!     lock and transition validation live inside it.
 
 pub mod link;
-pub mod pr;
+pub mod prompt;
 pub mod task;
-pub mod worker;
 
 /// Error type for domain ops. Mirrors the variants of the CLI's
 /// `CliError` that domain code needs, so the CLI can convert losslessly via a
@@ -33,14 +30,13 @@ pub enum OpError {
     /// transition the caller could have avoided. Maps to `CliError::Usage`
     /// (exit 2, kind "usage").
     Usage(String),
-    /// Requested entity does not exist (no task / no PR). Maps to
-    /// `CliError::NotFound` (exit 1, kind "notfound").
+    /// Requested entity does not exist. Maps to `CliError::NotFound`
+    /// (exit 1, kind "notfound").
     NotFound(String),
-    /// State guard tripped: conflicting transition on a terminal PR, etc.
-    /// Carries an optional remediation recipe. Maps to `CliError::Conflict`
-    /// (exit 1, kind "conflict").
+    /// State guard tripped. Carries an optional remediation recipe. Maps to
+    /// `CliError::Conflict` (exit 1, kind "conflict").
     Conflict { msg: String, recipe: Option<String> },
-    /// Everything else (I/O, git failures, serialization). Maps to
+    /// Everything else (I/O, serialization). Maps to
     /// `CliError::Other` (exit 1, kind "other").
     Other(String),
     /// The op already produced a rich, domain-specific result the caller
@@ -52,7 +48,7 @@ pub enum OpError {
 }
 
 impl OpError {
-    /// A `conflict` error carrying a remediation recipe for the orchestrator.
+    /// A `conflict` error carrying a remediation recipe for the caller.
     pub fn conflict_with_recipe(msg: impl Into<String>, recipe: impl Into<String>) -> Self {
         OpError::Conflict {
             msg: msg.into(),

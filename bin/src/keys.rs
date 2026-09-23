@@ -11,7 +11,7 @@
 use crate::ScanMsg;
 use cc_hub_lib::app::{App, Command, View};
 use cc_hub_lib::folder_picker::PickerMode;
-use cc_hub_lib::{focus, live_view, models, platform, send, spawn, tmux_pane};
+use cc_hub_lib::{focus, live_view, models, platform};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 
@@ -31,9 +31,7 @@ pub(crate) enum KeyOutcome {
 /// Map a key press onto a [`Command`] when a converted arm covers it.
 ///
 /// Guards mirror the original match arms exactly; anything returning `None`
-/// falls through to the legacy match below. PromptInput submission stays
-/// legacy entirely — the orchestrator-spawn path is out of the Sessions
-/// command scope.
+/// falls through to the legacy match below.
 pub(super) fn map_command(
     app: &App,
     key: &KeyEvent,
@@ -119,9 +117,6 @@ fn map_sessions_command(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<
         }
         (View::Grid, KeyCode::Char('i')) if on_sessions => Command::Sessions(S::OpenDetailPopup),
         (View::Grid, KeyCode::Char('H')) if on_sessions => Command::Sessions(S::ToggleShowInactive),
-        (View::Grid, KeyCode::Char('W')) if on_sessions => {
-            Command::Sessions(S::ToggleShowOrchWorkers)
-        }
         (View::Grid, KeyCode::Char('v')) if on_sessions => Command::Sessions(S::ToggleLayout),
         (View::Grid, KeyCode::Char('f') | KeyCode::Enter) if on_sessions => {
             Command::Sessions(S::FocusSelected)
@@ -186,7 +181,6 @@ pub(crate) async fn handle_key(
     spawn_metrics: &impl Fn(),
     on_sessions: bool,
     on_metrics: bool,
-    on_projects: bool,
     on_tasks: bool,
     on_agents: bool,
 ) -> KeyOutcome {
@@ -213,382 +207,6 @@ pub(crate) async fn handle_key(
         }
         (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_metrics => {
             app.metrics_nav_up();
-        }
-        // Kanban: j/k moves the row cursor within the focused
-        // column; h/l switches column; H/L (or [/]) cycles project chips.
-        (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_projects => {
-            app.projects.task_next();
-        }
-        (View::Grid, KeyCode::Up | KeyCode::Char('k')) if on_projects => {
-            app.projects.task_prev();
-        }
-        (View::Grid, KeyCode::Right | KeyCode::Char('l')) if on_projects => {
-            app.projects.col_right();
-        }
-        (View::Grid, KeyCode::Left | KeyCode::Char('h')) if on_projects => {
-            app.projects.col_left();
-        }
-        (View::Grid, KeyCode::Char(']') | KeyCode::Char('L')) if on_projects => {
-            app.projects.move_down();
-        }
-        (View::Grid, KeyCode::Char('[') | KeyCode::Char('H')) if on_projects => {
-            app.projects.move_up();
-        }
-        (View::Grid, KeyCode::Char(' ')) if on_projects => {
-            use cc_hub_lib::app::ApproveOutcome;
-            let target = app.selected_project_task().cloned();
-            match app.approve_review_task() {
-                ApproveOutcome::NotReviewTask => {
-                    app.set_status("nothing to approve (focus a Review task)".into());
-                }
-                ApproveOutcome::DoneNoPr | ApproveOutcome::Failed => {}
-                ApproveOutcome::PrApproved => {
-                    let Some(task) = target else {
-                        return KeyOutcome::Continue;
-                    };
-                    let short = cc_hub_lib::orchestrator::short_task_id(&task.task_id);
-                    let Some(tmux_name) = task.orchestrator_tmux.clone() else {
-                        // No orchestrator to drive the merge — roll
-                        // the card back to Review so it stays
-                        // actionable (re-approve / resurrect).
-                        app.rollback_merging_to_review(
-                            task.project_id.as_deref().unwrap_or_default(),
-                            &task.task_id,
-                        );
-                        app.set_status(format!(
-                            "approved {} but no live orchestrator — back to Review (press f to resurrect)",
-                            short
-                        ));
-                        return KeyOutcome::Continue;
-                    };
-                    if !send::tmux_session_exists(&tmux_name) {
-                        app.rollback_merging_to_review(
-                            task.project_id.as_deref().unwrap_or_default(),
-                            &task.task_id,
-                        );
-                        app.set_status(format!(
-                            "approved {} but orchestrator [{}] is not live — back to Review (press f to resurrect)",
-                            short, tmux_name
-                        ));
-                        return KeyOutcome::Continue;
-                    }
-                    let prompt = cc_hub_lib::orchestrator::build_review_approval_prompt(
-                        &task.task_id,
-                        &cc_hub_lib::orchestrator::resolve_cc_hub_bin(),
-                    );
-                    if send::pane_ready_for_input(&tmux_name) {
-                        crate::spawn_dispatch(
-                            scan_tx_main.clone(),
-                            tmux_name.clone(),
-                            prompt,
-                            format!(
-                                "approved {} and notified orchestrator [{}] to continue merge flow",
-                                short, tmux_name
-                            ),
-                            format!("approved {} but orchestrator notify failed", short),
-                        );
-                    } else {
-                        app.queue_pending_dispatch(tmux_name.clone(), prompt);
-                        app.set_status(format!(
-                            "approved {} — queued notify for orchestrator [{}] when idle",
-                            short, tmux_name
-                        ));
-                    }
-                }
-            }
-        }
-        (View::Grid, KeyCode::Char('r')) if on_projects => {
-            if !app.enter_projects_result() {
-                app.set_status("no task selected".into());
-            }
-        }
-        (View::ProjectsResult, KeyCode::Esc | KeyCode::Char('r') | KeyCode::Char('q')) => {
-            app.close_projects_result();
-        }
-        (View::ProjectsResult, KeyCode::Down | KeyCode::Char('j')) => {
-            app.projects.result_artifact_next();
-        }
-        (View::ProjectsResult, KeyCode::Up | KeyCode::Char('k')) => {
-            app.projects.result_artifact_prev();
-        }
-        (View::ProjectsResult, KeyCode::PageDown) => {
-            app.result_scroll_by(10);
-        }
-        (View::ProjectsResult, KeyCode::PageUp) => {
-            app.result_scroll_by(-10);
-        }
-        (View::ProjectsResult, KeyCode::Char('c')) => {
-            match app.selected_result_artifact().map(|a| a.path.clone()) {
-                None => app.set_status("no artifact to copy".into()),
-                Some(path) => match cc_hub_lib::clipboard::copy(&path) {
-                    Ok(()) => app.set_status(format!("copied: {}", path)),
-                    Err(e) => app.set_status(format!("copy failed: {}", e)),
-                },
-            }
-        }
-        (View::ProjectsResult, KeyCode::Char('e')) => {
-            app.toggle_result_artifact_expanded();
-        }
-        (View::ProjectsResult, KeyCode::Char('o')) => {
-            match app.selected_result_artifact().map(|a| a.path.clone()) {
-                None => app.set_status("no artifact to open".into()),
-                Some(path) => {
-                    let result = crate::open_path_detached(&path);
-                    match result {
-                        Ok(()) => app.set_status(format!("opening {}", path)),
-                        Err(e) => app.set_status(format!("open failed: {}", e)),
-                    }
-                }
-            }
-        }
-        (View::Grid, KeyCode::Char('c')) if on_projects => {
-            match app.selected_project_task().map(|t| t.task_id.clone()) {
-                None => app.set_status("no task selected".into()),
-                Some(task_id) => match cc_hub_lib::clipboard::copy(&task_id) {
-                    Ok(()) => app.set_status(format!("copied task id: {}", task_id)),
-                    Err(e) => app.set_status(format!("copy failed: {}", e)),
-                },
-            }
-        }
-        (View::Grid, KeyCode::Char('N')) if on_projects => {
-            // Register a project (folder picker), no task spawn.
-            // Use `n` to start a task on an existing project.
-            app.enter_folder_picker_for_register_only();
-        }
-        (View::Grid, KeyCode::Char('n')) if on_projects => {
-            // Start a new task on the currently-selected project.
-            if !app.enter_project_task_prompt_for_selected() {
-                app.set_status("no project selected — press N to register one".into());
-            }
-        }
-        (View::Grid, KeyCode::Enter) if on_projects => {
-            // Open the orchestrator's tmux session embedded in the
-            // TUI — same mechanism the Sessions view uses for `f`
-            // / Enter on a live session.
-            if let Some(task) = app.selected_project_task().cloned() {
-                match task.orchestrator_tmux.as_deref() {
-                    None => {
-                        app.set_status("task has no orchestrator tmux session yet".into());
-                    }
-                    Some(tmux_name) => {
-                        let (cols, rows) = crate::popup_pane_size(terminal);
-                        match tmux_pane::TmuxPaneView::spawn(tmux_name, rows, cols) {
-                            Ok(pane) => app.enter_tmux_pane(pane),
-                            Err(e) => app.set_status(format!("open orchestrator failed: {}", e)),
-                        }
-                    }
-                }
-            } else {
-                app.set_status("no task selected — focus a task on the kanban first".into());
-            }
-        }
-        (View::Grid, KeyCode::Char('f')) if on_projects => {
-            if let Some(task) = app.selected_project_task().cloned() {
-                let live_tmux = task
-                    .orchestrator_tmux
-                    .as_deref()
-                    .filter(|n| send::tmux_session_exists(n));
-                let resurrectable = if live_tmux.is_none()
-                    && matches!(
-                        task.status,
-                        cc_hub_lib::orchestrator::TaskStatus::Running
-                            | cc_hub_lib::orchestrator::TaskStatus::Review
-                            // The merge-approval prompt is idempotent,
-                            // so re-spawning the orchestrator and
-                            // re-pinging a Merging task is safe.
-                            | cc_hub_lib::orchestrator::TaskStatus::Merging
-                    ) {
-                    cc_hub_lib::scanner::find_orchestrator_session(
-                        task.project_root
-                            .as_deref()
-                            .unwrap_or(std::path::Path::new("")),
-                        &task.task_id,
-                        task.orchestrator_agent_kind,
-                        task.orchestrator_session_id.as_deref(),
-                    )
-                } else {
-                    None
-                };
-                if let Some(tmux_name) = live_tmux {
-                    let (cols, rows) = crate::popup_pane_size(terminal);
-                    match tmux_pane::TmuxPaneView::spawn(tmux_name, rows, cols) {
-                        Ok(pane) => app.enter_tmux_pane(pane),
-                        Err(e) => app.set_status(format!("open orchestrator failed: {}", e)),
-                    }
-                } else if let Some(resume) = resurrectable {
-                    let cwd = task
-                        .project_root
-                        .as_deref()
-                        .unwrap_or(std::path::Path::new(""))
-                        .to_string_lossy()
-                        .into_owned();
-                    match spawn::spawn_agent_session(
-                        &task.orchestrator_agent_id,
-                        &cwd,
-                        Some(resume.resume.clone()),
-                        None,
-                        None,
-                        false,
-                    ) {
-                        Ok(new_tmux) => {
-                            if let Err(e) = cc_hub_lib::orchestrator::update_task_state(
-                                task.project_id.as_deref().unwrap_or_default(),
-                                &task.task_id,
-                                |s| {
-                                    s.orchestrator_tmux = Some(new_tmux.clone());
-                                    s.orchestrator_session_id = Some(resume.session_id.clone());
-                                },
-                            ) {
-                                app.set_status(format!(
-                                    "resurrected [{}] but state write failed: {}",
-                                    new_tmux, e
-                                ));
-                            }
-                            // A Merging task's orchestrator died
-                            // mid-merge; re-ping the (idempotent)
-                            // approval prompt so the resumed session
-                            // picks the merge flow back up. Fires
-                            // once the session reports Idle.
-                            if task.status == cc_hub_lib::orchestrator::TaskStatus::Merging {
-                                let prompt = cc_hub_lib::orchestrator::build_review_approval_prompt(
-                                    &task.task_id,
-                                    &cc_hub_lib::orchestrator::resolve_cc_hub_bin(),
-                                );
-                                app.queue_pending_dispatch(new_tmux.clone(), prompt);
-                            }
-                            let (cols, rows) = crate::popup_pane_size(terminal);
-                            match tmux_pane::TmuxPaneView::spawn(&new_tmux, rows, cols) {
-                                Ok(pane) => {
-                                    app.set_status(format!(
-                                        "resumed orchestrator {} [{}]",
-                                        models::short_sid(&resume.session_id),
-                                        new_tmux
-                                    ));
-                                    app.enter_tmux_pane(pane);
-                                }
-                                Err(e) => app.set_status(format!(
-                                    "resurrected [{}] but attach failed: {}",
-                                    new_tmux, e
-                                )),
-                            }
-                        }
-                        Err(e) => app.set_status(format!("resurrect failed: {}", e)),
-                    }
-                } else if let Some(log_path) = cc_hub_lib::orchestrator::task_orchestrator_log_path(
-                    task.project_id.as_deref().unwrap_or_default(),
-                    &task.task_id,
-                )
-                .filter(|p| p.exists())
-                {
-                    let (cols, rows) = crate::popup_pane_size(terminal);
-                    match spawn::spawn_log_viewer_tmux_session(&log_path) {
-                        Ok(name) => match tmux_pane::TmuxPaneView::spawn_owned(&name, rows, cols) {
-                            Ok(pane) => app.enter_tmux_pane(pane),
-                            Err(e) => app.set_status(format!("log viewer attach failed: {}", e)),
-                        },
-                        Err(e) => app.set_status(format!("log viewer spawn failed: {}", e)),
-                    }
-                } else if matches!(
-                    task.status,
-                    cc_hub_lib::orchestrator::TaskStatus::Running
-                        | cc_hub_lib::orchestrator::TaskStatus::Review
-                ) {
-                    let session_store = match task.orchestrator_agent_kind {
-                        cc_hub_lib::agent::AgentKind::Claude => "~/.claude/projects/",
-                        cc_hub_lib::agent::AgentKind::Pi => "~/.pi/agent/sessions/",
-                        cc_hub_lib::agent::AgentKind::Codex => "~/.codex/sessions/",
-                    };
-                    let detail = match task.orchestrator_session_id.as_deref() {
-                        Some(sid) => format!(
-                            "orchestrator dead — sid {} not found under {} (cwd {}); no JSONL contains orchestrator prompt for task {}",
-                            models::short_sid(sid),
-                            session_store,
-                            task.project_root.as_deref().unwrap_or(std::path::Path::new("")).display(),
-                            task.task_id,
-                        ),
-                        None => format!(
-                            "orchestrator dead — no JSONL under {} contains orchestrator prompt for task {} (cwd {})",
-                            session_store,
-                            task.task_id,
-                            task.project_root.as_deref().unwrap_or(std::path::Path::new("")).display(),
-                        ),
-                    };
-                    app.set_status(detail);
-                } else {
-                    app.set_status("no orchestrator log available".into());
-                }
-            } else {
-                app.set_status("no task selected — focus a task on the kanban first".into());
-            }
-        }
-        (View::Grid, KeyCode::Char('R')) if on_projects => {
-            app.enter_confirm_task_restart();
-        }
-        (View::Grid, KeyCode::Char('x')) if on_projects => {
-            app.enter_confirm_task_delete();
-        }
-        (View::Grid, KeyCode::Char('X')) if on_projects => {
-            app.enter_confirm_project_delete();
-        }
-        (View::Grid, KeyCode::Char('b')) if on_projects => {
-            app.open_backlog();
-        }
-        (View::Backlog, KeyCode::Esc | KeyCode::Char('q')) => {
-            app.close_backlog();
-        }
-        (View::Backlog, KeyCode::Down | KeyCode::Char('j')) => {
-            app.projects.backlog_down();
-        }
-        (View::Backlog, KeyCode::Up | KeyCode::Char('k')) => {
-            app.projects.backlog_up();
-        }
-        (View::Backlog, KeyCode::Char('x')) => {
-            app.enter_confirm_backlog_task_delete();
-        }
-        // `s`/Enter starts the selected backlog task. Only bound
-        // inside the Backlog popup: backlog tasks are filtered out
-        // of every kanban column (see `App::kanban_column_tasks`),
-        // so a Grid 's' alias could never find one to start and
-        // only ever showed a "not in backlog" toast. The kanban's
-        // own start-affordance is `b` (open the Backlog popup).
-        (View::Backlog, KeyCode::Char('s') | KeyCode::Enter) => {
-            let Some(p) = app.selected_project().cloned() else {
-                app.set_status("no project selected".into());
-                return KeyOutcome::Continue;
-            };
-            let Some(task) = app.selected_backlog_task().cloned() else {
-                app.set_status("no task selected".into());
-                return KeyOutcome::Continue;
-            };
-            if task.status != cc_hub_lib::orchestrator::TaskStatus::Backlog {
-                app.set_status(format!(
-                    "task is not in backlog (status = {:?})",
-                    task.status
-                ));
-                return KeyOutcome::Continue;
-            }
-            match cc_hub_lib::orchestrator::start_backlog_task(&p.id, &task.task_id, None) {
-                Ok((state, tmux_name, orch_prompt)) => {
-                    if let Some(prompt) = orch_prompt {
-                        app.queue_pending_dispatch(tmux_name.clone(), prompt);
-                    }
-                    log::info!(
-                        "project task: started backlog {} orchestrator [{}]",
-                        state.task_id,
-                        tmux_name
-                    );
-                    app.set_status(format!(
-                        "task started [{}], orchestrator [{}] starting…",
-                        state.task_id, tmux_name
-                    ));
-                    app.close_backlog();
-                    app.projects.request_focus(state.task_id.clone());
-                }
-                Err(e) => {
-                    log::warn!("project task: start backlog failed: {}", e);
-                    app.set_status(format!("start backlog failed: {}", e));
-                }
-            }
         }
         (View::Grid, KeyCode::Enter) if on_metrics => {
             if let Some(row) = app.selected_metrics_session().cloned() {
@@ -655,86 +273,7 @@ pub(crate) async fn handle_key(
             }
         }
         (View::ConfirmClose, KeyCode::Char('y') | KeyCode::Char('Y')) => {
-            if let Some(pending) = app.take_pending_project_delete() {
-                let msg = match cc_hub_lib::orchestrator::remove_project(&pending.project_id) {
-                    Ok(()) => format!("removed {}", pending.display),
-                    Err(e) => format!("remove failed: {}", e),
-                };
-                // Selection may dangle past the now-removed project
-                // until the next scan tick lands; reset to 0 so
-                // we don't render one bad frame.
-                app.projects.reset_project_cursor();
-                app.set_status(msg);
-            } else if let Some(pending) = app.take_pending_task_delete() {
-                let msg = match cc_hub_lib::orchestrator::delete_task(
-                    &pending.project_id,
-                    &pending.task_id,
-                ) {
-                    Ok(d) => {
-                        let mut segs: Vec<String> = Vec::new();
-                        segs.push(
-                            if d.orchestrator_killed {
-                                "orch killed"
-                            } else {
-                                "no orch"
-                            }
-                            .to_string(),
-                        );
-                        if !d.worktrees_removed.is_empty() {
-                            let n = d.worktrees_removed.len();
-                            segs.push(format!(
-                                "{} worktree{} removed",
-                                n,
-                                if n == 1 { "" } else { "s" }
-                            ));
-                        }
-                        if !d.worktree_errors.is_empty() {
-                            segs.push(format!("{} worktree error(s)", d.worktree_errors.len()));
-                        }
-                        if d.lock_released {
-                            segs.push("lock released".into());
-                        }
-                        format!("deleted {} ({})", pending.display, segs.join(", "))
-                    }
-                    Err(e) => {
-                        log::warn!("task delete: {}", e);
-                        format!("delete failed: {}", e)
-                    }
-                };
-                app.set_status(msg);
-                if pending.from_backlog {
-                    // Model may still include the just-removed task
-                    // until the next scan tick; clamp so we don't
-                    // render a stale out-of-range selection.
-                    app.projects.clamp_backlog_cursor();
-                }
-            } else if let Some(pending) = app.take_pending_task_restart() {
-                match cc_hub_lib::orchestrator::restart_task(
-                    &pending.project_id,
-                    &pending.task_id,
-                    None,
-                ) {
-                    Ok((state, tmux_name, orch_prompt)) => {
-                        if let Some(prompt) = orch_prompt {
-                            app.queue_pending_dispatch(tmux_name.clone(), prompt);
-                        }
-                        log::info!(
-                            "project task: restarted {} orchestrator [{}]",
-                            state.task_id,
-                            tmux_name
-                        );
-                        app.set_status(format!(
-                            "restarted [{}], orchestrator [{}] starting…",
-                            state.task_id, tmux_name
-                        ));
-                        app.projects.request_focus(state.task_id.clone());
-                    }
-                    Err(e) => {
-                        log::warn!("project task: restart failed: {}", e);
-                        app.set_status(format!("restart failed: {}", e));
-                    }
-                }
-            } else if let Some(pending) = app.take_pending_close() {
+            if let Some(pending) = app.take_pending_close() {
                 let ok = focus::close_window(pending.pid);
                 let msg = if ok {
                     format!("closed {}", pending.display)
@@ -808,7 +347,7 @@ pub(crate) async fn handle_key(
         (View::FolderPicker, KeyCode::Esc | KeyCode::Char('q')) => {
             app.close_folder_picker();
         }
-        // Browse → back to the places list (no-op in the Projects flows).
+        // Browse → back to the places list.
         (View::FolderPicker, KeyCode::Tab) => {
             app.toggle_places_picker_mode();
         }
@@ -1044,64 +583,6 @@ pub(crate) async fn handle_key(
         }
         (View::RenameSession, KeyCode::Char(c)) => {
             app.rename_buffer.push(c);
-        }
-        (View::PromptInput, KeyCode::Esc) => {
-            app.close_prompt_input();
-        }
-        (View::PromptInput, KeyCode::Tab) => {
-            app.cycle_pending_agent_id();
-        }
-        (View::PromptInput, KeyCode::Backspace) => {
-            app.prompt_buffer.pop();
-        }
-        (View::PromptInput, KeyCode::Char(c)) => {
-            app.prompt_buffer.push(c);
-        }
-        // Projects-tab flow: create task, spawn orchestrator, queue the
-        // orchestrator prompt for dispatch when Idle. PromptInput only opens
-        // from the Projects flows now, so this is the sole Enter handler.
-        (View::PromptInput, KeyCode::Enter) => {
-            if app.prompt_buffer.trim().is_empty() {
-                app.close_prompt_input();
-                app.set_status("empty prompt — task creation cancelled".into());
-                return KeyOutcome::Continue;
-            }
-            let Some((cwd, prompt, agent_id)) = app.submit_project_task() else {
-                app.set_status("project task: missing cwd".into());
-                return KeyOutcome::Continue;
-            };
-            let project_root = std::path::Path::new(&cwd);
-            let project_name = project_root
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| cwd.clone());
-            match cc_hub_lib::orchestrator::spawn_orchestrator_for_new_task(
-                project_root,
-                &project_name,
-                prompt,
-                agent_id.as_deref(),
-            ) {
-                Ok((state, tmux_name, orch_prompt)) => {
-                    if let Some(prompt) = orch_prompt {
-                        app.queue_pending_dispatch(tmux_name.clone(), prompt);
-                    }
-                    log::info!(
-                        "project task: created {} in {}, orchestrator [{}]",
-                        state.task_id,
-                        cwd,
-                        tmux_name
-                    );
-                    app.set_status(format!(
-                        "task created [{}], orchestrator [{}] starting…",
-                        state.task_id, tmux_name
-                    ));
-                }
-                Err(e) => {
-                    log::warn!("project task: spawn failed: {}", e);
-                    app.set_status(format!("project task failed: {}", e));
-                }
-            }
-            return KeyOutcome::Continue;
         }
         // Popup navigation
         (View::Popup, KeyCode::Esc | KeyCode::Char('q')) => app.close_popup(),

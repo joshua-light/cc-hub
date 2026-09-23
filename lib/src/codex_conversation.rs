@@ -11,10 +11,7 @@
 //! [`crate::conversation::classify`], shared with every other backend.
 
 use crate::conversation::classify;
-use crate::conversation::{
-    parse_timestamp_ms, CurrentTool,
-    NO_TEXT_CONTENT,
-};
+use crate::conversation::{parse_timestamp_ms, CurrentTool, NO_TEXT_CONTENT};
 use crate::models::{ConversationMessage, SessionState};
 use serde_json::Value;
 use std::collections::HashSet;

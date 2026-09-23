@@ -239,7 +239,7 @@ pub struct TaskBadge {
     pub title: String,
     /// Priority of the linked task while it's still readable; `None` once
     /// only the sidecar title snapshot remains (it records no priority).
-    pub priority: Option<crate::orchestrator::TaskPriority>,
+    pub priority: Option<crate::task_store::TaskPriority>,
     pub stale: bool,
 }
 

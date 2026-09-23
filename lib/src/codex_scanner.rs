@@ -426,57 +426,6 @@ pub fn load_detail(info: &SessionInfo) -> Option<SessionDetail> {
     })
 }
 
-/// Resolve a codex session id to resume for a project/task orchestrator. Codex
-/// resumes by session UUID (`codex resume <uuid>`), so this returns the id, not
-/// a file path. Fast-path trusts a previously recorded sid; the fallback scans
-/// rollouts in the project cwd for the orchestrator prompt prefix.
-pub fn find_orchestrator_session(
-    project_root: &Path,
-    task_id: &str,
-    stored_sid: Option<&str>,
-) -> Option<String> {
-    if let Some(sid) = stored_sid {
-        // Trust the recorded sid: `codex resume <uuid>` locates the rollout by
-        // id regardless of which date directory it lives in.
-        return Some(sid.to_string());
-    }
-
-    let root_cwd = project_root.to_string_lossy().to_string();
-    let needle = crate::orchestrator::orchestrator_prompt_prefix(task_id);
-    let mut best: Option<(SystemTime, String)> = None;
-
-    use std::io::Read;
-    for (path, mtime) in crate::resources::codex_roots()
-        .iter()
-        .flat_map(|root| walk_rollouts(root))
-    {
-        if best.as_ref().is_some_and(|(t, _)| mtime <= *t) {
-            continue;
-        }
-        // Cheap pre-filter: read a chunk and require both the prompt prefix and
-        // this session's cwd before parsing the head for the id.
-        let mut buf = vec![0u8; 64 * 1024];
-        let Ok(n) = std::fs::File::open(&path).and_then(|mut f| f.read(&mut buf)) else {
-            continue;
-        };
-        buf.truncate(n);
-        let text = String::from_utf8_lossy(&buf);
-        if !text.contains(&needle) || !text.contains(&root_cwd) {
-            continue;
-        }
-        let head = read_head(&path);
-        if codex_conversation::extract_cwd(&head).as_deref() != Some(root_cwd.as_str()) {
-            continue;
-        }
-        if let Some(sid) = codex_conversation::extract_session_id(&head)
-            .or_else(|| session_id_from_filename(&path))
-        {
-            best = Some((mtime, sid));
-        }
-    }
-    best.map(|(_, sid)| sid)
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

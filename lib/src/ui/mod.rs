@@ -5,11 +5,11 @@
 //! chip strip share one source of truth.
 
 pub mod agents;
+pub mod artifacts;
 pub mod common;
 pub mod metrics;
 pub mod palette;
 pub mod popups;
-pub mod projects;
 pub mod sessions;
 pub mod sessions_list;
 pub mod tasks;
@@ -68,7 +68,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     render_tab_strip(frame, chunks[1], app);
     match app.current_tab {
         Tab::Tasks => tasks::render_tasks_body(frame, chunks[2], app),
-        Tab::Projects => projects::render_projects_body(frame, chunks[2], app),
         Tab::Sessions => sessions::render_sessions_body(frame, chunks[2], app),
         Tab::Agents => agents::render_agents_body(frame, chunks[2], app),
         Tab::Metrics => metrics::render_metrics_body(frame, chunks[2], app),
@@ -79,7 +78,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         View::Popup => sessions::render_popup(frame, frame.area(), app),
         View::LiveTail => popups::render_live_tail(frame, frame.area(), app),
         View::ConfirmClose => popups::render_confirm_close(frame, frame.area(), app),
-        View::PromptInput => popups::render_prompt_input(frame, frame.area(), app),
         View::ModelPicker => popups::render_model_picker(frame, frame.area(), app),
         View::AgentPicker => popups::render_agent_picker(frame, frame.area(), app),
         View::RespawnPicker => popups::render_respawn_picker(frame, frame.area(), app),
@@ -92,8 +90,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             popups::render_folder_picker(frame, frame.area(), app);
             popups::render_gh_create_input(frame, frame.area(), app);
         }
-        View::ProjectsResult => projects::render_projects_result(frame, frame.area(), app),
-        View::Backlog => projects::render_backlog(frame, frame.area(), app),
         View::TaskInput => popups::render_task_input(frame, frame.area(), app),
         View::TaskTags => popups::render_task_tags(frame, frame.area(), app),
         View::TaskKindPicker => popups::render_task_kind_picker(frame, frame.area(), app),
@@ -254,14 +250,13 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         let keybinds: &str = match app.view {
             View::Grid => match app.current_tab {
-                // High-value Review verbs lead so they survive the right-edge
+                // High-value verbs lead so they survive the right-edge
                 // truncation at narrow widths (the status bar is one row, no
-                // wrap); rare project-management verbs trail. The Space:approve
-                // chip is rendered separately *ahead* of this string below so
-                // it is never the first thing clipped.
+                // wrap); rare verbs trail. The Space chip is rendered
+                // separately *ahead* of this string below so it is never the
+                // first thing clipped.
                 Tab::Tasks => "a/n:add  enter/f:focus agent  v:info  s:assign agent  S:agent in ~  h/l:col  j/k:task  H/L:move  /:filter  1-4:priority  t:tags  T:kind  r:rename  A:attach  p:paste note  x:delete  u:undo  c:clear done  tab:next  q:quit",
-                Tab::Projects => "enter:focus orch  n:new task  r:result  f:agent terminal/resurrect  R:restart  b:backlog  h/l:col  j/k:task  H/L:project  N:register project  c:copy id  x:delete task  X:remove project  tab:next  q:quit",
-                Tab::Sessions => "enter/f:focus/resume  /:find any  n:new  R:respawn  A:default agent  N:new+model  p:new in…  i:info  r:rename  L:link task  o:shell  M:bookmarks  h/j/k/l:nav  v:layout  x:close  H:inactive  W:workers  tab:next  q:quit",
+                Tab::Sessions => "enter/f:focus/resume  /:find any  n:new  R:respawn  A:default agent  N:new+model  p:new in…  i:info  r:rename  L:link task  o:shell  M:bookmarks  h/j/k/l:nav  v:layout  x:close  H:inactive  tab:next  q:quit",
                 Tab::Metrics => "enter:view transcript  j/k:select  r:refresh  tab:next  q:quit",
                 Tab::Agents => agents::hints(&View::Grid),
             },
@@ -269,7 +264,6 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             View::Popup => "j/k:scroll  esc:close  q:close",
             View::LiveTail => "j/k:scroll  G:bottom  esc:close",
             View::ConfirmClose => "y:confirm  n/esc:cancel",
-            View::PromptInput => "type prompt  enter:create task  esc:cancel",
             View::ModelPicker if app
                 .model_picker
                 .as_ref()
@@ -292,7 +286,7 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                     "type:filter  ↑/↓:move  enter/space:pick  tab:browse folders  esc:cancel"
                 }
                 _ if app.tasks.pending_assign.is_some() => {
-                    "j/k:move  enter:descend  bksp:parent  space:pick  .:pick cwd  tab:projects  esc:cancel"
+                    "j/k:move  enter:descend  bksp:parent  space:pick  .:pick cwd  tab:places  esc:cancel"
                 }
                 _ => {
                     "j/k:move  enter:descend  bksp:parent  space:pick  .:pick cwd  m:bookmark  c/C:gh new (pub/priv)  esc:cancel"
@@ -319,20 +313,17 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 }
             }
             View::TaskFilter => "type to filter (text or #tag)  enter:apply  esc:clear",
-            View::ProjectsResult => "j/k:artifact  e:expand  PgUp/PgDn:scroll  c:copy path  o:xdg-open  esc/r:close",
-            View::Backlog => "j/k:select  s/enter:start  x:delete  esc/q:close",
         };
         // Render the Space chip *first* so the single highest-value verb
-        // (approve on Projects, ack on Sessions) is never the first thing
+        // (proceed/done on Tasks, ack on Sessions) is never the first thing
         // clipped off the right edge of this one-row, no-wrap status bar.
         let space_verb = match (&app.view, app.current_tab) {
             // Space is status-aware on the Tasks board: it approves a
             // focused Planning card's plan, and toggles Done elsewhere.
             (View::Grid, Tab::Tasks) => Some(match app.selected_board_task().map(|t| t.status) {
-                Some(crate::orchestrator::TaskStatus::Planning) => "proceed ",
+                Some(crate::task_store::TaskStatus::Planning) => "proceed ",
                 _ => "done ",
             }),
-            (View::Grid, Tab::Projects) => Some("approve "),
             (View::Grid, Tab::Sessions) => Some("ack "),
             _ => None,
         };

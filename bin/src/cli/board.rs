@@ -15,7 +15,7 @@ use std::io::{IsTerminal, Read};
 
 use super::{parse_flags, print_json, CliError};
 use cc_hub_lib::ops;
-use cc_hub_lib::orchestrator::{self, TaskPriority};
+use cc_hub_lib::task_store::{self, TaskPriority};
 use cc_hub_lib::tasks::{parse_tags, PersonalBoard};
 
 const VERBS: &str = "`add`, `note` or `notes`";
@@ -72,7 +72,7 @@ fn board_add(args: &[String]) -> Result<(), CliError> {
             .map_err(|e| CliError::Other(format!("write kind: {}", e)))?;
     }
     if let Some(title) = f.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
-        orchestrator::set_task_title(None, &task_id, title)
+        task_store::set_task_title(&task_id, title)
             .map_err(|e| CliError::Other(format!("write title: {}", e)))?;
     }
 
@@ -100,7 +100,7 @@ fn board_note(args: &[String]) -> Result<(), CliError> {
         Some(text) => text,
         None => piped_stdin()?,
     };
-    let state = ops::task::task_artifact_add_text(None, &task_id, &text, "cli")?;
+    let state = ops::task::task_artifact_add_text(&task_id, &text, "cli")?;
     let added = state.artifacts.last().expect("just pushed");
     print_json(&serde_json::json!({
         "ok": true,
@@ -202,7 +202,7 @@ fn parse_priority(s: &str) -> Result<TaskPriority, CliError> {
 mod tests {
     use super::*;
     use crate::cli::test_util::with_tempdir_home;
-    use cc_hub_lib::orchestrator::TaskStatus;
+    use cc_hub_lib::task_store::TaskStatus;
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()

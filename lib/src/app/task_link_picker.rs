@@ -1,11 +1,11 @@
 //! State behind [`crate::app::View::TaskLinkPicker`]: the fuzzy task
 //! selector `L` opens on the Sessions tab. The App builds the candidate list
-//! (personal board + orchestrated tasks, session-local ones first); this
+//! (board tasks, session-local ones first); this
 //! module owns the live filter, rows, and selection — the same shape as
 //! [`crate::app::ModelPickerState`].
 
 use crate::fuzzy;
-use crate::orchestrator::TaskStatus;
+use crate::task_store::TaskStatus;
 
 /// What picking a row does: drop the session's current link, or point it at
 /// a task. `Link` carries everything the sidecar record needs so the confirm
@@ -13,11 +13,7 @@ use crate::orchestrator::TaskStatus;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TaskLinkAction {
     Unlink,
-    Link {
-        task_id: String,
-        project_id: Option<String>,
-        title: String,
-    },
+    Link { task_id: String, title: String },
 }
 
 /// One candidate row: `label` is the task title (or prompt first line),
@@ -158,7 +154,6 @@ mod tests {
             status: Some(TaskStatus::Running),
             action: TaskLinkAction::Link {
                 task_id: task_id.into(),
-                project_id: None,
                 title: label.into(),
             },
         }
