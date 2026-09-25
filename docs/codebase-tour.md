@@ -139,7 +139,7 @@ overwriting or resetting state.
 - **`builds/`** — the Builds tab's domain. `mod.rs` is the store
   (`~/.cc-hub/builds/<id>/build.json` + `output.log`, locked updates, and
   `all()`, which fails a build whose runner died) plus the asks: `start`,
-  `rebuild`, `cancel` (a flag), `serve`. `recipe.rs` reads
+  `rebuild` (the checkout as it is now), `cancel` (a flag), `serve`. `recipe.rs` reads
   `[builds.recipes]` and expands its argv templates. `runner.rs` is
   `cc-hub build _run`: the only code that moves a build forward. `hold.rs` is
   the resource claim that outlives builds: a detached `cc-hub build _hold`
