@@ -2878,7 +2878,7 @@ home = "~/.codex-personal"
             harness(&mut app, HarnessCommand::EditSubmit);
             assert!(app.harness.detail.as_ref().unwrap().editing.is_none());
             let spec = crate::harness::spec::load(&dir).unwrap();
-            assert_eq!(spec.run.max_budget_usd, 1.25);
+            assert_eq!(spec.run.max_budget_usd, Some(1.25));
         });
     }
 
