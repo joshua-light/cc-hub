@@ -48,7 +48,8 @@ pub enum BuildsCommand {
     FormBackspace,
     FormSubmit,
     FormCancel,
-    /// `r` — the selected build again.
+    /// `r` — build the selected card's checkout as it is now (the recipe's
+    /// checkout on an empty tab).
     Rebuild,
     /// `c` — cancel the selected build.
     Cancel,
@@ -341,9 +342,17 @@ impl App {
                 }
             }
             Rebuild => {
-                if let Some(id) = self.builds.selected().map(|b| b.id.clone()) {
-                    self.builds_start(builds::rebuild(&id));
-                }
+                let started = match self.builds.selected() {
+                    Some(b) => builds::rebuild(&b.id),
+                    None => match recipe::all().next() {
+                        Some((name, _)) => builds::fresh(name),
+                        None => {
+                            self.set_status("no [builds.recipes] in config.toml".into());
+                            return Vec::new();
+                        }
+                    },
+                };
+                self.builds_start(started);
             }
             Cancel => {
                 let Some(b) = self.builds.selected() else {

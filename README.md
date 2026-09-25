@@ -555,7 +555,7 @@ it failed; and `● in player` on the build the player came from.
 |---|---|
 | `h` / `j` / `k` / `l` (or arrows) | Move between cards |
 | `n` | New build: recipe, checkout, ref (empty: working tree), route, serve. Seeded from the selected card |
-| `r` | The selected build again (a working-tree build takes the tree as it is now) |
+| `r` | Build the selected card's checkout as it is now: its working tree, the route the recipe picks, the card's serve. On an empty tab, the recipe's checkout. A pinned ref or route is `n` |
 | `c` | Cancel it |
 | `b` | Serve it; only the build in the player can be served |
 | `f` / `Enter` | Its output, following the end (`G` follows again after scrolling) |

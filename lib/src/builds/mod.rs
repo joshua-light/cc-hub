@@ -127,6 +127,14 @@ impl Build {
         }
     }
 
+    /// This build's checkout as it is now: the same checkout and serve, but
+    /// the working tree rather than the ref, and whatever route the recipe
+    /// picks for what changed. A pinned ref or route is a new build, not a
+    /// rebuild.
+    pub fn again(&self) -> Build {
+        Build::new(&self.recipe, &self.cwd, None, None, self.serve)
+    }
+
     /// What the card calls it: the ref, or the working tree.
     pub fn target(&self) -> &str {
         self.r#ref.as_deref().unwrap_or("working tree")
@@ -364,17 +372,18 @@ pub fn start(build: Build) -> io::Result<Build> {
     Ok(build)
 }
 
-/// The same build again: same checkout, ref, route and serve. A working-tree
-/// build snapshots the tree as it is now, which is the point of rebuilding it.
+/// The checkout of build `id`, built again as it is now ([`Build::again`]).
 pub fn rebuild(id: &str) -> io::Result<Build> {
-    let old = load(id)?;
-    start(Build::new(
-        &old.recipe,
-        &old.cwd,
-        old.r#ref,
-        old.route,
-        old.serve,
-    ))
+    start(load(id)?.again())
+}
+
+/// Build a recipe's own checkout as it is now, for when there is no build to
+/// rebuild yet.
+pub fn fresh(name: &str) -> io::Result<Build> {
+    let checkout = recipe::named(name)
+        .and_then(|r| r.checkout.clone())
+        .ok_or_else(|| io::Error::other(format!("{} names no checkout; n picks one", name)))?;
+    start(Build::new(name, &checkout, None, None, true))
 }
 
 /// Ask the runner to stop. A queued build has nothing to stop yet and is
@@ -473,6 +482,21 @@ mod tests {
             assert_eq!(read[0].status, BuildStatus::Failed);
             assert!(read[0].error.as_deref().unwrap().contains("runner exited"));
         });
+    }
+
+    #[test]
+    fn a_rebuild_takes_the_checkout_as_it_is_now() {
+        let pinned = Build::new(
+            "build-server",
+            "/repo",
+            Some("1a2b3c4".into()),
+            Some("full".into()),
+            true,
+        );
+        let again = pinned.again();
+        assert_eq!((again.r#ref, again.route), (None, None));
+        assert_eq!((again.cwd.as_str(), again.serve), ("/repo", true));
+        assert_ne!(again.id, pinned.id);
     }
 
     #[test]

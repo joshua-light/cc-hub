@@ -229,6 +229,9 @@ the working tree of `--cwd` (default: here) as it stands when the build starts.
 Without `--route` the recipe picks one. `--recipe` may be left out when only one
 recipe exists. `--serve` serves it the moment it succeeds.
 
+`rebuild` builds a build's checkout again as it is now: the working tree and
+the recipe's route, whatever ref or route the old build pinned.
+
 A recipe builds one thing at a time, oldest first. A recipe with a `resource`
 claims it before its first build, as the guest `Builds`, and keeps it after
 the build ends, so a session cannot slip in between two builds. `reserve`
