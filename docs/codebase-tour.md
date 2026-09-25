@@ -138,13 +138,15 @@ overwriting or resetting state.
 
 - **`builds/`** — the Builds tab's domain. `mod.rs` is the store
   (`~/.cc-hub/builds/<id>/build.json` + `output.log`, locked updates, and
-  `all()`, which fails a build whose runner died) plus the asks: `start`,
-  `rebuild` (the checkout as it is now), `cancel` (a flag), `serve`. `recipe.rs` reads
+  `all()`, which fails a build whose runner died) plus the asks: `start`
+  (which prunes a recipe to its last twenty finished builds), `rebuild` (the
+  checkout as it is now), `cancel` (a flag), `serve`. `recipe.rs` reads
   `[builds.recipes]` and expands its argv templates. `runner.rs` is
   `cc-hub build _run`: the only code that moves a build forward. `hold.rs` is
   the resource claim that outlives builds: a detached `cc-hub build _hold`
   that claims as the broker guest `Builds` and lives until released.
-  `app/builds_view.rs` holds the tab's state, `ui/builds.rs` draws it.
+  `app/builds_view.rs` holds the tab's state — a card per recipe, and which
+  of its builds the card shows (`shown`) — and `ui/builds.rs` draws it.
 
 ### Spawning + dispatching
 

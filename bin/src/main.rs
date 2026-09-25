@@ -278,6 +278,7 @@ pub(crate) fn open_path_detached(path: &str) -> io::Result<()> {
 fn builds_snapshot() -> cc_hub_lib::app::BuildsSnapshot {
     use cc_hub_lib::builds::{self, hold, recipe};
     cc_hub_lib::app::BuildsSnapshot {
+        recipes: recipe::all().map(|(name, _)| name.to_string()).collect(),
         builds: builds::all(),
         holds: recipe::all()
             .filter_map(|(_, r)| r.resource.clone())

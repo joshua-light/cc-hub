@@ -1,6 +1,9 @@
 //! Builds-tab state: the latest on-disk snapshot of every build, what each
 //! recipe's player holds and who holds each recipe's resource, the cursor over
-//! the cards, and the new-build form and log view while they are open.
+//! the recipe cards, and the new-build form and log view while they are open.
+//!
+//! The tab is a card per recipe, not per build: a recipe's builds are its
+//! history, and the card shows the one that matters now ([`BuildsView::shown`]).
 
 use crate::builds::hold::Hold;
 use crate::builds::{self, Build, BuildStatus};
@@ -9,6 +12,8 @@ use std::collections::BTreeMap;
 /// What the refresh reads off disk every second.
 #[derive(Clone, Debug, Default)]
 pub struct BuildsSnapshot {
+    /// The recipes, in config order: one card each.
+    pub recipes: Vec<String>,
     pub builds: Vec<Build>,
     /// The tab's hold on each recipe resource, if it has one.
     pub holds: BTreeMap<String, Option<Hold>>,
@@ -25,9 +30,12 @@ pub struct BuildsProbe {
 
 #[derive(Default)]
 pub struct BuildsView {
+    pub recipes: Vec<String>,
+    /// Every build, newest first.
     pub builds: Vec<Build>,
     pub holds: BTreeMap<String, Option<Hold>>,
     pub probe: BuildsProbe,
+    /// The selected recipe card.
     pub selected: usize,
     pub loaded: bool,
     pub form: Option<BuildForm>,
@@ -36,58 +44,96 @@ pub struct BuildsView {
 
 impl BuildsView {
     pub fn update(&mut self, snapshot: BuildsSnapshot) {
-        let keep = self.selected().map(|b| b.id.clone());
+        let keep = self.selected_recipe().map(str::to_string);
+        self.recipes = snapshot.recipes;
         self.builds = snapshot.builds;
         self.holds = snapshot.holds;
         self.loaded = true;
         self.selected = keep
-            .and_then(|id| self.builds.iter().position(|b| b.id == id))
+            .and_then(|name| self.recipes.iter().position(|r| *r == name))
             .unwrap_or(self.selected)
-            .min(self.builds.len().saturating_sub(1));
+            .min(self.recipes.len().saturating_sub(1));
         if let Some(log) = self.log.as_mut() {
             log.reload();
         }
     }
 
-    pub fn selected(&self) -> Option<&Build> {
-        self.builds.get(self.selected)
+    pub fn selected_recipe(&self) -> Option<&str> {
+        self.recipes.get(self.selected).map(String::as_str)
+    }
+
+    pub fn select_recipe(&mut self, name: &str) {
+        if let Some(i) = self.recipes.iter().position(|r| r == name) {
+            self.selected = i;
+        }
     }
 
     pub fn nav(&mut self, delta: isize) {
-        if self.builds.is_empty() {
+        if self.recipes.is_empty() {
             return;
         }
-        let max = self.builds.len() as isize - 1;
+        let max = self.recipes.len() as isize - 1;
         self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
     }
 
-    /// Whether this is the build its recipe's player was built from: the
-    /// newest one that succeeded on the commit `current` reports.
-    pub fn in_player(&self, build: &Build) -> bool {
-        let Some(current) = self.probe.current.get(&build.recipe) else {
-            return false;
+    /// A recipe's builds, newest first.
+    pub fn builds_of<'a>(&'a self, recipe: &'a str) -> impl Iterator<Item = &'a Build> + 'a {
+        self.builds.iter().filter(move |b| b.recipe == recipe)
+    }
+
+    /// The build a recipe's card is about: the one running, else the next
+    /// one to run, else the last one that ran. A build cancelled before it
+    /// started has nothing to say, so it is shown only when no other is left.
+    pub fn shown<'a>(&'a self, recipe: &'a str) -> Option<&'a Build> {
+        let running = self
+            .builds_of(recipe)
+            .find(|b| b.status == BuildStatus::Running);
+        // Newest first, so the next to run is the last queued one.
+        let next = || {
+            self.builds_of(recipe)
+                .filter(|b| b.status == BuildStatus::Queued)
+                .last()
         };
-        let same = |b: &Build| {
-            b.commit
-                .as_deref()
-                .is_some_and(|c| c.starts_with(current.as_str()) || current.starts_with(c))
-        };
-        self.builds
-            .iter()
-            .find(|b| b.recipe == build.recipe && b.status == BuildStatus::Succeeded && same(b))
-            .is_some_and(|b| b.id == build.id)
+        running
+            .or_else(next)
+            .or_else(|| self.builds_of(recipe).find(|b| b.started_at.is_some()))
+            .or_else(|| self.builds_of(recipe).next())
+    }
+
+    /// Builds of the recipe queued behind the one its card shows.
+    pub fn queued_behind(&self, recipe: &str) -> usize {
+        let shown = self.shown(recipe).map(|b| b.id.as_str());
+        self.builds_of(recipe)
+            .filter(|b| b.status == BuildStatus::Queued && Some(b.id.as_str()) != shown)
+            .count()
+    }
+
+    /// The builds `c` stops: every one of the recipe not yet finished.
+    pub fn active<'a>(&'a self, recipe: &'a str) -> Vec<&'a Build> {
+        self.builds_of(recipe)
+            .filter(|b| !b.status.is_finished())
+            .collect()
+    }
+
+    pub fn last_success<'a>(&'a self, recipe: &'a str) -> Option<&'a Build> {
+        self.builds_of(recipe)
+            .find(|b| b.status == BuildStatus::Succeeded)
+    }
+
+    /// The build the recipe's player was made from: the newest one that
+    /// succeeded on the commit `current` reports.
+    pub fn in_player<'a>(&'a self, recipe: &'a str) -> Option<&'a Build> {
+        let current = self.probe.current.get(recipe)?;
+        self.builds_of(recipe).find(|b| {
+            b.status == BuildStatus::Succeeded
+                && b.commit
+                    .as_deref()
+                    .is_some_and(|c| c.starts_with(current.as_str()) || current.starts_with(c))
+        })
     }
 
     pub fn typical(&self, build: &Build) -> Option<i64> {
         builds::typical(&self.builds, &build.recipe, build.taken.as_deref()?)
-    }
-
-    /// Builds that are queued or running.
-    pub fn active_count(&self) -> usize {
-        self.builds
-            .iter()
-            .filter(|b| !b.status.is_finished())
-            .count()
     }
 }
 
@@ -270,20 +316,63 @@ mod tests {
         b
     }
 
+    fn at(recipe: &str, id: &str, status: BuildStatus) -> Build {
+        let mut b = Build::new(recipe, "/tmp", None, None, false);
+        b.id = id.into();
+        b.status = status;
+        b
+    }
+
     #[test]
     fn only_the_newest_build_of_the_current_commit_is_in_the_player() {
         let mut view = BuildsView::default();
-        let newer = built("build-server", "1a2b3c4d5e6f708192a3b4c5d6e7f80910213243");
+        let mut newer = built("build-server", "1a2b3c4d5e6f708192a3b4c5d6e7f80910213243");
+        newer.id = "bd-2".into();
         let mut older = built("build-server", "1a2b3c4d5e6f708192a3b4c5d6e7f80910213243");
         older.id = "bd-1".into();
-        let other = built("build-server", "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432");
-        view.builds = vec![newer.clone(), older.clone(), other.clone()];
+        let mut other = built("build-server", "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432");
+        other.id = "bd-3".into();
+        view.builds = vec![other, newer, older];
         view.probe
             .current
             .insert("build-server".into(), "1a2b3c4d5e6f".into());
-        assert!(view.in_player(&newer));
-        assert!(!view.in_player(&older));
-        assert!(!view.in_player(&other));
+        assert_eq!(
+            view.in_player("build-server").map(|b| b.id.as_str()),
+            Some("bd-2")
+        );
+        assert!(view.in_player("other").is_none());
+    }
+
+    #[test]
+    fn a_card_shows_the_running_build_then_the_next_queued_then_the_last() {
+        use BuildStatus::*;
+        let mut view = BuildsView {
+            builds: vec![
+                at("r", "bd-4", Queued),
+                at("r", "bd-3", Queued),
+                at("r", "bd-2", Running),
+                at("r", "bd-1", Failed),
+            ],
+            ..BuildsView::default()
+        };
+        assert_eq!(view.shown("r").unwrap().id, "bd-2");
+        assert_eq!(view.queued_behind("r"), 2);
+        assert_eq!(view.active("r").len(), 3);
+
+        view.builds.remove(2);
+        assert_eq!(view.shown("r").unwrap().id, "bd-3");
+        assert_eq!(view.queued_behind("r"), 1);
+
+        view.builds = vec![at("r", "bd-2", Failed), at("r", "bd-1", Succeeded)];
+        assert_eq!(view.shown("r").unwrap().id, "bd-2");
+        assert_eq!(view.last_success("r").unwrap().id, "bd-1");
+        assert!(view.shown("other").is_none());
+
+        // Cancelled while queued: never ran, so the one that did is shown.
+        let mut ran = at("r", "bd-1", Cancelled);
+        ran.started_at = Some(1);
+        view.builds = vec![at("r", "bd-2", Cancelled), ran];
+        assert_eq!(view.shown("r").unwrap().id, "bd-1");
     }
 
     // Nothing here may call `BuildForm::new` or `step_value`: they read the

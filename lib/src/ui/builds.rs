@@ -1,8 +1,9 @@
-//! Builds tab: a line per recipe saying what it holds and what its player
-//! runs, then a card per build, newest first. A card answers "what is it,
-//! where is it, and is it the one I can play on?": the target and commit on
-//! its border, the route and time against the route's usual, the phase or why
-//! it failed, and an `in player` mark on the build the player was made from.
+//! Builds tab: a card per recipe. A card answers "can I play on it, and is
+//! anything in the way?": its border carries the recipe and the state of its
+//! build; inside, the resource it holds, what its player runs, and the build
+//! that matters now (running, else next to run, else the last to finish) with
+//! its route, time against the route's usual, and phase or failure. A
+//! recipe's older builds are its history, not cards.
 
 use crate::app::{App, BuildForm, FormField, LogView};
 use crate::builds::{recipe, Build, BuildStatus};
@@ -16,8 +17,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
 use ratatui::Frame;
 
-const CARD_W: u16 = 58;
-const CARD_H: u16 = 5;
+/// The narrowest a card gets before the cards stack into fewer columns.
+const CARD_W: u16 = 72;
+/// Seven body lines and the border: hold, player, a gap, then the build's
+/// four.
+const CARD_H: u16 = 9;
 const BAR_W: usize = 10;
 
 pub(crate) fn hints(app: &App) -> &'static str {
@@ -26,17 +30,22 @@ pub(crate) fn hints(app: &App) -> &'static str {
             "tab/↑↓:field  ←/→:change  type:edit  enter:build  esc:cancel"
         }
         crate::app::View::BuildLog => "j/k:scroll  PgUp/PgDn:page  G:follow  esc:close",
-        _ => "n:new  r:rebuild  c:cancel  b:serve  enter/f:log  x:delete  h/j/k/l:nav  tab:next  q:quit",
+        _ => "r:build now  n:new…  c:cancel  b:serve  enter/f:log  h/j/k/l:nav  tab:next  q:quit",
     }
 }
 
-/// What Space does: release what the tab holds or waits for, else reserve.
-pub(crate) fn space_verb(app: &App) -> &'static str {
-    if app.builds.holds.values().any(Option::is_some) {
-        "release "
-    } else {
-        "reserve "
-    }
+/// What Space does on the selected recipe: release its resource when the tab
+/// holds or waits for it, else reserve it. Nothing for a recipe without one.
+pub(crate) fn space_verb(app: &App) -> Option<&'static str> {
+    let name = app.builds.selected_recipe()?;
+    let resource = recipe::named(name)?.resource.as_ref()?;
+    Some(
+        if app.builds.holds.get(resource).is_some_and(Option::is_some) {
+            "release "
+        } else {
+            "reserve "
+        },
+    )
 }
 
 fn status_mark(status: BuildStatus, now_ms: u64) -> (&'static str, Color) {
@@ -65,41 +74,32 @@ fn short(commit: &str) -> &str {
     &commit[..commit.len().min(11)]
 }
 
+fn text(s: impl Into<String>, width: usize, style: Style) -> Span<'static> {
+    Span::styled(first_line_truncated(&s.into(), width), style)
+}
+
 pub(crate) fn render_builds_body(frame: &mut Frame, area: Rect, app: &mut App) {
     if area.height < 2 || area.width < 20 {
         return;
     }
-    let now = crate::builds::now();
-
-    let recipes: Vec<(&str, &recipe::Recipe)> = recipe::all().collect();
-    for (row, (name, recipe)) in recipes.iter().enumerate() {
-        let y = area.y + row as u16;
-        if y >= area.bottom() {
-            return;
-        }
-        let line = recipe_line(app, name, recipe, now);
-        frame.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
-    }
-    let top = recipes.len() as u16 + 1;
-    let body = Rect::new(
-        area.x,
-        area.y + top,
-        area.width,
-        area.height.saturating_sub(top),
-    );
-
-    if app.builds.builds.is_empty() {
+    if app.builds.recipes.is_empty() {
         let msg = if app.builds.loaded {
-            " No builds yet. n starts one."
+            " No recipes. Add one under [builds.recipes] in config.toml — see `cc-hub help build`."
         } else {
             " Reading builds …"
         };
         frame.render_widget(
             Paragraph::new(Span::styled(msg, Style::default().fg(DIM_TEXT))),
-            body,
+            area,
         );
         return;
     }
+    let body = Rect::new(
+        area.x,
+        area.y + 1,
+        area.width,
+        area.height.saturating_sub(1),
+    );
 
     let cols = (body.width / CARD_W).max(1);
     app.render.builds_cols = cols;
@@ -112,8 +112,9 @@ pub(crate) fn render_builds_body(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let cell_w = body.width / cols;
+    let now = crate::builds::now();
     let now_ms = crate::ui::now_ms();
-    for (i, build) in app.builds.builds.iter().enumerate() {
+    for (i, name) in app.builds.recipes.iter().enumerate() {
         let (row, col) = (i as u16 / cols, i as u16 % cols);
         if row < app.render.builds_scroll || row >= app.render.builds_scroll + rows_visible {
             continue;
@@ -133,7 +134,7 @@ pub(crate) fn render_builds_body(frame: &mut Frame, area: Rect, app: &mut App) {
             frame,
             Rect::new(x, y, w, CARD_H),
             app,
-            build,
+            name,
             selected,
             now,
             now_ms,
@@ -141,74 +142,27 @@ pub(crate) fn render_builds_body(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-/// `build-server  holding build-box · 12m   player 1a2b3c4d5e6`.
-fn recipe_line(app: &App, name: &str, recipe: &recipe::Recipe, now: i64) -> Line<'static> {
-    let mut spans = vec![
-        Span::styled(
-            format!(" {}", name),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-    ];
-    if let Some(resource) = &recipe.resource {
-        let hold = app.builds.holds.get(resource).cloned().flatten();
-        let other = app.builds.probe.holders.get(resource).cloned().flatten();
-        let (text, color) = match (hold, other) {
-            (Some(h), _) if h.granted => (
-                format!("󰌾 holding {} · {}", resource, age(now, h.since)),
-                Color::Green,
-            ),
-            (Some(h), _) => (
-                match h.behind {
-                    Some(who) => format!("󰔟 waiting for {}, held by {}", resource, who),
-                    None => format!("󰔟 waiting for {}", resource),
-                },
-                Color::Yellow,
-            ),
-            (None, Some(who)) => (format!("󰌾 {} held by {}", resource, who), Color::Yellow),
-            (None, None) => (format!("󰍁 {} free", resource), DIM_TEXT),
-        };
-        spans.push(Span::styled(text, Style::default().fg(color)));
-    }
-    if let Some(current) = app.builds.probe.current.get(name) {
-        spans.push(Span::styled("   player ", Style::default().fg(MUTED_TEXT)));
-        spans.push(Span::styled(
-            short(current).to_string(),
-            Style::default().fg(ACCENT_BLUE),
-        ));
-    }
-    Line::from(spans)
-}
-
 fn render_card(
     frame: &mut Frame,
     area: Rect,
     app: &App,
-    build: &Build,
+    name: &str,
     selected: bool,
     now: i64,
     now_ms: u64,
 ) {
-    let (mark, color) = status_mark(build.status, now_ms);
-    // The title runs along the border; the body sits a cell in from it.
-    let title_w = area.width.saturating_sub(3) as usize;
-    let inner_w = area.width.saturating_sub(4) as usize;
-    let in_player = app.builds.in_player(build);
+    let recipe = recipe::named(name);
+    let shown = app.builds.shown(name);
+    let in_player = app.builds.in_player(name);
+    let width = area.width.saturating_sub(4) as usize;
 
-    let mut title = format!(" {} {}", mark, build.target());
-    if let Some(commit) = &build.commit {
-        title.push_str(&format!(" · {}", short(commit)));
-    }
-    if let Some(subject) = &build.subject {
-        title.push_str(&format!(" · {}", subject));
-    }
-    let title = format!("{} ", first_line_truncated(&title, title_w));
-
+    let (mark, color) = match shown {
+        Some(b) => status_mark(b.status, now_ms),
+        None => ("○", DIM_TEXT),
+    };
     let border = if selected {
         Color::White
-    } else if build.status == BuildStatus::Running {
+    } else if shown.is_some_and(|b| b.status == BuildStatus::Running) {
         Color::Green
     } else {
         SEP_GRAY
@@ -223,29 +177,125 @@ fn render_card(
         .border_style(Style::default().fg(border))
         .padding(Padding::horizontal(1))
         .title(Span::styled(
-            title,
+            format!(" {} {} ", mark, name),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
-    if in_player {
-        block = block.title_bottom(
-            Line::from(Span::styled(
-                " ● in player ",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ))
-            .right_aligned(),
-        );
+    if let Some(description) = recipe
+        .map(|r| r.description.as_str())
+        .filter(|d| !d.is_empty())
+    {
+        block = block.title_bottom(Span::styled(
+            format!(
+                " {} ",
+                first_line_truncated(description, width.saturating_sub(2))
+            ),
+            Style::default().fg(DIM_TEXT),
+        ));
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let lines = vec![
-        time_line(app, build, now),
-        say_line(build, in_player, now, inner_w),
-        where_line(build, now, inner_w),
-    ];
+    let mut lines = Vec::new();
+    if let Some(resource) = recipe.and_then(|r| r.resource.as_deref()) {
+        lines.push(hold_line(app, resource, now, width));
+    }
+    if let Some(line) = player_line(app, name, in_player, now, width) {
+        lines.push(line);
+    }
+    // The gap sets the build apart from the recipe's own lines, when it has any.
+    if !lines.is_empty() {
+        lines.push(Line::raw(""));
+    }
+    match shown {
+        Some(build) => {
+            lines.push(build_line(build, color, mark, width));
+            lines.push(time_line(app, build, now));
+            lines.push(say_line(build, width));
+            if let Some(line) = after_line(app, name, build, now, width) {
+                lines.push(line);
+            }
+        }
+        None => {
+            lines.push(Line::from(text(
+                "nothing built yet — r builds the checkout as it is now",
+                width,
+                Style::default().fg(DIM_TEXT),
+            )));
+        }
+    }
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// `󰌾 holding build-box · 12m`, or who it waits behind.
+fn hold_line(app: &App, resource: &str, now: i64, width: usize) -> Line<'static> {
+    let hold = app.builds.holds.get(resource).cloned().flatten();
+    let other = app.builds.probe.holders.get(resource).cloned().flatten();
+    let (s, color) = match (hold, other) {
+        (Some(h), _) if h.granted => (
+            format!("󰌾 holding {} · {}", resource, age(now, h.since)),
+            Color::Green,
+        ),
+        (Some(h), _) => (
+            match h.behind {
+                Some(who) => format!("󰔟 waiting for {}, held by {}", resource, who),
+                None => format!("󰔟 waiting for {}", resource),
+            },
+            Color::Yellow,
+        ),
+        (None, Some(who)) => (format!("󰌾 {} held by {}", resource, who), Color::Yellow),
+        (None, None) => (format!("󰍁 {} free", resource), DIM_TEXT),
+    };
+    Line::from(text(s, width, Style::default().fg(color)))
+}
+
+/// `● player 1a2b3c4d5e6 · <subject> · served 3m ago`.
+fn player_line(
+    app: &App,
+    name: &str,
+    built: Option<&Build>,
+    now: i64,
+    width: usize,
+) -> Option<Line<'static>> {
+    let current = app.builds.probe.current.get(name)?;
+    let mut s = format!("player {}", short(current));
+    if let Some(subject) = built.and_then(|b| b.subject.as_deref()) {
+        s.push_str(&format!(" · {}", subject));
+    }
+    let served = built.and_then(|b| b.served_at).map(|at| age(now, at));
+    let tail = match (built, served) {
+        (Some(_), Some(ago)) => format!(" · served {} ago", ago),
+        (Some(_), None) => " · b serves it".to_string(),
+        (None, _) => " · not built from here".to_string(),
+    };
+    let room = width.saturating_sub(2 + tail.chars().count());
+    Some(Line::from(vec![
+        Span::styled(
+            "● ",
+            Style::default().fg(if built.is_some() {
+                Color::Green
+            } else {
+                DIM_TEXT
+            }),
+        ),
+        text(s, room, Style::default().fg(ACCENT_BLUE)),
+        Span::styled(tail, Style::default().fg(MUTED_TEXT)),
+    ]))
+}
+
+/// `✓ working tree · 1a2b3c4d5e6 · <subject>`.
+fn build_line(build: &Build, color: Color, mark: &str, width: usize) -> Line<'static> {
+    let mut s = format!("{} {}", mark, build.target());
+    if let Some(commit) = &build.commit {
+        s.push_str(&format!(" · {}", short(commit)));
+    }
+    if let Some(subject) = &build.subject {
+        s.push_str(&format!(" · {}", subject));
+    }
+    Line::from(text(
+        s,
+        width,
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    ))
 }
 
 /// The route, then how long: against the route's usual while running.
@@ -292,9 +342,9 @@ fn time_line(app: &App, build: &Build, now: i64) -> Line<'static> {
             }
         }
         _ => {
-            if let Some(elapsed) = build.elapsed(now) {
+            if let (Some(elapsed), Some(at)) = (build.elapsed(now), build.finished_at) {
                 spans.push(Span::styled(
-                    duration(elapsed),
+                    format!("{} · {} ago", duration(elapsed), age(now, at)),
                     Style::default().fg(DIM_TEXT),
                 ));
             }
@@ -303,10 +353,9 @@ fn time_line(app: &App, build: &Build, now: i64) -> Line<'static> {
     Line::from(spans)
 }
 
-/// What the build has to say: what it is doing, why it failed, or where it
-/// stands with the player.
-fn say_line(build: &Build, in_player: bool, now: i64, width: usize) -> Line<'static> {
-    let (text, style) = match build.status {
+/// What the build is doing, or why it did not work.
+fn say_line(build: &Build, width: usize) -> Line<'static> {
+    let (s, style) = match build.status {
         BuildStatus::Queued | BuildStatus::Running => (
             build.phase.clone().unwrap_or_else(|| "starting".into()),
             Style::default().fg(Color::White),
@@ -320,36 +369,40 @@ fn say_line(build: &Build, in_player: bool, now: i64, width: usize) -> Line<'sta
             Style::default().fg(Color::Red),
         ),
         BuildStatus::Cancelled => ("cancelled".into(), Style::default().fg(LABEL_GRAY)),
-        BuildStatus::Succeeded => match build.served_at {
-            Some(at) if in_player => (
-                format!("served {} ago", age(now, at)),
-                Style::default().fg(Color::Green),
-            ),
-            _ if in_player => (
-                "built — b serves it".into(),
-                Style::default().fg(FAINT_TEXT),
-            ),
-            Some(at) => (
-                format!("served {} ago, since replaced", age(now, at)),
-                Style::default().fg(DIM_TEXT),
-            ),
-            None => ("built".into(), Style::default().fg(DIM_TEXT)),
-        },
+        BuildStatus::Succeeded => ("built".into(), Style::default().fg(DIM_TEXT)),
     };
-    Line::from(Span::styled(first_line_truncated(&text, width), style))
+    Line::from(text(s, width, style))
 }
 
-/// The checkout, and how long ago the build was asked for.
-fn where_line(build: &Build, now: i64, width: usize) -> Line<'static> {
-    let checkout = std::path::Path::new(&build.cwd)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| build.cwd.clone());
-    let text = format!("{} · {} ago", checkout, age(now, build.created_at));
-    Line::from(Span::styled(
-        first_line_truncated(&text, width),
-        Style::default().fg(DIM_TEXT),
-    ))
+/// What comes after it: builds queued behind it, or, when it did not
+/// succeed, the last build that did.
+fn after_line(
+    app: &App,
+    name: &str,
+    build: &Build,
+    now: i64,
+    width: usize,
+) -> Option<Line<'static>> {
+    let queued = app.builds.queued_behind(name);
+    if queued > 0 {
+        return Some(Line::from(text(
+            format!("+{} queued", queued),
+            width,
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    if matches!(build.status, BuildStatus::Failed | BuildStatus::Cancelled) {
+        let last = app.builds.last_success(name)?;
+        let mut s = format!("last built ✓ {}", last.target());
+        if let Some(commit) = &last.commit {
+            s.push_str(&format!(" · {}", short(commit)));
+        }
+        if let Some(at) = last.finished_at {
+            s.push_str(&format!(" · {} ago", age(now, at)));
+        }
+        return Some(Line::from(text(s, width, Style::default().fg(DIM_TEXT))));
+    }
+    None
 }
 
 // ---- the form ---------------------------------------------------------------

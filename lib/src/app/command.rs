@@ -36,7 +36,8 @@ pub enum BuildsCommand {
     NavDown,
     NavLeft,
     NavRight,
-    /// `n` — the new-build form, seeded from the selected card.
+    /// `n` — the new-build form for the selected recipe, seeded from its
+    /// last build.
     OpenForm,
     /// Tab / Shift-Tab and ↓/↑ in the form: the next field.
     FormNext,
@@ -48,19 +49,16 @@ pub enum BuildsCommand {
     FormBackspace,
     FormSubmit,
     FormCancel,
-    /// `r` — build the selected card's checkout as it is now (the recipe's
-    /// checkout on an empty tab).
+    /// `r` — build the selected recipe's checkout as it is now.
     Rebuild,
-    /// `c` — cancel the selected build.
+    /// `c` — cancel the selected recipe's running and queued builds.
     Cancel,
-    /// `b` — serve the selected build, if it is the one in the player.
+    /// `b` — serve the build in the selected recipe's player.
     Serve,
-    /// `x` — delete the selected build once it has finished.
-    Delete,
-    /// Space — reserve the recipes' resources when the tab holds none of
-    /// them, let go of them when it holds or waits for any.
+    /// Space — reserve the selected recipe's resource, or let it go when the
+    /// tab holds or waits for it.
     ToggleHold,
-    /// Enter/`f` — the selected build's output.
+    /// Enter/`f` — the output of the build the selected card shows.
     OpenLog,
     CloseLog,
     LogUp,
@@ -280,7 +278,7 @@ impl App {
 
     fn execute_builds(&mut self, cmd: BuildsCommand) -> Vec<Effect> {
         use super::{BuildForm, LogView, View};
-        use crate::builds::{self, hold, recipe, BuildStatus};
+        use crate::builds::{self, hold, recipe};
         use BuildsCommand::*;
         let cols = self.render.builds_cols.max(1) as isize;
         match cmd {
@@ -289,15 +287,10 @@ impl App {
             NavUp => self.builds.nav(-cols),
             NavDown => self.builds.nav(cols),
             OpenForm => {
-                let like = self.builds.selected();
-                let Some(name) = like
-                    .map(|b| b.recipe.clone())
-                    .filter(|r| recipe::named(r).is_some())
-                    .or_else(|| recipe::all().next().map(|(n, _)| n.to_string()))
-                else {
-                    self.set_status("no [builds.recipes] in config.toml".into());
+                let Some(name) = self.builds_recipe() else {
                     return Vec::new();
                 };
+                let like = self.builds.builds_of(&name).next();
                 self.builds.form = Some(BuildForm::new(&name, like));
                 self.view = View::BuildForm;
             }
@@ -342,98 +335,111 @@ impl App {
                 }
             }
             Rebuild => {
-                let started = match self.builds.selected() {
-                    Some(b) => builds::rebuild(&b.id),
-                    None => match recipe::all().next() {
-                        Some((name, _)) => builds::fresh(name),
-                        None => {
-                            self.set_status("no [builds.recipes] in config.toml".into());
-                            return Vec::new();
-                        }
-                    },
+                let Some(name) = self.builds_recipe() else {
+                    return Vec::new();
+                };
+                let started = match self.builds.builds_of(&name).next() {
+                    Some(last) => builds::rebuild(&last.id),
+                    None => builds::fresh(&name),
                 };
                 self.builds_start(started);
             }
             Cancel => {
-                let Some(b) = self.builds.selected() else {
+                let Some(name) = self.builds_recipe() else {
                     return Vec::new();
                 };
-                let (id, target, status) = (b.id.clone(), b.target().to_string(), b.status);
-                let msg = if status.is_finished() {
-                    format!("{}: already {}", target, status.label())
-                } else {
-                    match builds::cancel(&id) {
-                        Ok(_) if status == BuildStatus::Queued => format!("{}: cancelled", target),
-                        Ok(_) => format!("{}: cancelling", target),
-                        Err(e) => format!("cancel failed: {}", e),
-                    }
+                let ids: Vec<String> = self
+                    .builds
+                    .active(&name)
+                    .iter()
+                    .map(|b| b.id.clone())
+                    .collect();
+                if ids.is_empty() {
+                    self.set_status(format!("{}: nothing is building", name));
+                    return Vec::new();
+                }
+                let failed: Vec<String> = ids
+                    .iter()
+                    .filter_map(|id| builds::cancel(id).err().map(|e| e.to_string()))
+                    .collect();
+                let msg = match (failed.first(), ids.len()) {
+                    (Some(e), _) => format!("cancel failed: {}", e),
+                    (None, 1) => format!("{}: cancelling", name),
+                    (None, n) => format!("{}: cancelling {} builds", name, n),
                 };
                 self.set_status(msg);
             }
             Serve => {
-                let Some(b) = self.builds.selected() else {
+                let Some(name) = self.builds_recipe() else {
                     return Vec::new();
                 };
-                let knows_current = recipe::named(&b.recipe).is_some_and(|r| !r.current.is_empty());
-                let label = short_commit(b.commit.as_deref())
-                    .unwrap_or(b.target())
-                    .to_string();
-                let msg = if b.status != BuildStatus::Succeeded {
-                    format!("{}: only a build that succeeded is served", label)
-                } else if knows_current && !self.builds.in_player(b) {
-                    format!("{}: not in the player any more; r rebuilds it", label)
+                let knows_current = recipe::named(&name).is_some_and(|r| !r.current.is_empty());
+                // Without a `current` there is no telling what the player runs,
+                // so the newest success is the best guess.
+                let build = if knows_current {
+                    self.builds.in_player(&name)
                 } else {
-                    match builds::serve(&b.id) {
-                        Ok(()) => format!("serving {}", label),
-                        Err(e) => format!("serve failed: {}", e),
-                    }
+                    self.builds.last_success(&name)
                 };
-                self.set_status(msg);
-            }
-            Delete => {
-                let Some(b) = self.builds.selected() else {
-                    return Vec::new();
-                };
-                let (id, target) = (b.id.clone(), b.target().to_string());
-                let msg = match builds::delete(&id) {
-                    Ok(()) => {
-                        self.builds.builds.retain(|b| b.id != id);
-                        self.builds.nav(0);
-                        format!("deleted {}", target)
+                let msg = match build {
+                    Some(b) => {
+                        let label = short_commit(b.commit.as_deref())
+                            .unwrap_or(b.target())
+                            .to_string();
+                        match builds::serve(&b.id) {
+                            Ok(()) => format!("serving {}", label),
+                            Err(e) => format!("serve failed: {}", e),
+                        }
                     }
-                    Err(e) => format!("{}: {}", target, e),
+                    None if knows_current => {
+                        format!("{}: the player was not built from here; r builds it", name)
+                    }
+                    None => format!("{}: nothing built yet; r builds it", name),
                 };
                 self.set_status(msg);
             }
             ToggleHold => {
-                let held: Vec<String> = self
+                let Some(name) = self.builds_recipe() else {
+                    return Vec::new();
+                };
+                let Some(resource) = recipe::named(&name).and_then(|r| r.resource.clone()) else {
+                    self.set_status(format!("{} names no resource to hold", name));
+                    return Vec::new();
+                };
+                let held = self
                     .builds
                     .holds
-                    .iter()
-                    .filter(|(_, h)| h.is_some())
-                    .map(|(r, _)| r.clone())
-                    .collect();
-                if held.is_empty() {
-                    self.builds_reserve();
+                    .get(&resource)
+                    .is_some_and(Option::is_some);
+                if !held {
+                    match hold::ensure(&resource) {
+                        Ok(h) => {
+                            self.builds.holds.insert(resource.clone(), Some(h));
+                            self.set_status(format!("reserving {}", resource));
+                        }
+                        Err(e) => self.set_status(format!("reserve {} failed: {}", resource, e)),
+                    }
                     return Vec::new();
                 }
                 // The broker is a Python process: off the event loop.
-                self.set_status(format!("releasing {}", held.join(", ")));
+                self.set_status(format!("releasing {}", resource));
+                self.builds.holds.insert(resource.clone(), None);
                 std::thread::spawn(move || {
-                    for resource in held {
-                        if let Err(e) = hold::release(&resource) {
-                            log::warn!("builds: release {}: {}", resource, e);
-                        }
+                    if let Err(e) = hold::release(&resource) {
+                        log::warn!("builds: release {}: {}", resource, e);
                     }
                 });
-                for hold in self.builds.holds.values_mut() {
-                    *hold = None;
-                }
             }
             OpenLog => {
-                if let Some(id) = self.builds.selected().map(|b| b.id.clone()) {
-                    self.builds.log = Some(LogView::open(&id));
-                    self.view = View::BuildLog;
+                let Some(name) = self.builds_recipe() else {
+                    return Vec::new();
+                };
+                match self.builds.shown(&name).map(|b| b.id.clone()) {
+                    Some(id) => {
+                        self.builds.log = Some(LogView::open(&id));
+                        self.view = View::BuildLog;
+                    }
+                    None => self.set_status(format!("{}: nothing built yet", name)),
                 }
             }
             CloseLog => {
@@ -455,41 +461,23 @@ impl App {
         Vec::new()
     }
 
-    /// Take every recipe resource the way a first build would: a hold that
-    /// claims now, or queues behind whoever has it.
-    fn builds_reserve(&mut self) {
-        use crate::builds::{hold, recipe};
-        let resources: Vec<String> = recipe::all()
-            .filter_map(|(_, r)| r.resource.clone())
-            .collect();
-        if resources.is_empty() {
-            self.set_status("no recipe names a resource to reserve".into());
-            return;
+    /// The selected recipe card's name, or why there is none.
+    fn builds_recipe(&mut self) -> Option<String> {
+        let name = self.builds.selected_recipe().map(str::to_string);
+        if name.is_none() {
+            self.set_status("no [builds.recipes] in config.toml".into());
         }
-        let mut reserved = Vec::new();
-        for resource in resources {
-            match hold::ensure(&resource) {
-                Ok(h) => {
-                    self.builds.holds.insert(resource.clone(), Some(h));
-                    reserved.push(resource);
-                }
-                Err(e) => {
-                    self.set_status(format!("reserve {} failed: {}", resource, e));
-                    return;
-                }
-            }
-        }
-        self.set_status(format!("reserving {}", reserved.join(", ")));
+        name
     }
 
-    /// Put a started build first and on the cursor, or say why it did not
+    /// Put a started build first on its recipe's card, or say why it did not
     /// start. True when it started.
     fn builds_start(&mut self, started: std::io::Result<crate::builds::Build>) -> bool {
         match started {
             Ok(build) => {
                 self.set_status(format!("queued {} ({})", build.target(), build.recipe));
+                self.builds.select_recipe(&build.recipe);
                 self.builds.builds.insert(0, build);
-                self.builds.selected = 0;
                 true
             }
             Err(e) => {
