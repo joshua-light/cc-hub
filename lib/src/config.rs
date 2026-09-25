@@ -28,6 +28,7 @@ pub struct Config {
     pub ui: UiConfig,
     pub metrics: MetricsConfig,
     pub harness: HarnessConfig,
+    pub builds: BuildsConfig,
     /// Retired with the Projects layer. Accepted and ignored so an old
     /// config keeps loading: `deny_unknown_fields` would otherwise fail the
     /// parse and drop every other setting back to defaults.
@@ -446,6 +447,39 @@ impl Default for HarnessConfig {
             enabled: true,
             show_tab: true,
             refresh_secs: 3,
+        }
+    }
+}
+
+/// The Builds tab (`lib/src/builds/`). It shows once a recipe exists.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BuildsConfig {
+    pub recipes: BTreeMap<String, crate::builds::Recipe>,
+    /// How often the TUI re-reads builds from disk.
+    pub refresh_secs: u64,
+    /// How often it asks each recipe what is built into its player, and the
+    /// broker who holds each recipe's resource. Both cost a process or an
+    /// ssh round trip, so this is slower than the refresh.
+    pub probe_secs: u64,
+}
+
+impl BuildsConfig {
+    pub fn refresh(&self) -> Duration {
+        Duration::from_secs(self.refresh_secs.max(1))
+    }
+
+    pub fn probe(&self) -> Duration {
+        Duration::from_secs(self.probe_secs.max(5))
+    }
+}
+
+impl Default for BuildsConfig {
+    fn default() -> Self {
+        Self {
+            recipes: BTreeMap::new(),
+            refresh_secs: 1,
+            probe_secs: 15,
         }
     }
 }

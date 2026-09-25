@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod builds_view;
 mod command;
 mod harness_view;
 mod metrics_view;
@@ -25,7 +26,10 @@ mod sessions_view;
 mod task_link_picker;
 mod tasks_view;
 
-pub use command::{Command, Effect, GlobalCommand, HarnessCommand, SessionsCommand, TasksCommand};
+pub use builds_view::{BuildForm, BuildsProbe, BuildsSnapshot, BuildsView, FormField, LogView};
+pub use command::{
+    BuildsCommand, Command, Effect, GlobalCommand, HarnessCommand, SessionsCommand, TasksCommand,
+};
 pub use harness_view::{Detail, HarnessView, Section};
 pub use metrics_view::MetricsView;
 pub use render_state::RenderState;
@@ -259,6 +263,10 @@ pub enum View {
     TaskFilter,
     /// Agents tab: runs, artifacts, log and settings of the focused agent.
     AgentDetail,
+    /// Builds tab: the new-build form behind `n`.
+    BuildForm,
+    /// Builds tab: the selected build's output, following its end.
+    BuildLog,
 }
 
 /// Outcome of committing the rename modal, so the command layer knows where
@@ -290,6 +298,7 @@ pub struct GhCreateInput {
 pub enum Tab {
     Tasks,
     Sessions,
+    Builds,
     Agents,
     Metrics,
 }
@@ -299,13 +308,20 @@ impl Tab {
         match self {
             Tab::Tasks => "Tasks",
             Tab::Sessions => "Sessions",
+            Tab::Builds => "Builds",
             Tab::Agents => "Agents",
             Tab::Metrics => "Metrics",
         }
     }
 }
 
-pub const TABS: &[Tab] = &[Tab::Tasks, Tab::Sessions, Tab::Agents, Tab::Metrics];
+pub const TABS: &[Tab] = &[
+    Tab::Tasks,
+    Tab::Sessions,
+    Tab::Builds,
+    Tab::Agents,
+    Tab::Metrics,
+];
 
 /// Tabs shown in the strip and reachable via ⇥, in [`TABS`] order.
 pub fn visible_tabs() -> Vec<Tab> {
@@ -313,8 +329,11 @@ pub fn visible_tabs() -> Vec<Tab> {
         .copied()
         // Agents shows once `~/.cc-hub/agents/` exists (at startup) unless
         // config hides it; `cc-hub agent new` creates the dir.
-        .filter(|t| {
-            *t != Tab::Agents || (config::get().harness.show_tab && crate::harness::root_exists())
+        .filter(|t| match t {
+            Tab::Agents => config::get().harness.show_tab && crate::harness::root_exists(),
+            // Builds shows once a recipe exists to build with.
+            Tab::Builds => !config::get().builds.recipes.is_empty(),
+            _ => true,
         })
         .collect()
 }
@@ -636,6 +655,7 @@ pub struct App {
     pub sessions: SessionsView,
     pub metrics: MetricsView,
     pub harness: HarnessView,
+    pub builds: BuildsView,
     pub tasks: TasksView,
     pub view: View,
     pub detail: Option<SessionDetail>,
@@ -838,6 +858,7 @@ impl App {
             sessions: SessionsView::new(),
             metrics: MetricsView::new(),
             harness: HarnessView::default(),
+            builds: BuildsView::default(),
             tasks: TasksView::new(),
             view: View::Grid,
             detail: None,
@@ -3583,6 +3604,15 @@ impl App {
     /// Replace the Agents-tab snapshot (from the periodic disk scan).
     pub fn update_harness(&mut self, agents: Vec<crate::harness::AgentSnapshot>) {
         self.harness.update(agents);
+    }
+
+    /// Replace the Builds-tab snapshot (from the one-second disk read).
+    pub fn update_builds(&mut self, snapshot: BuildsSnapshot) {
+        self.builds.update(snapshot);
+    }
+
+    pub fn update_builds_probe(&mut self, probe: BuildsProbe) {
+        self.builds.probe = probe;
     }
 
     pub fn log_state_dump(&self) {

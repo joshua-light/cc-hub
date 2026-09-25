@@ -6,12 +6,13 @@
 //!
 //! Argument parsing is hand-rolled to avoid a clap dep. Verbs: `board ...`
 //! (the Tasks board), `open <url>` (a `cc-hub://` deep link; the OS
-//! URL-scheme handler calls it), `agent ...`, `resource ...`, `usage` and
+//! URL-scheme handler calls it), `agent ...`, `build ...`, `resource ...`, `usage` and
 //! `wake`. They emit a single JSON line on stdout describing the result so a
 //! calling agent can parse the outcome programmatically.
 
 mod agent;
 mod board;
+mod build;
 mod help;
 mod link;
 mod resource;
@@ -35,6 +36,7 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
         "resource" => Some(handle(resource::resource(rest))),
         "agent" => Some(handle(agent::agent_subcommand(rest))),
         "board" => Some(handle(board::board_subcommand(rest))),
+        "build" => Some(handle(build::build(rest))),
         "usage" => Some(handle(usage::usage(rest))),
         "wake" => Some(handle(wake::wake(rest))),
         _ => None,

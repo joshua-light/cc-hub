@@ -11,6 +11,7 @@
 /// - `ui/sessions.rs` and `ui/sessions_list.rs` write [`Self::grid_scroll`]
 ///   (keep-selection-visible clamp, one writer per layout);
 ///   `ui/sessions.rs` also clamps [`Self::popup_scroll`].
+/// - `ui/builds.rs` writes [`Self::builds_cols`] and [`Self::builds_scroll`].
 /// - `ui/metrics.rs` writes [`Self::metrics_view_height`],
 ///   [`Self::metrics_row_lines`], and [`Self::metrics_scroll`].
 pub struct RenderState {
@@ -43,6 +44,10 @@ pub struct RenderState {
     /// First visible row of the agent detail's open section, written by
     /// the renderer to keep the cursor on screen.
     pub agent_detail_scroll: usize,
+    /// Builds-tab card columns and scroll (card rows), written by the
+    /// renderer; the cursor moves a row by stepping `builds_cols` cards.
+    pub builds_cols: u16,
+    pub builds_scroll: u16,
 }
 
 impl Default for RenderState {
@@ -57,6 +62,8 @@ impl Default for RenderState {
             task_info_scroll: 0,
             agents_scroll: 0,
             agent_detail_scroll: 0,
+            builds_cols: 1,
+            builds_scroll: 0,
         }
     }
 }

@@ -151,6 +151,47 @@ Opening a link for a card with a live session in that directory delivers the
 prompt to it (`"reused": true`) instead of starting another session. A link
 naming a different directory, or a role, starts a new session.
 
+## Builds
+
+A build is one run of a **recipe**: a command that turns a checkout at a ref
+into something you can serve. Recipes live in `config.toml`, and the hub knows
+nothing about what they build:
+
+```toml
+[builds.recipes.build-server]
+description = "the game server, built on a second machine from a warm cache"
+checkout = "~/src/game"
+resource = "build-box"                    # claimed before the first build
+routes = ["swap", "scripts", "full"]      # none asked for: the recipe picks
+build = ["build-server", "{ref}", "{route}"]
+cancel = ["build-server", "cancel"]
+serve = ["ssh", "-o", "RemoteCommand=none", "buildbox", "~/env/serve"]
+current = ["ssh", "-o", "RemoteCommand=none", "buildbox", "cat ~/build/state/built"]
+```
+
+Each command is an argv run in the build's checkout through a login shell.
+`{ref}`, `{route}` and `{commit}` stand for the build's values, and an argument
+that is only a placeholder with no value is dropped, so `{ref}` with no ref
+builds the working tree. The `build` command reports progress by printing
+`cc-hub: commit <sha>`, `cc-hub: route <name>` and `cc-hub: phase <text>`
+lines; the runner exports `CC_HUB_BUILD`, so a script that also runs by hand
+can stay quiet when nothing is listening. `current` prints the commit the
+player was built from, which puts `● in player` on that build's card.
+
+Each build is `~/.cc-hub/builds/<id>/` (`build.json`, `output.log`) and has a
+runner of its own: a detached `cc-hub build _run <id>` that outlives the TUI.
+A recipe builds one thing at a time, oldest first. A recipe with a `resource`
+claims it through the broker as the guest `Builds`
+([resource management](docs/resource-management.md)), and the claim outlives
+the build: builds come in bursts, and handing the resource back between two
+of them would let a session in between. Space on the tab reserves it before
+any build, to keep the env yours while you set up a test, and releases it
+again; `cc-hub build reserve` and `cc-hub build release` do the same. A cancel runs the recipe's `cancel`, then
+ends the command if it is still running 15 seconds later.
+
+`cc-hub build start [--ref R] [--route R] [--serve] [--wait]` does from a
+script or an agent session what `n` does on the tab; see `cc-hub help build`.
+
 ## Requirements
 
 | | Linux / macOS | Windows |
@@ -500,6 +541,26 @@ the plan, so the plan-first workflow works with one fewer column.
 | `m` | Jump to Metrics tab |
 | `q` | Quit |
 | `F1` (in embedded pane) | Close the pane, return to grid |
+
+### Builds tab
+
+Shown once `[builds.recipes]` has a recipe. A line per recipe says what the
+tab holds (`holding build-box · 12m`, or who it waits behind) and which commit
+the player runs. A card per build, newest first, carries the target, commit
+and subject on its border; the route and time, measured against the median of
+that route's last ten successes while it runs; the phase it reported, or why
+it failed; and `● in player` on the build the player came from.
+
+| Key | Action |
+|---|---|
+| `h` / `j` / `k` / `l` (or arrows) | Move between cards |
+| `n` | New build: recipe, checkout, ref (empty: working tree), route, serve. Seeded from the selected card |
+| `r` | The selected build again (a working-tree build takes the tree as it is now) |
+| `c` | Cancel it |
+| `b` | Serve it; only the build in the player can be served |
+| `f` / `Enter` | Its output, following the end (`G` follows again after scrolling) |
+| `x` | Delete a finished build |
+| `Space` | Reserve the recipes' resources, or release them when the tab holds or waits for any |
 
 ### Agents tab
 
