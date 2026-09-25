@@ -74,8 +74,6 @@ pub fn build_args(
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
-        "--max-budget-usd".into(),
-        spec.run.max_budget_usd.to_string(),
     ];
     if !spec.run.mcp {
         // Don't inherit ambient MCP servers.
@@ -92,6 +90,10 @@ pub fn build_args(
     if let Some(r) = resume {
         argv.push("--resume".into());
         argv.push(r.into());
+    }
+    if let Some(usd) = spec.run.max_budget_usd {
+        argv.push("--max-budget-usd".into());
+        argv.push(usd.to_string());
     }
     if let Some(n) = spec.run.max_turns {
         argv.push("--max-turns".into());
@@ -459,16 +461,23 @@ mod tests {
     #[test]
     fn args_pin_the_cli_contract() {
         let s = spec_with(
-            "[run]\ntools=[\"Read\",\"Bash(git *)\"]\nmax_turns=7\nmodel=\"sonnet\"\n[prompt]\ninstruction=\"go\"",
+            "[run]\ntools=[\"Read\",\"Bash(git *)\"]\nmax_turns=7\nmax_budget_usd=0.5\nmodel=\"sonnet\"\n[prompt]\ninstruction=\"go\"",
         );
         let args = build_args(&s, "hello", Some("sid"), Path::new("/p/sys.txt"));
         let joined = args.join(" ");
-        assert!(joined.starts_with("-p hello --system-prompt-file /p/sys.txt --autocompact 100000 --permission-mode dontAsk --setting-sources  --output-format stream-json --verbose --max-budget-usd 1 --strict-mcp-config"));
+        assert!(joined.starts_with("-p hello --system-prompt-file /p/sys.txt --autocompact 100000 --permission-mode dontAsk --setting-sources  --output-format stream-json --verbose --strict-mcp-config"));
         assert!(joined.contains("--allowed-tools Read Bash(git *)"));
         assert!(joined.contains("--disallowed-tools"));
         assert!(joined.contains(" Write "));
         assert!(!joined.contains(" Read Write"), "Read must not be denied");
-        assert!(joined.ends_with("--resume sid --max-turns 7 --model sonnet"));
+        assert!(joined.ends_with("--resume sid --max-budget-usd 0.5 --max-turns 7 --model sonnet"));
+    }
+
+    #[test]
+    fn no_budget_means_no_budget_flag() {
+        let s = spec_with("[prompt]\ninstruction=\"go\"");
+        let args = build_args(&s, "hello", None, Path::new("/p/sys.txt"));
+        assert!(!args.iter().any(|a| a == "--max-budget-usd"));
     }
 
     #[test]

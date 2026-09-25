@@ -107,7 +107,7 @@ pub struct RunCfg {
     pub window_pct: u8,
     pub max_turns: Option<u32>,
     /// Cap for one tick.
-    pub max_budget_usd: f64,
+    pub max_budget_usd: Option<f64>,
     /// Halts the agent for the rest of the day once reached.
     pub daily_budget_usd: Option<f64>,
     /// Halts the agent for good once reached.
@@ -138,7 +138,7 @@ impl Default for RunCfg {
             effort: None,
             window_pct: 32,
             max_turns: None,
-            max_budget_usd: 1.0,
+            max_budget_usd: None,
             daily_budget_usd: None,
             budget_usd_total: None,
             persistent_session: false,

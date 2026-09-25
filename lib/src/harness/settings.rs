@@ -80,7 +80,7 @@ impl Setting {
             Setting::Effort => "Enter cycles low → medium → high → xhigh → max → default.",
             Setting::Interval => "How often it polls or fires. Type 90s, 5m or 2h.",
             Setting::MaxTurns => "Caps tool round-trips per run. Type a number; empty means no limit.",
-            Setting::RunBudget => "A run stops once it has spent this much. Type dollars, like 0.50.",
+            Setting::RunBudget => "A run stops once it has spent this much. Type dollars, like 0.50; empty means no limit.",
             Setting::DailyBudget => "Reaching it halts the agent until tomorrow (UTC). Empty means no limit.",
             Setting::TotalBudget => "Reaching it halts the agent for good. Empty means no limit.",
             Setting::Window => "Context before autocompact kicks in. Type a size like 32k, up to 100k; bigger costs more per turn.",
@@ -144,7 +144,7 @@ impl Setting {
                 .max_turns
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "no limit".into()),
-            Setting::RunBudget => money(Some(run.max_budget_usd)),
+            Setting::RunBudget => money(run.max_budget_usd),
             Setting::DailyBudget => money(run.daily_budget_usd),
             Setting::TotalBudget => money(run.budget_usd_total),
             Setting::Window => format!("~{}k tokens", spec.approx_window_tokens() / 1000),
@@ -172,7 +172,7 @@ impl Setting {
             Setting::Effort => run.effort.clone().unwrap_or_default(),
             Setting::Interval => fmt_secs(spec.trigger.interval_s),
             Setting::MaxTurns => run.max_turns.map(|n| n.to_string()).unwrap_or_default(),
-            Setting::RunBudget => run.max_budget_usd.to_string(),
+            Setting::RunBudget => opt_money(run.max_budget_usd),
             Setting::DailyBudget => opt_money(run.daily_budget_usd),
             Setting::TotalBudget => opt_money(run.budget_usd_total),
             Setting::Window => format!("{}k", run.window_pct),
@@ -244,9 +244,10 @@ impl Setting {
                 Ok(n) if n > 0 => Ok(Some((n as i64).into())),
                 _ => Err("max turns: a whole number above 0, or empty for no limit".into()),
             },
-            Setting::RunBudget => parse_money(s).map(|v| Some(v.into())),
-            Setting::DailyBudget | Setting::TotalBudget if cleared => Ok(None),
-            Setting::DailyBudget | Setting::TotalBudget => parse_money(s).map(|v| Some(v.into())),
+            Setting::RunBudget | Setting::DailyBudget | Setting::TotalBudget if cleared => Ok(None),
+            Setting::RunBudget | Setting::DailyBudget | Setting::TotalBudget => {
+                parse_money(s).map(|v| Some(v.into()))
+            }
             Setting::Window => {
                 let n = s.trim_end_matches(['k', 'K']).trim();
                 match n.parse::<u64>() {
