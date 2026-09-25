@@ -15,7 +15,6 @@ pub(super) fn map_builds_command(app: &App, key: &KeyEvent, on_builds: bool) -> 
         (View::Grid, KeyCode::Char('r')) => B::Rebuild,
         (View::Grid, KeyCode::Char('c')) => B::Cancel,
         (View::Grid, KeyCode::Char('b')) => B::Serve,
-        (View::Grid, KeyCode::Char('x')) => B::Delete,
         (View::Grid, KeyCode::Char(' ')) => B::ToggleHold,
         (View::Grid, KeyCode::Enter | KeyCode::Char('f')) => B::OpenLog,
 

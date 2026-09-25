@@ -544,23 +544,26 @@ the plan, so the plan-first workflow works with one fewer column.
 
 ### Builds tab
 
-Shown once `[builds.recipes]` has a recipe. A line per recipe says what the
-tab holds (`holding build-box · 12m`, or who it waits behind) and which commit
-the player runs. A card per build, newest first, carries the target, commit
-and subject on its border; the route and time, measured against the median of
-that route's last ten successes while it runs; the phase it reported, or why
-it failed; and `● in player` on the build the player came from.
+Shown once `[builds.recipes]` has a recipe. A card per recipe — its builds
+are its history, not cards. The border carries the recipe and the state of
+its build, and its description; inside, the resource the tab holds for it
+(`holding build-box · 12m`, or who it waits behind), which commit its player
+runs and when it was served, and then the build that matters now: the one
+running, else the next to run, else the last one that ran. That build shows
+its target, commit and subject, its route and time (measured against the
+median of the route's last ten successes while it runs), and its phase or
+why it failed; below it, `+N queued`, or after a failure the last build that
+worked. A recipe keeps its last twenty finished builds.
 
 | Key | Action |
 |---|---|
-| `h` / `j` / `k` / `l` (or arrows) | Move between cards |
-| `n` | New build: recipe, checkout, ref (empty: working tree), route, serve. Seeded from the selected card |
-| `r` | Build the selected card's checkout as it is now: its working tree, the route the recipe picks, the card's serve. On an empty tab, the recipe's checkout. A pinned ref or route is `n` |
-| `c` | Cancel it |
-| `b` | Serve it; only the build in the player can be served |
-| `f` / `Enter` | Its output, following the end (`G` follows again after scrolling) |
-| `x` | Delete a finished build |
-| `Space` | Reserve the recipes' resources, or release them when the tab holds or waits for any |
+| `h` / `j` / `k` / `l` (or arrows) | Move between recipes |
+| `r` | Build the recipe's checkout as it is now: its working tree, the route the recipe picks, the last build's serve. A pinned ref or route is `n` |
+| `n` | New build of the recipe: checkout, ref (empty: working tree), route, serve. Seeded from its last build |
+| `c` | Cancel the recipe's running and queued builds |
+| `b` | Serve the build in the recipe's player |
+| `f` / `Enter` | The output of the build the card shows, following the end (`G` follows again after scrolling) |
+| `Space` | Reserve the recipe's resource, or release it when the tab holds or waits for it |
 
 ### Agents tab
 

@@ -331,7 +331,7 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 _ => "done ",
             }),
             (View::Grid, Tab::Sessions) => Some("ack "),
-            (View::Grid, Tab::Builds) => Some(builds::space_verb(app)),
+            (View::Grid, Tab::Builds) => builds::space_verb(app),
             _ => None,
         };
         if let Some(verb) = space_verb {

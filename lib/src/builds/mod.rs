@@ -321,12 +321,21 @@ fn reap(build: Build) -> Build {
     .unwrap_or(build)
 }
 
-pub fn delete(id: &str) -> io::Result<()> {
-    let build = load(id)?;
-    if !build.status.is_finished() {
-        return Err(io::Error::other("cancel it first; it has not finished"));
+/// How many finished builds a recipe keeps: its history, which is what the
+/// route timings are measured from. Older ones are removed as new ones start.
+const KEPT: usize = 20;
+
+/// Remove the finished builds of `recipe` beyond the newest [`KEPT`].
+fn prune(recipe: &str) {
+    let old = all()
+        .into_iter()
+        .filter(|b| b.recipe == recipe && b.status.is_finished())
+        .skip(KEPT);
+    for build in old {
+        if let Err(e) = build_dir(&build.id).and_then(fs::remove_dir_all) {
+            log::warn!("builds: prune {}: {}", build.id, e);
+        }
     }
-    fs::remove_dir_all(build_dir(id)?)
 }
 
 /// The usual running time of a route: the median of its last ten successful
@@ -363,6 +372,7 @@ pub fn start(build: Build) -> io::Result<Build> {
         }
     }
     create(&build)?;
+    prune(&build.recipe);
     if let Err(e) = detach(&["build", "_run", &build.id]) {
         update(&build.id, |b| {
             b.finish(BuildStatus::Failed, Some(format!("runner: {}", e)))
@@ -497,6 +507,30 @@ mod tests {
         assert_eq!((again.r#ref, again.route), (None, None));
         assert_eq!((again.cwd.as_str(), again.serve), ("/repo", true));
         assert_ne!(again.id, pinned.id);
+    }
+
+    #[test]
+    fn a_recipe_keeps_its_newest_finished_builds() {
+        with_temp_home(|| {
+            let mut ids = Vec::new();
+            for n in 0..KEPT + 3 {
+                let mut b = Build::new("build-server", "/tmp", None, None, false);
+                b.id = format!("bd-{:04}", n);
+                b.status = BuildStatus::Succeeded;
+                create(&b).unwrap();
+                ids.push(b.id);
+            }
+            let mut other = Build::new("other", "/tmp", None, None, false);
+            other.id = "bd-0000-other".into();
+            other.status = BuildStatus::Failed;
+            create(&other).unwrap();
+
+            prune("build-server");
+            let left: Vec<String> = all().into_iter().map(|b| b.id).collect();
+            assert_eq!(left.len(), KEPT + 1);
+            assert!(!left.contains(&ids[0]) && !left.contains(&ids[2]));
+            assert!(left.contains(&ids[3]) && left.contains(&other.id));
+        });
     }
 
     #[test]
