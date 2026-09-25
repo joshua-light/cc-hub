@@ -6,6 +6,7 @@
 
 pub mod agents;
 pub mod artifacts;
+pub mod builds;
 pub mod common;
 pub mod metrics;
 pub mod palette;
@@ -69,6 +70,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     match app.current_tab {
         Tab::Tasks => tasks::render_tasks_body(frame, chunks[2], app),
         Tab::Sessions => sessions::render_sessions_body(frame, chunks[2], app),
+        Tab::Builds => builds::render_builds_body(frame, chunks[2], app),
         Tab::Agents => agents::render_agents_body(frame, chunks[2], app),
         Tab::Metrics => metrics::render_metrics_body(frame, chunks[2], app),
     }
@@ -99,6 +101,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         // above), so filter-editing needs no overlay.
         View::TaskFilter => {}
         View::AgentDetail => agents::render_agent_detail(frame, frame.area(), app),
+        View::BuildForm => builds::render_build_form(frame, frame.area(), app),
+        View::BuildLog => builds::render_build_log(frame, frame.area(), app),
         View::Grid => {}
     }
 }
@@ -259,8 +263,10 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 Tab::Sessions => "enter/f:focus/resume  /:find any  n:new  R:respawn  A:default agent  N:new+model  p:new in…  i:info  r:rename  L:link task  o:shell  M:bookmarks  h/j/k/l:nav  v:layout  x:close  H:inactive  tab:next  q:quit",
                 Tab::Metrics => "enter:view transcript  j/k:select  r:refresh  tab:next  q:quit",
                 Tab::Agents => agents::hints(app),
+                Tab::Builds => builds::hints(app),
             },
             View::AgentDetail => agents::hints(app),
+            View::BuildForm | View::BuildLog => builds::hints(app),
             View::Popup => "j/k:scroll  esc:close  q:close",
             View::LiveTail => "j/k:scroll  G:bottom  esc:close",
             View::ConfirmClose => "y:confirm  n/esc:cancel",
@@ -325,6 +331,7 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 _ => "done ",
             }),
             (View::Grid, Tab::Sessions) => Some("ack "),
+            (View::Grid, Tab::Builds) => Some(builds::space_verb(app)),
             _ => None,
         };
         if let Some(verb) = space_verb {

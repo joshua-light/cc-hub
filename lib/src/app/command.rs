@@ -26,6 +26,47 @@ pub enum Command {
     Sessions(SessionsCommand),
     Tasks(TasksCommand),
     Harness(HarnessCommand),
+    Builds(BuildsCommand),
+}
+
+/// Builds-tab commands (`lib/src/builds/`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildsCommand {
+    NavUp,
+    NavDown,
+    NavLeft,
+    NavRight,
+    /// `n` — the new-build form, seeded from the selected card.
+    OpenForm,
+    /// Tab / Shift-Tab and ↓/↑ in the form: the next field.
+    FormNext,
+    FormPrev,
+    /// ←/→ on a stepped field: its previous or next value.
+    FormLeft,
+    FormRight,
+    FormChar(char),
+    FormBackspace,
+    FormSubmit,
+    FormCancel,
+    /// `r` — the selected build again.
+    Rebuild,
+    /// `c` — cancel the selected build.
+    Cancel,
+    /// `b` — serve the selected build, if it is the one in the player.
+    Serve,
+    /// `x` — delete the selected build once it has finished.
+    Delete,
+    /// Space — reserve the recipes' resources when the tab holds none of
+    /// them, let go of them when it holds or waits for any.
+    ToggleHold,
+    /// Enter/`f` — the selected build's output.
+    OpenLog,
+    CloseLog,
+    LogUp,
+    LogDown,
+    LogPageUp,
+    LogPageDown,
+    LogEnd,
 }
 
 /// Agents-tab commands (persistent agents, `lib/src/harness/`).
@@ -217,6 +258,11 @@ pub enum Effect {
     OpenExternal { target: String },
 }
 
+/// The first eleven characters of a commit, as `git log --oneline` shows it.
+pub(crate) fn short_commit(commit: Option<&str>) -> Option<&str> {
+    commit.map(|c| &c[..c.len().min(11)])
+}
+
 impl App {
     /// Execute a user command: apply every in-process consequence and return
     /// the effects bin must interpret. Status messaging happens here so the
@@ -227,6 +273,220 @@ impl App {
             Command::Sessions(c) => self.execute_sessions(c),
             Command::Tasks(c) => self.execute_tasks(c),
             Command::Harness(c) => self.execute_harness(c),
+            Command::Builds(c) => self.execute_builds(c),
+        }
+    }
+
+    fn execute_builds(&mut self, cmd: BuildsCommand) -> Vec<Effect> {
+        use super::{BuildForm, LogView, View};
+        use crate::builds::{self, hold, recipe, BuildStatus};
+        use BuildsCommand::*;
+        let cols = self.render.builds_cols.max(1) as isize;
+        match cmd {
+            NavLeft => self.builds.nav(-1),
+            NavRight => self.builds.nav(1),
+            NavUp => self.builds.nav(-cols),
+            NavDown => self.builds.nav(cols),
+            OpenForm => {
+                let like = self.builds.selected();
+                let Some(name) = like
+                    .map(|b| b.recipe.clone())
+                    .filter(|r| recipe::named(r).is_some())
+                    .or_else(|| recipe::all().next().map(|(n, _)| n.to_string()))
+                else {
+                    self.set_status("no [builds.recipes] in config.toml".into());
+                    return Vec::new();
+                };
+                self.builds.form = Some(BuildForm::new(&name, like));
+                self.view = View::BuildForm;
+            }
+            FormNext | FormPrev | FormLeft | FormRight | FormChar(_) | FormBackspace => {
+                let Some(form) = self.builds.form.as_mut() else {
+                    return Vec::new();
+                };
+                match cmd {
+                    FormNext => form.step_field(1),
+                    FormPrev => form.step_field(-1),
+                    FormLeft => form.step_value(-1),
+                    FormRight => form.step_value(1),
+                    FormChar(c) => match form.text_mut() {
+                        Some(text) => text.push(c),
+                        None if c == ' ' => form.step_value(1),
+                        None => {}
+                    },
+                    FormBackspace => {
+                        if let Some(text) = form.text_mut() {
+                            text.pop();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            FormCancel => {
+                self.builds.form = None;
+                self.view = View::Grid;
+            }
+            FormSubmit => {
+                let Some(build) = self.builds.form.as_ref().map(|f| f.to_build()) else {
+                    return Vec::new();
+                };
+                if build.cwd.is_empty() {
+                    self.set_status("a build needs a checkout".into());
+                    return Vec::new();
+                }
+                // A refused build keeps the form open, so it can be fixed.
+                if self.builds_start(builds::start(build)) {
+                    self.builds.form = None;
+                    self.view = View::Grid;
+                }
+            }
+            Rebuild => {
+                if let Some(id) = self.builds.selected().map(|b| b.id.clone()) {
+                    self.builds_start(builds::rebuild(&id));
+                }
+            }
+            Cancel => {
+                let Some(b) = self.builds.selected() else {
+                    return Vec::new();
+                };
+                let (id, target, status) = (b.id.clone(), b.target().to_string(), b.status);
+                let msg = if status.is_finished() {
+                    format!("{}: already {}", target, status.label())
+                } else {
+                    match builds::cancel(&id) {
+                        Ok(_) if status == BuildStatus::Queued => format!("{}: cancelled", target),
+                        Ok(_) => format!("{}: cancelling", target),
+                        Err(e) => format!("cancel failed: {}", e),
+                    }
+                };
+                self.set_status(msg);
+            }
+            Serve => {
+                let Some(b) = self.builds.selected() else {
+                    return Vec::new();
+                };
+                let knows_current = recipe::named(&b.recipe).is_some_and(|r| !r.current.is_empty());
+                let label = short_commit(b.commit.as_deref())
+                    .unwrap_or(b.target())
+                    .to_string();
+                let msg = if b.status != BuildStatus::Succeeded {
+                    format!("{}: only a build that succeeded is served", label)
+                } else if knows_current && !self.builds.in_player(b) {
+                    format!("{}: not in the player any more; r rebuilds it", label)
+                } else {
+                    match builds::serve(&b.id) {
+                        Ok(()) => format!("serving {}", label),
+                        Err(e) => format!("serve failed: {}", e),
+                    }
+                };
+                self.set_status(msg);
+            }
+            Delete => {
+                let Some(b) = self.builds.selected() else {
+                    return Vec::new();
+                };
+                let (id, target) = (b.id.clone(), b.target().to_string());
+                let msg = match builds::delete(&id) {
+                    Ok(()) => {
+                        self.builds.builds.retain(|b| b.id != id);
+                        self.builds.nav(0);
+                        format!("deleted {}", target)
+                    }
+                    Err(e) => format!("{}: {}", target, e),
+                };
+                self.set_status(msg);
+            }
+            ToggleHold => {
+                let held: Vec<String> = self
+                    .builds
+                    .holds
+                    .iter()
+                    .filter(|(_, h)| h.is_some())
+                    .map(|(r, _)| r.clone())
+                    .collect();
+                if held.is_empty() {
+                    self.builds_reserve();
+                    return Vec::new();
+                }
+                // The broker is a Python process: off the event loop.
+                self.set_status(format!("releasing {}", held.join(", ")));
+                std::thread::spawn(move || {
+                    for resource in held {
+                        if let Err(e) = hold::release(&resource) {
+                            log::warn!("builds: release {}: {}", resource, e);
+                        }
+                    }
+                });
+                for hold in self.builds.holds.values_mut() {
+                    *hold = None;
+                }
+            }
+            OpenLog => {
+                if let Some(id) = self.builds.selected().map(|b| b.id.clone()) {
+                    self.builds.log = Some(LogView::open(&id));
+                    self.view = View::BuildLog;
+                }
+            }
+            CloseLog => {
+                self.builds.log = None;
+                self.view = View::Grid;
+            }
+            LogUp | LogDown | LogPageUp | LogPageDown | LogEnd => {
+                if let Some(log) = self.builds.log.as_mut() {
+                    match cmd {
+                        LogUp => log.scroll(-1),
+                        LogDown => log.scroll(1),
+                        LogPageUp => log.scroll(-20),
+                        LogPageDown => log.scroll(20),
+                        _ => log.back = 0,
+                    }
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    /// Take every recipe resource the way a first build would: a hold that
+    /// claims now, or queues behind whoever has it.
+    fn builds_reserve(&mut self) {
+        use crate::builds::{hold, recipe};
+        let resources: Vec<String> = recipe::all()
+            .filter_map(|(_, r)| r.resource.clone())
+            .collect();
+        if resources.is_empty() {
+            self.set_status("no recipe names a resource to reserve".into());
+            return;
+        }
+        let mut reserved = Vec::new();
+        for resource in resources {
+            match hold::ensure(&resource) {
+                Ok(h) => {
+                    self.builds.holds.insert(resource.clone(), Some(h));
+                    reserved.push(resource);
+                }
+                Err(e) => {
+                    self.set_status(format!("reserve {} failed: {}", resource, e));
+                    return;
+                }
+            }
+        }
+        self.set_status(format!("reserving {}", reserved.join(", ")));
+    }
+
+    /// Put a started build first and on the cursor, or say why it did not
+    /// start. True when it started.
+    fn builds_start(&mut self, started: std::io::Result<crate::builds::Build>) -> bool {
+        match started {
+            Ok(build) => {
+                self.set_status(format!("queued {} ({})", build.target(), build.recipe));
+                self.builds.builds.insert(0, build);
+                self.builds.selected = 0;
+                true
+            }
+            Err(e) => {
+                self.set_status(format!("build refused: {}", e));
+                false
+            }
         }
     }
 

@@ -15,6 +15,7 @@ use cc_hub_lib::{focus, live_view, models, platform};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 
+mod builds;
 mod harness;
 mod tasks;
 
@@ -38,11 +39,15 @@ pub(super) fn map_command(
     on_sessions: bool,
     on_tasks: bool,
     on_agents: bool,
+    on_builds: bool,
 ) -> Option<Command> {
     if let Some(cmd) = tasks::map_tasks_command(app, key, on_tasks) {
         return Some(cmd);
     }
     if let Some(cmd) = harness::map_harness_command(app, key, on_agents) {
+        return Some(cmd);
+    }
+    if let Some(cmd) = builds::map_builds_command(app, key, on_builds) {
         return Some(cmd);
     }
     map_sessions_command(app, key, on_sessions)
@@ -144,8 +149,9 @@ pub(crate) async fn handle_key(
     on_metrics: bool,
     on_tasks: bool,
     on_agents: bool,
+    on_builds: bool,
 ) -> KeyOutcome {
-    if let Some(cmd) = map_command(app, &key, on_sessions, on_tasks, on_agents) {
+    if let Some(cmd) = map_command(app, &key, on_sessions, on_tasks, on_agents, on_builds) {
         for effect in app.execute(cmd) {
             crate::effects::apply_effect(
                 app,

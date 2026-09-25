@@ -12,7 +12,7 @@ cc-hub is a single Cargo workspace with two crates:
 Cargo.toml          # workspace root; pins ratatui/crossterm/tokio/chrono
 bin/                # cc-hub binary — TUI driver + CLI subcommands
   src/main.rs       # tokio runtime, terminal setup, scan/event loop
-  src/cli/          # `cc-hub board | open | agent | resource | usage | wake`
+  src/cli/          # `cc-hub board | build | open | agent | resource | usage | wake`
 lib/                # cc-hub-lib — everything else, behind a stable API
   src/lib.rs        # module wiring
   src/*.rs          # state, scanners, UI, platform, agents, task store…
@@ -134,6 +134,18 @@ overwriting or resetting state.
   renders, and `tick_once` (shared with `cc-hub agent once`).
   Not to be confused with `agent.rs`, the backend registry.
 
+### Builds
+
+- **`builds/`** — the Builds tab's domain. `mod.rs` is the store
+  (`~/.cc-hub/builds/<id>/build.json` + `output.log`, locked updates, and
+  `all()`, which fails a build whose runner died) plus the asks: `start`,
+  `rebuild`, `cancel` (a flag), `serve`. `recipe.rs` reads
+  `[builds.recipes]` and expands its argv templates. `runner.rs` is
+  `cc-hub build _run`: the only code that moves a build forward. `hold.rs` is
+  the resource claim that outlives builds: a detached `cc-hub build _hold`
+  that claims as the broker guest `Builds` and lives until released.
+  `app/builds_view.rs` holds the tab's state, `ui/builds.rs` draws it.
+
 ### Spawning + dispatching
 
 - **`agent.rs`** — `AgentKind` (`Claude | Pi`) and `AgentConfig` (resolved
@@ -200,6 +212,7 @@ render one JSON line so a calling agent can parse the outcome. `cc-hub help
 |---|---|---|
 | Compiled config | `~/.cc-hub/config.toml` | `lib/src/config.rs` (loads once, deny-unknown) |
 | Per-task state | `~/.cc-hub/tasks/<tid>/state.json` (+ `board.json`, `tasks-archive-v2.json`) | `task_store`, `tasks::PersonalBoard` |
+| Builds, their output and holds | `~/.cc-hub/builds/<id>/{build.json,output.log}`, `~/.cc-hub/builds/holds/<resource>.json` | `lib/src/builds/` |
 | Persistent agent spec / state | `~/.cc-hub/agents/<name>/{agent.toml,state.json,notes.jsonl,inbox/,log/,work/}` | `lib/src/harness/` (`state.lock` guards `state.json`) |
 | Pi bridge heartbeats | `~/.cc-hub/pi-heartbeats/<sid>.json` | `lib/src/pi_bridge.rs` |
 | Claude sessions | `~/.claude/sessions/*.json` | (Claude Code, read-only) |

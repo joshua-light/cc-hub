@@ -153,7 +153,14 @@ mod tests {
                 c
             );
             assert!(matches!(
-                map_command(&app, &KeyEvent::from(KeyCode::Char(c)), false, true, false),
+                map_command(
+                    &app,
+                    &KeyEvent::from(KeyCode::Char(c)),
+                    false,
+                    true,
+                    false,
+                    false
+                ),
                 Some(Command::Global(GlobalCommand::CycleTab { .. }))
             ));
         }
