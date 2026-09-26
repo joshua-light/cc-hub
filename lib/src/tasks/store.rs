@@ -11,8 +11,10 @@ use crate::platform::paths::cc_hub_home;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub use super::status::{validate_status_transition, TaskPriority, TaskStatus};
 
 /// Root of the task store: `~/.cc-hub/tasks/`.
 pub fn tasks_dir() -> Option<PathBuf> {
@@ -23,11 +25,11 @@ pub fn task_dir(task_id: &str) -> Option<PathBuf> {
     tasks_dir().map(|d| d.join(task_id))
 }
 
-pub fn task_state_file(task_id: &str) -> Option<PathBuf> {
+fn task_state_file(task_id: &str) -> Option<PathBuf> {
     task_dir(task_id).map(|d| d.join("state.json"))
 }
 
-pub fn new_task_id() -> String {
+fn new_task_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -47,94 +49,6 @@ pub fn now_unix_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
-}
-
-/// A card's column. Backlog ("To-Do") → Planning → Running ("In Progress")
-/// → Review → Done; see [`validate_status_transition`] for every legal edge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TaskStatus {
-    Backlog,
-    /// An agent was assigned and told to present a plan first; the card
-    /// waits for the user to approve it (Space → Running).
-    Planning,
-    Running,
-    /// The card's session wrote a `PR:` note, which carries the card here
-    /// (see [`crate::ops::task::task_artifact_add_text`]) — so the board
-    /// separates a card that wants a review from one that wants an answer.
-    Review,
-    Done,
-}
-
-impl TaskStatus {
-    /// Lowercase wire name. Must match `#[serde(rename_all = "lowercase")]`
-    /// above so JSON round-trips agree.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            TaskStatus::Backlog => "backlog",
-            TaskStatus::Planning => "planning",
-            TaskStatus::Running => "running",
-            TaskStatus::Review => "review",
-            TaskStatus::Done => "done",
-        }
-    }
-
-    /// Human label as shown on the Tasks-board columns ("To-Do",
-    /// "In Progress", …). Distinct from [`Self::as_str`], the wire name.
-    pub fn board_label(&self) -> &'static str {
-        match self {
-            TaskStatus::Backlog => "To-Do",
-            TaskStatus::Planning => "Planning",
-            TaskStatus::Running => "In Progress",
-            TaskStatus::Review => "Review",
-            TaskStatus::Done => "Done",
-        }
-    }
-}
-
-impl std::str::FromStr for TaskStatus {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "backlog" => Ok(TaskStatus::Backlog),
-            "planning" => Ok(TaskStatus::Planning),
-            "running" => Ok(TaskStatus::Running),
-            "review" => Ok(TaskStatus::Review),
-            "done" => Ok(TaskStatus::Done),
-            _ => Err(()),
-        }
-    }
-}
-
-/// Task priority (P1 highest … P4 lowest). Variants are declared in
-/// ascending order (`P1 < P2 < P3 < P4`) so a plain ascending sort puts the
-/// most urgent first. `P3` (the default) is skipped during serialization.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskPriority {
-    P1,
-    P2,
-    #[default]
-    P3,
-    P4,
-}
-
-impl TaskPriority {
-    /// True for the priority new tasks get; used by `skip_serializing_if`.
-    pub fn is_default(&self) -> bool {
-        *self == TaskPriority::default()
-    }
-
-    /// Short badge label shown on the card (`P1`–`P4`).
-    pub fn label(self) -> &'static str {
-        match self {
-            TaskPriority::P1 => "P1",
-            TaskPriority::P2 => "P2",
-            TaskPriority::P3 => "P3",
-            TaskPriority::P4 => "P4",
-        }
-    }
 }
 
 /// A note or file attached to a card — pasted text, a screenshot, a URL.
@@ -263,20 +177,9 @@ pub fn read_task_state(task_id: &str) -> io::Result<TaskState> {
 /// dirs on demand.
 pub fn write_task_state(state: &TaskState) -> io::Result<()> {
     let path = task_state_file(&state.task_id).ok_or_else(|| io::Error::other("no home dir"))?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let body = serde_json::to_string_pretty(state)
         .map_err(|e| io::Error::other(format!("serialize state: {}", e)))?;
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    {
-        use std::io::Write;
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(body.as_bytes())?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, &path)?;
-    Ok(())
+    crate::persist::write_atomic(&path, body.as_bytes())
 }
 
 /// Take the per-task exclusive advisory lock that serializes every
@@ -286,115 +189,43 @@ pub fn write_task_state(state: &TaskState) -> io::Result<()> {
 /// directly. Returns `None` when the task directory doesn't exist yet:
 /// there's nothing to protect, and the caller's read will surface
 /// `NotFound` with its usual error.
-pub(crate) fn lock_task_state(task_id: &str) -> io::Result<Option<fs::File>> {
-    use fs2::FileExt;
+fn lock_task_state(task_id: &str) -> io::Result<Option<fs::File>> {
     let Some(dir) = task_dir(task_id) else {
         return Ok(None);
     };
     if !dir.exists() {
         return Ok(None);
     }
+    lock_exclusive(&dir.join("state.lock")).map(Some)
+}
+
+/// Open (creating it, never truncating) the sidecar lock file at `path` and
+/// block until this process holds its exclusive advisory lock. The lock is
+/// released when the returned file drops.
+pub(super) fn lock_exclusive(path: &Path) -> io::Result<fs::File> {
+    use fs2::FileExt;
     let f = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(dir.join("state.lock"))?;
+        .open(path)?;
     f.lock_exclusive()?;
-    Ok(Some(f))
-}
-
-/// Single source of truth for legal task-status transitions. Enforced
-/// centrally by [`update_task`], so no CLI verb or TUI keybind can invent an
-/// edge the board doesn't have. Self-transitions are always allowed.
-///
-/// | from → to           | produced by                                         |
-/// |---------------------|-----------------------------------------------------|
-/// | Backlog ↔ Running   | manual move                                         |
-/// | Backlog ↔ Planning  | assign (`s`/`S`) / manual move back                 |
-/// | Running → Planning  | re-assign a stalled In-Progress card                |
-/// | Done → Planning     | re-assign a finished card (reopen with agent)       |
-/// | Planning → Running  | plan approved (Space), manual move                  |
-/// | Running → Done      | finish                                              |
-/// | Backlog → Done      | Space checks off a To-Do card directly              |
-/// | Planning → Done     | finish an assigned card without approving the plan  |
-/// | Done → Backlog      | reopen (Space on a Done card)                       |
-/// | Done → Running      | manual move off Done                                |
-/// | Running → Review    | a `PR:` note                                        |
-/// | Planning → Review   | a `PR:` note from a card still in the plan gate     |
-/// | Review  → Running   | manual move                                         |
-/// | Review  → Planning  | re-assign a card whose PR needs another round       |
-/// | Review  → Done      | finish                                              |
-/// | Done → Review       | manual move off Done                                |
-pub fn validate_status_transition(from: &TaskStatus, to: &TaskStatus) -> Result<(), String> {
-    use TaskStatus::*;
-    let legal = from == to
-        || matches!(
-            (from, to),
-            (Backlog, Running)
-                | (Running, Backlog)
-                | (Running, Done)
-                | (Backlog, Planning)
-                | (Planning, Backlog)
-                | (Planning, Running)
-                // Re-assigning a stalled or finished card spawns a fresh
-                // planning agent: any column can (re-)enter Planning.
-                | (Running, Planning)
-                | (Done, Planning)
-                // Space checks off a card regardless of phase: a To-Do
-                // that never started, or a Planning card whose agent the
-                // user abandoned.
-                | (Backlog, Done)
-                | (Planning, Done)
-                | (Done, Backlog)
-                | (Done, Running)
-                // The review gate: a `PR:` note carries the card here,
-                // and it leaves either finished or back into another
-                // round of work.
-                | (Running, Review)
-                | (Planning, Review)
-                | (Review, Running)
-                | (Review, Planning)
-                | (Review, Done)
-                | (Done, Review)
-        );
-    if legal {
-        Ok(())
-    } else {
-        Err(format!(
-            "illegal task status transition {:?} → {:?} (the board flows Backlog → Planning → \
-             Running → Review → Done; Review can bounce back to Running/Planning, and Done can \
-             reopen to Backlog/Running/Review)",
-            from, to
-        ))
-    }
+    Ok(f)
 }
 
 fn update_task_inner<F>(task_id: &str, touch: bool, f: F) -> io::Result<TaskState>
 where
     F: FnOnce(&mut TaskState),
 {
-    try_update_task_inner(task_id, touch, |s| {
-        let previous_session = s.session_id.clone();
-        f(s);
-        for sid in previous_session.iter().chain(s.session_id.iter()) {
-            if !s.usage_session_ids.contains(sid) {
-                s.usage_session_ids.push(sid.clone());
-            }
-        }
-        true
-    })
-    .map(|(state, _)| state)
-}
-
-fn try_update_task_inner<F>(task_id: &str, touch: bool, f: F) -> io::Result<(TaskState, bool)>
-where
-    F: FnOnce(&mut TaskState) -> bool,
-{
     let _lock = lock_task_state(task_id)?;
     let mut state = read_task_state(task_id)?;
     let prev_status = state.status;
-    if !f(&mut state) {
-        return Ok((state, false));
+    let previous_session = state.session_id.clone();
+    f(&mut state);
+    for sid in previous_session.iter().chain(state.session_id.iter()) {
+        if !state.usage_session_ids.contains(sid) {
+            state.usage_session_ids.push(sid.clone());
+        }
     }
     if state.status != prev_status {
         validate_status_transition(&prev_status, &state.status)
@@ -415,7 +246,7 @@ where
             }
         }
     }
-    Ok((state, true))
+    Ok(state)
 }
 
 /// In-place update under `read → mutate → write`, serialized by the
@@ -447,58 +278,6 @@ pub fn set_task_title(task_id: &str, title: &str) -> io::Result<TaskState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn legal_edges_pass() {
-        use TaskStatus::*;
-        for (from, to) in [
-            (Backlog, Running),
-            (Running, Backlog),
-            (Running, Done),
-            (Backlog, Backlog),
-            // The plan gate: assign → approve.
-            (Backlog, Planning),
-            (Planning, Backlog),
-            (Planning, Running),
-            // Re-assign flows re-enter Planning from anywhere.
-            (Running, Planning),
-            (Done, Planning),
-            // Space checks off a card regardless of phase.
-            (Backlog, Done),
-            (Planning, Done),
-            // Done reopens on the board.
-            (Done, Backlog),
-            (Done, Running),
-            // The review gate: a `PR:` note carries the card in, and it
-            // leaves finished or into another round.
-            (Running, Review),
-            (Planning, Review),
-            (Review, Running),
-            (Review, Planning),
-            (Review, Done),
-            (Done, Review),
-        ] {
-            assert!(
-                validate_status_transition(&from, &to).is_ok(),
-                "{:?} → {:?} should be legal",
-                from,
-                to
-            );
-        }
-    }
-
-    #[test]
-    fn illegal_edges_fail() {
-        use TaskStatus::*;
-        for (from, to) in [(Backlog, Review), (Review, Backlog)] {
-            assert!(
-                validate_status_transition(&from, &to).is_err(),
-                "{:?} → {:?} should be illegal",
-                from,
-                to
-            );
-        }
-    }
 
     #[cfg(unix)]
     #[test]
@@ -591,17 +370,5 @@ mod tests {
                 "touch() should bump updated_at"
             );
         });
-    }
-
-    #[test]
-    fn task_status_serialises_lowercase() {
-        assert_eq!(
-            serde_json::to_string(&TaskStatus::Running).unwrap(),
-            "\"running\""
-        );
-        assert_eq!(
-            serde_json::to_string(&TaskStatus::Backlog).unwrap(),
-            "\"backlog\""
-        );
     }
 }

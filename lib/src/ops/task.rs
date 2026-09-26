@@ -12,6 +12,16 @@ fn looks_like_url(s: &str) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
 }
 
+fn load_state(task_id: &str) -> Result<TaskState, OpError> {
+    store::read_task_state(task_id).map_err(|e| OpError::Other(format!("load state: {}", e)))
+}
+
+fn artifacts_dir(task_id: &str) -> Result<PathBuf, OpError> {
+    Ok(store::task_dir(task_id)
+        .ok_or_else(|| OpError::Other("no home dir".into()))?
+        .join("artifacts"))
+}
+
 fn update_task<F>(task_id: &str, f: F) -> Result<TaskState, OpError>
 where
     F: FnOnce(&mut TaskState),
@@ -31,8 +41,7 @@ pub fn task_artifact_add(
 ) -> Result<TaskState, OpError> {
     // Confirm the task exists before doing any filesystem work, so we don't
     // copy files into a directory that points at a nonexistent task.
-    let _ = store::read_task_state(task_id)
-        .map_err(|e| OpError::Other(format!("load state: {}", e)))?;
+    let _ = load_state(task_id)?;
 
     let (kind, stored_path) = if looks_like_url(raw_path) {
         let kind = kind.unwrap_or_else(|| "url".into());
@@ -58,9 +67,7 @@ pub fn task_artifact_add(
             .map(|n| n.to_string_lossy().into_owned())
             .ok_or_else(|| OpError::Other(format!("{} has no file name", src.display())))?;
 
-        let dest_dir = store::task_dir(task_id)
-            .ok_or_else(|| OpError::Other("no home dir".into()))?
-            .join("artifacts");
+        let dest_dir = artifacts_dir(task_id)?;
         std::fs::create_dir_all(&dest_dir)
             .map_err(|e| OpError::Other(format!("create {}: {}", dest_dir.display(), e)))?;
 
@@ -111,8 +118,7 @@ pub fn task_artifact_add_text(
     }
     // Confirm the task exists before touching the filesystem, mirroring
     // `task_artifact_add`.
-    let state = store::read_task_state(task_id)
-        .map_err(|e| OpError::Other(format!("load state: {}", e)))?;
+    let state = load_state(task_id)?;
     // The notes are the card's record, and a record does not say the same
     // thing twice in a row: a session that writes its wait again has not
     // asked anything new, and the second copy only rings a second bell.
@@ -123,9 +129,7 @@ pub fn task_artifact_add_text(
         )));
     }
 
-    let dest_dir = store::task_dir(task_id)
-        .ok_or_else(|| OpError::Other("no home dir".into()))?
-        .join("artifacts");
+    let dest_dir = artifacts_dir(task_id)?;
     std::fs::create_dir_all(&dest_dir)
         .map_err(|e| OpError::Other(format!("create {}: {}", dest_dir.display(), e)))?;
 
@@ -222,8 +226,7 @@ pub fn task_notes(task_id: &str) -> Result<Vec<Note>, OpError> {
 /// artifacts dir, so a URL or a hand-attached external path is never touched.
 /// Returns the persisted state plus the removed record.
 pub fn task_artifact_remove(task_id: &str, index: usize) -> Result<(TaskState, Artifact), OpError> {
-    let state = store::read_task_state(task_id)
-        .map_err(|e| OpError::Other(format!("load state: {}", e)))?;
+    let state = load_state(task_id)?;
     if index >= state.artifacts.len() {
         return Err(OpError::NotFound(format!(
             "task {} has no artifact #{}",
@@ -252,11 +255,9 @@ pub fn task_artifact_remove(task_id: &str, index: usize) -> Result<(TaskState, A
         recipe: None,
     })?;
 
-    let artifacts_dir = store::task_dir(task_id)
-        .ok_or_else(|| OpError::Other("no home dir".into()))?
-        .join("artifacts");
+    let own_dir = artifacts_dir(task_id)?;
     let stored = PathBuf::from(&removed.path);
-    if stored.starts_with(&artifacts_dir) {
+    if stored.starts_with(&own_dir) {
         if let Err(e) = std::fs::remove_file(&stored) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 log::warn!(

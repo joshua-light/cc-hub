@@ -1,4 +1,7 @@
-//! Persisted task usage. Missing transcripts are unknown, never zero-cost work.
+//! A card's token and cost totals, summed over every session that worked it
+//! and persisted on the card. Missing transcripts are unknown, never
+//! zero-cost work.
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 

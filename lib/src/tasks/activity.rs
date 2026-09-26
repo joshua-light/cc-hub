@@ -1,4 +1,8 @@
-//! Task progress is distinct from session liveness and the user's Done action.
+//! A card's progress label: what the task is waiting on, read from its
+//! notes (`state.json`) and the router's and broker's side files
+//! (`clarification.json`, `resources.json`). Independent of whether the
+//! session is alive and of the card's column.
+
 use serde::Deserialize;
 use std::path::Path;
 
@@ -122,7 +126,7 @@ pub struct Label {
     pub errand: Errand,
 }
 
-pub fn label_at(root: &Path, task: &str) -> Option<Label> {
+fn label_at(root: &Path, task: &str) -> Option<Label> {
     if task.contains('/') || task.contains('\\') || task == ".." {
         return None;
     }
@@ -163,7 +167,7 @@ pub fn label_at(root: &Path, task: &str) -> Option<Label> {
 }
 
 pub fn label(task: &str) -> Option<Label> {
-    label_at(&dirs::home_dir()?.join(".cc-hub/tasks"), task)
+    label_at(&super::store::tasks_dir()?, task)
 }
 
 #[cfg(test)]
