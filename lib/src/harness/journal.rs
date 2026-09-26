@@ -97,14 +97,11 @@ pub fn read_events(dir: &Path, limit: usize) -> Vec<LogLine> {
     let Ok(raw) = fs::read_to_string(events_path(dir)) else {
         return Vec::new();
     };
-    let mut lines: Vec<LogLine> = raw
-        .lines()
+    raw.lines()
         .rev()
         .filter_map(|l| serde_json::from_str(l).ok())
         .take(limit)
-        .collect();
-    lines.shrink_to_fit();
-    lines
+        .collect()
 }
 
 #[cfg(test)]

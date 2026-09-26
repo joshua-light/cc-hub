@@ -38,6 +38,16 @@ pub struct Tick {
 }
 
 impl Tick {
+    /// A tick that never got a result from the CLI.
+    fn failed(subtype: &str, result: String) -> Self {
+        Tick {
+            subtype: Some(subtype.into()),
+            result,
+            returncode: -1,
+            ..Default::default()
+        }
+    }
+
     /// The CLI aborts when context refills within 3 turns of a compact,
     /// 3× running. Such a session can never recover.
     pub fn thrashed(&self) -> bool {
@@ -129,20 +139,13 @@ pub fn run(
     // file. It lives in the agent dir, never the workdir.
     let prompt_file: PathBuf = spec.dir.join(".system-prompt.txt");
     if let Err(e) = fs::write(&prompt_file, &spec.system_prompt) {
-        return Tick {
-            subtype: Some("spawn_failed".into()),
-            result: format!("write system prompt: {}", e),
-            returncode: -1,
-            ..Default::default()
-        };
+        return Tick::failed("spawn_failed", format!("write system prompt: {}", e));
     }
     if let Err(e) = fs::create_dir_all(&spec.workdir) {
-        return Tick {
-            subtype: Some("spawn_failed".into()),
-            result: format!("create workdir {}: {}", spec.workdir.display(), e),
-            returncode: -1,
-            ..Default::default()
-        };
+        return Tick::failed(
+            "spawn_failed",
+            format!("create workdir {}: {}", spec.workdir.display(), e),
+        );
     }
 
     let spawn = crate::title::spawn_argv().unwrap_or_else(|| vec!["claude".into()]);
@@ -177,14 +180,10 @@ pub fn run(
                 account.apply(&mut cmd)
             }
             _ => {
-                return Tick {
-                    subtype: Some("account_unavailable".into()),
-                    result: format!(
-                        "scheduled Claude agent requires a valid Claude account: {name}"
-                    ),
-                    returncode: -1,
-                    ..Default::default()
-                }
+                return Tick::failed(
+                    "account_unavailable",
+                    format!("scheduled Claude agent requires a valid Claude account: {name}"),
+                )
             }
         }
     }
@@ -196,11 +195,11 @@ pub fn run(
     let duration_s = started.elapsed().as_secs();
     let Some(streamed) = streamed else {
         return Tick {
-            subtype: Some("timeout".into()),
-            result: format!("tick exceeded {}s or failed to spawn", spec.run.timeout_s),
-            returncode: -1,
             duration_s,
-            ..Default::default()
+            ..Tick::failed(
+                "timeout",
+                format!("tick exceeded {}s or failed to spawn", spec.run.timeout_s),
+            )
         };
     };
 
@@ -441,7 +440,7 @@ fn context_of(usage: &serde_json::Value) -> u64 {
     .sum()
 }
 
-fn tail(s: &str, n: usize) -> String {
+pub(super) fn tail(s: &str, n: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
     if chars.len() <= n {
         return s.to_string();

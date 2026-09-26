@@ -164,11 +164,7 @@ fn failure_detail(tick: &Tick) -> Option<String> {
     if stderr.is_empty() && tick.returncode == 0 {
         return None;
     }
-    let tail: String = {
-        let chars: Vec<char> = stderr.chars().collect();
-        let from = chars.len().saturating_sub(1000);
-        chars[from..].iter().collect()
-    };
+    let tail = runner::tail(stderr, 1000);
     Some(if tail.is_empty() {
         format!("exit {}", tick.returncode)
     } else {
