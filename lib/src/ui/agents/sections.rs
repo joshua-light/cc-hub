@@ -304,9 +304,7 @@ pub(super) fn render_settings(
     agent: &AgentSnapshot,
     d: &Detail,
     scroll: &mut usize,
-    now: i64,
 ) {
-    let _ = now;
     let spec = match &agent.spec {
         Ok(spec) => spec,
         Err(e) => {

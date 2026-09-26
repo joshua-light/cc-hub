@@ -1,15 +1,35 @@
 use super::rows::{
     format_session_row, model_color, render_bar_chart_section, section_header, selection_row_style,
-    MetricsStyles,
+    DIM, LABEL, VAL,
 };
 use crate::metrics::{MetricsAnalysis, ModelStats};
-use crate::models;
 use crate::models::short_sid;
-use crate::ui::common::{fmt_cost, format_tokens, short_model};
-use crate::ui::palette::{DOT_IDLE, FAINT_TEXT};
+use crate::ui::common::{fmt_cost, format_tokens, pad, short_model};
+use crate::ui::palette::FAINT_TEXT;
 use chrono::Duration as ChronoDuration;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
+
+/// The report under construction. Sections whose rows open a session push
+/// them through [`Report::push_row`], so `row_lines[i]` is the line of the
+/// `i`-th selectable row.
+struct Report {
+    lines: Vec<Line<'static>>,
+    row_lines: Vec<usize>,
+    selected: Option<usize>,
+}
+
+impl Report {
+    /// Whether the next row given to [`Report::push_row`] is the selected one.
+    fn next_row_selected(&self) -> bool {
+        self.selected == Some(self.row_lines.len())
+    }
+
+    fn push_row(&mut self, line: Line<'static>) {
+        self.row_lines.push(self.lines.len());
+        self.lines.push(line);
+    }
+}
 
 /// Returns the rendered line buffer plus the logical-line index of every
 /// selectable session row, in the same canonical order as
@@ -19,28 +39,58 @@ pub(super) fn build_metrics_content(
     m: &MetricsAnalysis,
     selected: Option<usize>,
 ) -> (Vec<Line<'static>>, Vec<usize>) {
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut row_lines: Vec<usize> = Vec::new();
-    let mut global_row: usize = 0;
-    let dim = Style::default().fg(Color::DarkGray);
-    let label = Style::default().fg(DOT_IDLE);
-    let val = Style::default()
-        .fg(Color::White)
-        .add_modifier(Modifier::BOLD);
+    let mut r = Report {
+        lines: Vec::new(),
+        row_lines: Vec::new(),
+        selected,
+    };
+    overview(&mut r.lines, m);
+    cost_breakdown(&mut r.lines, m);
+    cost_by_model(&mut r.lines, m);
+    daily_spending(&mut r.lines, m);
+    top_projects(&mut r.lines, m);
+    render_bar_chart_section(
+        &mut r.lines,
+        "Tool usage",
+        "tool calls",
+        "tools",
+        &m.by_tool,
+    );
+    render_bar_chart_section(
+        &mut r.lines,
+        "Shell commands",
+        "shell commands",
+        "commands",
+        &m.by_shell,
+    );
+    render_bar_chart_section(
+        &mut r.lines,
+        "MCP servers",
+        "MCP calls",
+        "servers",
+        &m.by_mcp,
+    );
+    interruptions(&mut r, m);
+    peak_context(&mut r, m);
+    token_spikes(&mut r, m);
+    top_sessions(&mut r, m);
+    (r.lines, r.row_lines)
+}
 
+fn overview(lines: &mut Vec<Line<'static>>, m: &MetricsAnalysis) {
     lines.push(section_header("Overview"));
     lines.push(Line::from(vec![
-        Span::styled("  Total cost   ", label),
-        Span::styled(fmt_cost(m.total_cost), val.fg(Color::Green)),
-        Span::styled("    Sessions ", label),
-        Span::styled(format!("{}", m.total_sessions), val),
-        Span::styled("    Messages ", label),
-        Span::styled(format!("{}", m.total_messages), val),
-        Span::styled("    Cache hit ", label),
-        Span::styled(format!("{:.0}%", m.cache_hit_rate * 100.0), val),
+        Span::styled("  Total cost   ", LABEL),
+        Span::styled(fmt_cost(m.total_cost), VAL.fg(Color::Green)),
+        Span::styled("    Sessions ", LABEL),
+        Span::styled(format!("{}", m.total_sessions), VAL),
+        Span::styled("    Messages ", LABEL),
+        Span::styled(format!("{}", m.total_messages), VAL),
+        Span::styled("    Cache hit ", LABEL),
+        Span::styled(format!("{:.0}%", m.cache_hit_rate * 100.0), VAL),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("  Tokens      ", label),
+        Span::styled("  Tokens      ", LABEL),
         Span::styled(
             format!(
                 "{} in / {} out / {} cache_r / {} cache_w",
@@ -49,11 +99,13 @@ pub(super) fn build_metrics_content(
                 format_tokens(m.total_tokens.cache_read),
                 format_tokens(m.total_tokens.cache_creation),
             ),
-            val,
+            VAL,
         ),
     ]));
     lines.push(Line::raw(""));
+}
 
+fn cost_breakdown(lines: &mut Vec<Line<'static>>, m: &MetricsAnalysis) {
     lines.push(section_header("Cost breakdown"));
     let breakdown = [
         (
@@ -87,14 +139,16 @@ pub(super) fn build_metrics_content(
         let bar_w = ((toks as f64 / max_tokens as f64) * 30.0).round() as usize;
         let bar: String = "━".repeat(bar_w);
         lines.push(Line::from(vec![
-            Span::styled(format!("  {}", name), label),
+            Span::styled(format!("  {}", name), LABEL),
             Span::styled(bar, Style::default().fg(col)),
             Span::raw(" "),
-            Span::styled(format_tokens(toks), dim),
+            Span::styled(format_tokens(toks), DIM),
         ]));
     }
     lines.push(Line::raw(""));
+}
 
+fn cost_by_model(lines: &mut Vec<Line<'static>>, m: &MetricsAnalysis) {
     lines.push(section_header("Cost by model"));
     let mut models: Vec<(&String, &ModelStats)> = m.by_model.iter().collect();
     models.sort_by(|a, b| {
@@ -112,22 +166,21 @@ pub(super) fn build_metrics_content(
         let bar_w = ((s.cost / max_model_cost) * 26.0).round() as usize;
         let short = short_model(name);
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("  {:<22}", models::first_line_truncated(short, 22)),
-                label,
-            ),
+            Span::styled(format!("  {}", pad(short, 22)), LABEL),
             Span::styled("━".repeat(bar_w), Style::default().fg(model_color(name))),
             Span::raw(" "),
-            Span::styled(fmt_cost(s.cost), val),
-            Span::styled(format!(" {:>4.1}%", pct), dim),
-            Span::styled(format!("  {} msgs", s.messages), dim),
+            Span::styled(fmt_cost(s.cost), VAL),
+            Span::styled(format!(" {:>4.1}%", pct), DIM),
+            Span::styled(format!("  {} msgs", s.messages), DIM),
         ]));
     }
     lines.push(Line::raw(""));
+}
 
+fn daily_spending(lines: &mut Vec<Line<'static>>, m: &MetricsAnalysis) {
     lines.push(section_header("Daily spending (last 30 days)"));
     let today = chrono::Local::now().date_naive();
-    let mut days: Vec<f64> = (0..30)
+    let days: Vec<f64> = (0..30)
         .rev()
         .map(|n| {
             let day = today - ChronoDuration::days(n as i64);
@@ -137,7 +190,7 @@ pub(super) fn build_metrics_content(
     let day_max = days.iter().cloned().fold(0f64, f64::max).max(0.01);
     let blocks = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let spark: String = days
-        .iter_mut()
+        .iter()
         .map(|c| {
             if *c <= 0.0 {
                 ' '
@@ -150,19 +203,21 @@ pub(super) fn build_metrics_content(
     let last_7_total: f64 = days.iter().rev().take(7).sum();
     let last_30_total: f64 = days.iter().sum();
     lines.push(Line::from(vec![
-        Span::styled("  ", dim),
+        Span::styled("  ", DIM),
         Span::styled(spark, Style::default().fg(Color::Rgb(150, 200, 240))),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("  last 7d ", label),
-        Span::styled(fmt_cost(last_7_total), val),
-        Span::styled("    last 30d ", label),
-        Span::styled(fmt_cost(last_30_total), val),
-        Span::styled("    peak day ", label),
-        Span::styled(fmt_cost(day_max), val),
+        Span::styled("  last 7d ", LABEL),
+        Span::styled(fmt_cost(last_7_total), VAL),
+        Span::styled("    last 30d ", LABEL),
+        Span::styled(fmt_cost(last_30_total), VAL),
+        Span::styled("    peak day ", LABEL),
+        Span::styled(fmt_cost(day_max), VAL),
     ]));
     lines.push(Line::raw(""));
+}
 
+fn top_projects(lines: &mut Vec<Line<'static>>, m: &MetricsAnalysis) {
     lines.push(section_header("Top projects"));
     let max_proj = m
         .top_projects
@@ -173,160 +228,127 @@ pub(super) fn build_metrics_content(
     for (name, s) in &m.top_projects {
         let bar_w = ((s.cost / max_proj) * 24.0).round() as usize;
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("  {:<26}", models::first_line_truncated(name, 26)),
-                label,
-            ),
+            Span::styled(format!("  {}", pad(name, 26)), LABEL),
             Span::styled(
                 "━".repeat(bar_w),
                 Style::default().fg(Color::Rgb(120, 180, 220)),
             ),
             Span::raw(" "),
-            Span::styled(fmt_cost(s.cost), val),
-            Span::styled(format!("  {} sess", s.sessions), dim),
-            Span::styled(format!("  {} msgs", s.messages), dim),
+            Span::styled(fmt_cost(s.cost), VAL),
+            Span::styled(format!("  {} sess", s.sessions), DIM),
+            Span::styled(format!("  {} msgs", s.messages), DIM),
         ]));
     }
     lines.push(Line::raw(""));
+}
 
-    let styles = MetricsStyles { dim, label, val };
-    render_bar_chart_section(
-        &mut lines,
-        "Tool usage",
-        "tool calls",
-        "tools",
-        &m.by_tool,
-        &styles,
-    );
-    render_bar_chart_section(
-        &mut lines,
-        "Shell commands",
-        "shell commands",
-        "commands",
-        &m.by_shell,
-        &styles,
-    );
-    render_bar_chart_section(
-        &mut lines,
-        "MCP servers",
-        "MCP calls",
-        "servers",
-        &m.by_mcp,
-        &styles,
-    );
-
-    lines.push(section_header("Interruptions (Esc'd mid-tool-call)"));
+fn interruptions(r: &mut Report, m: &MetricsAnalysis) {
+    r.lines
+        .push(section_header("Interruptions (Esc'd mid-tool-call)"));
     let i = &m.interruptions;
     if i.total_interrupted_turns == 0 {
-        lines.push(Line::from(Span::styled("  (none detected)", dim)));
+        r.lines
+            .push(Line::from(Span::styled("  (none detected)", DIM)));
     } else {
-        lines.push(Line::from(vec![
-            Span::styled("  Wasted ", label),
+        r.lines.push(Line::from(vec![
+            Span::styled("  Wasted ", LABEL),
             Span::styled(
                 fmt_cost(i.total_wasted_cost),
-                val.fg(Color::Rgb(220, 140, 140)),
+                VAL.fg(Color::Rgb(220, 140, 140)),
             ),
-            Span::styled("    Turns ", label),
-            Span::styled(format!("{}", i.total_interrupted_turns), val),
-            Span::styled("    Sessions ", label),
-            Span::styled(format!("{}", i.sessions_affected), val),
+            Span::styled("    Turns ", LABEL),
+            Span::styled(format!("{}", i.total_interrupted_turns), VAL),
+            Span::styled("    Sessions ", LABEL),
+            Span::styled(format!("{}", i.sessions_affected), VAL),
         ]));
         for entry in i.by_session.iter() {
             let sid = short_sid(&entry.session_id).to_string();
-            let (marker, sid_style) = selection_row_style(selected == Some(global_row));
-            row_lines.push(lines.len());
-            lines.push(Line::from(vec![
+            let (marker, sid_style) = selection_row_style(r.next_row_selected());
+            r.push_row(Line::from(vec![
                 Span::styled(format!("{}{:<10}", marker, sid), sid_style),
                 Span::styled(
                     format!("{:>8}", fmt_cost(entry.wasted_cost)),
-                    val.fg(Color::Rgb(220, 140, 140)),
+                    VAL.fg(Color::Rgb(220, 140, 140)),
                 ),
-                Span::styled(format!("  {:>3} orphan", entry.orphan_count), dim),
+                Span::styled(format!("  {:>3} orphan", entry.orphan_count), DIM),
                 Span::raw("  "),
                 Span::styled(
-                    format!(
-                        "{:<18}",
-                        models::first_line_truncated(&entry.last_tool_name, 18)
-                    ),
+                    pad(&entry.last_tool_name, 18),
                     Style::default().fg(FAINT_TEXT),
                 ),
-                Span::styled(
-                    format!("{:<24}", models::first_line_truncated(&entry.project, 24)),
-                    Style::default().fg(FAINT_TEXT),
-                ),
+                Span::styled(pad(&entry.project, 24), Style::default().fg(FAINT_TEXT)),
             ]));
-            global_row += 1;
         }
     }
-    lines.push(Line::raw(""));
+    r.lines.push(Line::raw(""));
+}
 
-    lines.push(section_header("Peak context reached"));
+fn peak_context(r: &mut Report, m: &MetricsAnalysis) {
+    r.lines.push(section_header("Peak context reached"));
     let pc = &m.peak_context;
     if pc.findings.is_empty() {
-        lines.push(Line::from(Span::styled("  (no sessions)", dim)));
+        r.lines
+            .push(Line::from(Span::styled("  (no sessions)", DIM)));
     } else {
         for f in pc.findings.iter() {
             let sid = short_sid(&f.session_id).to_string();
-            let (marker, sid_style) = selection_row_style(selected == Some(global_row));
-            row_lines.push(lines.len());
-            lines.push(Line::from(vec![
+            let (marker, sid_style) = selection_row_style(r.next_row_selected());
+            r.push_row(Line::from(vec![
                 Span::styled(format!("{}{:<10}", marker, sid), sid_style),
                 Span::styled(
                     format!("{:>8} ctx", format_tokens(f.peak_ctx_tokens)),
-                    val.fg(Color::Rgb(220, 180, 130)),
+                    VAL.fg(Color::Rgb(220, 180, 130)),
                 ),
                 Span::styled(
                     format!("  {:>8}", fmt_cost(f.total_cost)),
-                    val.fg(Color::Green),
+                    VAL.fg(Color::Green),
                 ),
                 Span::styled(
                     format!("  @ turn {}/{}", f.peak_turn_index, f.assistant_turns),
-                    dim,
+                    DIM,
                 ),
                 Span::raw("  "),
-                Span::styled(
-                    format!("{:<24}", models::first_line_truncated(&f.project, 24)),
-                    Style::default().fg(FAINT_TEXT),
-                ),
+                Span::styled(pad(&f.project, 24), Style::default().fg(FAINT_TEXT)),
             ]));
-            global_row += 1;
         }
     }
-    lines.push(Line::raw(""));
+    r.lines.push(Line::raw(""));
+}
 
-    lines.push(section_header("Token spikes (outlier single-turn deltas)"));
+fn token_spikes(r: &mut Report, m: &MetricsAnalysis) {
+    r.lines
+        .push(section_header("Token spikes (outlier single-turn deltas)"));
     let g = &m.context_growth;
-    lines.push(Line::from(vec![
-        Span::styled("  Scored ", label),
-        Span::styled(format!("{}", g.sessions_scored), val),
-        Span::styled("    Spikes ", label),
-        Span::styled(format!("{}", g.findings.len()), val),
-        Span::styled("    Cost in flagged sessions ", label),
+    r.lines.push(Line::from(vec![
+        Span::styled("  Scored ", LABEL),
+        Span::styled(format!("{}", g.sessions_scored), VAL),
+        Span::styled("    Spikes ", LABEL),
+        Span::styled(format!("{}", g.findings.len()), VAL),
+        Span::styled("    Cost in flagged sessions ", LABEL),
         Span::styled(
             fmt_cost(g.anomalous_cost),
-            val.fg(Color::Rgb(220, 180, 130)),
+            VAL.fg(Color::Rgb(220, 180, 130)),
         ),
     ]));
-    lines.push(Line::from(Span::styled(
+    r.lines.push(Line::from(Span::styled(
         "  score = peak turn delta / median turn delta — flags one-shot bursts, not total growth",
-        dim,
+        DIM,
     )));
     if g.findings.is_empty() {
-        lines.push(Line::from(Span::styled("  (no spikes)", dim)));
+        r.lines.push(Line::from(Span::styled("  (no spikes)", DIM)));
     } else {
         for f in g.findings.iter() {
             let sid = short_sid(&f.session_id).to_string();
-            let (marker, sid_style) = selection_row_style(selected == Some(global_row));
-            row_lines.push(lines.len());
-            lines.push(Line::from(vec![
+            let (marker, sid_style) = selection_row_style(r.next_row_selected());
+            r.push_row(Line::from(vec![
                 Span::styled(format!("{}{:<10}", marker, sid), sid_style),
                 Span::styled(
                     format!("{:>5.1}x", f.score),
-                    val.fg(Color::Rgb(220, 180, 130)),
+                    VAL.fg(Color::Rgb(220, 180, 130)),
                 ),
                 Span::styled(
                     format!("  {:>8}", fmt_cost(f.total_cost)),
-                    val.fg(Color::Green),
+                    VAL.fg(Color::Green),
                 ),
                 Span::styled(
                     format!(
@@ -335,33 +357,27 @@ pub(super) fn build_metrics_content(
                         f.peak_turn_index,
                         f.assistant_turns
                     ),
-                    dim,
+                    DIM,
                 ),
                 Span::raw("  "),
-                Span::styled(
-                    format!("{:<24}", models::first_line_truncated(&f.project, 24)),
-                    Style::default().fg(FAINT_TEXT),
-                ),
+                Span::styled(pad(&f.project, 24), Style::default().fg(FAINT_TEXT)),
             ]));
-            global_row += 1;
         }
     }
-    lines.push(Line::raw(""));
+    r.lines.push(Line::raw(""));
+}
 
-    lines.push(section_header("Top sessions"));
-    lines.push(Line::from(Span::styled(
+fn top_sessions(r: &mut Report, m: &MetricsAnalysis) {
+    r.lines.push(section_header("Top sessions"));
+    r.lines.push(Line::from(Span::styled(
         format!(
             "  {:<10} {:>8} {:>10} {:<22} {:<24}",
             "session", "cost", "tokens", "model", "project"
         ),
-        dim,
+        DIM,
     )));
     for s in &m.top_sessions {
-        let is_sel = selected == Some(global_row);
-        row_lines.push(lines.len());
-        lines.push(format_session_row(s, dim, val, is_sel));
-        global_row += 1;
+        let line = format_session_row(s, r.next_row_selected());
+        r.push_row(line);
     }
-
-    (lines, row_lines)
 }

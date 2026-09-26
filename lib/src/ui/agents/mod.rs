@@ -23,8 +23,6 @@ mod text;
 pub(crate) use detail::render_agent_detail;
 pub(crate) use table::render_agents_body;
 
-const SELECTED_BG: Color = Color::Rgb(40, 40, 52);
-
 fn status_indicator(status: AgentStatus) -> (&'static str, Color) {
     match status {
         AgentStatus::Ticking => ("󰒓", Color::Green),

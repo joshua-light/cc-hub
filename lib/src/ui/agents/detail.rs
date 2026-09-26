@@ -1,12 +1,13 @@
 use super::sections::{render_artifacts, render_log, render_runs, render_settings};
 use super::status_indicator;
 use super::text::{event_label, wrap_text};
-use super::SELECTED_BG;
 use crate::app::{App, Section};
 use crate::harness::{AgentSnapshot, AgentStatus};
 use crate::models::first_line_truncated;
-use crate::ui::common::{age, centered_rect, fmt_cost, popup_block, truncate_line};
-use crate::ui::palette::{DIM_TEXT, FAINT_TEXT, LABEL_GRAY, SEP_GRAY};
+use crate::ui::common::{
+    age, centered_rect, fmt_cost, popup_block, selection_stripe, truncate_line,
+};
+use crate::ui::palette::{DIM_TEXT, FAINT_TEXT, LABEL_GRAY, SELECTED_ROW_BG, SEP_GRAY};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -66,7 +67,7 @@ fn render_agent_detail_at(frame: &mut Frame, area: Rect, app: &mut App, now: i64
         Section::Runs => render_runs(frame, body, agent, detail, scroll, now),
         Section::Artifacts => render_artifacts(frame, body, agent, detail, scroll, now),
         Section::Log => render_log(frame, body, agent, detail, scroll, now),
-        Section::Settings => render_settings(frame, body, agent, detail, scroll, now),
+        Section::Settings => render_settings(frame, body, agent, detail, scroll),
     }
 }
 
@@ -244,15 +245,11 @@ pub(super) fn render_rows(
     for (i, line) in rows.into_iter().enumerate().skip(*scroll).take(h) {
         let y = area.y + (i - *scroll) as u16;
         let selected = i == cursor;
-        let mut spans = vec![if selected {
-            Span::styled("▌", Style::default().fg(Color::White))
-        } else {
-            Span::raw(" ")
-        }];
+        let mut spans = vec![selection_stripe(selected)];
         spans.extend(line.spans);
         let mut p = Paragraph::new(truncate_line(Line::from(spans), width));
         if selected {
-            p = p.style(Style::default().bg(SELECTED_BG));
+            p = p.style(Style::default().bg(SELECTED_ROW_BG));
         }
         frame.render_widget(p, Rect::new(area.x, y, area.width, 1));
     }

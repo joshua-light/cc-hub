@@ -1,8 +1,8 @@
 use crate::app::App;
 use crate::models::SessionDetail;
 use crate::ui::common::{
-    centered_rect, format_datetime, format_time, format_tokens, popup_block, short_model,
-    state_color, state_indicator, wrapped_total_rows,
+    centered_rect, format_datetime, format_time, format_tokens, popup_block, scroll_position,
+    short_model, state_color, state_indicator, wrapped_total_rows,
 };
 use crate::ui::palette::MUTED_TEXT;
 use ratatui::layout::Rect;
@@ -54,11 +54,7 @@ pub(crate) fn render_popup(frame: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
-    let scroll_info = format!(
-        " {}/{} ",
-        (app.render.popup_scroll as usize).min(total_rows.saturating_sub(1) as usize) + 1,
-        total_rows
-    );
+    let scroll_info = scroll_position(app.render.popup_scroll, total_rows);
 
     let scroll_span = Paragraph::new(Line::from(Span::styled(
         scroll_info,

@@ -1,5 +1,7 @@
 use super::card::render_card;
-use super::{render_group_header, render_no_sessions, GROUP_GAP, GROUP_HEADER_HEIGHT};
+use super::{
+    keep_in_view, render_group_header, render_no_sessions, GROUP_GAP, GROUP_HEADER_HEIGHT,
+};
 use crate::app::App;
 use crate::ui::{cell_height, now_ms};
 use ratatui::layout::Rect;
@@ -23,29 +25,16 @@ pub(super) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
         y_acc = y_acc.saturating_add(GROUP_HEADER_HEIGHT + rows * cell_height() + GROUP_GAP);
     }
 
-    // Auto-scroll to keep selected card visible (prefer showing group header too)
-    {
-        let g_offset = group_offsets[app.sessions.sel_group];
-        let card_row = (app.sessions.sel_in_group / cols) as u16;
-        let card_y = g_offset + GROUP_HEADER_HEIGHT + card_row * cell_height();
-        let card_bottom = card_y + cell_height();
-
-        if card_bottom.saturating_sub(g_offset) <= area.height {
-            // Both header and card fit — keep both visible
-            if g_offset < app.render.grid_scroll {
-                app.render.grid_scroll = g_offset;
-            } else if card_bottom > app.render.grid_scroll + area.height {
-                app.render.grid_scroll = card_bottom.saturating_sub(area.height);
-            }
-        } else {
-            // Just ensure the card itself is visible
-            if card_y < app.render.grid_scroll {
-                app.render.grid_scroll = card_y;
-            } else if card_bottom > app.render.grid_scroll + area.height {
-                app.render.grid_scroll = card_bottom.saturating_sub(area.height);
-            }
-        }
-    }
+    let g_offset = group_offsets[app.sessions.sel_group];
+    let card_row = (app.sessions.sel_in_group / cols) as u16;
+    let card_y = g_offset + GROUP_HEADER_HEIGHT + card_row * cell_height();
+    keep_in_view(
+        &mut app.render.grid_scroll,
+        g_offset,
+        card_y,
+        card_y + cell_height(),
+        area.height,
+    );
 
     let scroll = app.render.grid_scroll;
     let now = now_ms();

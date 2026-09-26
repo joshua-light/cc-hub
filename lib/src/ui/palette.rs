@@ -50,3 +50,7 @@ pub(crate) const KIND_TEAL: Color = Color::Rgb(120, 200, 190);
 /// Ice blue for the cold-cache snowflake (session quiet past the prompt-cache
 /// TTL — see [`crate::models::SessionInfo::cache_cold`]).
 pub(crate) const ICE_BLUE: Color = Color::Rgb(130, 190, 220);
+
+/// Background of the selected row in one-line lists (sessions list, agents
+/// table and detail lists).
+pub(crate) const SELECTED_ROW_BG: Color = Color::Rgb(40, 40, 52);

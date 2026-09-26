@@ -1,9 +1,7 @@
 use super::card_body::body_lines;
-use crate::models::{first_line_truncated, SessionInfo, SessionState};
-use crate::ui::common::{
-    priority_color, spinner_frame, starting_frame, state_color, state_indicator, task_color,
-    COLD_CACHE_ICON,
-};
+use super::{agent_prefix, animated_indicator, badge_color};
+use crate::models::{first_line_truncated, SessionInfo, SessionState, TaskBadge};
+use crate::ui::common::{priority_color, state_color, COLD_CACHE_ICON};
 use crate::ui::palette::SEP_GRAY;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -15,17 +13,36 @@ pub(super) fn render_card(
     frame: &mut Frame,
     area: Rect,
     session: &SessionInfo,
-    badge: Option<&crate::models::TaskBadge>,
+    badge: Option<&TaskBadge>,
     selected: bool,
     now: u64,
 ) {
-    let (indicator, ind_color) = state_indicator(&session.state);
-    let indicator = match session.state {
-        SessionState::Processing => spinner_frame(now),
-        SessionState::Starting => starting_frame(now),
-        _ => indicator,
-    };
+    let (border_type, border_color) = border(session, selected);
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(border_type)
+        .border_style(Style::default().fg(border_color))
+        .title(card_title(session, now));
+    if let Some(badge) = badge {
+        block = with_task_badge(block, badge, area.width);
+    }
 
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let inner_w = inner.width as usize;
+    let inner_h = inner.height as usize;
+    let lines = body_lines(session, now, inner_w, inner_h);
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, inner);
+}
+
+fn border(session: &SessionInfo, selected: bool) -> (BorderType, Color) {
     let border_color = if selected {
         Color::White
     } else if session.needs_attention() || session.state == SessionState::Processing {
@@ -50,14 +67,14 @@ pub(super) fn render_card(
     } else {
         BorderType::Rounded
     };
+    (border_type, border_color)
+}
 
+fn card_title(session: &SessionInfo, now: u64) -> Span<'static> {
+    let (indicator, ind_color) = animated_indicator(&session.state, now);
     // Claude is the ~99% default — labelling every card "[Claude]" is pure
     // noise — so the badge is shown only for non-Claude agents.
-    let agent_badge = if session.agent_id == "claude" {
-        String::new()
-    } else {
-        format!("[{}] ", session.agent_badge())
-    };
+    let agent_badge = agent_prefix(session);
 
     // Border title is the primary skim surface — prepending the Haiku-
     // generated 2-3 word title when available lets users scan what each
@@ -111,66 +128,45 @@ pub(super) fn render_card(
             Style::default().fg(ind_color).add_modifier(Modifier::BOLD),
         )
     };
-    let mut block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(border_type)
-        .border_style(Style::default().fg(border_color))
-        .title(Span::styled(title, title_style));
+    Span::styled(title, title_style)
+}
 
-    // Task link mark (`L`): the task title on the bottom border, in a color
-    // stable per task id — every card of the same task carries the same
-    // mark, wherever it sits in the grid. A stale link (task Done or
-    // deleted) dims to gray. The task's priority rides the bottom-right
-    // corner in the board's priority hue (colored text, not a filled chip —
-    // background fill on this card is reserved for "needs you"), and the
-    // title's truncation budget shrinks so the two never collide.
-    if let Some(badge) = badge {
-        let color = if badge.stale {
+// Task link mark (`L`): the task title on the bottom border, in a color
+// stable per task id — every card of the same task carries the same
+// mark, wherever it sits in the grid. A stale link (task Done or
+// deleted) dims to gray. The task's priority rides the bottom-right
+// corner in the board's priority hue (colored text, not a filled chip —
+// background fill on this card is reserved for "needs you"), and the
+// title's truncation budget shrinks so the two never collide.
+fn with_task_badge<'a>(mut block: Block<'a>, badge: &TaskBadge, width: u16) -> Block<'a> {
+    let color = badge_color(badge);
+    let prio_w = badge.priority.map_or(0, |p| p.label().chars().count() + 2);
+    let label = format!(
+        " 󰓹 {} ",
+        first_line_truncated(
+            &badge.title,
+            (width as usize).saturating_sub(7 + prio_w).max(4)
+        )
+    );
+    block = block.title_bottom(Line::from(Span::styled(
+        label,
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )));
+    if let Some(priority) = badge.priority {
+        let prio_color = if badge.stale {
             Color::DarkGray
         } else {
-            task_color(&badge.task_id)
+            priority_color(priority)
         };
-        let prio_w = badge.priority.map_or(0, |p| p.label().chars().count() + 2);
-        let label = format!(
-            " 󰓹 {} ",
-            first_line_truncated(
-                &badge.title,
-                (area.width as usize).saturating_sub(7 + prio_w).max(4)
-            )
+        block = block.title_bottom(
+            Line::from(Span::styled(
+                format!(" {} ", priority.label()),
+                Style::default().fg(prio_color).add_modifier(Modifier::BOLD),
+            ))
+            .alignment(Alignment::Right),
         );
-        block = block.title_bottom(Line::from(Span::styled(
-            label,
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        )));
-        if let Some(priority) = badge.priority {
-            let prio_color = if badge.stale {
-                Color::DarkGray
-            } else {
-                priority_color(priority)
-            };
-            block = block.title_bottom(
-                Line::from(Span::styled(
-                    format!(" {} ", priority.label()),
-                    Style::default().fg(prio_color).add_modifier(Modifier::BOLD),
-                ))
-                .alignment(Alignment::Right),
-            );
-        }
     }
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if inner.height == 0 || inner.width == 0 {
-        return;
-    }
-
-    let inner_w = inner.width as usize;
-    let inner_h = inner.height as usize;
-    let lines = body_lines(session, now, inner_w, inner_h);
-
-    let paragraph = Paragraph::new(lines);
-    frame.render_widget(paragraph, inner);
+    block
 }
 
 #[cfg(test)]

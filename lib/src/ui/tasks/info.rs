@@ -1,6 +1,6 @@
-use super::wrap_text;
+use super::{ago, wrap_text};
 use crate::app::App;
-use crate::models;
+use crate::tasks::store::Artifact;
 use crate::ui::artifacts::{
     classify_artifact, evidence_card_header, read_text_excerpt, truncated_footer, CardKind,
 };
@@ -78,10 +78,7 @@ pub(crate) fn render_task_info(frame: &mut Frame, area: Rect, app: &mut App) {
             Style::default().fg(priority_color(t.priority)),
         ),
         Span::raw("  "),
-        Span::styled(
-            models::relative_age(now_secs.saturating_sub(t.created_at.max(0) as u64)),
-            Style::default().fg(META_GRAY),
-        ),
+        Span::styled(ago(now_secs, t.created_at), Style::default().fg(META_GRAY)),
         Span::raw("  "),
         Span::styled(
             format!(
@@ -156,64 +153,7 @@ pub(crate) fn render_task_info(frame: &mut Frame, area: Rect, app: &mut App) {
         let top = lines.len() as u16;
         let is_lead = t.lead_artifact == Some(i);
         lines.push(evidence_card_header(a, i == sel, is_lead));
-        match classify_artifact(a) {
-            CardKind::Text | CardKind::Diff => {
-                let path = Path::new(&a.path);
-                match read_text_excerpt(path, 8 * 1024) {
-                    None => {
-                        let msg = if std::fs::metadata(path).is_ok() {
-                            Span::styled(
-                                "  (binary file — open externally with `o`)",
-                                Style::default().fg(Color::DarkGray),
-                            )
-                        } else {
-                            Span::styled(
-                                format!("  (cannot read {})", a.path),
-                                Style::default().fg(Color::Rgb(220, 100, 100)),
-                            )
-                        };
-                        lines.push(Line::from(msg));
-                    }
-                    Some((content, truncated)) => {
-                        let shown = content.len().min(INFO_EXCERPT_LINES);
-                        for s in content.iter().take(shown) {
-                            lines.push(Line::from(Span::styled(
-                                format!("  {}", s),
-                                Style::default().fg(Color::Gray),
-                            )));
-                        }
-                        let hidden = content.len().saturating_sub(shown) + truncated;
-                        if hidden > 0 {
-                            lines.push(truncated_footer(hidden));
-                        }
-                    }
-                }
-            }
-            CardKind::Url => {
-                lines.push(Line::from(Span::styled(
-                    format!("  {}", a.path),
-                    Style::default().fg(ACCENT_BLUE),
-                )));
-            }
-            CardKind::Image => {
-                lines.push(Line::from(Span::styled(
-                    "  (image — press `o` to open)",
-                    Style::default().fg(Color::DarkGray),
-                )));
-            }
-            CardKind::Video => {
-                lines.push(Line::from(Span::styled(
-                    "  (video — press `o` to open)",
-                    Style::default().fg(Color::DarkGray),
-                )));
-            }
-            CardKind::Fallback => {
-                lines.push(Line::from(Span::styled(
-                    format!("  {}", a.path),
-                    Style::default().fg(FAINT_TEXT),
-                )));
-            }
-        }
+        lines.extend(attachment_body(a));
         lines.push(Line::raw(""));
         card_spans.push((top, lines.len() as u16));
     }
@@ -256,6 +196,71 @@ pub(crate) fn render_task_info(frame: &mut Frame, area: Rect, app: &mut App) {
         ))),
         footer_area,
     );
+}
+
+/// An attachment card's body below its header: a text excerpt, or a
+/// one-line pointer for URLs and media.
+fn attachment_body(a: &Artifact) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    match classify_artifact(a) {
+        CardKind::Text | CardKind::Diff => {
+            let path = Path::new(&a.path);
+            match read_text_excerpt(path, 8 * 1024) {
+                None => {
+                    let msg = if std::fs::metadata(path).is_ok() {
+                        Span::styled(
+                            "  (binary file — open externally with `o`)",
+                            Style::default().fg(Color::DarkGray),
+                        )
+                    } else {
+                        Span::styled(
+                            format!("  (cannot read {})", a.path),
+                            Style::default().fg(Color::Rgb(220, 100, 100)),
+                        )
+                    };
+                    lines.push(Line::from(msg));
+                }
+                Some((content, truncated)) => {
+                    let shown = content.len().min(INFO_EXCERPT_LINES);
+                    for s in content.iter().take(shown) {
+                        lines.push(Line::from(Span::styled(
+                            format!("  {}", s),
+                            Style::default().fg(Color::Gray),
+                        )));
+                    }
+                    let hidden = content.len().saturating_sub(shown) + truncated;
+                    if hidden > 0 {
+                        lines.push(truncated_footer(hidden));
+                    }
+                }
+            }
+        }
+        CardKind::Url => {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", a.path),
+                Style::default().fg(ACCENT_BLUE),
+            )));
+        }
+        CardKind::Image => {
+            lines.push(Line::from(Span::styled(
+                "  (image — press `o` to open)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        CardKind::Video => {
+            lines.push(Line::from(Span::styled(
+                "  (video — press `o` to open)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        CardKind::Fallback => {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", a.path),
+                Style::default().fg(FAINT_TEXT),
+            )));
+        }
+    }
+    lines
 }
 
 // Unix-only: these construct an App over the on-disk personal store, which

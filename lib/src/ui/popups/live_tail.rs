@@ -5,7 +5,7 @@ use super::transcript::{
     render_prompt_block, render_thinking, render_tool_bullet, PreviewPart,
 };
 use crate::app::App;
-use crate::ui::common::{centered_rect, format_tokens, wrapped_total_rows};
+use crate::ui::common::{centered_rect, format_tokens, scroll_position, wrapped_total_rows};
 use crate::ui::palette::DIM_TEXT;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -108,11 +108,7 @@ pub(crate) fn render_live_tail(frame: &mut Frame, area: Rect, app: &mut App) {
     let hint_area = Rect::new(inner.x, bottom_y, hint_width, 1);
     frame.render_widget(hint, hint_area);
 
-    let scroll_info = format!(
-        " {}/{} ",
-        (lv.scroll as usize).min(total_rows.saturating_sub(1) as usize) + 1,
-        total_rows
-    );
+    let scroll_info = scroll_position(lv.scroll, total_rows);
     let indicator = Paragraph::new(Line::from(Span::styled(
         scroll_info,
         Style::default().fg(DIM_TEXT),

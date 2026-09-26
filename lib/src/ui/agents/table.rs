@@ -1,10 +1,12 @@
+use super::status_indicator;
 use super::text::one_line;
-use super::{status_indicator, SELECTED_BG};
 use crate::app::App;
 use crate::harness::{AgentSnapshot, AgentStatus};
 use crate::models::first_line_truncated;
-use crate::ui::common::{age, fmt_cost, pad, spinner_frame, truncate_line, Cell, COL_SEP};
-use crate::ui::palette::{DIM_TEXT, FAINT_TEXT, LABEL_GRAY, MUTED_TEXT};
+use crate::ui::common::{
+    age, fmt_cost, pad, selection_stripe, spinner_frame, truncate_line, Cell, COL_SEP,
+};
+use crate::ui::palette::{DIM_TEXT, FAINT_TEXT, LABEL_GRAY, MUTED_TEXT, SELECTED_ROW_BG};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -229,11 +231,7 @@ fn render_row(
     let say_text = first_line_truncated(&one_line(&say_text), say_budget);
 
     let mut spans: Vec<Span<'static>> = vec![
-        if selected {
-            Span::styled("▌", Style::default().fg(Color::White))
-        } else {
-            Span::raw(" ")
-        },
+        selection_stripe(selected),
         Span::styled(format!("{} ", glyph), Style::default().fg(color)),
         Span::styled(pad(&agent.name, NAME_W), name_style),
         Span::raw(" ".repeat(COL_SEP)),
@@ -250,7 +248,7 @@ fn render_row(
 
     let mut row = Paragraph::new(truncate_line(Line::from(spans), width));
     if selected {
-        row = row.style(Style::default().bg(SELECTED_BG));
+        row = row.style(Style::default().bg(SELECTED_ROW_BG));
     }
     frame.render_widget(row, area);
 }

@@ -8,7 +8,12 @@
 //! - `detail`: the per-session detail popup
 
 use crate::app::App;
-use crate::ui::palette::SEP_GRAY;
+use crate::models::{SessionInfo, SessionState, TaskBadge};
+use crate::ui::common::{
+    context_window_size, spinner_frame, starting_frame, state_indicator, task_color,
+    COLD_CACHE_ICON,
+};
+use crate::ui::palette::{ICE_BLUE, SEP_GRAY};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -76,6 +81,70 @@ fn render_group_header(frame: &mut Frame, area: Rect, group: &crate::models::Pro
     ));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Scroll so the selected item (content rows `item_top..item_bottom`) is on
+/// screen, with its group header too when both fit in `view_h` rows.
+fn keep_in_view(scroll: &mut u16, group_top: u16, item_top: u16, item_bottom: u16, view_h: u16) {
+    if item_bottom.saturating_sub(group_top) <= view_h {
+        if group_top < *scroll {
+            *scroll = group_top;
+        } else if item_bottom > *scroll + view_h {
+            *scroll = item_bottom.saturating_sub(view_h);
+        }
+    } else if item_top < *scroll {
+        *scroll = item_top;
+    } else if item_bottom > *scroll + view_h {
+        *scroll = item_bottom.saturating_sub(view_h);
+    }
+}
+
+/// State glyph and colour, animated: Processing spins, Starting orbits.
+fn animated_indicator(state: &SessionState, now: u64) -> (&'static str, Color) {
+    let (indicator, color) = state_indicator(state);
+    let indicator = match state {
+        SessionState::Processing => spinner_frame(now),
+        SessionState::Starting => starting_frame(now),
+        _ => indicator,
+    };
+    (indicator, color)
+}
+
+/// `[Codex] ` ahead of a non-Claude session's title; empty for Claude.
+fn agent_prefix(session: &SessionInfo) -> String {
+    if session.agent_id == "claude" {
+        String::new()
+    } else {
+        format!("[{}] ", session.agent_badge())
+    }
+}
+
+/// Icon and colour of the last-activity clock. Past the prompt-cache TTL the
+/// clock becomes the ice-blue snowflake: restarting beats resuming.
+fn activity_clock(session: &SessionInfo, now: u64) -> (&'static str, Color) {
+    if session.cache_cold(now) {
+        (COLD_CACHE_ICON, ICE_BLUE)
+    } else {
+        ("󰔟", Color::DarkGray)
+    }
+}
+
+/// Context-window use as (percent capped at 999, percent clamped to 100 for
+/// the colour ramp and bar); `None` without a token count.
+fn context_pct(session: &SessionInfo) -> Option<(f64, u8)> {
+    let ctx = session.context_tokens?;
+    let window = context_window_size(session.model.as_deref().unwrap_or(""));
+    let pct = ((ctx as f64 / window as f64) * 100.0).min(999.0);
+    Some((pct, (pct as u64).min(100) as u8))
+}
+
+/// A task badge's identity colour, dimmed to gray once the link is stale.
+fn badge_color(badge: &TaskBadge) -> Color {
+    if badge.stale {
+        Color::DarkGray
+    } else {
+        task_color(&badge.task_id)
+    }
 }
 
 #[cfg(test)]

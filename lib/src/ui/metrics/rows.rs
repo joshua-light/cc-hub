@@ -1,18 +1,15 @@
 use crate::metrics::{SessionSummary, ToolStats};
-use crate::models;
 use crate::models::short_sid;
-use crate::ui::common::{fmt_cost, format_tokens, short_model};
-use crate::ui::palette::FAINT_TEXT;
+use crate::ui::common::{fmt_cost, format_tokens, pad, short_model};
+use crate::ui::palette::{DOT_IDLE, FAINT_TEXT};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-pub(super) const TOOLS_DISPLAY_LIMIT: usize = 15;
+const TOOLS_DISPLAY_LIMIT: usize = 15;
 
-pub(super) struct MetricsStyles {
-    pub(super) dim: Style,
-    pub(super) label: Style,
-    pub(super) val: Style,
-}
+pub(super) const DIM: Style = Style::new().fg(Color::DarkGray);
+pub(super) const LABEL: Style = Style::new().fg(DOT_IDLE);
+pub(super) const VAL: Style = Style::new().fg(Color::White).add_modifier(Modifier::BOLD);
 
 pub(super) fn render_bar_chart_section(
     lines: &mut Vec<Line<'static>>,
@@ -20,9 +17,7 @@ pub(super) fn render_bar_chart_section(
     empty_noun: &str,
     overflow_noun: &str,
     stats: &std::collections::BTreeMap<String, ToolStats>,
-    s: &MetricsStyles,
 ) {
-    let (dim, label, val) = (s.dim, s.label, s.val);
     lines.push(section_header(header));
     let mut rows: Vec<(&String, &ToolStats)> = stats.iter().collect();
     rows.sort_by_key(|t| std::cmp::Reverse(t.1.count));
@@ -31,7 +26,7 @@ pub(super) fn render_bar_chart_section(
     if rows.is_empty() {
         lines.push(Line::from(Span::styled(
             format!("  (no {} recorded)", empty_noun),
-            dim,
+            DIM,
         )));
     } else {
         for (name, s) in rows.iter().take(TOOLS_DISPLAY_LIMIT) {
@@ -42,15 +37,12 @@ pub(super) fn render_bar_chart_section(
                 0.0
             };
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {:<22}", models::first_line_truncated(name, 22)),
-                    label,
-                ),
+                Span::styled(format!("  {}", pad(name, 22)), LABEL),
                 Span::styled("━".repeat(bar_w), Style::default().fg(tool_color(name))),
                 Span::raw(" "),
-                Span::styled(format!("{:>6} calls", s.count), val),
-                Span::styled(format!("  {:>4.1}%", pct), dim),
-                Span::styled(format!("  {} sess", s.sessions), dim),
+                Span::styled(format!("{:>6} calls", s.count), VAL),
+                Span::styled(format!("  {:>4.1}%", pct), DIM),
+                Span::styled(format!("  {} sess", s.sessions), DIM),
             ]));
         }
         if rows.len() > TOOLS_DISPLAY_LIMIT {
@@ -60,14 +52,14 @@ pub(super) fn render_bar_chart_section(
                     rows.len() - TOOLS_DISPLAY_LIMIT,
                     overflow_noun
                 ),
-                dim,
+                DIM,
             )));
         }
     }
     lines.push(Line::raw(""));
 }
 
-pub(super) fn tool_color(name: &str) -> Color {
+fn tool_color(name: &str) -> Color {
     // Stable hash → palette so the same tool keeps the same color.
     let mut h: u32 = 0x811c_9dc5;
     for b in name.as_bytes() {
@@ -101,12 +93,7 @@ pub(super) fn selection_row_style(selected: bool) -> (&'static str, Style) {
     }
 }
 
-pub(super) fn format_session_row(
-    s: &SessionSummary,
-    dim: Style,
-    val: Style,
-    selected: bool,
-) -> Line<'static> {
+pub(super) fn format_session_row(s: &SessionSummary, selected: bool) -> Line<'static> {
     let sid = short_sid(&s.session_id).to_string();
     let subagent = if s.is_subagent { "⑂" } else { " " };
     let mark = if selected {
@@ -120,19 +107,13 @@ pub(super) fn format_session_row(
     Line::from(vec![
         Span::styled(format!("{}{:<8}", mark, sid), sid_style),
         Span::raw(" "),
-        Span::styled(format!("{:>8}", fmt_cost(s.cost)), val.fg(Color::Green)),
+        Span::styled(format!("{:>8}", fmt_cost(s.cost)), VAL.fg(Color::Green)),
         Span::raw(" "),
-        Span::styled(format!("{:>10}", toks), dim),
+        Span::styled(format!("{:>10}", toks), DIM),
         Span::raw(" "),
-        Span::styled(
-            format!("{:<22}", models::first_line_truncated(model, 22)),
-            dim,
-        ),
+        Span::styled(pad(model, 22), DIM),
         Span::raw(" "),
-        Span::styled(
-            format!("{:<24}", models::first_line_truncated(&s.project, 24)),
-            Style::default().fg(FAINT_TEXT),
-        ),
+        Span::styled(pad(&s.project, 24), Style::default().fg(FAINT_TEXT)),
     ])
 }
 

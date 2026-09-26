@@ -2,6 +2,7 @@ use super::card::render_task_card;
 use crate::app::App;
 use crate::models::SessionInfo;
 use crate::tasks::store::TaskStatus;
+use crate::ui::common::task_status_meta;
 use crate::ui::palette::{DIM_TEXT, LABEL_GRAY};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -9,13 +10,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use std::collections::HashMap;
-
-fn column_meta(status: TaskStatus) -> (&'static str, &'static str, Color) {
-    // Icon/accent come from the shared status palette so the columns and
-    // the task-link picker read the same.
-    let (icon, accent) = crate::ui::common::task_status_meta(status);
-    (status.board_label(), icon, accent)
-}
 
 pub(super) fn render_task_column(
     frame: &mut Frame,
@@ -26,7 +20,10 @@ pub(super) fn render_task_column(
     sessions_by_tmux: &HashMap<&str, &SessionInfo>,
     now_secs: u64,
 ) {
-    let (label, icon, accent) = column_meta(status);
+    // Icon/accent come from the shared status palette so the columns and
+    // the task-link picker read the same.
+    let (icon, accent) = task_status_meta(status);
+    let label = status.board_label();
     // Display order, not board order: live columns put needs-input cards
     // first, frozen at tab entry so scan ticks can't reorder cards under
     // the cursor (see `App::task_display_column`); the cursor indexes the
@@ -36,10 +33,8 @@ pub(super) fn render_task_column(
     let col_focused = app.tasks.col == col_idx;
     // Done cards use their second content row for usage stats.
     let card_height: u16 = 5;
-    let gap: u16 = 0;
     let inner = Block::default().borders(Borders::ALL).inner(area);
-    let max_cards =
-        ((inner.height as u32 + gap as u32) / (card_height as u32 + gap as u32)) as usize;
+    let max_cards = (inner.height / card_height) as usize;
     let sel = if count == 0 {
         0
     } else if col_focused {
@@ -128,7 +123,7 @@ pub(super) fn render_task_column(
             sessions_by_tmux,
             now_secs,
         );
-        y = y.saturating_add(card_height + gap);
+        y = y.saturating_add(card_height);
         if y >= inner.y + inner.height {
             break;
         }

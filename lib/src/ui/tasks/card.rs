@@ -1,5 +1,5 @@
-use super::wrap_text;
-use crate::models::{self, SessionInfo, SessionState};
+use super::{ago, wrap_text};
+use crate::models::{SessionInfo, SessionState};
 use crate::tasks::activity::Errand;
 use crate::tasks::store::{TaskState, TaskStatus};
 use crate::ui::common::priority_color;
@@ -135,10 +135,7 @@ fn meta_line(
     if status == TaskStatus::Done {
         let when = t.done_at.unwrap_or(t.created_at);
         let mut spans = vec![Span::styled(
-            format!(
-                "✓ {}",
-                models::relative_age(now_secs.saturating_sub(when.max(0) as u64))
-            ),
+            format!("✓ {}", ago(now_secs, when)),
             age_style,
         )];
         // A done task that ran through an agent keeps its transcript — `f`
@@ -223,10 +220,7 @@ fn meta_line(
         }
         spans.push(Span::styled("  ", age_style));
     }
-    spans.push(Span::styled(
-        models::relative_age(now_secs.saturating_sub(t.created_at.max(0) as u64)),
-        age_style,
-    ));
+    spans.push(Span::styled(ago(now_secs, t.created_at), age_style));
     spans.extend(clip);
     Line::from(spans)
 }
@@ -425,7 +419,6 @@ mod tests {
 
     #[test]
     fn completed_card_renders_usage_and_cost() {
-        use ratatui::{backend::TestBackend, Terminal};
         let mut task = card(TaskPriority::P3);
         task.status = TaskStatus::Done;
         task.stats = Some(crate::tasks::stats::TaskStats {

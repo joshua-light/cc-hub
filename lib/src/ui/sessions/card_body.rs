@@ -1,9 +1,9 @@
+use super::{activity_clock, context_pct};
 use crate::models::{first_line_truncated, short_sid, SessionInfo, SessionState};
 use crate::ui::common::{
-    context_window_size, ctx_bar, ctx_color, format_elapsed, format_tool_label, short_model,
-    state_indicator, COLD_CACHE_ICON,
+    ctx_bar, ctx_color, format_elapsed, format_tool_label, short_model, state_indicator,
 };
-use crate::ui::palette::{CONTEXT_GRAY, ICE_BLUE, MUTED_TEXT, PURPLE};
+use crate::ui::palette::{CONTEXT_GRAY, MUTED_TEXT, PURPLE};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -149,6 +149,18 @@ fn model_line(session: &SessionInfo, inner_w: usize) -> Line<'static> {
         ));
         left_cols = 3 + short.chars().count();
     }
+    push_debug_id(&mut spans, session, left_cols, inner_w);
+    Line::from(spans)
+}
+
+/// Right-align the dim pid:sid debug id after `spans`, which already take
+/// `left_cols` columns.
+fn push_debug_id(
+    spans: &mut Vec<Span<'static>>,
+    session: &SessionInfo,
+    left_cols: usize,
+    inner_w: usize,
+) {
     let id = format!("{}:{}", session.pid, short_sid(&session.session_id));
     let pad = inner_w.saturating_sub(left_cols + id.chars().count());
     spans.push(Span::raw(" ".repeat(pad)));
@@ -156,7 +168,6 @@ fn model_line(session: &SessionInfo, inner_w: usize) -> Line<'static> {
         id,
         Style::default().fg(Color::Rgb(50, 50, 60)),
     ));
-    Line::from(spans)
 }
 
 /// The last user message (or topic summary), dimmed, on up to `budget` rows.
@@ -210,13 +221,7 @@ fn meta_line(session: &SessionInfo, inner_w: usize) -> Line<'static> {
         ));
         left_cols += sep.chars().count() + 3 + short.chars().count();
     }
-    let id = format!("{}:{}", session.pid, short_sid(&session.session_id));
-    let pad = inner_w.saturating_sub(left_cols + id.chars().count());
-    spans.push(Span::raw(" ".repeat(pad)));
-    spans.push(Span::styled(
-        id,
-        Style::default().fg(Color::Rgb(50, 50, 60)),
-    ));
+    push_debug_id(&mut spans, session, left_cols, inner_w);
     Line::from(spans)
 }
 
@@ -234,11 +239,7 @@ fn footer_line(session: &SessionInfo, now: u64, inner_w: usize) -> Line<'static>
         // gray: state color lives in the chip and border only. Past the
         // prompt-cache TTL the clock becomes an ice-blue snowflake: the one
         // exception, because "cold" is exactly what this number measures.
-        let (icon, color) = if session.cache_cold(now) {
-            (COLD_CACHE_ICON, ICE_BLUE)
-        } else {
-            ("󰔟", Color::DarkGray)
-        };
+        let (icon, color) = activity_clock(session, now);
         spans.push(Span::styled(
             format!("{} {}", icon, elapsed),
             Style::default().fg(color),
@@ -256,10 +257,7 @@ fn footer_line(session: &SessionInfo, now: u64, inner_w: usize) -> Line<'static>
         ));
         left_cols += sep.len() + 3 + count.chars().count();
     }
-    if let Some(ctx) = session.context_tokens {
-        let window = context_window_size(session.model.as_deref().unwrap_or(""));
-        let pct = ((ctx as f64 / window as f64) * 100.0).min(999.0);
-        let pct_u8 = (pct as u64).min(100) as u8;
+    if let Some((pct, pct_u8)) = context_pct(session) {
         let pct_label = format!(" {:.0}%", pct);
         let bar_w = 8usize;
         let bar_cols = 3 + bar_w + pct_label.chars().count();

@@ -386,17 +386,10 @@ pub(crate) fn fmt_cost(c: f64) -> String {
     }
 }
 
+/// Compact age of `at` relative to `now`, both unix seconds: `45s`, `3m`,
+/// `2h`, `5d`. A timestamp in the future reads as `0s`.
 pub(crate) fn age(now: i64, at: i64) -> String {
-    let d = (now - at).max(0);
-    if d < 60 {
-        format!("{}s", d)
-    } else if d < 3600 {
-        format!("{}m", d / 60)
-    } else if d < 86_400 {
-        format!("{}h", d / 3600)
-    } else {
-        format!("{}d", d / 86_400)
-    }
+    models::relative_age_short((now - at).max(0) as u64)
 }
 
 /// Cut spans so the line never wraps.
@@ -429,6 +422,26 @@ pub(crate) fn pad(s: &str, w: usize) -> String {
 pub(crate) fn pad_left(s: &str, w: usize) -> String {
     let n = s.chars().count();
     format!("{}{}", " ".repeat(w.saturating_sub(n)), s)
+}
+
+/// ` 3/40 `: the 1-based position of `scroll` among `total` rows, clamped to
+/// the last row, for a scrollable view's corner.
+pub(crate) fn scroll_position(scroll: u16, total: u16) -> String {
+    format!(
+        " {}/{} ",
+        (scroll as usize).min(total.saturating_sub(1) as usize) + 1,
+        total
+    )
+}
+
+/// First cell of a selectable one-line row: a white bar when selected, a
+/// blank otherwise, so selected and plain rows stay aligned.
+pub(crate) fn selection_stripe(selected: bool) -> Span<'static> {
+    if selected {
+        Span::styled("▌", Style::default().fg(Color::White))
+    } else {
+        Span::raw(" ")
+    }
 }
 
 /// Gap between two columns of a table row's right-hand cluster.

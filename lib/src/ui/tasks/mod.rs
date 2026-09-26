@@ -119,6 +119,11 @@ fn render_filter_bar(frame: &mut Frame, area: Rect, app: &App, editing: bool) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
+/// `3m ago` for a unix-seconds timestamp; one in the future reads `0s ago`.
+pub(super) fn ago(now_secs: u64, at: i64) -> String {
+    models::relative_age(now_secs.saturating_sub(at.max(0) as u64))
+}
+
 /// Greedy word wrap to `width` columns (char-counted).
 pub(super) fn wrap_text(text: &str, width: usize) -> Vec<String> {
     if width == 0 {

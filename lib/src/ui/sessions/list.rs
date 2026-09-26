@@ -21,15 +21,15 @@
 //! renderer's right-edge math does) would skew rows whose cells are blank
 //! or whose padding bottoms out at zero.
 
-use super::{render_group_header, render_no_sessions, GROUP_GAP, GROUP_HEADER_HEIGHT};
+use super::{
+    activity_clock, agent_prefix, animated_indicator, badge_color, context_pct, keep_in_view,
+    render_group_header, render_no_sessions, GROUP_GAP, GROUP_HEADER_HEIGHT,
+};
 use crate::app::App;
 use crate::models::{first_line_truncated, SessionInfo, SessionState};
-use crate::ui::common::{
-    context_window_size, ctx_color, format_elapsed, short_model, spinner_frame, starting_frame,
-    state_indicator, task_color, Cell, COLD_CACHE_ICON, COL_SEP,
-};
+use crate::ui::common::{ctx_color, format_elapsed, selection_stripe, short_model, Cell, COL_SEP};
 use crate::ui::now_ms;
-use crate::ui::palette::{CONTEXT_GRAY, ICE_BLUE, MUTED_TEXT};
+use crate::ui::palette::{CONTEXT_GRAY, MUTED_TEXT, SELECTED_ROW_BG};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -149,25 +149,17 @@ pub(super) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
         y_acc = y_acc.saturating_add(GROUP_HEADER_HEIGHT + body_h + GROUP_GAP);
     }
 
-    // Auto-scroll to keep the selected row visible (prefer its header too).
-    {
-        let g_offset = group_offsets[app.sessions.sel_group];
-        let row_y = g_offset
-            + GROUP_HEADER_HEIGHT
-            + row_offsets[app.sessions.sel_group][app.sessions.sel_in_group];
-        let row_bottom = row_y + 1;
-        if row_bottom.saturating_sub(g_offset) <= area.height {
-            if g_offset < app.render.grid_scroll {
-                app.render.grid_scroll = g_offset;
-            } else if row_bottom > app.render.grid_scroll + area.height {
-                app.render.grid_scroll = row_bottom.saturating_sub(area.height);
-            }
-        } else if row_y < app.render.grid_scroll {
-            app.render.grid_scroll = row_y;
-        } else if row_bottom > app.render.grid_scroll + area.height {
-            app.render.grid_scroll = row_bottom.saturating_sub(area.height);
-        }
-    }
+    let g_offset = group_offsets[app.sessions.sel_group];
+    let row_y = g_offset
+        + GROUP_HEADER_HEIGHT
+        + row_offsets[app.sessions.sel_group][app.sessions.sel_in_group];
+    keep_in_view(
+        &mut app.render.grid_scroll,
+        g_offset,
+        row_y,
+        row_y + 1,
+        area.height,
+    );
 
     let scroll = app.render.grid_scroll;
     let now = now_ms();
@@ -213,7 +205,6 @@ pub(super) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_row(
     frame: &mut Frame,
     area: Rect,
@@ -224,27 +215,15 @@ fn render_row(
     now: u64,
 ) {
     let width = area.width as usize;
-    let (indicator, ind_color) = state_indicator(&session.state);
-    let indicator = match session.state {
-        SessionState::Processing => spinner_frame(now),
-        SessionState::Starting => starting_frame(now),
-        _ => indicator,
-    };
+    let (indicator, ind_color) = animated_indicator(&session.state, now);
 
     let mut cluster: Vec<Cell> = Vec::new();
     if cols.task_w > 0 {
         let (text, style) = match badge {
-            Some(b) => {
-                let color = if b.stale {
-                    Color::DarkGray
-                } else {
-                    task_color(&b.task_id)
-                };
-                (
-                    format!("󰓹 {}", first_line_truncated(&b.title, cols.task_w - 2)),
-                    Style::default().fg(color),
-                )
-            }
+            Some(b) => (
+                format!("󰓹 {}", first_line_truncated(&b.title, cols.task_w - 2)),
+                Style::default().fg(badge_color(b)),
+            ),
             None => (String::new(), Style::default()),
         };
         cluster.push(Cell {
@@ -294,11 +273,7 @@ fn render_row(
     {
         // Same swap as the card footer: past the prompt-cache TTL the clock
         // becomes the ice-blue snowflake — restarting beats resuming.
-        let (icon, color) = if session.cache_cold(now) {
-            (COLD_CACHE_ICON, ICE_BLUE)
-        } else {
-            ("󰔟", Color::DarkGray)
-        };
+        let (icon, color) = activity_clock(session, now);
         let text = match session.last_activity {
             Some(ts) => format!("{} {}", icon, format_elapsed(now, ts)),
             None => String::new(),
@@ -311,13 +286,8 @@ fn render_row(
         });
     }
     {
-        let (text, color) = match session.context_tokens {
-            Some(ctx) => {
-                let window = context_window_size(session.model.as_deref().unwrap_or(""));
-                let pct = ((ctx as f64 / window as f64) * 100.0).min(999.0);
-                let pct_u8 = (pct as u64).min(100) as u8;
-                (format!("󰍛 {:.0}%", pct), ctx_color(pct_u8))
-            }
+        let (text, color) = match context_pct(session) {
+            Some((pct, pct_u8)) => (format!("󰍛 {:.0}%", pct), ctx_color(pct_u8)),
             None => (String::new(), Color::DarkGray),
         };
         cluster.push(Cell {
@@ -332,11 +302,7 @@ fn render_row(
     // Title region: agent badge + Haiku title (falling back
     // to the last user message, same priority as the card body).
     let title_budget = width.saturating_sub(LEFT_FIXED + cluster_width);
-    let agent_badge = if session.agent_id == "claude" {
-        String::new()
-    } else {
-        format!("[{}] ", session.agent_badge())
-    };
+    let agent_badge = agent_prefix(session);
     let prefix_w = agent_badge.chars().count();
 
     let attention = session.needs_attention();
@@ -366,11 +332,7 @@ fn render_row(
     let used = prefix_w + text.chars().count();
 
     let mut spans: Vec<Span<'static>> = Vec::new();
-    spans.push(if selected {
-        Span::styled("▌", Style::default().fg(Color::White))
-    } else {
-        Span::raw(" ")
-    });
+    spans.push(selection_stripe(selected));
     spans.push(Span::styled(
         format!("{} ", indicator),
         Style::default().fg(ind_color),
@@ -389,7 +351,7 @@ fn render_row(
     if selected {
         // Full-row background highlight is the list's selection cue — the
         // grid's double border has no one-row-tall equivalent.
-        row = row.style(Style::default().bg(Color::Rgb(40, 40, 52)));
+        row = row.style(Style::default().bg(SELECTED_ROW_BG));
     }
     frame.render_widget(row, area);
 }

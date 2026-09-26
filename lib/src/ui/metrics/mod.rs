@@ -4,6 +4,7 @@
 //! - `rows`: line builders the sections share
 
 use crate::app::App;
+use crate::ui::common::scroll_position;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -75,11 +76,7 @@ pub(crate) fn render_metrics_body(frame: &mut Frame, area: Rect, app: &mut App) 
     app.render.metrics_row_lines = row_lines;
     app.render.metrics_scroll = scroll;
 
-    let scroll_info = format!(
-        " {}/{} ",
-        (scroll as usize).min(total_lines.saturating_sub(1) as usize) + 1,
-        total_lines
-    );
+    let scroll_info = scroll_position(scroll, total_lines);
     let indicator_area = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
