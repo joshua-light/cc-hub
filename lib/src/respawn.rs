@@ -5,8 +5,8 @@
 //! homes is resumed natively — its transcript is copied into the target
 //! account's `projects/` so `--resume` finds it — and every other pairing
 //! starts a fresh session that reads the old transcript. Native resume stays
-//! limited to the paths the broker has proven; see
-//! docs/account-routing-design.md.
+//! limited to the paths the broker has proven; see "Replacement from the
+//! transcript" in docs/resource-management.md.
 
 use crate::agent::AgentKind;
 use crate::models::SessionInfo;
