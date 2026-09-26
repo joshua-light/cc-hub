@@ -9,11 +9,11 @@
 /// All writer sites:
 /// - `ui/mod.rs` → [`crate::app::App::update_grid_cols`] writes
 ///   [`Self::grid_cols`].
-/// - `ui/sessions.rs` and `ui/sessions_list.rs` write [`Self::grid_scroll`]
-///   (keep-selection-visible clamp, one writer per layout);
-///   `ui/sessions.rs` also clamps [`Self::popup_scroll`].
+/// - `ui/sessions/grid.rs` and `ui/sessions/list.rs` write
+///   [`Self::grid_scroll`] through `sessions::keep_in_view` (one writer per
+///   layout); `ui/sessions/detail.rs` clamps [`Self::popup_scroll`].
 /// - `ui/builds.rs` writes [`Self::builds_cols`] and [`Self::builds_scroll`].
-/// - `ui/metrics.rs` writes [`Self::metrics_view_height`],
+/// - `ui/metrics/mod.rs` writes [`Self::metrics_view_height`],
 ///   [`Self::metrics_row_lines`], and [`Self::metrics_scroll`].
 pub struct RenderState {
     /// Vertical scroll offset of the Sessions grid, in rows. The renderer
@@ -36,7 +36,7 @@ pub struct RenderState {
     /// the renderer for the same selection engagement decision.
     pub metrics_row_lines: Vec<usize>,
     /// Scroll offset (lines) of the Tasks-tab Task Info popup body. Clamped
-    /// by the renderer (`ui/tasks.rs`) to keep the selected attachment
+    /// by the renderer (`ui/tasks/info.rs`) to keep the selected attachment
     /// visible.
     pub task_info_scroll: u16,
     /// Scroll offset (rows) of the Agents-tab table, written by the
