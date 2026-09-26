@@ -1,4 +1,8 @@
-//! Task progress is distinct from session liveness and the user's Done action.
+//! A card's progress label: what the task is waiting on, read from its
+//! notes (`state.json`) and the router's and broker's side files
+//! (`clarification.json`, `resources.json`). Independent of whether the
+//! session is alive and of the card's column.
+
 use serde::Deserialize;
 use std::path::Path;
 

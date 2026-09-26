@@ -1,25 +1,20 @@
-//! Personal task board shown on the Tasks tab. A board task is a plain to-do
-//! item that can optionally be handed to a single agent session: assigning spawns a detached agent in a
-//! chosen cwd, prompted to investigate and plan first — the card sits in
-//! Planning until the user approves the plan (Space), which tells the agent
-//! to proceed and moves the card to In Progress. The binding is recorded so
-//! `f` on the card attaches to that session exactly like the Sessions tab.
-//! When that session opens a pull request it writes a `PR:` note, and the
-//! note carries the card to Review — the column for work that wants reading
-//! rather than answering.
+//! The personal task board behind the Tasks tab.
 //!
-//! A board task is a [`store::TaskState`], stored one file per task at
-//! `~/.cc-hub/tasks/<task-id>/state.json` behind a per-task lock, with the
-//! legal status edges enforced by the store's transition table. [`PersonalBoard`]
-//! is the in-memory snapshot the TUI mutates through; every mutation is a
-//! locked read-mutate-write of the task's own file, so concurrent cc-hub
-//! instances conflict per task, not per board. Board-level metadata
-//! (`last_assign_cwd`) lives in `~/.cc-hub/board.json`.
+//! Each card is a [`store::TaskState`] in `~/.cc-hub/tasks/<task-id>/state.json`.
+//! Every mutation is a read-mutate-write under that task's own lock, so
+//! concurrent cc-hub instances conflict per task, not per board.
+//! [`PersonalBoard`] is the in-memory snapshot the TUI mutates through.
 //!
-//! - [`store`] — per-task `state.json` files and the status transition table.
-//! - [`activity`] — the card's progress label, from the task's notes and side files.
-//! - [`stats`] — persisted per-task usage.
-//! - [`session_links`] — user-driven session→task links.
+//! - `board`: [`PersonalBoard`], the loaded board and its mutations.
+//! - `binding`: keeps a card's `session_id` and `tmux` in step with the scan.
+//! - `quick_add`: the add popup's `#tag` / `!N` syntax and tag normalization.
+//! - `archive`: the append-only log of removed cards.
+//! - `meta`: board-level state in `~/.cc-hub/board.json`.
+//! - [`store`]: per-task `state.json` files, locking and atomic writes.
+//! - `status`: card columns, priorities and the legal-transition table.
+//! - [`activity`]: the card's progress label, from its notes and side files.
+//! - [`stats`]: per-card token and cost totals.
+//! - [`session_links`]: user-driven session→task links.
 
 mod archive;
 mod binding;

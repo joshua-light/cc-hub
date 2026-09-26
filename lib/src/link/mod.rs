@@ -1,45 +1,21 @@
-//! The `cc-hub://` deep link — the URL an outside tool opens to make the hub
-//! start something.
-//!
-//! Three kinds exist today: `review`, `fix` and `task`.
-//!
-//! A browser extension puts "Light Review" and "Full Review" buttons on a
-//! pull request page; each is a link like
+//! The `cc-hub://` deep link: the URL an outside tool opens to make the hub
+//! start something. An OS scheme handler routes it to `cc-hub open <url>`,
+//! which parses it here and acts on it in [`crate::ops::link`].
 //!
 //! ```text
 //! cc-hub://review?depth=light&pr=https%3A%2F%2Fbitbucket.example.com%2Fprojects%2FAPP%2Frepos%2Fsample-project%2Fpull-requests%2F11280
-//! ```
-//!
-//! A locally configured OS handler routes the scheme to `cc-hub open <url>`,
-//! which parses the string here and acts on it in [`crate::ops::link`].
-//!
-//! A caller with nobody watching — a persistent agent that starts reviews on
-//! its own — adds `&post=80` to let the review post findings it is at least
-//! that confident about instead of asking a human who is not there.
-//!
-//! The same extension puts a "Fix" button beside those two. It is the other
-//! side of a review: the session it starts works through the comments the
-//! pull request already has instead of writing new ones. A fix is filed as a
-//! card on the Tasks board the moment the link is opened, and runs through
-//! the resource broker like any card; `kind` says which deliverable kind the
-//! card is filed under, so the broker can pick the subscription account.
-//!
-//! ```text
 //! cc-hub://fix?pr=https%3A%2F%2Fbitbucket.example.com%2Fprojects%2FAPP%2Frepos%2Fsample-project%2Fpull-requests%2F11280&kind=tps
-//! ```
-//!
-//! A `task` link hands a Tasks-board card to a session:
-//!
-//! ```text
 //! cc-hub://task?id=tk-1788509616255974000&dir=%2FUsers%2Fme%2Fgit%2Fself%2Fcc-hub
 //! ```
 //!
-//! The `task-runner` agent opens one for every card that reaches In Progress
-//! without a session of its own: it decides where the work belongs, and the
-//! hub starts a session there, bound to the card, running the `task` skill.
-//!
 //! This module is pure: a string becomes a [`Link`], and each link renders
 //! the prompt it stands for. Nothing here reads disk or spawns a process.
+//!
+//! - `review`: [`ReviewLink`], review a pull request.
+//! - `fix`: [`FixLink`], work through a pull request's review comments.
+//! - `task`: [`TaskLink`], hand a Tasks-board card to a session.
+//! - `pull_request`: [`PullRequestUrl`], the repo and number a PR URL names.
+//! - `query`: the percent-decoded `key=value` tail.
 
 mod fix;
 mod pull_request;

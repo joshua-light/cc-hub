@@ -333,8 +333,8 @@ fn delete_task_dir(id: &str) -> io::Result<()> {
     Ok(())
 }
 
-// Unix-only for the same reason as todo.rs: isolation works by redirecting
-// `$HOME`, which `dirs::home_dir()` ignores on Windows.
+// Unix-only: `with_temp_home` redirects `$HOME`, which `dirs::home_dir()`
+// ignores on Windows.
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -504,8 +504,7 @@ mod tests {
     fn concurrent_instances_merge_at_task_granularity() {
         with_temp_home(|| {
             // Two boards loaded from the same (empty) store: each adds a
-            // task; both must land on disk. The old single-file board's CAS
-            // would have rejected the second writer entirely.
+            // task; both must land on disk.
             let mut first = PersonalBoard::load_result().unwrap();
             let mut second = PersonalBoard::load_result().unwrap();
             first.add("first writer").unwrap().unwrap();

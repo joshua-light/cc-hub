@@ -12,8 +12,8 @@ fn archive_path() -> Option<PathBuf> {
 /// Append removed tasks to `~/.cc-hub/tasks-archive-v2.json` (a bare JSON
 /// array of unified [`TaskState`]s), so `x` and `c` are recoverable beyond
 /// the in-session undo slot. The archive is a log, not a ledger: an undone
-/// delete leaves its copy behind, and a corrupt file starts fresh — same
-/// policy as the board.
+/// delete leaves its copy behind. A corrupt archive is an `InvalidData`
+/// error, so the removal that archives first fails with it.
 pub(super) fn archive_tasks(items: &[TaskState]) -> io::Result<()> {
     if items.is_empty() {
         return Ok(());

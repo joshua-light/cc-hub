@@ -127,8 +127,8 @@ fn fix_target(
 /// No hand-over without a brief. The session that hands a card to the next
 /// role must have written down what the task is and how it is verified;
 /// that record is the card's notes, and a card with none has nothing to hand
-/// over. The `task` skill used to keep this rule in its own script; it lives
-/// here so that every role link, from any caller, passes the same gate.
+/// over. The rule lives here so every role link, from any caller, passes
+/// the same gate.
 pub(super) fn without_a_brief(card: &TaskState) -> Result<(), OpError> {
     if crate::ops::task::notes_of(card).is_empty() {
         return Err(OpError::conflict_with_recipe(

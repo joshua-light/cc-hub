@@ -4,13 +4,15 @@ use std::str::FromStr;
 
 use super::LinkError;
 
-/// `cc-hub://task?id=<tk-…>[&dir=<path>][&kind=<word>][&role=<word>]`: work a Tasks-board
-/// card in an agent session bound to that card — the card's live session in
-/// `dir` if it has one, else a fresh one. `dir` is where the session runs —
-/// the caller decides that, because only it knows what kind of task this
-/// is; without one the card's own recorded cwd is used. `kind`
-/// is a word in the prompt and nothing more: the `task` skill owns what its
-/// kinds mean, exactly as the review skill owns what `light` and `full` mean.
+/// `cc-hub://task?id=<tk-…>[&dir=<path>][&kind=<word>][&role=<word>]`: work
+/// a Tasks-board card in an agent session bound to that card — the card's
+/// live session in `dir` if it has one, else a fresh one. The `task-runner`
+/// agent opens one for every In Progress card without a session.
+///
+/// `dir` is where the session runs. The caller picks it, because only it
+/// knows what kind of task this is; without one the card's recorded cwd is
+/// used. `kind` is a word in the prompt and nothing more: the `task` skill
+/// owns what its kinds mean, as the review skill owns `light` and `full`.
 /// `role` is the same kind of word, with one consequence for the hub: a link
 /// that names a role is a hand-over, so it always starts a fresh session and
 /// closes the one the card had, instead of reusing it.
