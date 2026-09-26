@@ -1,4 +1,4 @@
-use super::resolve::resolve_spawn_command;
+use super::resolve::spawn_argv;
 use super::scratch_cwd;
 use crate::config;
 use log::{debug, warn};
@@ -45,13 +45,10 @@ pub(crate) fn detach_from_tty(cmd: &mut Command) {
 #[cfg(not(unix))]
 pub(crate) fn detach_from_tty(_cmd: &mut Command) {}
 
-/// Spawn `cmd` and poll `try_wait` until it finishes or `timeout` expires,
-/// killing on timeout. Stdin/stdout/stderr configuration is the caller's
-/// responsibility — this helper just owns the deadline loop so resolution
-/// and generation don't duplicate it.
 /// Run `cmd` detached from our tty, killing it past `timeout` or on
-/// shutdown. Shared with the persistent-agent harness, which drives the
-/// same spawn command in `-p` mode.
+/// [`request_shutdown`]. `None` on spawn failure, timeout or shutdown. The
+/// caller configures stdio. Shared with the persistent-agent harness, which
+/// drives the same spawn command in `-p` mode.
 pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
     detach_from_tty(&mut cmd);
     let mut child: Child = cmd
@@ -64,7 +61,7 @@ pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) => {
-                if SHUTDOWN.load(Ordering::Relaxed) {
+                if shutting_down() {
                     debug!("title: shutdown signal, killing subprocess");
                     let _ = child.kill();
                     let _ = child.wait();
@@ -96,7 +93,7 @@ pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
 /// (resolve, spawn, non-zero exit, timeout, shutdown).
 pub fn run_claude_blocking(model: &str, prompt: &str, timeout: Duration) -> Option<String> {
     fs::create_dir_all(scratch_cwd()).ok()?;
-    let resolved = resolve_spawn_command()?;
+    let resolved = spawn_argv()?;
     let (exe, base_args) = resolved.split_first()?;
     let mut cmd = Command::new(exe);
     cmd.args(base_args)

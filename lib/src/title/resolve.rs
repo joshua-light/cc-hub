@@ -17,22 +17,13 @@ struct ResolveCache {
     value: Option<Vec<String>>,
 }
 
-/// Ask the user's login shell once to resolve the configured spawn
-/// command to its real argv. We only pay the `-ic` tax here; every actual
-/// title generation then runs the resolved binary directly, avoiding both
-/// the overhead of starting zsh and the tty fight an interactive shell
-/// would cause.
-///
-/// Recognizes either a path (from `command -v`) or an alias body (from
-/// `alias <name>`, whose output is roughly `<name>='claude …'` in zsh /
-/// `alias <name>='claude …'` in bash).
 /// The configured spawn command resolved to a direct argv (alias bodies
 /// expanded), cached. `None` when the shell couldn't resolve it.
+///
+/// Only resolution pays the login shell's `-ic` tax; callers then exec the
+/// resolved binary directly, avoiding both zsh startup and the tty fight an
+/// interactive shell would cause.
 pub fn spawn_argv() -> Option<Vec<String>> {
-    resolve_spawn_command()
-}
-
-pub(super) fn resolve_spawn_command() -> Option<Vec<String>> {
     // Successful resolutions are stable enough to cache for an hour; failures
     // re-attempt every minute so a transient shell hiccup doesn't disable
     // titling for the rest of the process.
