@@ -40,7 +40,7 @@ pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> Metr
     let mut interruptions = InterruptionAnalysis::default();
     let mut growth = ContextGrowthAnalysis::default();
     let mut peak_ctx_findings: Vec<PeakContextFinding> = Vec::new();
-    // Cross-file dedup of canonical calls (BUG 5): resume/fork copies history
+    // Cross-file dedup of canonical calls: resume/fork copies history
     // verbatim, so the same call reappears in later files. The first parsed
     // file that carries an id owns its cost/tokens/day; later files skip it.
     let mut global_seen: HashSet<String> = HashSet::new();
@@ -62,7 +62,6 @@ pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> Metr
         let mut owned_calls: Vec<&AssistantCall> = Vec::new();
 
         for call in &s.calls {
-            // Skip calls already counted by an earlier file (resume/fork copy).
             if !call.dedup_key.is_empty() && !global_seen.insert(call.dedup_key.clone()) {
                 continue;
             }

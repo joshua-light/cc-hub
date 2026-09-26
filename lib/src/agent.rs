@@ -1,3 +1,6 @@
+//! Coding-agent backend registry: [`AgentKind`], [`AgentConfig`] and the
+//! default Claude models. The persistent-agent harness is [`crate::harness`].
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

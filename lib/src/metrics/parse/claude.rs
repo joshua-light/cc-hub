@@ -1,3 +1,8 @@
+//! Dedup mirrors cc-metrics: Claude Code writes one JSONL line per content
+//! block, all sharing a `requestId` and cumulative `usage`. We keep one entry
+//! per `requestId`, redirecting via `message.id` when two `requestId`s share
+//! the same canonical API response.
+
 use super::{extract_bash_commands, project_of, AssistantCall, ParsedSession, ToolUse};
 use crate::conversation::parse_timestamp_ms;
 use crate::metrics::cost::Tokens;

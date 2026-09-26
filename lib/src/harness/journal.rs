@@ -47,8 +47,6 @@ pub fn read_notes(dir: &Path, limit: usize) -> Vec<Note> {
     notes
 }
 
-// ---- events ---------------------------------------------------------------
-//
 // The harness's own log, one line per thing worth knowing later: a run
 // started or ended, a poll command failed, the agent halted, someone changed
 // it from the hub. The Agents tab reads it to answer "why didn't it run?" —

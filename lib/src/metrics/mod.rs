@@ -1,14 +1,13 @@
-//! Usage analytics for Claude Code sessions.
+//! Usage analytics over Claude Code, Pi and Codex transcripts: cost and
+//! tokens by model, project, day and session, plus tool usage, interrupted
+//! tool calls and context growth.
 //!
-//! Walks `~/.claude/projects/<encoded-cwd>/*.jsonl` (and subagent JSONLs
-//! under `<session-uuid>/subagents/`), parses token usage from each
-//! `assistant` line, and aggregates cost/tokens by model, project, day,
-//! and session.
-//!
-//! Dedup mirrors cc-metrics: Claude Code writes one JSONL line per content
-//! block, all sharing a `requestId` and cumulative `usage`. We keep one
-//! entry per `requestId`, redirecting via `message.id` when two
-//! `requestId`s share the same canonical API response.
+//! - `cost`: per-model pricing and token sums.
+//! - `parse`: one parser per transcript dialect, into a shared `ParsedSession`.
+//! - `discover`: finds every transcript file on disk.
+//! - `task_usage`: token and cost totals for the sessions behind one task.
+//! - `context`: peak-context and token-spike findings for one session.
+//! - `analyze`: the Metrics tab's one-pass aggregation.
 
 mod analyze;
 mod context;
@@ -124,9 +123,8 @@ pub struct PeakContextAnalysis {
 }
 
 /// A session reference surfaced in the Metrics tab that the user can
-/// select and resume. The flat index used by the UI walks the analysis
-/// in the order shown on screen: Top sessions → Interruptions →
-/// Context-growth findings.
+/// select and resume. The UI indexes the flat list built by
+/// [`MetricsAnalysis::selectable_sessions`].
 #[derive(Clone, Debug)]
 pub struct SelectableSession {
     pub session_id: String,
@@ -134,8 +132,8 @@ pub struct SelectableSession {
     pub project: String,
     pub jsonl_path: PathBuf,
     /// Timestamp (ms) of the assistant turn worth highlighting when the
-    /// transcript opens — currently only populated for context-growth
-    /// findings, where it marks the peak-delta turn.
+    /// transcript opens. Set only for peak-context and context-growth
+    /// findings, where it marks the peak turn.
     pub peak_timestamp_ms: Option<u64>,
 }
 

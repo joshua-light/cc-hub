@@ -1,3 +1,10 @@
+//! Transcript parsers, one per agent dialect, all producing a
+//! [`ParsedSession`].
+//!
+//! - `claude`: Claude Code JSONL, deduped per API request.
+//! - `codex`: Codex rollouts, folded into one call from the final usage total.
+//! - `pi`: Pi session JSONL, one call per assistant message.
+
 mod claude;
 mod codex;
 mod pi;

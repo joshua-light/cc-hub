@@ -76,8 +76,8 @@ pub(super) fn parse_pi_session_file(path: &Path) -> Option<ParsedSession> {
                                 .unwrap_or(0),
                             tool_uses: Vec::new(),
                             cost_override,
-                            // Pi sessions carry no requestId/message.id; cross-file
-                            // dedup (BUG 5) doesn't apply, so leave the key empty.
+                            // Pi sessions carry no requestId/message.id, so
+                            // cross-file dedup can't apply.
                             dedup_key: String::new(),
                         };
                         if let Some(content) = msg.get("content").and_then(|c| c.as_array()) {

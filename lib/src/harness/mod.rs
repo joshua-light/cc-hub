@@ -16,6 +16,18 @@
 //!
 //! `agent.rs` (singular) is the coding-agent *backend* registry; this module
 //! is the harness that runs unattended agents on top of one of them.
+//!
+//! - `spec`: parses `agent.toml`.
+//! - `settings`: the spec fields the Agents tab edits in place.
+//! - `trigger`: inbox, poll and interval event sources.
+//! - `supervisor`: the per-agent tokio loops inside the TUI.
+//! - `tick`: one tick end to end, folded into `state.json`, plus budget gates.
+//! - `runner`: spawns `claude -p` for a tick and parses its stream-json.
+//! - `tools`: turns the spec's tool list into CLI allow/deny rules.
+//! - `state`: `state.json` bookkeeping under `state.lock`.
+//! - `journal`: `notes.jsonl` (to the user) and `events.jsonl` (harness log).
+//! - `snapshot`: what the Agents tab renders.
+//! - `scaffold`: creates a new agent directory.
 
 mod journal;
 pub mod runner;
@@ -73,8 +85,6 @@ pub fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-// ---- paths ----------------------------------------------------------------
-
 pub fn inbox_path(dir: &Path) -> PathBuf {
     dir.join("inbox")
 }
@@ -82,8 +92,6 @@ pub fn inbox_path(dir: &Path) -> PathBuf {
 pub fn log_path(dir: &Path) -> PathBuf {
     dir.join("log").join(format!("{}.jsonl", today_utc()))
 }
-
-// ---- control verbs --------------------------------------------------------
 
 /// Drop an event into the agent's inbox. Works for every trigger kind: the
 /// inbox is always checked first.
