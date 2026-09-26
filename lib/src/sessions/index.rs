@@ -15,6 +15,7 @@ use crate::config;
 use crate::conversation;
 use crate::platform::paths;
 use crate::sessions::codex;
+use crate::sessions::common::project_name;
 use crate::sessions::scanner;
 use crate::title;
 use std::collections::HashMap;
@@ -67,14 +68,6 @@ fn mtime_ms(path: &Path) -> Option<u64> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
         .map(|d| d.as_millis() as u64)
-}
-
-fn project_name(cwd: &str) -> String {
-    Path::new(cwd)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string()
 }
 
 /// The configured agent id for `kind`, alphabetically first when several are

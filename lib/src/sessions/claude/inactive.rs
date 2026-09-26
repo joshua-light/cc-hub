@@ -1,12 +1,11 @@
 use super::paths::{is_scratch_cwd, projects_dir, scratch_project_dir_name};
-use super::project_name;
 use crate::agent::AgentKind;
 use crate::config;
 use crate::conversation;
 use crate::models::{SessionInfo, SessionState};
+use crate::sessions::common::{project_name, recent_unclaimed};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 /// Build a [`SessionInfo`] from an orphan JSONL alone — no metadata file, no
 /// live process. `cwd` is taken from the first JSONL entry that carries one;
@@ -115,22 +114,9 @@ pub(super) fn scan_orphan_jsonls(
         // TTL budget, and identical in every other respect to the old walk.
         let files = crate::sessions::dir_cache::list_jsonl_dir(&proj_path, relist_ttl);
         visited_dirs.insert(proj_path);
-        let mut candidates: Vec<(PathBuf, SystemTime)> = Vec::new();
-        for (path, mtime) in files.iter() {
-            if claimed_paths.contains(path) {
-                continue;
-            }
-            let Some(age) = mtime.elapsed().ok().map(|d| d.as_secs()) else {
-                continue;
-            };
-            if age > cfg.window_secs {
-                continue;
-            }
-            candidates.push((path.clone(), *mtime));
-        }
+        let candidates = recent_unclaimed(&files, claimed_paths, cfg.window_secs);
         total_in_window += candidates.len();
-        candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
-        for (path, _) in candidates.into_iter().take(cfg.max_per_project) {
+        for path in candidates.into_iter().take(cfg.max_per_project) {
             if let Some(info) = synthesize_inactive_from_jsonl(&path, titles) {
                 out.push(info);
             }

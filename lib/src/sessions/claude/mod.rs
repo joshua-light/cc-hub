@@ -14,6 +14,7 @@ use crate::config;
 use crate::conversation;
 use crate::models::{short_sid, RawSession, SessionInfo, SessionState};
 use crate::platform::process::{Process, ProcessInfo};
+use crate::sessions::common::project_name;
 use clear_chain::{read_clears_from_history, resolve_jsonl_paths, ClearMap};
 use inactive::scan_orphan_jsonls;
 use log::{debug, info, warn};
@@ -201,14 +202,6 @@ struct JsonlData {
     is_thinking: bool,
     context_tokens: Option<u64>,
     tool_uses_count: u64,
-}
-
-fn project_name(cwd: &str) -> String {
-    Path::new(cwd)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string()
 }
 
 /// Claude sessions under the default home and every extra Claude account home.
