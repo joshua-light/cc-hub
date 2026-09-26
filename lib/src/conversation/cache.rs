@@ -37,6 +37,21 @@ pub struct StateDerivation {
 }
 
 impl StateDerivation {
+    /// The state of a session with no readable transcript: Idle, nothing known.
+    pub(crate) fn idle() -> Self {
+        StateDerivation {
+            state: SessionState::Idle,
+            last_user_message: None,
+            last_activity: None,
+            git_branch: None,
+            model: None,
+            version: None,
+            current_tool: None,
+            is_thinking: false,
+            context_tokens: None,
+        }
+    }
+
     /// Run the full extract pipeline over a tail window. Pure: no IO, no
     /// cache. `source` labels unknown-stop-reason warnings with the file.
     fn derive(entries: &[Value], source: &Path) -> Self {

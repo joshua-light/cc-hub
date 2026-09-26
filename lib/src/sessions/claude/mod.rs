@@ -189,21 +189,6 @@ fn reconcile_with_session_status(
     }
 }
 
-/// Extracted JSONL data for a session, avoiding a 7-element tuple.
-struct JsonlData {
-    state: SessionState,
-    last_user_message: Option<String>,
-    last_activity: Option<u64>,
-    git_branch: Option<String>,
-    model: Option<String>,
-    version: Option<String>,
-    summary: Option<String>,
-    current_tool: Option<conversation::CurrentTool>,
-    is_thinking: bool,
-    context_tokens: Option<u64>,
-    tool_uses_count: u64,
-}
-
 /// Claude sessions under the default home and every extra Claude account home.
 pub(super) fn scan(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
     let mut sessions = scan_claude_sessions(titles);
@@ -292,25 +277,14 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
                     .map_or("none".to_string(), |p| p.display().to_string())
             );
 
-            let mut data = match &jsonl_path {
+            let (mut derived, summary, tool_uses_count) = match &jsonl_path {
                 Some(path) => {
                     // Memoized on (path, mtime): skips the whole tail-read +
                     // extract pipeline when the JSONL hasn't changed this tick.
-                    let derived = conversation::derive_state_cached(path)
+                    let mut derived = conversation::derive_state_cached(path)
                         .map(|d| (*d).clone())
-                        .unwrap_or_else(|| conversation::StateDerivation {
-                            state: SessionState::Idle,
-                            last_user_message: None,
-                            last_activity: None,
-                            git_branch: None,
-                            model: None,
-                            version: None,
-                            current_tool: None,
-                            is_thinking: false,
-                            context_tokens: None,
-                        });
+                        .unwrap_or_else(conversation::StateDerivation::idle);
                     let mtime_age_secs = mtime_age_secs(path);
-                    let mut state = derived.state;
                     // First user message is immutable per session — cached
                     // permanently, so the head is read at most once per path.
                     let summary = conversation::first_user_message_cached(path);
@@ -318,7 +292,7 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
 
                     debug!(
                         "  sid={} raw_state={} last_activity={:?}",
-                        sid_short, state, derived.last_activity
+                        sid_short, derived.state, derived.last_activity
                     );
 
                     // If the JSONL was modified very recently but state
@@ -326,7 +300,7 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
                     // its first response yet (e.g. right after a slash
                     // command). Upgrade to Processing.
                     if is_alive
-                        && state == SessionState::Idle
+                        && derived.state == SessionState::Idle
                         && mtime_age_secs.is_some_and(|s| s < 30)
                     {
                         debug!(
@@ -334,61 +308,40 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
                             sid_short,
                             mtime_age_secs.unwrap()
                         );
-                        state = SessionState::Processing;
+                        derived.state = SessionState::Processing;
                     }
 
                     debug!(
                         "  sid={} final_state={} model={:?} branch={:?}",
-                        sid_short, state, derived.model, derived.git_branch
+                        sid_short, derived.state, derived.model, derived.git_branch
                     );
 
-                    JsonlData {
-                        state,
-                        last_user_message: derived.last_user_message,
-                        last_activity: derived.last_activity,
-                        git_branch: derived.git_branch,
-                        model: derived.model,
-                        version: derived.version,
-                        summary,
-                        current_tool: derived.current_tool,
-                        is_thinking: derived.is_thinking,
-                        context_tokens: derived.context_tokens,
-                        tool_uses_count,
-                    }
+                    (derived, summary, tool_uses_count)
                 }
                 None => {
                     debug!("  sid={} no jsonl → Idle", sid_short);
-                    JsonlData {
-                        state: SessionState::Idle,
-                        last_user_message: None,
-                        last_activity: None,
-                        git_branch: None,
-                        model: None,
-                        version: None,
-                        summary: None,
-                        current_tool: None,
-                        is_thinking: false,
-                        context_tokens: None,
-                        tool_uses_count: 0,
-                    }
+                    (conversation::StateDerivation::idle(), None, 0)
                 }
             };
 
             // The transcript can't see a prompt that's open but not yet
             // answered; the session file's live status can. Surface `waiting`
             // as the blue Question state while the prompt is open.
-            let reconciled =
-                reconcile_with_session_status(data.state.clone(), is_alive, raw.status.as_deref());
-            if reconciled != data.state {
+            let reconciled = reconcile_with_session_status(
+                derived.state.clone(),
+                is_alive,
+                raw.status.as_deref(),
+            );
+            if reconciled != derived.state {
                 debug!(
                     "  sid={} status={:?} overrides {} → {}",
-                    sid_short, raw.status, data.state, reconciled
+                    sid_short, raw.status, derived.state, reconciled
                 );
-                data.state = reconciled;
+                derived.state = reconciled;
             }
 
             if !is_alive {
-                data.state = SessionState::Inactive;
+                derived.state = SessionState::Inactive;
             }
 
             let tmux_session = if is_alive {
@@ -407,21 +360,21 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
                 project_name: project_name(&raw.cwd),
                 cwd: raw.cwd,
                 started_at: raw.started_at,
-                last_activity: data.last_activity,
-                state: data.state,
-                last_user_message: data.last_user_message,
-                summary: data.summary,
+                last_activity: derived.last_activity,
+                state: derived.state,
+                last_user_message: derived.last_user_message,
+                summary,
                 title,
-                model: data.model,
-                git_branch: data.git_branch,
-                version: data.version,
+                model: derived.model,
+                git_branch: derived.git_branch,
+                version: derived.version,
                 jsonl_path,
                 tmux_session,
-                current_tool: data.current_tool,
-                is_thinking: data.is_thinking,
+                current_tool: derived.current_tool,
+                is_thinking: derived.is_thinking,
                 titling: false,
-                context_tokens: data.context_tokens,
-                tool_uses_count: data.tool_uses_count,
+                context_tokens: derived.context_tokens,
+                tool_uses_count,
             }
         })
         .collect();
