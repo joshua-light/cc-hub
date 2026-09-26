@@ -134,7 +134,7 @@ Persistent agents (the Agents tab).
 
 ### `[builds.recipes.<name>]`
 
-Each command is an argv, run in the build's checkout through a login shell.
+Each command, and each `run` step, is an argv, run in the build's checkout through a login shell.
 In an argument, `{ref}`, `{route}` and `{commit}` stand for the build's
 values. An argument that is only a placeholder with no value is dropped.
 
@@ -144,10 +144,9 @@ values. An argument that is only a placeholder with no value is dropped.
 | `checkout` | none | Folder a new build starts in. |
 | `resource` | none | A `resources.toml` resource the builds need. Claimed before the first build and held until released. |
 | `routes` | `[]` | Routes a build may ask for. With none asked for, the recipe picks. |
-| `build` | `[]` | The build. Exit 0 is success. Prints `cc-hub: commit <sha>`, `cc-hub: route <name>` and `cc-hub: phase <text>` lines to report progress. |
-| `cancel` | `[]` | Stops a running build, including work it started elsewhere. |
-| `serve` | `[]` | Puts a built commit to use. |
-| `current` | `[]` | Prints the commit currently served. |
+| `run` | `[]` | The steps, each an argv, run in order. The build succeeds when every step exits 0 and stops at the first that does not. Any step reports progress with `cc-hub: commit <sha>`, `cc-hub: route <name>` and `cc-hub: phase <text>` lines; a later step can use the reported `{commit}`. |
+| `cancel` | `[]` | Stops a running step, including work it started elsewhere. |
+| `current` | `[]` | Prints the commit the recipe's last run left in place. |
 
 ```toml
 [builds.recipes.build-server]
@@ -155,9 +154,11 @@ description = "the game server, built on a second machine from a warm cache"
 checkout = "~/src/game"
 resource = "build-box"
 routes = ["swap", "scripts", "full"]
-build = ["build-server", "{ref}", "{route}"]
+run = [
+    ["build-server", "{ref}", "{route}"],
+    ["ssh", "-o", "RemoteCommand=none", "buildbox", "~/env/restart"],
+]
 cancel = ["build-server", "cancel"]
-serve = ["ssh", "-o", "RemoteCommand=none", "buildbox", "~/env/serve"]
 current = ["ssh", "-o", "RemoteCommand=none", "buildbox", "cat ~/build/state/built"]
 ```
 

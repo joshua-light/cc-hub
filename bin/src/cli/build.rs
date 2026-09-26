@@ -1,6 +1,6 @@
 //! `cc-hub build …` — the Builds tab from a script or an agent session.
 //! Everything a key on the tab does, a verb here does too, through the same
-//! `cc_hub_lib::builds` calls. The `_run`, `_serve` and `_hold` verbs are the
+//! `cc_hub_lib::builds` calls. The `_run` and `_hold` verbs are the
 //! detached processes those calls start, not for typing.
 
 use super::{print_json, CliError};
@@ -8,11 +8,16 @@ use cc_hub_lib::builds::{self, hold, recipe, runner, Build, BuildStatus};
 use std::time::Duration;
 
 pub(crate) fn build(args: &[String]) -> Result<(), CliError> {
-    let (verb, rest) = args.split_first().ok_or_else(|| {
-        CliError::Usage("build <start|list|cancel|rebuild|serve|reserve|release>".into())
-    })?;
+    let (verb, rest) = args
+        .split_first()
+        .ok_or_else(|| CliError::Usage("build <run|start|list|cancel|reserve|release>".into()))?;
     let flags = Flags::parse(rest)?;
     match verb.as_str() {
+        "run" => {
+            let build =
+                builds::run(&recipe_name(flags.recipe.clone())?).map_err(CliError::other)?;
+            finish(build, flags.wait)
+        }
         "start" => start(flags),
         "list" => {
             print_json(&serde_json::json!({ "ok": true, "builds": builds::all() }));
@@ -21,29 +26,6 @@ pub(crate) fn build(args: &[String]) -> Result<(), CliError> {
         "cancel" => {
             let build = builds::cancel(&flags.build()?).map_err(CliError::other)?;
             print_json(&serde_json::json!({ "ok": true, "build": build }));
-            Ok(())
-        }
-        "rebuild" => {
-            let build = builds::rebuild(&flags.build()?).map_err(CliError::other)?;
-            finish(build, flags.wait)
-        }
-        "serve" => {
-            let id = flags.build()?;
-            let build = builds::load(&id).map_err(|e| CliError::NotFound(e.to_string()))?;
-            if build.status != BuildStatus::Succeeded {
-                return Err(CliError::Conflict {
-                    msg: format!(
-                        "{} {}; only a build that succeeded is served",
-                        id,
-                        build.status.label()
-                    ),
-                    recipe: None,
-                });
-            }
-            runner::serve(&id).map_err(CliError::other)?;
-            print_json(
-                &serde_json::json!({ "ok": true, "build": builds::load(&id).map_err(CliError::other)? }),
-            );
             Ok(())
         }
         "reserve" => {
@@ -69,29 +51,29 @@ pub(crate) fn build(args: &[String]) -> Result<(), CliError> {
             runner::run(flags.positional()?).map_err(CliError::other)?;
             Ok(())
         }
-        "_serve" => runner::serve(flags.positional()?).map_err(CliError::other),
         "_hold" => hold::keep(flags.positional()?).map_err(CliError::other),
         other => Err(CliError::Usage(format!("unknown build verb: {}", other))),
     }
 }
 
+/// `--recipe`, which may be left out when there is only one.
+fn recipe_name(named: Option<String>) -> Result<String, CliError> {
+    if let Some(name) = named {
+        return Ok(name);
+    }
+    let names: Vec<&str> = recipe::all().map(|(name, _)| name).collect();
+    match names.as_slice() {
+        [only] => Ok(only.to_string()),
+        [] => Err(CliError::Usage("no [builds.recipes] in config.toml".into())),
+        many => Err(CliError::Usage(format!(
+            "--recipe is one of {}",
+            many.join(", ")
+        ))),
+    }
+}
+
 fn start(flags: Flags) -> Result<(), CliError> {
-    let recipe = match flags.recipe {
-        Some(name) => name,
-        None => {
-            let names: Vec<&str> = recipe::all().map(|(name, _)| name).collect();
-            match names.as_slice() {
-                [only] => only.to_string(),
-                [] => return Err(CliError::Usage("no [builds.recipes] in config.toml".into())),
-                many => {
-                    return Err(CliError::Usage(format!(
-                        "--recipe is one of {}",
-                        many.join(", ")
-                    )))
-                }
-            }
-        }
-    };
+    let recipe = recipe_name(flags.recipe)?;
     let cwd = match flags.cwd {
         Some(dir) => dir,
         None => std::env::current_dir()
@@ -99,7 +81,7 @@ fn start(flags: Flags) -> Result<(), CliError> {
             .display()
             .to_string(),
     };
-    let build = Build::new(&recipe, &cwd, flags.r#ref, flags.route, flags.serve);
+    let build = Build::new(&recipe, &cwd, flags.r#ref, flags.route);
     let build = builds::start(build).map_err(|e| CliError::Usage(e.to_string()))?;
     finish(build, flags.wait)
 }
@@ -149,7 +131,6 @@ struct Flags {
     route: Option<String>,
     build: Option<String>,
     resource: Option<String>,
-    serve: bool,
     wait: bool,
     positional: Option<String>,
 }
@@ -172,7 +153,6 @@ impl Flags {
                 "--route" => f.route = Some(value("--route")?),
                 "--build" => f.build = Some(value("--build")?),
                 "--resource" => f.resource = Some(value("--resource")?),
-                "--serve" => f.serve = true,
                 "--wait" => f.wait = true,
                 "--json" => {}
                 flag if flag.starts_with("--") => {
@@ -222,11 +202,11 @@ mod tests {
             "origin/main",
             "--route",
             "swap",
-            "--serve",
+            "--wait",
         ]))
         .unwrap();
         assert_eq!(f.r#ref.as_deref(), Some("origin/main"));
         assert_eq!(f.route.as_deref(), Some("swap"));
-        assert!(f.serve && !f.wait);
+        assert!(f.wait);
     }
 }

@@ -11,7 +11,7 @@ task board that hands tasks to agents.
   an agent, approve its plan, attach to its session.
 - **Sessions**: every agent session as a card. Spawn, attach, resume, rename,
   link to a task, or continue on another account.
-- **Builds**: one card per build recipe; build, cancel and serve. Shown once
+- **Builds**: one card per build recipe; run and cancel its steps. Shown once
   `config.toml` has a recipe.
 - **Agents**: persistent agents that wake on events and run unattended. Shown
   once `~/.cc-hub/agents/` exists.

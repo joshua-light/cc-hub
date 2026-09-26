@@ -1,4 +1,5 @@
-//! A recipe is how a build is done, written down in `config.toml`:
+//! A recipe is a thing that runs, written down in `config.toml`: its steps,
+//! done in order each time it runs, and how to ask what it last made.
 //!
 //! ```toml
 //! [builds.recipes.build-server]
@@ -6,9 +7,11 @@
 //! checkout = "~/src/game"
 //! resource = "build-box"
 //! routes = ["swap", "scripts", "full"]
-//! build = ["build-server", "{ref}", "{route}"]
+//! run = [
+//!     ["build-server", "{ref}", "{route}"],
+//!     ["ssh", "-o", "RemoteCommand=none", "buildbox", "~/env/restart"],
+//! ]
 //! cancel = ["build-server", "cancel"]
-//! serve = ["ssh", "-o", "RemoteCommand=none", "buildbox", "~/env/serve"]
 //! current = ["ssh", "-o", "RemoteCommand=none", "buildbox", "cat ~/build/state/built"]
 //! ```
 //!
@@ -28,20 +31,20 @@ pub struct Recipe {
     pub description: String,
     /// The checkout a new build starts in.
     pub checkout: Option<String>,
-    /// The resource (`~/.cc-hub/resources.toml`) a build and a serve need.
-    /// Held from the first build until it is released by hand.
+    /// The resource (`~/.cc-hub/resources.toml`) a run needs. Held from the
+    /// first run until it is released by hand.
     pub resource: Option<String>,
     /// Routes a build may ask for. Asking for none lets the recipe choose.
     pub routes: Vec<String>,
-    /// Builds. Exit 0 is success; `cc-hub: <key> <value>` lines report
-    /// progress ([`super::Report`]).
-    pub build: Vec<String>,
-    /// Stops a running build, including whatever it started elsewhere. Run by
-    /// the runner before it ends the build command itself.
+    /// The steps, in order. The run succeeds when every one exits 0 and stops
+    /// at the first that does not; `cc-hub: <key> <value>` lines from any of
+    /// them report progress ([`super::Report`]).
+    pub run: Vec<Vec<String>>,
+    /// Stops a running step, including whatever it started elsewhere. Run by
+    /// the runner before it ends the step itself.
     pub cancel: Vec<String>,
-    /// Puts a built commit to use.
-    pub serve: Vec<String>,
-    /// Prints the commit currently built into what `serve` serves.
+    /// Prints the commit the recipe's last run left in place, wherever that
+    /// is. Asked on its own, so it also sees what was run by hand.
     pub current: Vec<String>,
 }
 
@@ -142,14 +145,14 @@ mod tests {
 
     #[test]
     fn a_placeholder_inside_an_argument_is_substituted() {
-        let template = argv(&["ssh", "buildbox", "serve {commit}"]);
+        let template = argv(&["ssh", "buildbox", "restart {commit}"]);
         let values = Values {
             commit: Some("1a2b3c4"),
             ..Values::default()
         };
         assert_eq!(
             expand(&template, values),
-            argv(&["ssh", "buildbox", "serve 1a2b3c4"])
+            argv(&["ssh", "buildbox", "restart 1a2b3c4"])
         );
     }
 

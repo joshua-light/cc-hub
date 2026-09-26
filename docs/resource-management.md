@@ -67,7 +67,7 @@ nothing and claims what it needs:
 
 ```sh
 cc-hub resource claim android --wait 300   # the complete set the work needs
-cc-hub resource release [NAME...]          # as soon as it is done
+cc-hub resource release [NAME...] [--as NAME]   # as soon as it is done, or to stop waiting
 cc-hub resource list                       # who holds what, and the queue
 ```
 
@@ -104,6 +104,12 @@ name. It gets no account, no card and no replacement; the hub only lends it
 a resource. The hold ends with the claiming process: the broker walks up past
 shells and `cc-hub` itself to find the session's process, and `--pid` names
 it when that walk would guess wrong.
+
+A release is found the same way, and when it runs from some other process —
+an agent's commands do not always come from the one that claimed — `--as`
+finds the guest by the name it claimed under instead. A release names what it
+hands back and what it no longer waits for alike, so a claim still in the
+queue is withdrawn by the same command that would have handed it back.
 
 ## Replacement from the transcript
 

@@ -125,22 +125,25 @@ Commands and the folder layout: `cc-hub help agent` and
 
 ## Builds
 
-A build is one run of a recipe over a checkout (see
-[configuration.md](configuration.md#buildsrecipesname)). Each build is
-`~/.cc-hub/builds/<id>/` with `build.json` and `output.log`, driven by a
-detached `cc-hub build _run <id>` that outlives the TUI. A recipe builds one
-thing at a time, oldest first, and keeps its last twenty finished builds.
+A build is one run of a recipe: its steps, in order, over a checkout at a ref
+(see [configuration.md](configuration.md#buildsrecipesname)). The first step
+to fail ends the build. Each build is `~/.cc-hub/builds/<id>/` with
+`build.json` and `output.log`, driven by a detached `cc-hub build _run <id>`
+that outlives the TUI. A recipe runs one build at a time, oldest first, and
+keeps its last twenty finished builds.
 
-The `build` command reports progress with `cc-hub: commit|route|phase …`
-lines. The runner sets `CC_HUB_BUILD`, so a script also run by hand can stay
-quiet when nothing listens. `current` prints the served commit, which marks
-that build `● in player`.
+Any step reports progress with `cc-hub: commit|route|phase …` lines, and a
+later step can name the reported commit as `{commit}`. The runner sets
+`CC_HUB_BUILD`, so a script also run by hand can stay quiet when nothing
+listens. `current` prints the commit the recipe's last run left in place.
+When that differs from the last successful build's, something else ran since,
+and the card says `now at <commit>`.
 
 A recipe with a `resource` claims it through the broker as the guest
 `Builds` and keeps it after the build ends. Builds come in bursts, and
 releasing between two of them would let another session in. `Space` on the
 tab, or `cc-hub build reserve`/`release`, takes or frees it by hand. A cancel
-runs the recipe's `cancel`, then ends the build command if it still runs 15
+runs the recipe's `cancel`, then ends the running step if it still runs 15
 seconds later.
 
 ## Moving a session to another account

@@ -74,15 +74,14 @@ session's folder. It overrides a built-in key it collides with.
 | Key | Action |
 |---|---|
 | `h` `j` `k` `l` / arrows | Move between recipes |
-| `r` | Build the recipe's checkout as it is now |
-| `n` | New build: pick ref, route and serve |
+| `r` | Run the recipe on its checkout as it is now, on the route the recipe picks |
+| `n` | Run with a checkout, ref or route of your own (seeded from the last build) |
 | `c` | Cancel the recipe's running and queued builds |
-| `b` | Serve the build the card shows |
 | `Enter` / `f` | Build output |
 | `Space` | Reserve the recipe's resource, or release it |
 
 New-build form: `Tab`/`↓` and `Shift+Tab`/`↑` change field, `←`/`→` step a
-choice, typing edits text, `Enter` builds, `Esc` cancels.
+choice, typing edits text, `Enter` runs, `Esc` cancels.
 
 Build output: `j`/`k` scroll, `PgUp`/`PgDn` page, `G`/`End` follow the end,
 `Esc`/`q` close.

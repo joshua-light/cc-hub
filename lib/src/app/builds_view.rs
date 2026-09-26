@@ -1,5 +1,5 @@
-//! Builds-tab state: the latest on-disk snapshot of every build, what each
-//! recipe's player holds and who holds each recipe's resource, the cursor over
+//! Builds-tab state: the latest on-disk snapshot of every build, the commit
+//! each recipe's `current` reports and who holds each recipe's resource, the cursor over
 //! the recipe cards, and the new-build form and log view while they are open.
 //!
 //! The tab is a card per recipe, not per build: a recipe's builds are its
@@ -120,16 +120,14 @@ impl BuildsView {
             .find(|b| b.status == BuildStatus::Succeeded)
     }
 
-    /// The build the recipe's player was made from: the newest one that
-    /// succeeded on the commit `current` reports.
-    pub fn in_player<'a>(&'a self, recipe: &'a str) -> Option<&'a Build> {
-        let current = self.probe.current.get(recipe)?;
-        self.builds_of(recipe).find(|b| {
-            b.status == BuildStatus::Succeeded
-                && b.commit
-                    .as_deref()
-                    .is_some_and(|c| c.starts_with(current.as_str()) || current.starts_with(c))
-        })
+    /// The commit the recipe's `current` reports, when it is not the one its
+    /// last successful run left: something ran it since, by hand or from
+    /// elsewhere. `None` when they agree, which is what the card expects.
+    pub fn drifted<'a>(&'a self, recipe: &'a str) -> Option<&'a str> {
+        let current = self.probe.current.get(recipe)?.as_str();
+        let last = self.last_success(recipe).and_then(|b| b.commit.as_deref());
+        let same = last.is_some_and(|c| c.starts_with(current) || current.starts_with(c));
+        (!same).then_some(current)
     }
 
     pub fn typical(&self, build: &Build) -> Option<i64> {
@@ -138,8 +136,8 @@ impl BuildsView {
 }
 
 /// The form behind `n`: a recipe, a checkout, a ref and a route. Every field
-/// starts at what a rebuild of the selected card would use, so the common
-/// case is `n` and Enter.
+/// starts at what the selected card's last build used, so running it again
+/// pinned is `n` and Enter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BuildForm {
     pub recipe: String,
@@ -148,7 +146,6 @@ pub struct BuildForm {
     pub r#ref: String,
     /// `None` lets the recipe choose.
     pub route: Option<String>,
-    pub serve: bool,
     pub field: FormField,
 }
 
@@ -158,16 +155,14 @@ pub enum FormField {
     Checkout,
     Ref,
     Route,
-    Serve,
 }
 
 impl FormField {
-    pub const ALL: [FormField; 5] = [
+    pub const ALL: [FormField; 4] = [
         FormField::Recipe,
         FormField::Checkout,
         FormField::Ref,
         FormField::Route,
-        FormField::Serve,
     ];
 
     pub fn label(self) -> &'static str {
@@ -176,7 +171,6 @@ impl FormField {
             FormField::Checkout => "checkout",
             FormField::Ref => "ref",
             FormField::Route => "route",
-            FormField::Serve => "serve",
         }
     }
 
@@ -196,7 +190,6 @@ impl BuildForm {
                 cwd: b.cwd.clone(),
                 r#ref: b.r#ref.clone().unwrap_or_default(),
                 route: b.route.clone(),
-                serve: b.serve,
                 field: FormField::Ref,
             },
             None => Self {
@@ -204,7 +197,6 @@ impl BuildForm {
                 cwd: checkout.unwrap_or_default(),
                 r#ref: String::new(),
                 route: None,
-                serve: true,
                 field: FormField::Ref,
             },
         }
@@ -216,7 +208,7 @@ impl BuildForm {
         self.field = all[(i + delta).rem_euclid(all.len() as isize) as usize];
     }
 
-    /// Left/Right on a stepped field: the next recipe, route, or serve.
+    /// Left/Right on a stepped field: the next recipe or route.
     pub fn step_value(&mut self, delta: isize) {
         match self.field {
             FormField::Recipe => {
@@ -241,7 +233,6 @@ impl BuildForm {
                 self.route =
                     choices[(i + delta).rem_euclid(choices.len() as isize) as usize].clone();
             }
-            FormField::Serve => self.serve = !self.serve,
             FormField::Checkout | FormField::Ref => {}
         }
     }
@@ -256,13 +247,7 @@ impl BuildForm {
 
     pub fn to_build(&self) -> Build {
         let r#ref = Some(self.r#ref.trim().to_string()).filter(|r| !r.is_empty());
-        Build::new(
-            &self.recipe,
-            self.cwd.trim(),
-            r#ref,
-            self.route.clone(),
-            self.serve,
-        )
+        Build::new(&self.recipe, self.cwd.trim(), r#ref, self.route.clone())
     }
 }
 
@@ -310,37 +295,37 @@ mod tests {
     use super::*;
 
     fn built(recipe: &str, commit: &str) -> Build {
-        let mut b = Build::new(recipe, "/tmp", None, None, false);
+        let mut b = Build::new(recipe, "/tmp", None, None);
         b.status = BuildStatus::Succeeded;
         b.commit = Some(commit.into());
         b
     }
 
     fn at(recipe: &str, id: &str, status: BuildStatus) -> Build {
-        let mut b = Build::new(recipe, "/tmp", None, None, false);
+        let mut b = Build::new(recipe, "/tmp", None, None);
         b.id = id.into();
         b.status = status;
         b
     }
 
     #[test]
-    fn only_the_newest_build_of_the_current_commit_is_in_the_player() {
+    fn a_current_other_than_the_last_success_has_drifted() {
         let mut view = BuildsView::default();
         let mut newer = built("build-server", "1a2b3c4d5e6f708192a3b4c5d6e7f80910213243");
         newer.id = "bd-2".into();
-        let mut older = built("build-server", "1a2b3c4d5e6f708192a3b4c5d6e7f80910213243");
+        let mut older = built("build-server", "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432");
         older.id = "bd-1".into();
-        let mut other = built("build-server", "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432");
-        other.id = "bd-3".into();
-        view.builds = vec![other, newer, older];
+        view.builds = vec![newer, older];
         view.probe
             .current
             .insert("build-server".into(), "1a2b3c4d5e6f".into());
-        assert_eq!(
-            view.in_player("build-server").map(|b| b.id.as_str()),
-            Some("bd-2")
-        );
-        assert!(view.in_player("other").is_none());
+        assert_eq!(view.drifted("build-server"), None);
+
+        view.probe
+            .current
+            .insert("build-server".into(), "9f8e7d6c5b4a".into());
+        assert_eq!(view.drifted("build-server"), Some("9f8e7d6c5b4a"));
+        assert_eq!(view.drifted("other"), None);
     }
 
     #[test]
@@ -384,7 +369,6 @@ mod tests {
             cwd: "/repo".into(),
             r#ref: "  ".into(),
             route: None,
-            serve: true,
             field: FormField::Ref,
         };
         assert_eq!(form.to_build().r#ref, None);

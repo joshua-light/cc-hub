@@ -201,12 +201,12 @@ PROJECT="keep-project"
         return broker.claim_and_wait(self.cfg, broker.parser().parse_args(
             argv + (['--as', alias] if alias else [])))
 
-    def guest_release(self, pid, *names):
-        args = broker.parser().parse_args(['release', *names, '--pid', str(pid)])
+    def guest_release(self, pid, *names, alias=None):
+        argv = ['release', *names, '--pid', str(pid)]
+        args = broker.parser().parse_args(argv + (['--as', alias] if alias else []))
         with broker.lock():
             db = broker.state()
-            session = broker.current_session(db, args)
-            freed = broker.release(db, session, args.names or None) if session else []
+            freed = [n for s in broker.releasing(db, args) for n in broker.release(db, s, args.names or None)]
             broker.save(db)
             return freed
 
@@ -352,6 +352,29 @@ PROJECT="keep-project"
                 self.guest_claim(4242, 'main-tps', alias=None)
             self.assertEqual(self.guest_release(4242), [])
             self.assertIsNone(broker.resource_list(self.cfg, broker.state())['main-tps']['holder'])
+
+    def test_a_guest_withdraws_a_claim_still_in_the_queue(self):
+        first, second = self.start(task='tk-one'), self.start(task='tk-two')
+        self.claim(first, 'main-tps')
+        with self.alive(4242):
+            self.guest_claim(4242, 'main-tps')
+            self.claim(second, 'main-tps')
+            # Named, like the claim was: nothing held, the place in line goes.
+            self.assertEqual(self.guest_release(4242, 'main-tps'), [])
+            self.assertEqual(broker.resource_list(self.cfg, broker.state())['main-tps']['queue'], ['tk-two'])
+            self.release(first)
+        self.assertEqual(broker.state()['workers'][second['id']]['holds'], ['main-tps'])
+
+    def test_a_guest_releases_by_its_name_from_another_process(self):
+        worker = self.start(task='tk-one')
+        self.claim(worker, 'main-tps')
+        with self.alive(4242, 4343):
+            self.guest_claim(4242, 'main-tps', alias='TPS server test')
+            self.guest_release(4343, alias='TPS server test')
+            db = broker.state()
+            self.assertNotIn('wants', db['guests']['4242'])
+            # The name finds a guest; it never makes one.
+            self.assertNotIn('4343', db['guests'])
 
     def test_a_guest_claims_for_the_session_not_the_shell_it_typed_in(self):
         # As the broker is really reached: a `cc-hub` run from a shell, which

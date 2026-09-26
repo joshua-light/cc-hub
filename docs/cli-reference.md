@@ -26,7 +26,7 @@ full. The other verbs document themselves: `cc-hub help <verb>`.
 | `board` | Add a card, add or read its notes | `cc-hub help board` |
 | `open` | Act on a `cc-hub://` link | `cc-hub help open` |
 | `agent` | Scaffold, run and inspect persistent agents | below |
-| `build` | Start, cancel, serve and list builds | `cc-hub help build` |
+| `build` | Run, cancel and list builds | `cc-hub help build` |
 | `resource` | Accounts, task sessions and shared resources | `cc-hub help resource`, [resource-management.md](resource-management.md) |
 | `usage` | Quota of a Claude account | `cc-hub help usage` |
 | `wake` | `cc-hub wake <name>`: agents watching `<name>` poll now. Prints `{"ok": true, "wake": "<name>"}` | none |
