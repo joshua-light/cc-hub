@@ -40,11 +40,6 @@ pub enum BuildsCommand {
     LogEnd,
 }
 
-/// The first eleven characters of a commit, as `git log --oneline` shows it.
-fn short_commit(commit: Option<&str>) -> Option<&str> {
-    commit.map(|c| &c[..c.len().min(11)])
-}
-
 impl App {
     pub(super) fn execute_builds(&mut self, cmd: BuildsCommand) -> Vec<Effect> {
         use crate::app::{BuildForm, LogView, View};
@@ -153,7 +148,10 @@ impl App {
                 };
                 let msg = match build {
                     Some(b) => {
-                        let label = short_commit(b.commit.as_deref())
+                        let label = b
+                            .commit
+                            .as_deref()
+                            .map(builds::short_commit)
                             .unwrap_or(b.target())
                             .to_string();
                         match builds::serve(&b.id) {

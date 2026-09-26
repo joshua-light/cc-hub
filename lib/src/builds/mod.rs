@@ -192,6 +192,11 @@ impl Report {
     }
 }
 
+/// The first eleven characters of a commit, as `git log --oneline` shows it.
+pub fn short_commit(commit: &str) -> &str {
+    &commit[..commit.len().min(11)]
+}
+
 // ---- the store --------------------------------------------------------------
 
 pub fn builds_dir() -> Option<PathBuf> {
