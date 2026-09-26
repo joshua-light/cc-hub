@@ -1,6 +1,6 @@
 //! cc-hub-lib: session discovery, state, and TUI rendering for cc-hub. The
 //! `cc-hub` binary owns the runtime and drives everything through this crate.
-//! Start with `docs/codebase-tour.md` for the source layout.
+//! Start with `docs/architecture.md` for the source layout.
 
 pub mod acks;
 pub mod agent;
