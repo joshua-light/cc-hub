@@ -6,8 +6,8 @@
 //! - `status_bar`: key hints, status message and refresh age
 //! - `popups`: overlays drawn over the body
 //! - `common`, `palette`: helpers and colours shared across the UI
-//! - `tasks`, `sessions`, `sessions_list`, `builds`, `agents`, `metrics`:
-//!   one module per tab body
+//! - `tasks`, `sessions`, `builds`, `agents`, `metrics`: one module per tab
+//!   body
 //! - `artifacts`: task attachment cards for the Task Info popup
 
 pub mod agents;
@@ -19,7 +19,6 @@ pub mod metrics;
 pub mod palette;
 pub mod popups;
 pub mod sessions;
-pub mod sessions_list;
 mod status_bar;
 pub mod tasks;
 

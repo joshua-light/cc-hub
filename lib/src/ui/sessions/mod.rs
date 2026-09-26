@@ -16,6 +16,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
+mod list;
+
 pub(crate) const GROUP_HEADER_HEIGHT: u16 = 1;
 pub(crate) const GROUP_GAP: u16 = 1;
 
@@ -25,7 +27,7 @@ pub(crate) const GROUP_GAP: u16 = 1;
 pub(crate) fn render_sessions_body(frame: &mut Frame, area: Rect, app: &mut App) {
     match app.sessions.layout {
         crate::app::SessionsLayout::Grid => render_grid(frame, area, app),
-        crate::app::SessionsLayout::List => super::sessions_list::render_list(frame, area, app),
+        crate::app::SessionsLayout::List => list::render_list(frame, area, app),
     }
 }
 
