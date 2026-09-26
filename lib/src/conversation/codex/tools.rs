@@ -2,9 +2,7 @@ use super::{payload, payload_type, rec_type};
 use crate::conversation::CurrentTool;
 use serde_json::Value;
 use std::collections::HashSet;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::io::BufRead;
 
 fn is_tool_call(entry: &Value) -> bool {
     rec_type(entry) == Some("response_item")
@@ -107,14 +105,6 @@ fn value_as_command(v: &Value) -> Option<String> {
 /// `custom_tool_call` response items). Shared with [`crate::conversation::tool_count`].
 pub fn count_tool_uses_in_reader<R: BufRead>(reader: R) -> usize {
     crate::conversation::count_blocks_in_reader(reader, |val| if is_tool_call(val) { 1 } else { 0 })
-}
-
-pub fn count_tool_uses(path: &Path) -> usize {
-    let file = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => return 0,
-    };
-    count_tool_uses_in_reader(BufReader::new(file))
 }
 
 #[cfg(test)]

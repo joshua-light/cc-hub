@@ -30,8 +30,8 @@ mod test_util;
 
 pub use cache::{derive_state_cached, first_user_message_cached, retain_cached, StateDerivation};
 pub use io::{
-    count_blocks_in_reader, count_blocks_of_type, count_tool_uses, count_tool_uses_in_reader,
-    read_jsonl_all, read_jsonl_head, read_jsonl_tail, read_jsonl_tail_for_state,
+    count_blocks_in_reader, count_blocks_of_type, count_tool_uses_in_reader, read_jsonl_all,
+    read_jsonl_head, read_jsonl_tail, read_jsonl_tail_for_state,
 };
 pub use messages::{
     extract_first_user_message, extract_last_activity, extract_last_user_message, extract_messages,
