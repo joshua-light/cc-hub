@@ -1,12 +1,12 @@
 //! The runner: `cc-hub build _run <id>`, detached, the one process that moves
 //! a build forward.
 //!
-//! It waits for its turn, since a recipe builds one thing at a time, oldest
-//! first. Then it waits for the recipe's [`hold`](super::hold), runs the build
-//! command and writes every line it prints to `output.log`, folding
-//! [`Report`]s into the record. When asked to cancel it runs the recipe's own
-//! cancel and ends the command if that did not. A build that succeeded and
-//! asked to be served is served by the same runner, before it exits.
+//! It waits for its turn, since a recipe runs one build at a time, oldest
+//! first. Then it waits for the recipe's [`hold`](super::hold) and runs the
+//! recipe's steps in order, writing every line they print to `output.log` and
+//! folding [`Report`]s into the record. The first step to fail ends the build.
+//! When asked to cancel it runs the recipe's own cancel and ends the step if
+//! that did not.
 
 use super::recipe::{self, Recipe, Values};
 use super::{append_output, hold, load, update, Build, BuildStatus, Report};
@@ -15,7 +15,7 @@ use std::process::{Child, ExitStatus};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-/// How long a cancelled command gets to end on its own, after the recipe's
+/// How long a cancelled step gets to end on its own, after the recipe's
 /// cancel, before it is ended.
 const CANCEL_GRACE: Duration = Duration::from_secs(15);
 
@@ -53,73 +53,51 @@ fn drive(id: &str) -> io::Result<BuildStatus> {
 
     let from = build.r#ref.as_deref().unwrap_or("HEAD");
     let subject = git(&build.cwd, &["log", "-1", "--format=%s", from]);
-    let build = update(id, |b| {
+    update(id, |b| {
         b.status = BuildStatus::Running;
         b.started_at = Some(super::now());
         b.phase = None;
         b.subject = subject;
     })?;
 
-    let argv = recipe::expand(&recipe.build, Values::of(&build));
-    let (exit, last) = match stream(id, &argv, &build.cwd) {
-        Ok((child, lines)) => follow(id, recipe, &build, child, lines)?,
-        Err(e) => return fail(id, format!("{}: {}", argv.join(" "), e)),
-    };
+    if recipe.run.is_empty() {
+        return fail(id, format!("{} has no steps to run", build.recipe));
+    }
+    let mut exit = None;
+    for step in &recipe.run {
+        // Read again for each step: an earlier one may have reported the
+        // commit a later one names.
+        let build = load(id)?;
+        let argv = recipe::expand(step, Values::of(&build));
+        let (status, last) = match stream(id, &argv, &build.cwd) {
+            Ok((child, lines)) => follow(id, recipe, &build, child, lines)?,
+            Err(e) => return fail(id, format!("{}: {}", argv.join(" "), e)),
+        };
+        exit = status.code();
+        if load(id)?.cancel {
+            return end(id, BuildStatus::Cancelled, exit, None);
+        }
+        if !status.success() {
+            return end(id, BuildStatus::Failed, exit, last);
+        }
+    }
+    end(id, BuildStatus::Succeeded, exit, None)
+}
 
-    let cancelled = load(id)?.cancel;
-    let status = if cancelled {
-        BuildStatus::Cancelled
-    } else if exit.success() {
-        BuildStatus::Succeeded
-    } else {
-        BuildStatus::Failed
-    };
-    let build = update(id, |b| {
-        b.exit_code = exit.code();
-        let error = (status == BuildStatus::Failed).then_some(last).flatten();
+fn end(
+    id: &str,
+    status: BuildStatus,
+    exit: Option<i32>,
+    error: Option<String>,
+) -> io::Result<BuildStatus> {
+    update(id, |b| {
+        b.exit_code = exit;
         b.finish(status, error);
     })?;
-    if status == BuildStatus::Succeeded && build.serve && !recipe.serve.is_empty() {
-        serve(id)?;
-    }
     Ok(status)
 }
 
-/// Serve a build that succeeded: take the hold, run the recipe's serve, and
-/// record when it worked. `cc-hub build _serve <id>` and a `serve` build's
-/// runner both end here.
-pub fn serve(id: &str) -> io::Result<()> {
-    let build = load(id)?;
-    let recipe = recipe::named(&build.recipe)
-        .ok_or_else(|| io::Error::other(format!("no recipe named {:?}", build.recipe)))?;
-    if let Some(resource) = &recipe.resource {
-        let mut holds = HoldWatch::default();
-        loop {
-            match holds.granted(resource)? {
-                Wait::Ready => break,
-                Wait::For(why) => {
-                    log::info!("serve {}: {}", id, why);
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-            }
-        }
-    }
-    let argv = recipe::expand(&recipe.serve, Values::of(&build));
-    let (mut child, lines) = stream(id, &argv, &build.cwd)?;
-    for line in lines {
-        append_output(id, &line)?;
-    }
-    if child.wait()?.success() {
-        update(id, |b| b.served_at = Some(super::now()))?;
-        Ok(())
-    } else {
-        append_output(id, "cc-hub: serve failed")?;
-        Err(io::Error::other("serve failed; see the build's output"))
-    }
-}
-
-/// Watch the build command: log its lines, apply its reports, and cancel it
-/// when asked. Returns how it exited and the last thing it said to a person.
+/// Watch a step: log its lines, apply its reports, and cancel it when asked. Returns how it exited and the last thing it said to a person.
 fn follow(
     id: &str,
     recipe: &Recipe,

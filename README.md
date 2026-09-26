@@ -153,9 +153,9 @@ naming a different directory, or a role, starts a new session.
 
 ## Builds
 
-A build is one run of a **recipe**: a command that turns a checkout at a ref
-into something you can serve. Recipes live in `config.toml`, and the hub knows
-nothing about what they build:
+A build is one run of a **recipe**: its steps, in order, over a checkout at a
+ref. `r` on the tab runs one. Recipes live in `config.toml`, and the hub knows
+nothing about what they do:
 
 ```toml
 [builds.recipes.build-server]
@@ -163,24 +163,29 @@ description = "the game server, built on a second machine from a warm cache"
 checkout = "~/src/game"
 resource = "build-box"                    # claimed before the first build
 routes = ["swap", "scripts", "full"]      # none asked for: the recipe picks
-build = ["build-server", "{ref}", "{route}"]
+run = [
+    ["build-server", "{ref}", "{route}"],
+    ["ssh", "-o", "RemoteCommand=none", "buildbox", "~/env/restart"],
+]
 cancel = ["build-server", "cancel"]
-serve = ["ssh", "-o", "RemoteCommand=none", "buildbox", "~/env/serve"]
 current = ["ssh", "-o", "RemoteCommand=none", "buildbox", "cat ~/build/state/built"]
 ```
 
 Each command is an argv run in the build's checkout through a login shell.
 `{ref}`, `{route}` and `{commit}` stand for the build's values, and an argument
 that is only a placeholder with no value is dropped, so `{ref}` with no ref
-builds the working tree. The `build` command reports progress by printing
+builds the working tree. The steps run one after another, and the first to
+fail ends the build. Any step reports progress by printing
 `cc-hub: commit <sha>`, `cc-hub: route <name>` and `cc-hub: phase <text>`
-lines; the runner exports `CC_HUB_BUILD`, so a script that also runs by hand
-can stay quiet when nothing is listening. `current` prints the commit the
-player was built from, which puts `● in player` on that build's card.
+lines, and a later step can name the reported commit as `{commit}`; the runner
+exports `CC_HUB_BUILD`, so a script that also runs by hand can stay quiet when
+nothing is listening. `current` prints the commit the recipe's last run left
+in place; when that is not the last successful build's, something ran it
+since, and the card says `now at <commit>`.
 
 Each build is `~/.cc-hub/builds/<id>/` (`build.json`, `output.log`) and has a
 runner of its own: a detached `cc-hub build _run <id>` that outlives the TUI.
-A recipe builds one thing at a time, oldest first. A recipe with a `resource`
+A recipe runs one build at a time, oldest first. A recipe with a `resource`
 claims it through the broker as the guest `Builds`
 ([resource management](docs/resource-management.md)), and the claim outlives
 the build: builds come in bursts, and handing the resource back between two
@@ -189,8 +194,9 @@ any build, to keep the env yours while you set up a test, and releases it
 again; `cc-hub build reserve` and `cc-hub build release` do the same. A cancel runs the recipe's `cancel`, then
 ends the command if it is still running 15 seconds later.
 
-`cc-hub build start [--ref R] [--route R] [--serve] [--wait]` does from a
-script or an agent session what `n` does on the tab; see `cc-hub help build`.
+`cc-hub build run` and `cc-hub build start [--ref R] [--route R]` do from a
+script or an agent session what `r` and `n` do on the tab; see
+`cc-hub help build`.
 
 ## Requirements
 
@@ -546,22 +552,21 @@ the plan, so the plan-first workflow works with one fewer column.
 
 Shown once `[builds.recipes]` has a recipe. A card per recipe — its builds
 are its history, not cards. The border carries the recipe and the state of
-its build, and its description; inside, the resource the tab holds for it
-(`holding build-box · 12m`, or who it waits behind), which commit its player
-runs and when it was served, and then the build that matters now: the one
-running, else the next to run, else the last one that ran. That build shows
-its target, commit and subject, its route and time (measured against the
-median of the route's last ten successes while it runs), and its phase or
-why it failed; below it, `+N queued`, or after a failure the last build that
-worked. A recipe keeps its last twenty finished builds.
+its build, the resource the tab holds for it (`󰌾 build-box · 12m`, or who is
+in the way), and its description. Inside is the build that matters now: the
+one running, else the next to run, else the last one that ran. It shows its
+commit and subject, its route and time (measured against the median of the
+route's last ten successes while it runs), and its phase or why it failed;
+below it, `+N queued`, `now at <commit>` when `current` disagrees with the
+last success, or after a failure the last build that worked. A recipe keeps
+its last twenty finished builds.
 
 | Key | Action |
 |---|---|
 | `h` / `j` / `k` / `l` (or arrows) | Move between recipes |
-| `r` | Build the recipe's checkout as it is now: its working tree, the route the recipe picks, the last build's serve. A pinned ref or route is `n` |
-| `n` | New build of the recipe: checkout, ref (empty: working tree), route, serve. Seeded from its last build |
+| `r` | Run the recipe on its checkout as it is now: the working tree, the route the recipe picks. A pinned ref or route is `n` |
+| `n` | Run the recipe with a checkout, ref (empty: working tree) or route of your own. Seeded from its last build |
 | `c` | Cancel the recipe's running and queued builds |
-| `b` | Serve the build in the recipe's player |
 | `f` / `Enter` | The output of the build the card shows, following the end (`G` follows again after scrolling) |
 | `Space` | Reserve the recipe's resource, or release it when the tab holds or waits for it |
 

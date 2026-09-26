@@ -35,7 +35,7 @@ Persistent agents (Agents tab):
   agent             Scaffold, run, poke, pause and inspect persistent agents
 
 Builds (Builds tab):
-  build             Start, cancel, serve and list builds of a [builds.recipes] recipe
+  build             Run, cancel and list builds of a [builds.recipes] recipe
 
 Tasks board:
   board             Add a card to the personal Tasks board
@@ -216,24 +216,27 @@ first. A hand-over link (`&role=…`) is refused for a card with no note.
 const BUILD_HELP: &str = r#"cc-hub build — builds of a `[builds.recipes.<name>]` recipe (the Builds tab)
 
 Usage:
-  cc-hub build start [--recipe R] [--cwd DIR] [--ref REF] [--route R] [--serve] [--wait]
+  cc-hub build run [--recipe R] [--wait]
+  cc-hub build start [--recipe R] [--cwd DIR] [--ref REF] [--route R] [--wait]
   cc-hub build list
   cc-hub build cancel --build ID
-  cc-hub build rebuild --build ID [--wait]
-  cc-hub build serve --build ID
   cc-hub build reserve [--resource NAME]
   cc-hub build release [--resource NAME]
 
-`start` queues a build and returns at once; `--wait` returns when it has
-finished, exiting non-zero unless it succeeded. Without `--ref` the build takes
-the working tree of `--cwd` (default: here) as it stands when the build starts.
-Without `--route` the recipe picks one. `--recipe` may be left out when only one
-recipe exists. `--serve` serves it the moment it succeeds.
+A build is one run of a recipe: its steps, in order, until one fails.
 
-`rebuild` builds a build's checkout again as it is now: the working tree and
-the recipe's route, whatever ref or route the old build pinned.
+`run` is `r` on the tab: the recipe's checkout (its last build's, else its
+own) as the working tree is now, on the route the recipe picks.
 
-A recipe builds one thing at a time, oldest first. A recipe with a `resource`
+`start` is `n`: a run with a checkout, ref or route of your own. Without
+`--ref` it takes the working tree of `--cwd` (default: here) as it stands when
+the build starts. Without `--route` the recipe picks one.
+
+Both return at once; `--wait` returns when the build has finished, exiting
+non-zero unless it succeeded. `--recipe` may be left out when only one recipe
+exists.
+
+A recipe runs one build at a time, oldest first. A recipe with a `resource`
 claims it before its first build, as the guest `Builds`, and keeps it after
 the build ends, so a session cannot slip in between two builds. `reserve`
 takes it ahead of any build, queueing behind whoever has it; `release` lets it

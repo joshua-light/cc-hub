@@ -12,9 +12,8 @@ pub(super) fn map_builds_command(app: &App, key: &KeyEvent, on_builds: bool) -> 
         (View::Grid, KeyCode::Up | KeyCode::Char('k')) => B::NavUp,
         (View::Grid, KeyCode::Down | KeyCode::Char('j')) => B::NavDown,
         (View::Grid, KeyCode::Char('n')) => B::OpenForm,
-        (View::Grid, KeyCode::Char('r')) => B::Rebuild,
+        (View::Grid, KeyCode::Char('r')) => B::Run,
         (View::Grid, KeyCode::Char('c')) => B::Cancel,
-        (View::Grid, KeyCode::Char('b')) => B::Serve,
         (View::Grid, KeyCode::Char(' ')) => B::ToggleHold,
         (View::Grid, KeyCode::Enter | KeyCode::Char('f')) => B::OpenLog,
 
