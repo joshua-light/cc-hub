@@ -1,4 +1,3 @@
-use super::harness_settings::BROKEN_SPEC;
 use super::Effect;
 use crate::agent::AgentKind;
 use crate::app::harness_view::{Detail, Section};
@@ -193,23 +192,12 @@ impl App {
             }
             Section::Log => Vec::new(),
             Section::Settings => {
-                let Some(setting) = crate::harness::settings::SETTINGS.get(d.setting).copied()
-                else {
-                    return Vec::new();
-                };
-                let Ok(spec) = &agent.spec else {
-                    self.set_status(BROKEN_SPEC.into());
-                    return Vec::new();
-                };
-                if let Some(why) = setting.locked(spec) {
-                    self.set_status(format!("{}: {}", setting.label(), why));
-                    return Vec::new();
-                }
-                match setting.step(spec) {
-                    Some(next) => {
+                match self.harness_unlocked_setting(|setting, spec| setting.step(spec)) {
+                    Some(Some(next)) => {
                         self.harness_apply_setting(&next);
                     }
-                    None => self.harness_edit_setting(),
+                    Some(None) => self.harness_edit_setting(),
+                    None => {}
                 }
                 Vec::new()
             }

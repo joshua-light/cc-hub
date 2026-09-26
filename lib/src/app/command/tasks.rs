@@ -1,12 +1,11 @@
 use super::Effect;
 use crate::app::App;
+use crate::config;
 use crate::models;
 use crate::tasks::store::TaskPriority;
 
-/// Tasks-tab commands, one per former Tasks-board arm in
-/// `bin/src/keys/tasks.rs`. Modal buffer editing (typing into the
-/// input/tags/filter buffers) stays in bin; only the Grid actions and the
-/// filter/tags/input submit arms are commands here.
+/// Tasks-tab commands: the grid actions and the input/tags/filter submit
+/// arms. Typing into those buffers stays in `bin/src/keys/tasks.rs`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TasksCommand {
     NavUp,
@@ -70,130 +69,77 @@ impl App {
     pub(super) fn execute_tasks(&mut self, cmd: TasksCommand) -> Vec<Effect> {
         use TasksCommand::*;
         match cmd {
-            NavRight => {
-                self.tasks.col_right();
-                Vec::new()
-            }
-            NavLeft => {
-                self.tasks.col_left();
-                Vec::new()
-            }
-            NavDown => {
-                self.tasks.row_down();
-                Vec::new()
-            }
-            NavUp => {
-                self.tasks.row_up();
-                Vec::new()
-            }
+            NavRight => self.tasks.col_right(),
+            NavLeft => self.tasks.col_left(),
+            NavDown => self.tasks.row_down(),
+            NavUp => self.tasks.row_up(),
             MoveTaskRight => {
-                match self.move_selected_task(1) {
-                    Some(msg) => self.set_status(msg),
-                    None => self.set_status("nothing to move right".into()),
-                }
-                Vec::new()
+                let msg = self.move_selected_task(1);
+                self.status_or(msg, "nothing to move right");
             }
             MoveTaskLeft => {
-                match self.move_selected_task(-1) {
-                    Some(msg) => self.set_status(msg),
-                    None => self.set_status("nothing to move left".into()),
-                }
-                Vec::new()
+                let msg = self.move_selected_task(-1);
+                self.status_or(msg, "nothing to move left");
             }
-            OpenAddInput => {
-                self.enter_task_input();
-                Vec::new()
-            }
-            OpenFilter => {
-                self.enter_task_filter();
-                Vec::new()
-            }
-            ClearFilter => {
-                self.clear_task_filter();
-                Vec::new()
-            }
+            OpenAddInput => self.enter_task_input(),
+            OpenFilter => self.enter_task_filter(),
+            ClearFilter => self.clear_task_filter(),
             UndoDelete => {
-                match self.undo_task_delete() {
-                    Some(msg) => self.set_status(msg),
-                    None => self.set_status("nothing to undo".into()),
-                }
-                Vec::new()
+                let msg = self.undo_task_delete();
+                self.status_or(msg, "nothing to undo");
             }
             SpaceAction => {
-                match self.task_space_action() {
-                    Some(msg) => self.set_status(msg),
-                    None => self.set_status("no task focused".into()),
-                }
-                Vec::new()
+                let msg = self.task_space_action();
+                self.status_or(msg, "no task focused");
             }
             OpenAssignPicker => {
                 if !self.enter_task_assign_picker() {
                     self.set_status("focus an unfinished task to assign an agent".into());
                 }
-                Vec::new()
             }
             AssignAtHome => {
-                match self.assign_selected_task_at_home() {
-                    Some(msg) => self.set_status(msg),
-                    None => {
-                        self.set_status("focus a To-Do/In Progress task to start an agent".into())
-                    }
-                }
-                Vec::new()
+                let msg = self.assign_selected_task_at_home();
+                self.status_or(msg, "focus a To-Do/In Progress task to start an agent");
             }
             OpenRename => {
                 if !self.enter_task_rename() {
                     self.set_status("no task focused".into());
                 }
-                Vec::new()
             }
             OpenTags => {
                 if !self.enter_task_tags() {
                     self.set_status("no task focused".into());
                 }
-                Vec::new()
             }
             OpenKindPicker => {
                 if !self.enter_task_kind_picker() {
-                    let why = if crate::config::get().tasks.kinds.is_empty() {
+                    let why = if config::get().tasks.kinds.is_empty() {
                         "no task kinds configured — set [tasks].kinds in ~/.cc-hub/config.toml"
                     } else {
                         "no task focused"
                     };
                     self.set_status(why.into());
                 }
-                Vec::new()
             }
             SetPriority(priority) => {
-                match self.set_selected_task_priority(priority) {
-                    Some(msg) => self.set_status(msg),
-                    None => self.set_status("no task focused".into()),
-                }
-                Vec::new()
+                let msg = self.set_selected_task_priority(priority);
+                self.status_or(msg, "no task focused");
             }
             DeleteSelected => {
-                match self.delete_selected_task() {
-                    Some(msg) => self.set_status(msg),
-                    None => self.set_status("no task focused".into()),
-                }
-                Vec::new()
+                let msg = self.delete_selected_task();
+                self.status_or(msg, "no task focused");
             }
-            ClearDone => {
-                self.clear_done_tasks();
-                Vec::new()
-            }
-            FocusAgent => self.focus_task_agent(),
+            ClearDone => self.clear_done_tasks(),
+            FocusAgent => return self.focus_task_agent(),
             OpenTaskInfo => {
                 if !self.enter_task_info() {
                     self.set_status("no task focused".into());
                 }
-                Vec::new()
             }
             OpenAttachInput { from_info } => {
                 if !self.enter_task_attach(from_info) {
                     self.set_status("no task focused".into());
                 }
-                Vec::new()
             }
             SubmitAttach => {
                 if !self.submit_task_attach() {
@@ -203,14 +149,10 @@ impl App {
                         .unwrap_or_else(|| "attach cancelled — empty input".into());
                     self.set_status(msg);
                 }
-                Vec::new()
             }
             RemoveAttachment => {
-                match self.remove_selected_attachment() {
-                    Some(msg) => self.set_status(msg),
-                    None => self.set_status("no task focused".into()),
-                }
-                Vec::new()
+                let msg = self.remove_selected_attachment();
+                self.status_or(msg, "no task focused");
             }
             SubmitInput => {
                 let renaming = self.tasks.renaming.is_some();
@@ -224,7 +166,6 @@ impl App {
                     });
                     self.set_status(msg);
                 }
-                Vec::new()
             }
             SubmitTags => {
                 if !self.submit_task_tags() {
@@ -232,19 +173,22 @@ impl App {
                         self.set_status(msg);
                     }
                 }
-                Vec::new()
             }
-            ApplyFilter => {
-                self.apply_task_filter();
-                Vec::new()
-            }
+            ApplyFilter => self.apply_task_filter(),
         }
+        Vec::new()
+    }
+
+    /// Report the action's own message, or `fallback` when it had nothing
+    /// to act on.
+    fn status_or(&mut self, msg: Option<String>, fallback: &str) {
+        self.set_status(msg.unwrap_or_else(|| fallback.into()));
     }
 
     /// `f`/Enter on a board card: attach a live agent's tmux pane, resume a
     /// dead-but-resumable session in place (runtime spawn, rebinds `tmux`), or
-    /// explain why neither is possible. The live-attach path is the only
-    /// effect — pane sizing is bin's job.
+    /// explain why neither is possible. Both attach paths end in a pane
+    /// effect; pane sizing is bin's job.
     fn focus_task_agent(&mut self) -> Vec<Effect> {
         let Some(task) = self.selected_board_task().cloned() else {
             self.set_status("no task focused".into());
@@ -254,37 +198,31 @@ impl App {
             .tmux
             .as_deref()
             .filter(|tmux| self.task_session_is_live(tmux));
-        if let Some(tmux) = live_tmux {
-            if let Some(sid) = task.session_id.as_deref() {
-                self.set_status(format!("opened {} [{}]", models::short_sid(sid), tmux));
-            }
-            return vec![Effect::OpenTmuxPane {
-                tmux: tmux.to_string(),
-                owned: false,
-            }];
-        }
-        if task.session_id.is_some() && task.cwd.is_some() {
-            match self.resume_board_task(&task) {
-                Ok(tmux) => {
-                    if let Some(sid) = task.session_id.as_deref() {
-                        self.set_status(format!("opened {} [{}]", models::short_sid(sid), tmux));
+        let tmux = match live_tmux {
+            Some(tmux) => tmux.to_string(),
+            None if task.session_id.is_some() && task.cwd.is_some() => {
+                match self.resume_board_task(&task) {
+                    Ok(tmux) => tmux,
+                    Err(e) => {
+                        self.set_status(e);
+                        return Vec::new();
                     }
-                    vec![Effect::OpenTmuxPane { tmux, owned: false }]
-                }
-                Err(e) => {
-                    self.set_status(e);
-                    Vec::new()
                 }
             }
-        } else {
-            self.set_status(if task.tmux.is_some() {
-                "agent session is gone and its session id was never seen — press s to re-assign"
-                    .into()
-            } else {
-                "no agent assigned — press s to assign one".into()
-            });
-            Vec::new()
+            None => {
+                self.set_status(if task.tmux.is_some() {
+                    "agent session is gone and its session id was never seen — press s to re-assign"
+                        .into()
+                } else {
+                    "no agent assigned — press s to assign one".into()
+                });
+                return Vec::new();
+            }
+        };
+        if let Some(sid) = task.session_id.as_deref() {
+            self.set_status(format!("opened {} [{}]", models::short_sid(sid), tmux));
         }
+        vec![Effect::OpenTmuxPane { tmux, owned: false }]
     }
 }
 

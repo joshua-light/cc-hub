@@ -2,9 +2,19 @@
 //!
 //! Most app tests are unix-only: they redirect `$HOME` with
 //! `with_temp_home`, which `dirs::home_dir()` honours on unix and ignores on
-//! Windows.
+//! Windows. Every `App` touches the on-disk task store, so one built outside
+//! `with_temp_home` reads and writes the developer's real `~/.cc-hub`; the
+//! fixtures that build one are unix-only.
 
+#[cfg(unix)]
+use crate::agent::AgentKind;
+#[cfg(unix)]
+use crate::agent_runtime::testing::RecordingRuntime;
+#[cfg(unix)]
+use crate::app::{App, Command, Effect, HarnessCommand, Tab, TasksCommand};
 use crate::models::{SessionInfo, SessionState};
+#[cfg(unix)]
+use std::sync::Arc;
 
 /// A Claude session in `/tmp` whose session id and tmux name are both
 /// `tmux`.
@@ -34,19 +44,6 @@ pub(super) fn fake_session(tmux: &str, state: SessionState) -> SessionInfo {
         tool_uses_count: 0,
     }
 }
-
-// Unix-only: every test constructs an App, which touches the on-disk task
-// store — with_temp_home isolation redirects $HOME, which only works on
-// unix. An App built WITHOUT with_temp_home reads and writes the
-// developer's real ~/.cc-hub.
-#[cfg(unix)]
-use crate::agent::AgentKind;
-#[cfg(unix)]
-use crate::agent_runtime::testing::RecordingRuntime;
-#[cfg(unix)]
-use crate::app::{App, Command, Effect, HarnessCommand, Tab, TasksCommand};
-#[cfg(unix)]
-use std::sync::Arc;
 
 #[cfg(unix)]
 pub(super) fn session(id: &str, state: SessionState, tmux: Option<&str>) -> SessionInfo {
@@ -80,7 +77,7 @@ pub(super) fn session(id: &str, state: SessionState, tmux: Option<&str>) -> Sess
 pub(super) fn app_with(sessions: Vec<SessionInfo>) -> (App, Arc<RecordingRuntime>) {
     let runtime = Arc::new(RecordingRuntime::default());
     let mut app = App::new_with_runtime(runtime.clone());
-    // The grid hides Inactive sessions by default; command tests select
+    // The grid hides Inactive sessions by default; tests select
     // whatever they inject, so make every fixture visible.
     app.sessions.show_inactive = true;
     app.update_sessions(sessions);
@@ -95,7 +92,7 @@ pub(super) fn status(app: &App) -> String {
         .unwrap_or_default()
 }
 
-/// App on the Tasks tab wired to a recording runtime, no seeded sessions.
+/// An App wired to a recording runtime, with no seeded sessions.
 #[cfg(unix)]
 pub(super) fn task_app() -> (App, Arc<RecordingRuntime>) {
     let runtime = Arc::new(RecordingRuntime::default());
@@ -109,7 +106,7 @@ pub(super) fn tasks(app: &mut App, cmd: TasksCommand) -> Vec<Effect> {
 }
 
 #[cfg(unix)]
-pub(super) const AGENT_SPEC: &str = "description = \"Watches PRs\"\n\n[run]\nmax_budget_usd = 0.50  # per run\n\n[prompt]\ninstruction = \"go\"\n";
+const AGENT_SPEC: &str = "description = \"Watches PRs\"\n\n[run]\nmax_budget_usd = 0.50  # per run\n\n[prompt]\ninstruction = \"go\"\n";
 
 /// An app whose Agents tab holds one agent, `bb-prs`, on disk under the
 /// temp home. Returns the agent's folder.

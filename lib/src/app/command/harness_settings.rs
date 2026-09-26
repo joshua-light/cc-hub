@@ -1,30 +1,46 @@
 use crate::app::harness_view::Section;
 use crate::app::App;
+use crate::harness::settings::{Setting, SETTINGS};
+use crate::harness::Spec;
 
-pub(super) const BROKEN_SPEC: &str =
-    "agent.toml doesn't load — n opens Claude in its folder to fix it";
+const BROKEN_SPEC: &str = "agent.toml doesn't load — n opens Claude in its folder to fix it";
 
 impl App {
-    /// Open the edit box on the selected setting, pre-filled.
-    pub(super) fn harness_edit_setting(&mut self) {
+    /// The selected setting and the agent's spec, handed to `f` when the
+    /// spec loads and the setting is not locked; otherwise the status line
+    /// says why.
+    pub(super) fn harness_unlocked_setting<T>(
+        &mut self,
+        f: impl FnOnce(Setting, &Spec) -> T,
+    ) -> Option<T> {
         let (Some(agent), Some(d)) = (self.harness.selected(), self.harness.detail.as_ref()) else {
-            return;
+            return None;
         };
-        if d.section != Section::Settings {
-            return;
-        }
-        let Some(setting) = crate::harness::settings::SETTINGS.get(d.setting).copied() else {
-            return;
-        };
+        let setting = SETTINGS.get(d.setting).copied()?;
         let Ok(spec) = &agent.spec else {
             self.set_status(BROKEN_SPEC.into());
-            return;
+            return None;
         };
         if let Some(why) = setting.locked(spec) {
             self.set_status(format!("{}: {}", setting.label(), why));
+            return None;
+        }
+        Some(f(setting, spec))
+    }
+
+    /// Open the edit box on the selected setting, pre-filled.
+    pub(super) fn harness_edit_setting(&mut self) {
+        let on_settings = self
+            .harness
+            .detail
+            .as_ref()
+            .is_some_and(|d| d.section == Section::Settings);
+        if !on_settings {
             return;
         }
-        let raw = setting.raw(spec);
+        let Some(raw) = self.harness_unlocked_setting(|setting, spec| setting.raw(spec)) else {
+            return;
+        };
         if let Some(d) = self.harness.detail.as_mut() {
             d.editing = Some(raw);
         }

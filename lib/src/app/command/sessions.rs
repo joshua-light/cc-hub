@@ -4,7 +4,7 @@ use crate::app::{App, RenameSubmit, SessionsLayout};
 use crate::config;
 use crate::{models, spawn, title};
 
-/// Sessions-tab commands, one per former `bin/src/keys.rs` arm.
+/// Sessions-tab commands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionsCommand {
     NavUp,
@@ -64,37 +64,28 @@ impl App {
             // In the list layout every row is one column wide, so
             // left/right degenerate to up/down instead of cycling within
             // the group (a jump that reads as random on a linear list).
-            NavRight => {
-                match self.sessions.layout {
-                    SessionsLayout::Grid => self.sessions.move_right(),
-                    SessionsLayout::List => self.sessions.move_down(1),
-                }
-                Vec::new()
-            }
-            NavLeft => {
-                match self.sessions.layout {
-                    SessionsLayout::Grid => self.sessions.move_left(),
-                    SessionsLayout::List => self.sessions.move_up(1),
-                }
-                Vec::new()
-            }
+            NavRight => match self.sessions.layout {
+                SessionsLayout::Grid => self.sessions.move_right(),
+                SessionsLayout::List => self.sessions.move_down(1),
+            },
+            NavLeft => match self.sessions.layout {
+                SessionsLayout::Grid => self.sessions.move_left(),
+                SessionsLayout::List => self.sessions.move_up(1),
+            },
             NavDown => {
                 let cols = self.sessions_nav_cols();
                 self.sessions.move_down(cols);
-                Vec::new()
             }
             NavUp => {
                 let cols = self.sessions_nav_cols();
                 self.sessions.move_up(cols);
-                Vec::new()
             }
-            OpenDetailPopup => match self.selected_session_id() {
-                Some(id) => {
+            OpenDetailPopup => {
+                if let Some(id) = self.selected_session_id() {
                     self.enter_popup();
-                    vec![Effect::RequestSessionDetail { session_id: id }]
+                    return vec![Effect::RequestSessionDetail { session_id: id }];
                 }
-                None => Vec::new(),
-            },
+            }
             ToggleShowInactive => {
                 self.toggle_show_inactive();
                 let state = if self.sessions.show_inactive {
@@ -103,45 +94,30 @@ impl App {
                     "hidden"
                 };
                 self.set_status(format!("inactive sessions {}", state));
-                Vec::new()
             }
             ToggleLayout => {
                 self.toggle_sessions_layout();
                 self.set_status(format!("sessions layout: {}", self.sessions.layout.label()));
-                Vec::new()
             }
-            FocusSelected => self.focus_selected_session(),
-            OpenShellHere => match self.selected_session_info() {
-                Some(session) => vec![Effect::OpenShell {
-                    cwd: session.cwd.clone(),
-                }],
-                None => Vec::new(),
-            },
-            StageConfirmClose => {
-                self.enter_confirm_close();
-                Vec::new()
+            FocusSelected => return self.focus_selected_session(),
+            OpenShellHere => {
+                if let Some(session) = self.selected_session_info() {
+                    return vec![Effect::OpenShell {
+                        cwd: session.cwd.clone(),
+                    }];
+                }
             }
+            StageConfirmClose => self.enter_confirm_close(),
             AckSelected => {
                 self.ack_selected();
-                Vec::new()
             }
             SpawnAgentHere => {
                 let agent_id = self.default_session_agent_id.clone();
                 self.spawn_agent_here(agent_id);
-                Vec::new()
             }
-            SpawnAgentHereWith { agent_id } => {
-                self.spawn_agent_here(agent_id.to_string());
-                Vec::new()
-            }
-            OpenModelPicker => {
-                self.enter_model_picker();
-                Vec::new()
-            }
-            OpenAgentPicker => {
-                self.enter_agent_picker();
-                Vec::new()
-            }
+            SpawnAgentHereWith { agent_id } => self.spawn_agent_here(agent_id.to_string()),
+            OpenModelPicker => self.enter_model_picker(),
+            OpenAgentPicker => self.enter_agent_picker(),
             OpenRespawnPicker => {
                 if !self.enter_respawn_picker() {
                     let msg = if self.selected_session_info().is_none() {
@@ -151,23 +127,18 @@ impl App {
                     };
                     self.set_status(msg.into());
                 }
-                Vec::new()
             }
-            OpenPlacesPicker => {
-                self.enter_session_places_picker();
-                Vec::new()
-            }
+            OpenPlacesPicker => self.enter_session_places_picker(),
             OpenBookmarksPicker => {
                 if !self.enter_bookmarks_picker() {
                     self.set_status("no bookmarks — press N then m on a folder to add one".into());
                 }
-                Vec::new()
             }
             OpenSessionFinder => {
                 self.enter_session_finder();
-                vec![Effect::BuildSessionIndex]
+                return vec![Effect::BuildSessionIndex];
             }
-            ConfirmSessionFinder => self.confirm_session_finder(),
+            ConfirmSessionFinder => return self.confirm_session_finder(),
             OpenTaskLinkPicker => {
                 if !self.enter_task_link_picker() {
                     let msg = if self.selected_session_info().is_none() {
@@ -177,36 +148,28 @@ impl App {
                     };
                     self.set_status(msg.into());
                 }
-                Vec::new()
             }
             OpenRenameSession => {
                 if !self.enter_rename_session() {
                     self.set_status("no session selected to rename".into());
                 }
-                Vec::new()
             }
-            SubmitRename => {
-                match self.submit_session_rename() {
-                    RenameSubmit::Persist { sid, title } => {
-                        match title::persist_title(&sid, &title) {
-                            Ok(()) => self.set_status(format!("renamed to “{}”", title)),
-                            Err(e) => {
-                                log::warn!("rename: persist failed for {}: {}", sid, e);
-                                self.set_status(format!("rename failed: {}", e));
-                            }
-                        }
+            SubmitRename => match self.submit_session_rename() {
+                RenameSubmit::Persist { sid, title } => match title::persist_title(&sid, &title) {
+                    Ok(()) => self.set_status(format!("renamed to “{}”", title)),
+                    Err(e) => {
+                        log::warn!("rename: persist failed for {}: {}", sid, e);
+                        self.set_status(format!("rename failed: {}", e));
                     }
-                    RenameSubmit::Deferred { title } => self.set_status(format!(
-                        "named “{}” — applies when the session loads",
-                        title
-                    )),
-                    RenameSubmit::Cancelled => {
-                        self.set_status("rename cancelled — empty title".into())
-                    }
-                }
-                Vec::new()
-            }
+                },
+                RenameSubmit::Deferred { title } => self.set_status(format!(
+                    "named “{}” — applies when the session loads",
+                    title
+                )),
+                RenameSubmit::Cancelled => self.set_status("rename cancelled — empty title".into()),
+            },
         }
+        Vec::new()
     }
 
     /// `f`/Enter: resume an inactive session in place (runtime spawn), attach

@@ -41,7 +41,7 @@ pub enum BuildsCommand {
 }
 
 /// The first eleven characters of a commit, as `git log --oneline` shows it.
-pub(crate) fn short_commit(commit: Option<&str>) -> Option<&str> {
+fn short_commit(commit: Option<&str>) -> Option<&str> {
     commit.map(|c| &c[..c.len().min(11)])
 }
 

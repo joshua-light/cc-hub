@@ -8,10 +8,16 @@
 //! without a terminal: tests execute commands against a recording runtime and
 //! assert on state plus returned effects.
 //!
-//! Sessions- and Tasks-view commands are ported; Projects/Metrics arms still
-//! live in `bin/src/keys.rs`. Modal buffer-edit keys (task input/tags/filter
-//! character editing) stay as thin `bin` arms — only their submit/logic arms
-//! became commands.
+//! Metrics-tab keys and modal buffer typing (task input, tags, filter) stay
+//! as thin arms under `bin/src/keys`; only their submit arms are commands.
+//!
+//! Each tab file holds its command enum and executor:
+//! - `builds`: [`BuildsCommand`], the Builds tab.
+//! - `harness`: [`HarnessCommand`], the Agents tab and its detail view.
+//! - `harness_settings`: setting edits and on/off writes to an agent's
+//!   `agent.toml` and state.
+//! - `sessions`: [`SessionsCommand`], the Sessions tab.
+//! - `tasks`: [`TasksCommand`], the Tasks board.
 
 mod builds;
 mod harness;
