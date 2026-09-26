@@ -28,7 +28,7 @@ use ratatui::text::Line;
 use sessions::SpawnWatch;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 mod board;
 mod builds_view;
@@ -59,16 +59,11 @@ pub use picker_list::PickerRow;
 pub use places::GhCreateInput;
 pub use render_state::RenderState;
 pub use sessions::{
-    AgentPickerState, ModelPickerChoice, ModelPickerRow, ModelPickerState, RenameSubmit,
-    RespawnChoice, RespawnPickerState, SessionFinderChoice, SessionFinderRow, SessionFinderState,
-    SessionsLayout, SessionsView, TaskLinkAction, TaskLinkChoice, TaskLinkPickerState, TaskLinkRow,
-    SPAWN_MODELS,
+    AgentPickerState, ModelPickerChoice, ModelPickerState, RenameSubmit, RespawnChoice,
+    RespawnPickerState, SessionFinderChoice, SessionFinderState, SessionsLayout, SessionsView,
+    TaskLinkAction, TaskLinkChoice, TaskLinkPickerState,
 };
-pub use view::{visible_tabs, PendingClose, PendingConfirm, Tab, View, TABS};
-
-pub fn status_msg_ttl() -> Duration {
-    config::get().ui.status_msg_ttl()
-}
+pub use view::{visible_tabs, PendingClose, Tab, View, TABS};
 
 pub struct App {
     runtime: Arc<dyn AgentRuntime>,
@@ -88,9 +83,8 @@ pub struct App {
     pub last_refresh: Instant,
     pub live_view: Option<LiveView>,
     pub status_msg: Option<(String, Instant)>,
-    /// The action staged behind [`View::ConfirmClose`]; at most one is
-    /// pending at a time.
-    pub pending_confirm: Option<PendingConfirm>,
+    /// The close staged behind [`View::ConfirmClose`].
+    pub pending_close: Option<PendingClose>,
     pub usage: Option<UsageInfo>,
     pub usage_line: Line<'static>,
     pub session_counts: SessionCounts,
@@ -175,7 +169,7 @@ impl App {
             last_refresh: Instant::now(),
             live_view: None,
             status_msg: None,
-            pending_confirm: None,
+            pending_close: None,
             usage: None,
             usage_line: Line::default(),
             session_counts: SessionCounts::default(),
@@ -282,7 +276,7 @@ impl App {
         if let Some((msg, _)) = &self.status_msg {
             log::info!("status_msg: {}", msg);
         }
-        if let Some(PendingConfirm::Close(pc)) = &self.pending_confirm {
+        if let Some(pc) = &self.pending_close {
             log::info!("pending_close: pid={} display={}", pc.pid, pc.display);
         }
         if !self.sessions.acks.is_empty() {

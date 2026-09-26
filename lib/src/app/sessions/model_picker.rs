@@ -6,9 +6,6 @@ use crate::app::picker_list::{rank_rows, step, PickerRow, Searchable};
 use crate::app::{App, View};
 use crate::config;
 
-/// Default model choices for the implicit Claude agent.
-pub use crate::agent::DEFAULT_CLAUDE_MODELS as SPAWN_MODELS;
-
 /// State behind [`View::ModelPicker`]: where the new session will spawn
 /// (captured at open time so a rescan can't move the target), the live fuzzy
 /// query, selected coding agent, and its filtered model choices.
@@ -22,8 +19,6 @@ pub struct ModelPickerState {
     pub choices: Vec<ModelPickerChoice>,
     agents: Vec<AgentConfig>,
 }
-
-pub type ModelPickerRow = PickerRow;
 
 /// A model choice for the currently-selected coding agent. Agents with no
 /// configured models get one choice with no override, leaving the provider
@@ -309,7 +304,7 @@ mod tests {
             assert_eq!(spawns.len(), 1);
             assert_eq!(
                 spawns[0].model.as_deref(),
-                Some(crate::app::SPAWN_MODELS[1].1)
+                Some(crate::agent::DEFAULT_CLAUDE_MODELS[1].1)
             );
             assert_eq!(spawns[0].cwd, "/tmp/proj");
             assert!(status(&app).starts_with("started"), "got: {}", status(&app));
@@ -326,7 +321,7 @@ mod tests {
             app.model_picker_move(100);
             assert_eq!(
                 app.model_picker.as_ref().unwrap().selected,
-                crate::app::SPAWN_MODELS.len() - 1
+                crate::agent::DEFAULT_CLAUDE_MODELS.len() - 1
             );
         });
     }
@@ -345,8 +340,8 @@ mod tests {
             assert_eq!(
                 picker.selected_model(),
                 Some((
-                    crate::app::SPAWN_MODELS[1].0,
-                    Some(crate::app::SPAWN_MODELS[1].1)
+                    crate::agent::DEFAULT_CLAUDE_MODELS[1].0,
+                    Some(crate::agent::DEFAULT_CLAUDE_MODELS[1].1)
                 ))
             );
             assert!(!picker.rows[0].label_indices.is_empty());
@@ -361,8 +356,8 @@ mod tests {
             assert_eq!(
                 picker.selected_model(),
                 Some((
-                    crate::app::SPAWN_MODELS[2].0,
-                    Some(crate::app::SPAWN_MODELS[2].1)
+                    crate::agent::DEFAULT_CLAUDE_MODELS[2].0,
+                    Some(crate::agent::DEFAULT_CLAUDE_MODELS[2].1)
                 ))
             );
             assert!(!picker.rows[0].detail_indices.is_empty());
@@ -413,7 +408,7 @@ mod tests {
 
         picker.cycle_agent();
         assert_eq!(picker.agent_id, "claude");
-        assert_eq!(picker.rows.len(), crate::app::SPAWN_MODELS.len());
+        assert_eq!(picker.rows.len(), crate::agent::DEFAULT_CLAUDE_MODELS.len());
     }
 
     #[test]

@@ -102,7 +102,6 @@ impl From<OpError> for CliError {
             OpError::NotFound(msg) => CliError::NotFound(msg),
             OpError::Conflict { msg, recipe } => CliError::Conflict { msg, recipe },
             OpError::Other(msg) => CliError::Other(msg),
-            OpError::Reported(msg) => CliError::Reported(msg),
         }
     }
 }

@@ -28,8 +28,6 @@ pub struct SessionFinderChoice {
     pub detail: String,
 }
 
-pub type SessionFinderRow = PickerRow;
-
 #[derive(Clone, Debug)]
 pub struct SessionFinderState {
     /// True until the background archive scan delivers its list — the

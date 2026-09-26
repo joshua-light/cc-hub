@@ -204,26 +204,14 @@ fn scan_codex(titles: &HashMap<String, String>) -> Vec<IndexedSession> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::test_util::HOME_TEST_LOCK;
     use std::fs;
 
-    fn with_temp_home<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
-        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().expect("tempdir");
-        let prev = std::env::var_os("HOME");
-        let prev_cfg = std::env::var_os("CLAUDE_CONFIG_DIR");
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
-        std::env::set_var("HOME", home.path());
-        let out = f(home.path());
-        match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        match prev_cfg {
-            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
-            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
-        }
-        out
+    fn with_temp_home<T>(f: impl FnOnce(&Path) -> T) -> T {
+        let mut out = None;
+        crate::test_util::with_temp_home(|| {
+            out = Some(f(&dirs::home_dir().unwrap()));
+        });
+        out.unwrap()
     }
 
     fn write_claude_jsonl(home: &Path, dir: &str, sid: &str, cwd: &str, msg: &str) {

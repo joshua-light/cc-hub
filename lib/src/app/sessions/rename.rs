@@ -13,7 +13,7 @@ pub enum RenameSubmit {
     Persist { sid: String, title: String },
     /// Title captured for a session still booting behind a spawn placeholder;
     /// it is persisted to the real id the moment the scanner sees it (see
-    /// [`App::adopt_pending_spawn_names`]). Nothing to write yet.
+    /// `App::adopt_pending_spawn_names`). Nothing to write yet.
     Deferred { title: String },
     /// Empty title — treated as a cancel.
     Cancelled,
@@ -81,7 +81,7 @@ impl App {
     /// A boot-time prompt targets a spawn placeholder whose synthetic id can't
     /// be persisted against, so it routes by the spawning tmux name: if the
     /// real session has already landed it persists now, otherwise the name is
-    /// stashed for [`Self::adopt_pending_spawn_names`] to apply on arrival.
+    /// stashed for `Self::adopt_pending_spawn_names` to apply on arrival.
     pub fn submit_session_rename(&mut self) -> RenameSubmit {
         self.view = View::Grid;
         let Some(sid) = self.rename_target.take() else {

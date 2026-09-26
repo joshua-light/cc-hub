@@ -130,26 +130,12 @@ mod tests {
         SessionInfo {
             agent_id: agent_id.into(),
             agent_kind: kind,
-            pid: 1,
             session_id: "sid-1".into(),
             cwd: "/tmp/proj".into(),
             project_name: "proj".into(),
-            started_at: 0,
-            last_activity: None,
             state: crate::models::SessionState::Inactive,
-            last_user_message: None,
-            summary: None,
-            title: None,
-            titling: false,
-            model: None,
-            git_branch: None,
-            version: None,
             jsonl_path: jsonl.map(PathBuf::from),
-            tmux_session: None,
-            current_tool: None,
-            is_thinking: false,
-            context_tokens: None,
-            tool_uses_count: 0,
+            ..crate::test_util::session_info()
         }
     }
 

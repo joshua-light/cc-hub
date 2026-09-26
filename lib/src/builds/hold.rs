@@ -14,6 +14,7 @@
 //! doing nothing but living. Its file under `~/.cc-hub/builds/holds/` says
 //! where it stands, for the runners that wait on it and the tab that shows it.
 
+use crate::persist::now_unix_secs;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -68,7 +69,7 @@ pub fn ensure(resource: &str) -> io::Result<Hold> {
     let hold = Hold {
         resource: resource.to_string(),
         pid,
-        since: super::now(),
+        since: now_unix_secs(),
         granted: false,
         behind: None,
     };
@@ -101,7 +102,7 @@ pub fn keep(resource: &str) -> io::Result<()> {
         .unwrap_or_else(|| Hold {
             resource: resource.to_string(),
             pid: me,
-            since: super::now(),
+            since: now_unix_secs(),
             granted: false,
             behind: None,
         });
@@ -117,7 +118,7 @@ pub fn keep(resource: &str) -> io::Result<()> {
             Ok(result) if result["ok"].as_bool() == Some(true) => {
                 hold.granted = true;
                 hold.behind = None;
-                hold.since = super::now();
+                hold.since = now_unix_secs();
                 write(&hold)?;
                 break;
             }

@@ -7,11 +7,12 @@
 //! Task ID format: `tk-<unix-nanos>`. Sortable, unique within a single host
 //! to nanosecond resolution, no extra dep.
 
+use crate::persist::now_unix_secs;
 use crate::platform::paths::cc_hub_home;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use super::status::{validate_status_transition, TaskPriority, TaskStatus};
@@ -42,13 +43,6 @@ fn new_task_id() -> String {
 pub fn short_task_id(task_id: &str) -> String {
     let take = task_id.len().saturating_sub(6);
     task_id[take..].to_string()
-}
-
-pub fn now_unix_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 /// A note or file attached to a card — pasted text, a screenshot, a URL.
@@ -196,21 +190,7 @@ fn lock_task_state(task_id: &str) -> io::Result<Option<fs::File>> {
     if !dir.exists() {
         return Ok(None);
     }
-    lock_exclusive(&dir.join("state.lock")).map(Some)
-}
-
-/// Open (creating it, never truncating) the sidecar lock file at `path` and
-/// block until this process holds its exclusive advisory lock. The lock is
-/// released when the returned file drops.
-pub(super) fn lock_exclusive(path: &Path) -> io::Result<fs::File> {
-    use fs2::FileExt;
-    let f = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(path)?;
-    f.lock_exclusive()?;
-    Ok(f)
+    crate::persist::lock_exclusive(&dir.join("state.lock")).map(Some)
 }
 
 fn update_task_inner<F>(task_id: &str, touch: bool, f: F) -> io::Result<TaskState>

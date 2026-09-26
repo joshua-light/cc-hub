@@ -1,7 +1,8 @@
 //! The one-row status bar: status message or per-view key hints, the pending
 //! dispatch indicator, and the refresh age.
 
-use crate::app::{status_msg_ttl, App, Tab, View};
+use crate::app::{App, Tab, View};
+use crate::config;
 use crate::folder_picker::PickerMode;
 use crate::models;
 use crate::ui::{agents, builds};
@@ -22,7 +23,7 @@ pub(super) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     let fresh_status = app
         .status_msg
         .as_ref()
-        .filter(|(_, ts)| ts.elapsed() < status_msg_ttl())
+        .filter(|(_, ts)| ts.elapsed() < config::get().ui.status_msg_ttl())
         .map(|(msg, _)| msg.as_str());
 
     let mut spans: Vec<Span> = Vec::new();

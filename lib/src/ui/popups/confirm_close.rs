@@ -1,6 +1,6 @@
 //! The close-terminal confirmation dialog.
 
-use crate::app::{App, PendingConfirm};
+use crate::app::App;
 use crate::ui::common::{centered_fixed, popup_block};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -9,17 +9,13 @@ use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 pub(crate) fn render_confirm_close(frame: &mut Frame, area: Rect, app: &App) {
-    let (title, display, consequence, action_color) = match app.pending_confirm.as_ref() {
-        Some(PendingConfirm::Close(pending)) => (
-            " Close terminal? ",
-            pending.display.clone(),
-            "Closes the OS terminal window hosting this session when the platform can resolve it. The tmux session may survive.",
-            Color::Red,
-        ),
-        None => {
-            return;
-        }
+    let Some(pending) = app.pending_close.as_ref() else {
+        return;
     };
+    let title = " Close terminal? ";
+    let display = pending.display.clone();
+    let consequence = "Closes the OS terminal window hosting this session when the platform can resolve it. The tmux session may survive.";
+    let action_color = Color::Red;
 
     let popup = centered_fixed(area, 76, 8);
     frame.render_widget(Clear, popup);

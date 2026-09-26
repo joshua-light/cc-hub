@@ -3,15 +3,15 @@
 //! Codex's rollout format is structurally different from Claude/Pi: every
 //! record is `{"timestamp", "type", "payload"}`, and the turn lifecycle lives
 //! in `event_msg` records (`task_started` / `task_complete` / `turn_aborted`),
-//! not in per-message stop reasons. So the [`CodexDialect`] answers the shared
-//! [`classify`] state machine's format questions by mapping those lifecycle
+//! not in per-message stop reasons. So the `CodexDialect` answers the shared
+//! `classify` state machine's format questions by mapping those lifecycle
 //! events onto assistant "stop reasons": a `task_started` reads as an in-flight
 //! assistant turn (Processing), a `task_complete`/`turn_aborted` as end-of-turn
 //! (WaitingForInput). The *meaning* still lives once in
-//! [`crate::conversation::classify`], shared with every other backend.
+//! `crate::conversation::classify`, shared with every other backend.
 //!
-//! - [`tools`] — tool-call detection, the current tool, and tool-use counts.
-//! - [`messages`] — user/assistant message text and token totals.
+//! - `tools` — tool-call detection, the current tool, and tool-use counts.
+//! - `messages` — user/assistant message text and token totals.
 
 mod messages;
 #[cfg(test)]

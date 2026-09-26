@@ -6,8 +6,8 @@
 //! one comparison — otherwise every title generation would materialize as a
 //! spurious "Inactive" session in the grid.
 //!
-//! - [`run`] — subprocess plumbing: deadline loop, tty detach, shutdown.
-//! - [`resolve`] — resolves the spawn command through the login shell.
+//! - `run` — subprocess plumbing: deadline loop, tty detach, shutdown.
+//! - `resolve` — resolves the spawn command through the login shell.
 
 mod resolve;
 mod run;
@@ -18,7 +18,6 @@ use log::warn;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -74,23 +73,15 @@ pub fn load() -> HashMap<String, String> {
 }
 
 fn save(titles: &HashMap<String, String>) -> std::io::Result<()> {
-    let path = cache_file();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let body = serde_json::to_string_pretty(&TitleCacheFile {
-        titles: titles.clone(),
-    })?;
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(body.as_bytes())?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, &path)
+    crate::persist::save_json(
+        &cache_file(),
+        &TitleCacheFile {
+            titles: titles.clone(),
+        },
+    )
 }
 
-/// Atomically insert `title` under `sid`. Holds [`WRITE_LOCK`] across the
+/// Atomically insert `title` under `sid`. Holds `WRITE_LOCK` across the
 /// load/insert/save cycle so two concurrent titlers can't clobber each
 /// other's entries.
 pub fn persist_title(sid: &str, title: &str) -> std::io::Result<()> {

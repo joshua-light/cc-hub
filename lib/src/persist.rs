@@ -6,6 +6,7 @@ use serde::Serialize;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Serialise `value` as pretty JSON and atomically replace `path` with it,
 /// creating parent directories as needed. The tempfile is namespaced by pid
@@ -33,6 +34,14 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         f.sync_all()?;
     }
     fs::rename(&tmp, path)
+}
+
+/// Wall-clock unix seconds for on-disk timestamps; 0 on a pre-epoch clock.
+pub fn now_unix_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Open the sidecar lock file at `path`, creating it if needed, and block

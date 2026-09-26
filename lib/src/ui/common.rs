@@ -8,7 +8,7 @@
 //! - model/tool labels, context-window bars, and time, age, token and cost
 //!   formatters
 //! - one-line row helpers: padding, truncation, the selection stripe
-//! - [`Cell`], one column of a table row's right-hand cluster
+//! - `Cell`, one column of a table row's right-hand cluster
 
 use crate::models;
 use crate::models::first_line_truncated;

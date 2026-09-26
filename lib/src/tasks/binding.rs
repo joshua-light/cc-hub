@@ -43,28 +43,13 @@ mod tests {
 
     fn scanned(id: &str, state: SessionState, tmux: &str) -> SessionInfo {
         SessionInfo {
-            agent_id: "claude".into(),
-            agent_kind: crate::agent::AgentKind::Claude,
             pid: 4242,
             session_id: id.into(),
             cwd: "/tmp/project".into(),
             project_name: "project".into(),
-            started_at: 0,
-            last_activity: None,
             state,
-            last_user_message: None,
-            summary: None,
-            title: None,
-            titling: false,
-            model: None,
-            git_branch: None,
-            version: None,
-            jsonl_path: None,
             tmux_session: Some(tmux.into()),
-            current_tool: None,
-            is_thinking: false,
-            context_tokens: None,
-            tool_uses_count: 0,
+            ..crate::test_util::session_info()
         }
     }
 

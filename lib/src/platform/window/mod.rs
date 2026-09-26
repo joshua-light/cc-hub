@@ -4,9 +4,9 @@
 //! backends in a `OnceLock`; each operation tries them in order. Headless
 //! environments get an empty chain, where every operation is a no-op.
 //!
-//! - [`hyprland`]: Hyprland via `hyprctl`, when `HYPRLAND_INSTANCE_SIGNATURE`
+//! - `hyprland`: Hyprland via `hyprctl`, when `HYPRLAND_INSTANCE_SIGNATURE`
 //!   is set.
-//! - [`xdotool`]: X11 via `xdotool`, when it is installed.
+//! - `xdotool`: X11 via `xdotool`, when it is installed.
 //! - `macos`: CoreGraphics finds the window, the Accessibility API raises it
 //!   and AppleScript activates its app. The first AX call triggers macOS's
 //!   Accessibility permission prompt; until the user grants it, focus and

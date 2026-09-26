@@ -59,7 +59,7 @@ pub fn load() -> HashMap<String, TaskLink> {
     }
 }
 
-/// Atomically upsert `sid → link`. Holds [`WRITE_LOCK`] across the
+/// Atomically upsert `sid → link`. Holds `WRITE_LOCK` across the
 /// load/insert/save cycle so two writers can't clobber each other's entries.
 pub fn link(sid: &str, link: TaskLink) -> io::Result<()> {
     mutate(|links| {

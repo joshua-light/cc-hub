@@ -79,44 +79,29 @@ pub fn count_recent_sessions() -> SessionCounts {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::test_util::HOME_TEST_LOCK;
+    use crate::test_util::with_temp_home;
 
     #[test]
     fn scratch_summary_sessions_are_not_counted() {
-        let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().expect("tempdir");
-        let prev_home = std::env::var_os("HOME");
-        // CLAUDE_CONFIG_DIR would override the HOME-derived layout — clear it
-        // so claude_home() points at the temp home for the duration.
-        let prev_cfg = std::env::var_os("CLAUDE_CONFIG_DIR");
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
-        std::env::set_var("HOME", home.path());
+        with_temp_home(|| {
+            let projects = paths::claude_home().expect("claude_home").join("projects");
+            let real = projects.join("-home-me-proj");
+            // The scratch project dir is exactly what the Claude scanner skips.
+            let scratch = projects.join(
+                crate::sessions::scanner::scratch_project_dir_name()
+                    .expect("scratch project dir name"),
+            );
+            fs::create_dir_all(&real).unwrap();
+            fs::create_dir_all(&scratch).unwrap();
+            // Both JSONLs are created now, so both land in today's window.
+            fs::write(real.join("a.jsonl"), "{}\n").unwrap();
+            fs::write(scratch.join("b.jsonl"), "{}\n").unwrap();
 
-        let projects = paths::claude_home().expect("claude_home").join("projects");
-        let real = projects.join("-home-me-proj");
-        // The scratch project dir is exactly what the Claude scanner skips.
-        let scratch = projects.join(
-            crate::sessions::scanner::scratch_project_dir_name().expect("scratch project dir name"),
-        );
-        fs::create_dir_all(&real).unwrap();
-        fs::create_dir_all(&scratch).unwrap();
-        // Both JSONLs are created now, so both land in today's window.
-        fs::write(real.join("a.jsonl"), "{}\n").unwrap();
-        fs::write(scratch.join("b.jsonl"), "{}\n").unwrap();
+            let counts = count_recent_sessions();
 
-        let counts = count_recent_sessions();
-
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        match prev_cfg {
-            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
-            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
-        }
-
-        // Only the real session is counted; the scratch one is excluded.
-        assert_eq!(counts.today, 1);
-        assert_eq!(counts.week, 1);
+            // Only the real session is counted; the scratch one is excluded.
+            assert_eq!(counts.today, 1);
+            assert_eq!(counts.week, 1);
+        });
     }
 }

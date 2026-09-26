@@ -6,7 +6,7 @@
 //! - `linux`: procfs.
 //! - `macos`: `libproc` and sysctl, since Darwin has no procfs.
 //! - `windows`: Toolhelp snapshots and process handles.
-//! - [`agent_cmd`]: pure classifiers for agent command lines.
+//! - `agent_cmd`: pure classifiers for agent command lines.
 
 use crate::agent::AgentKind;
 use log::debug;

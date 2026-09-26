@@ -123,14 +123,8 @@ pub fn load_state(dir: &Path) -> AgentState {
 /// Read-mutate-write `state.json` under the agent's `state.lock`, so the
 /// TUI supervisor and CLI verbs can't clobber each other.
 pub fn update_state<F: FnOnce(&mut AgentState)>(dir: &Path, f: F) -> io::Result<AgentState> {
-    use fs2::FileExt;
     fs::create_dir_all(dir)?;
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(dir.join("state.lock"))?;
-    lock.lock_exclusive()?;
+    let lock = crate::persist::lock_exclusive(&dir.join("state.lock"))?;
     let mut state = load_state(dir);
     f(&mut state);
     save_json(&state_path(dir), &state)?;

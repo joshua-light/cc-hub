@@ -6,7 +6,7 @@
 //! recipe's older builds are its history, not cards.
 
 use crate::app::{App, BuildForm, FormField, LogView};
-use crate::builds::{recipe, Build, BuildStatus};
+use crate::builds::{recipe, short_commit, Build, BuildStatus};
 use crate::models::first_line_truncated;
 use crate::ui::common::{age, centered_fixed, centered_rect, popup_block, spinner_frame};
 use crate::ui::palette::{ACCENT_BLUE, DIM_TEXT, FAINT_TEXT, LABEL_GRAY, MUTED_TEXT, SEP_GRAY};
@@ -69,10 +69,6 @@ fn duration(secs: i64) -> String {
     }
 }
 
-fn short(commit: &str) -> &str {
-    &commit[..commit.len().min(11)]
-}
-
 fn text(s: impl Into<String>, width: usize, style: Style) -> Span<'static> {
     Span::styled(first_line_truncated(&s.into(), width), style)
 }
@@ -111,7 +107,7 @@ pub(crate) fn render_builds_body(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let cell_w = body.width / cols;
-    let now = crate::builds::now();
+    let now = crate::persist::now_unix_secs();
     let now_ms = crate::ui::now_ms();
     for (i, name) in app.builds.recipes.iter().enumerate() {
         let (row, col) = (i as u16 / cols, i as u16 % cols);
@@ -256,7 +252,7 @@ fn player_line(
     width: usize,
 ) -> Option<Line<'static>> {
     let current = app.builds.probe.current.get(name)?;
-    let mut s = format!("player {}", short(current));
+    let mut s = format!("player {}", short_commit(current));
     if let Some(subject) = built.and_then(|b| b.subject.as_deref()) {
         s.push_str(&format!(" · {}", subject));
     }
@@ -285,7 +281,7 @@ fn player_line(
 fn build_line(build: &Build, color: Color, mark: &str, width: usize) -> Line<'static> {
     let mut s = format!("{} {}", mark, build.target());
     if let Some(commit) = &build.commit {
-        s.push_str(&format!(" · {}", short(commit)));
+        s.push_str(&format!(" · {}", short_commit(commit)));
     }
     if let Some(subject) = &build.subject {
         s.push_str(&format!(" · {}", subject));
@@ -394,7 +390,7 @@ fn after_line(
         let last = app.builds.last_success(name)?;
         let mut s = format!("last built ✓ {}", last.target());
         if let Some(commit) = &last.commit {
-            s.push_str(&format!(" · {}", short(commit)));
+            s.push_str(&format!(" · {}", short_commit(commit)));
         }
         if let Some(at) = last.finished_at {
             s.push_str(&format!(" · {} ago", age(now, at)));
