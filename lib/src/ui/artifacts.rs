@@ -47,7 +47,7 @@ pub(crate) fn classify_artifact(a: &Artifact) -> CardKind {
     }
 }
 
-/// Reads up to 8 KiB of `path` as lossy UTF-8 and splits into lines. Returns
+/// Reads up to `max_bytes` of `path` as lossy UTF-8 and splits into lines. Returns
 /// `None` for binary files (>5 % non-text bytes in the leading 1 KiB) so the
 /// caller can show "(binary file)" rather than dumping garbage at the user.
 pub(crate) fn read_text_excerpt(path: &Path, max_bytes: usize) -> Option<(Vec<String>, usize)> {
