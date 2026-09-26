@@ -11,6 +11,7 @@ mod tools;
 use crate::conversation::classify;
 use crate::conversation::io::read_tail_until;
 use crate::conversation::parse_timestamp_ms;
+use crate::conversation::render::truncate_plain;
 use crate::models::SessionState;
 use serde_json::Value;
 use std::path::Path;
@@ -51,13 +52,13 @@ fn message_timestamp(entry: &Value) -> Option<u64> {
 
 fn content_text(content: &Value, max_len: usize) -> Option<String> {
     if let Some(text) = content.as_str() {
-        return Some(truncate_str(text, max_len));
+        return Some(truncate_plain(text, max_len));
     }
     let arr = content.as_array()?;
     for block in arr {
         if block.get("type").and_then(|t| t.as_str()) == Some("text") {
             if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                return Some(truncate_str(text, max_len));
+                return Some(truncate_plain(text, max_len));
             }
         }
     }
@@ -174,12 +175,20 @@ pub fn extract_metadata(entries: &[Value]) -> (Option<String>, Option<String>, O
     (None, model, None)
 }
 
-pub fn extract_last_activity(entries: &[Value]) -> Option<u64> {
-    entries.iter().filter_map(message_timestamp).max()
+/// Pi's session id: the head's `id`, else the transcript's file stem.
+pub(crate) fn extract_session_id(head: &[Value], path: &Path) -> Option<String> {
+    head.iter()
+        .find_map(|e| e.get("id").and_then(|v| v.as_str()))
+        .map(str::to_string)
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })
 }
 
-fn truncate_str(s: &str, max: usize) -> String {
-    crate::models::first_line_truncated(s.trim(), max)
+pub fn extract_last_activity(entries: &[Value]) -> Option<u64> {
+    entries.iter().filter_map(message_timestamp).max()
 }
 
 #[cfg(test)]

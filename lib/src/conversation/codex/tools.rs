@@ -1,4 +1,5 @@
 use super::{payload, payload_type, rec_type};
+use crate::conversation::render::one_line_hint;
 use crate::conversation::CurrentTool;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -84,8 +85,7 @@ fn format_tool_hint(name: &str, payload: &Value) -> Option<String> {
                     .and_then(|o| o.values().find_map(|v| v.as_str().map(str::to_string)))
             }),
     }?;
-    let cleaned = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!cleaned.is_empty()).then_some(cleaned)
+    one_line_hint(&raw)
 }
 
 /// A command value that may be a plain string or an argv array of strings.

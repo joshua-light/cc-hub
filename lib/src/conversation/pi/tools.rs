@@ -1,4 +1,5 @@
 use super::message_role;
+use crate::conversation::render::one_line_hint;
 use crate::conversation::CurrentTool;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -88,8 +89,7 @@ fn format_tool_hint(name: &str, args: Option<&Value>) -> Option<String> {
             .as_object()
             .and_then(|o| o.values().find_map(|v| v.as_str().map(str::to_string))),
     }?;
-    let cleaned = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!cleaned.is_empty()).then_some(cleaned)
+    one_line_hint(&raw)
 }
 
 #[cfg(test)]

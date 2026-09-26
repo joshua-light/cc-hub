@@ -92,6 +92,24 @@ pub fn extract_last_activity(entries: &[Value]) -> Option<u64> {
 
 /// Parse a JSONL timestamp field to epoch milliseconds.
 /// Handles both integer timestamps and ISO 8601 strings (e.g. "2026-04-15T18:14:30.201Z").
+/// The session's working directory: the first entry carrying a top-level
+/// `cwd`. Claude and Pi transcripts both record it this way.
+pub(crate) fn extract_cwd(entries: &[Value]) -> Option<String> {
+    entries
+        .iter()
+        .find_map(|e| e.get("cwd").and_then(|c| c.as_str()))
+        .map(str::to_string)
+}
+
+/// Session start (epoch ms): the first entry with a parseable top-level
+/// `timestamp`, else 0.
+pub(crate) fn extract_started_at(entries: &[Value]) -> u64 {
+    entries
+        .iter()
+        .find_map(|e| e.get("timestamp").and_then(parse_timestamp_ms))
+        .unwrap_or(0)
+}
+
 pub fn parse_timestamp_ms(val: &Value) -> Option<u64> {
     if let Some(n) = val.as_u64() {
         return Some(n);

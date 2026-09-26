@@ -20,22 +20,13 @@ fn synthesize_inactive_from_jsonl(
     let session_id = path.file_stem().and_then(|s| s.to_str())?.to_string();
     let head_entries = conversation::read_jsonl_head(path, 4096);
 
-    let cwd = head_entries
-        .iter()
-        .find_map(|e| e.get("cwd").and_then(|c| c.as_str()))?
-        .to_string();
+    let cwd = conversation::extract_cwd(&head_entries)?;
 
     if is_scratch_cwd(&cwd) {
         return None;
     }
 
-    let started_at = head_entries
-        .iter()
-        .find_map(|e| {
-            e.get("timestamp")
-                .and_then(conversation::parse_timestamp_ms)
-        })
-        .unwrap_or(0);
+    let started_at = conversation::extract_started_at(&head_entries);
 
     // Memoized on (path, mtime); the immutable summary is cached permanently.
     let derived = conversation::derive_state_cached(path)?;

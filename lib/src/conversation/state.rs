@@ -1,6 +1,7 @@
 //! Entry classification and the session-state machine.
 
 use super::classify;
+use super::render::one_line_hint;
 use crate::models::SessionState;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -334,12 +335,7 @@ fn format_tool_hint(name: &str, input: Option<&Value>) -> Option<String> {
             .map(str::to_string),
         _ => None,
     }?;
-    let cleaned = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    if cleaned.is_empty() {
-        None
-    } else {
-        Some(cleaned)
-    }
+    one_line_hint(&raw)
 }
 
 /// Sum of input + cache_read + cache_creation tokens from the *most recent*

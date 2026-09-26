@@ -223,6 +223,19 @@ pub(super) fn truncate_str(s: &str, max: usize) -> String {
     crate::models::first_line_truncated(s.trim(), max)
 }
 
+/// [`truncate_str`] without the XML stripping, for dialects whose text
+/// carries no injected tags.
+pub(super) fn truncate_plain(s: &str, max: usize) -> String {
+    crate::models::first_line_truncated(s.trim(), max)
+}
+
+/// A tool hint on one line: whitespace runs collapse to single spaces, and
+/// an all-blank hint is `None`.
+pub(super) fn one_line_hint(raw: &str) -> Option<String> {
+    let cleaned = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,4 +1,5 @@
-use super::{content_text, message_role, message_timestamp, truncate_str};
+use super::{content_text, message_role, message_timestamp};
+use crate::conversation::render::truncate_plain;
 use crate::conversation::{NO_CONTENT, NO_TEXT_CONTENT, THINKING_MARKER, TOOL_MARKER_PREFIX};
 use crate::models::ConversationMessage;
 use serde_json::Value;
@@ -109,7 +110,7 @@ fn extract_text_content(entry: &Value) -> String {
                 match block.get("type").and_then(|t| t.as_str()) {
                     Some("text") => {
                         if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                            parts.push(truncate_str(text, 200));
+                            parts.push(truncate_plain(text, 200));
                         }
                     }
                     Some("toolCall") => {

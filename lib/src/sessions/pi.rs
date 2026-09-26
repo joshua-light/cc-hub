@@ -20,33 +20,15 @@ fn build_session_info(
     model_override: Option<String>,
 ) -> Option<SessionInfo> {
     let head = conversation::read_jsonl_head(&jsonl_path, 4096);
-    let cwd = head
-        .iter()
-        .find_map(|e| e.get("cwd").and_then(|c| c.as_str()))?
-        .to_string();
-    let started_at = head
-        .iter()
-        .find_map(|e| {
-            e.get("timestamp")
-                .and_then(conversation::parse_timestamp_ms)
-        })
-        .unwrap_or(0);
+    let cwd = conversation::extract_cwd(&head)?;
+    let started_at = conversation::extract_started_at(&head);
     let tail = conversation::pi::read_jsonl_tail_for_state(&jsonl_path);
     let parsed_state = apply_state_hint(conversation::pi::extract_state(&tail), state);
     let last_user_message = conversation::pi::extract_last_user_message(&tail);
     let last_activity = conversation::pi::extract_last_activity(&tail);
     let (git_branch, model, version) = conversation::pi::extract_metadata(&tail);
     let summary = conversation::pi::extract_first_user_message(&head);
-    let session_id = head
-        .iter()
-        .find_map(|e| e.get("id").and_then(|v| v.as_str()))
-        .map(str::to_string)
-        .or_else(|| {
-            jsonl_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(str::to_string)
-        })?;
+    let session_id = conversation::pi::extract_session_id(&head, &jsonl_path)?;
 
     let tool_uses_count = crate::conversation::tool_count::count_pi(&jsonl_path);
     Some(SessionInfo {
@@ -222,19 +204,13 @@ fn scan_external_live_sessions(
                 continue;
             }
             let head = conversation::read_jsonl_head(&path, 4096);
-            let Some(cwd) = head
-                .iter()
-                .find_map(|e| e.get("cwd").and_then(|c| c.as_str()))
-            else {
+            let Some(cwd) = conversation::extract_cwd(&head) else {
                 continue;
             };
             let Some(mtime) = path.metadata().ok().and_then(|m| m.modified().ok()) else {
                 continue;
             };
-            by_cwd
-                .entry(cwd.to_string())
-                .or_default()
-                .push((path, mtime));
+            by_cwd.entry(cwd).or_default().push((path, mtime));
         }
     }
     for files in by_cwd.values_mut() {

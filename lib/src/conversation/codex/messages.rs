@@ -1,4 +1,5 @@
 use super::{payload, payload_type, rec_type, record_timestamp};
+use crate::conversation::render::truncate_plain;
 use crate::conversation::NO_TEXT_CONTENT;
 use crate::models::ConversationMessage;
 use serde_json::Value;
@@ -8,7 +9,7 @@ use serde_json::Value;
 fn message_text(msg: &Value, max_len: usize) -> Option<String> {
     let content = msg.get("content")?;
     if let Some(s) = content.as_str() {
-        return Some(truncate_str(s, max_len));
+        return Some(truncate_plain(s, max_len));
     }
     let arr = content.as_array()?;
     let mut parts = Vec::new();
@@ -25,7 +26,7 @@ fn message_text(msg: &Value, max_len: usize) -> Option<String> {
     if parts.is_empty() {
         None
     } else {
-        Some(truncate_str(&parts.join(" "), max_len))
+        Some(truncate_plain(&parts.join(" "), max_len))
     }
 }
 
@@ -34,7 +35,7 @@ fn user_event_text(entry: &Value, max_len: usize) -> Option<String> {
     payload(entry)?
         .get("message")
         .and_then(|v| v.as_str())
-        .map(|s| truncate_str(s, max_len))
+        .map(|s| truncate_plain(s, max_len))
 }
 
 fn is_user_message_record(entry: &Value) -> bool {
@@ -128,10 +129,6 @@ pub fn extract_messages(entries: &[Value], count: usize) -> Vec<ConversationMess
     } else {
         out
     }
-}
-
-fn truncate_str(s: &str, max: usize) -> String {
-    crate::models::first_line_truncated(s.trim(), max)
 }
 
 #[cfg(test)]
