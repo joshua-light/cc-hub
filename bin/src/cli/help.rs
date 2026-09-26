@@ -71,7 +71,8 @@ const RESOURCE_HELP: &str = r#"cc-hub resource
   accounts [--refresh]                      Show account health and quota windows
   list                                      Resources, who holds each, and the queue
   claim NAME... [--wait SECONDS]            (in a session) the complete set the work needs
-  release [NAME...]                         (in a session) hand back some or all of it
+  release [NAME...] [--as NAME]             (in a session) hand back, or stop waiting
+                                            for, some or all of it
   select --kind KIND --role ROLE            Preview a capacity-aware allocation
   start --task ID --kind KIND --role ROLE --cwd DIR --prompt TEXT
                                             Start the session working a task; a task

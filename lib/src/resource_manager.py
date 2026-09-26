@@ -553,18 +553,25 @@ def claim(cfg, db, worker, names):
 
 
 def release(db, worker, names=None):
-    """Hand back some or all of what the worker holds, and offer the queue
-    what came free."""
-    kept = [n for n in worker.get('holds', []) if names is not None and n not in names]
-    freed = [n for n in worker.get('holds', []) if n not in kept]
-    if names is None:
-        worker.pop('wants', None)
-        worker.pop('wants_at', None)
-    if not freed:
-        return []
-    worker['holds'] = kept
-    record(worker, 'released', resources=freed)
-    grant_waiting(db)
+    """Hand back some or all of what the worker holds, withdraw the same from
+    what it waits for, and offer the queue what came free. A queued claim
+    stands ahead of every later one, so withdrawing it frees them as surely
+    as handing back a held resource does."""
+    def kept(key):
+        return [n for n in worker.get(key, []) if names is not None and n not in names]
+    freed = [n for n in worker.get('holds', []) if n not in kept('holds')]
+    withdrawn = [n for n in worker.get('wants', []) if n not in kept('wants')]
+    if withdrawn:
+        worker['wants'] = kept('wants')
+        if not worker['wants']:
+            worker.pop('wants')
+            worker.pop('wants_at', None)
+        record(worker, 'withdrawn', resources=withdrawn)
+    if freed:
+        worker['holds'] = kept('holds')
+        record(worker, 'released', resources=freed)
+    if freed or withdrawn:
+        grant_waiting(db)
     return freed
 
 
@@ -709,6 +716,20 @@ def current_session(db, args):
     if args.worker or os.environ.get('CC_HUB_RESOURCE_WORKER'):
         return current_worker(db, args.worker, require_owner=True)
     return guest(db, getattr(args, 'name', None), getattr(args, 'pid', None))
+
+
+def releasing(db, args):
+    """Who is handing back. A worker, or a guest by its process, as for a
+    claim; failing that, the guests that claimed under the `--as` name. An
+    agent does not always run its release from the process it claimed from,
+    and a release must never register a guest, so the name finds and does
+    not create."""
+    if args.worker or os.environ.get('CC_HUB_RESOURCE_WORKER'):
+        return [current_worker(db, args.worker, require_owner=True)]
+    found = guest(db, pid=args.pid)
+    if found:
+        return [found]
+    return [g for g in db['guests'].values() if args.name and g['name'] == args.name[:64]]
 
 
 def live_worker(db, task):
@@ -1133,6 +1154,7 @@ def parser():
     release_p = commands.add_parser('release')
     release_p.add_argument('names', nargs='*')
     release_p.add_argument('--worker')
+    release_p.add_argument('--as', dest='name')
     release_p.add_argument('--pid', type=int)
     select_p = commands.add_parser('select')
     for name in ('kind', 'role'):
@@ -1214,9 +1236,11 @@ def main(argv=None):
                     result = worker
                 elif args.verb == 'release':
                     # A guest with nothing to its name held nothing to hand back.
-                    session = current_session(db, args)
-                    freed = release(db, session, args.names or None) if session else []
-                    result = {'released': freed, 'holds': session.get('holds', []) if session else []}
+                    found = releasing(db, args)
+                    freed = [n for s in found for n in release(db, s, args.names or None)]
+                    result = {'released': freed,
+                              'holds': [n for s in found for n in s.get('holds', [])],
+                              'waiting_for': [n for s in found for n in s.get('wants', [])]}
                 save(db)
         print(json.dumps({'ok': True, 'result': result}))
         return 0
