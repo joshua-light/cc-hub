@@ -1,19 +1,29 @@
-//! Claude JSONL transcript parsing: reading session logs, deriving session
-//! state, extracting messages/metadata, and rendering content previews.
+//! Agent transcript parsing: reading session logs, deriving session state,
+//! extracting messages/metadata, and rendering content previews.
 //!
-//! Split into focused submodules, all re-exported flat at `conversation::*`:
+//! Claude parsing lives in focused submodules, all re-exported flat at
+//! `conversation::*`:
 //! - [`io`] — JSONL reading and streaming block counters.
 //! - [`cache`] — mtime-keyed memoization of derived state and summaries.
 //! - [`state`] — entry classification and the session-state machine.
 //! - [`messages`] — message and metadata extraction.
 //! - [`render`] — content-preview and tool-display rendering.
+//!
+//! Other dialects and helpers stay behind their module names, because their
+//! items would clash with the flat Claude API:
+//! - [`pi`] — Pi transcript parsing.
+//! - [`codex`] — Codex rollout parsing.
+//! - [`tool_count`] — incremental tool-use counts across every dialect.
 
 mod cache;
 pub(crate) mod classify;
+pub mod codex;
 mod io;
 mod messages;
+pub mod pi;
 mod render;
 pub(crate) mod state;
+pub mod tool_count;
 
 #[cfg(test)]
 mod test_util;

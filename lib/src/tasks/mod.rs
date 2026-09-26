@@ -15,6 +15,16 @@
 //! locked read-mutate-write of the task's own file, so concurrent cc-hub
 //! instances conflict per task, not per board. Board-level metadata
 //! (`last_assign_cwd`) lives in `~/.cc-hub/board.json`.
+//!
+//! - [`store`] — per-task `state.json` files and the status transition table.
+//! - [`activity`] — the card's progress label, from the task's notes and side files.
+//! - [`stats`] — persisted per-task usage.
+//! - [`session_links`] — user-driven session→task links.
+
+pub mod activity;
+pub mod session_links;
+pub mod stats;
+pub mod store;
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
