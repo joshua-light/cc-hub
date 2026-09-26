@@ -16,7 +16,7 @@ pub(super) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
     let cols = app.render.grid_cols as usize;
     let cell_width = area.width / app.render.grid_cols;
 
-    // Compute content-space y offset for each group
+    // Content-space y of each group, before scrolling.
     let mut group_offsets: Vec<u16> = Vec::new();
     let mut y_acc: u16 = 0;
     for group in &app.sessions.groups {
@@ -41,14 +41,12 @@ pub(super) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
     for (gi, group) in app.sessions.groups.iter().enumerate() {
         let g_y = group_offsets[gi];
 
-        // Render group header
         let header_sy = g_y as i32 - scroll as i32;
         if header_sy >= 0 && header_sy < area.height as i32 {
             let hy = area.y + header_sy as u16;
             render_group_header(frame, Rect::new(area.x, hy, area.width, 1), group);
         }
 
-        // Render cards for this group
         for (si, session) in group.sessions.iter().enumerate() {
             let col = (si % cols) as u16;
             let row = (si / cols) as u16;
@@ -56,7 +54,7 @@ pub(super) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
             let card_cy = g_y + GROUP_HEADER_HEIGHT + row * cell_height();
             let card_sy = card_cy as i32 - scroll as i32;
 
-            // Only render if fully visible within the area
+            // A card that would be clipped is skipped.
             if card_sy < 0 || card_sy + cell_height() as i32 > area.height as i32 {
                 continue;
             }

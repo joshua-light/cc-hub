@@ -140,8 +140,8 @@ pub(crate) fn render_task_info(frame: &mut Frame, area: Rect, app: &mut App) {
     lines.push(Line::raw(""));
 
     // ── Attachment cards ──────────────────────────────────────────────────
-    // Track each card's (top, end) canvas rows so the scroll clamp below can
-    // keep the selected card in view.
+    // Each card's (top, end) canvas rows, so the scroll clamp can keep the
+    // selected card in view.
     let mut card_spans: Vec<(u16, u16)> = Vec::with_capacity(n_attach);
     if n_attach == 0 {
         lines.push(Line::from(Span::styled(
@@ -163,7 +163,6 @@ pub(crate) fn render_task_info(frame: &mut Frame, area: Rect, app: &mut App) {
     let total = lines.len() as u16;
     let mut scroll = app.render.task_info_scroll;
     if let Some(&(top, end)) = card_spans.get(sel) {
-        // Keep the selected card visible, same contract as the Result popup.
         let h = end.saturating_sub(top);
         if top < scroll {
             scroll = top;

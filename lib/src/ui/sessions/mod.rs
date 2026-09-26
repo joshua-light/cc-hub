@@ -74,7 +74,6 @@ fn render_group_header(frame: &mut Frame, area: Rect, group: &crate::models::Pro
             Style::default().fg(Color::Yellow),
         ));
     }
-    // Show cwd path dimmed after the counts
     spans.push(Span::styled(
         format!("  {}", group.cwd),
         Style::default().fg(SEP_GRAY),
@@ -110,7 +109,8 @@ fn animated_indicator(state: &SessionState, now: u64) -> (&'static str, Color) {
     (indicator, color)
 }
 
-/// `[Codex] ` ahead of a non-Claude session's title; empty for Claude.
+/// `[Codex] ` ahead of a non-Claude session's title. Claude is the ~99%
+/// default, so labelling it would be noise.
 fn agent_prefix(session: &SessionInfo) -> String {
     if session.agent_id == "claude" {
         String::new()

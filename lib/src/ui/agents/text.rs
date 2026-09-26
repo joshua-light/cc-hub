@@ -41,7 +41,8 @@ pub(super) fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Greedy word wrap for plain text, preserving explicit line breaks.
+/// Greedy word wrap for plain text. Keeps explicit line breaks and hard-cuts
+/// a word wider than the line; `ui::tasks`' wrap differs on both counts.
 pub(super) fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let width = width.max(8);
     let mut out = Vec::new();

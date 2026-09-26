@@ -89,9 +89,9 @@ pub(crate) fn render_metrics_body(frame: &mut Frame, area: Rect, app: &mut App) 
 
     let body_area = Rect::new(area.x, area.y, area.width, body_height);
     // No wrap: the rows are tabular and `max_scroll`/`row_lines`/`view_height`
-    // are all counted in logical lines. Wrapping made `.scroll` count wrapped
-    // rows instead, so on a narrow terminal the clamp and the selection-follow
-    // targeted the wrong rows. Clipping over-long rows keeps 1 line == 1 row.
+    // all count logical lines. Wrapping would make `.scroll` count wrapped
+    // rows, so on a narrow terminal the clamp and the selection-follow would
+    // target the wrong rows. Clipping keeps 1 line == 1 row.
     let content = Paragraph::new(lines).scroll((scroll, 0));
     frame.render_widget(content, body_area);
 }

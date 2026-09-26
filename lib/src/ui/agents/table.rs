@@ -1,3 +1,7 @@
+//! One row per agent: status icon, name, last run, what the agent has to
+//! say, and a right cluster (trigger, spend today) that drops at narrow
+//! widths for every row at once so the columns stay aligned.
+
 use super::status_indicator;
 use super::text::one_line;
 use crate::app::App;
@@ -12,12 +16,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
-
-// ---- table ----------------------------------------------------------------
-//
-// One row per agent: status icon, name, last run, what the agent has to
-// say, and a right cluster (trigger, spend today) that drops at narrow
-// widths for every row at once so the columns stay aligned.
 
 const NAME_W: usize = 18;
 /// Last run: "✓ 12m", "✗ 3d", "▸ 40s".

@@ -1,10 +1,13 @@
 //! Helpers shared across the UI:
 //!
-//! - session state, task status, priority and identity colours
-//! - popup block, centering geometry, the text cursor and wrapped-row count
+//! - session state, task status, priority and identity colours; the
+//!   spinner frames
+//! - popup block, centering geometry, the text cursor, wrapped-row count and
+//!   scroll-position label
 //! - the title-bar usage line
-//! - model/tool labels, context-window bars, and time, token and cost
+//! - model/tool labels, context-window bars, and time, age, token and cost
 //!   formatters
+//! - one-line row helpers: padding, truncation, the selection stripe
 //! - [`Cell`], one column of a table row's right-hand cluster
 
 use crate::models;
@@ -213,11 +216,11 @@ pub(crate) fn state_color(state: &SessionState) -> Color {
     state_indicator(state).1
 }
 
-/// Braille spinner shown as the title indicator while a session is
-/// Processing. The frame index derives from wall-clock time, so it advances
-/// on every repaint — at least once a second from the clock tick, faster
+/// Braille spinner for work in flight: a Processing session, a ticking agent,
+/// a running build. The frame derives from wall-clock time, so it advances
+/// on every repaint: at least once a second from the clock tick, faster
 /// while scan events stream in. Motion is the point: a turning glyph reads
-/// as "alive" where the static gear read as ambient.
+/// as alive where a static one reads as ambient.
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub(crate) fn spinner_frame(now: u64) -> &'static str {
@@ -413,12 +416,14 @@ pub(crate) fn truncate_line(line: Line<'_>, width: usize) -> Line<'_> {
     Line::from(spans)
 }
 
+/// `s`'s first line, truncated or right-padded to exactly `w` chars.
 pub(crate) fn pad(s: &str, w: usize) -> String {
     let s = first_line_truncated(s, w);
     let n = s.chars().count();
     format!("{}{}", s, " ".repeat(w.saturating_sub(n)))
 }
 
+/// `s` left-padded to `w` chars; a longer `s` is kept whole.
 pub(crate) fn pad_left(s: &str, w: usize) -> String {
     let n = s.chars().count();
     format!("{}{}", " ".repeat(w.saturating_sub(n)), s)

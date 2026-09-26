@@ -7,26 +7,23 @@ use crate::ui::palette::{CONTEXT_GRAY, MUTED_TEXT, PURPLE};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-/// The rows inside a card's border, top to bottom.
+/// The rows inside a card's border: activity, message, padding, then the
+/// identity rows. Identity rows pin to the floor so they sit in the same
+/// place on every card, however many payload rows render above them.
 pub(super) fn body_lines(
     session: &SessionInfo,
     now: u64,
     inner_w: usize,
     inner_h: usize,
 ) -> Vec<Line<'static>> {
-    // Body order is activity → message → (padding) → identity rows: what
-    // the session is doing or needs comes first, identity metadata is
-    // pinned to the card floor so it sits in the same place on every card
-    // regardless of how many payload lines render above it.
     let mut lines = Vec::new();
     if let Some(activity) = activity_line(session, inner_w) {
         lines.push(activity);
     }
 
-    // Identity rows. With four or more body rows the branch gets a row of
-    // its own — real branch names (`refactor/architecture-cleanup`) don't
-    // fit beside the model and id — while shorter custom cells fall back to
-    // merging all three into one compact row.
+    // With four or more rows the branch gets its own: real branch names
+    // (`refactor/architecture-cleanup`) don't fit beside the model and id.
+    // Shorter cells merge all three into one row.
     let mut bottom: Vec<Line> = Vec::new();
     if inner_h >= 4 {
         if let Some(branch) = branch_line(session, inner_w) {
@@ -38,11 +35,9 @@ pub(super) fn body_lines(
     }
     bottom.push(footer_line(session, now, inner_w));
 
-    // The Haiku title in the border already summarises the session —
-    // repeating the (often truncated mid-sentence) last user message below
-    // it is noise. Only render the message when no title is available to
-    // skim against, and only into rows the activity line left free above
-    // the pinned identity rows.
+    // The border's Haiku title already summarises the session, so the last
+    // user message renders only on untitled cards, and only into rows the
+    // activity line left free.
     let msg_budget = inner_h.saturating_sub(bottom.len() + lines.len()).min(2);
     let display_msg = if session.title.as_deref().is_some_and(|t| !t.is_empty()) {
         None
@@ -64,17 +59,13 @@ pub(super) fn body_lines(
     lines
 }
 
-/// Row 1 of a card body: only what the border chrome *can't* say. The chip
-/// title, border weight, and state icon already carry the state itself, so
-/// repeating it here as text ("needs input", "idle") would be noise — this
-/// row renders the live payload instead: the pending tool a Waiting card
-/// wants approved, the question text it wants answered, or the tool a
-/// Processing card is running. Dormant states have no payload and get no row.
+/// First body row: the live payload the border can't show. That is the
+/// tool a Waiting card wants approved, the question a Question card asks,
+/// or the tool a Processing card runs. The chip, border and icon already
+/// carry the state, so no state label; dormant states get no row.
 fn activity_line(session: &SessionInfo, inner_w: usize) -> Option<Line<'static>> {
-    // The payload is content, not state — the chip, border and spinner
-    // already carry the state color, so the row reads in plain white.
-    // Attention payloads keep bold so the thing to approve/answer still
-    // pops when scanning a wall of cards.
+    // Payload is content, not state, so it reads in plain white. Attention
+    // payloads stay bold so they pop on a wall of cards.
     match session.state {
         SessionState::Question => {
             // The unresolved tool_use is AskUserQuestion; its hint is the

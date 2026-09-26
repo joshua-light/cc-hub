@@ -14,8 +14,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-// ---- detail ---------------------------------------------------------------
-
 pub(crate) fn render_agent_detail(frame: &mut Frame, area: Rect, app: &mut App) {
     render_agent_detail_at(frame, area, app, crate::harness::now_unix());
 }

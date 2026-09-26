@@ -1,10 +1,11 @@
-//! Tasks-tab body: a kanban board (To-Do · In Progress · Review · Done by
-//! default) over the personal task store. Each card is a flat task,
-//! optionally annotated with its bound agent session's live state (resolved
-//! by tmux name).
+//! Tasks tab: a kanban board (To-Do · In Progress · Review · Done by
+//! default) over the personal task store. Each card is a task, annotated
+//! with its bound agent session's live state when it has one (matched by
+//! tmux name).
+//!
 //! Planning holds cards whose agent is drafting a plan; Space approves it and
-//! the card moves to In Progress. The Planning column is opt-in
-//! (`ui.show_planning_column = true`); when hidden its cards fold into In
+//! the card moves to In Progress. The column is opt-in
+//! (`ui.show_planning_column = true`); hidden, its cards fold into In
 //! Progress. Review holds cards whose session wrote a `PR:` note, so a card
 //! that wants a reading is never mistaken for one that wants an answer.
 //!
@@ -124,7 +125,9 @@ pub(super) fn ago(now_secs: u64, at: i64) -> String {
     models::relative_age(now_secs.saturating_sub(at.max(0) as u64))
 }
 
-/// Greedy word wrap to `width` columns (char-counted).
+/// Greedy word wrap to `width` columns (char-counted). Line breaks fold into
+/// spaces and a word wider than the line is truncated; `ui::agents`' wrap
+/// differs on both counts.
 pub(super) fn wrap_text(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![String::new()];

@@ -11,6 +11,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
+/// The selected session's detail popup: path, agent, state and token
+/// totals, then its recent messages, scrollable.
 pub(crate) fn render_popup(frame: &mut Frame, area: Rect, app: &mut App) {
     let popup_area = centered_rect(area, 0.85);
 

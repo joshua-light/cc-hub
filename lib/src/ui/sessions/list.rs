@@ -1,25 +1,19 @@
-//! Sessions tab, list layout: one compact row per session under the same
-//! per-project group headers as the card grid. An experimental alternative
-//! layout, toggled at runtime with `v` (see [`crate::app::SessionsLayout`]).
+//! List layout: one row per session under the grid's group headers.
 //!
-//! Rows are laid out as a table: a flexible title region on the left and a
-//! cluster of fixed-width metadata columns (linked task, branch, model,
-//! tool odometer, last-activity clock, context %) on the right, so values
-//! line up vertically across rows. Columns that don't fit the terminal
-//! width are dropped for every row at once, lowest-value first, to keep
-//! alignment. The task column alone is elastic: it widens into leftover
-//! row space until the longest visible task name fits.
+//! Rows form a table: a flexible title on the left and fixed-width metadata
+//! columns on the right, so values line up across rows. Columns that don't
+//! fit drop for every row at once, lowest value first. The task column alone
+//! is elastic: it widens into leftover space until the longest visible task
+//! name fits.
 //!
-//! Within a group, a blank separator row splits runs of rows linked to
-//! different tasks (the unlinked tail counts as one run of its own), so
-//! the task clusters the sort already builds read as visual blocks.
+//! Within a group, a blank row splits runs linked to different tasks (the
+//! unlinked tail is one run), so the sort's task clusters read as blocks.
 //!
-//! All width math counts terminal *advance* — `chars().count()`, one cell
-//! per glyph. Nerd Font icons visually bleed into the following cell but
-//! still advance the cursor by one, so every icon is followed by a space
-//! the bleed can safely overlap; budgeting them as two cells (as the card
-//! renderer's right-edge math does) would skew rows whose cells are blank
-//! or whose padding bottoms out at zero.
+//! Width math counts terminal advance, one cell per glyph
+//! (`chars().count()`). Nerd Font icons bleed into the next cell but advance
+//! by one, so each icon is followed by a space the bleed can overlap.
+//! Budgeting icons as two cells, as the card's right-edge math does, would
+//! skew rows whose cells are blank or whose padding bottoms out at zero.
 
 use super::{
     activity_clock, agent_prefix, animated_indicator, badge_color, context_pct, keep_in_view,
@@ -131,9 +125,8 @@ pub(super) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    // Content-space y offset of each group: header + one row per session
-    // + separators at task boundaries + gap. Same bookkeeping as the grid
-    // with a cell height of 1, plus the separator rows.
+    // Content-space y of each group: header, one row per session plus task
+    // separators, then the gap.
     let mut group_offsets: Vec<u16> = Vec::new();
     let mut row_offsets: Vec<Vec<u16>> = Vec::new();
     let mut y_acc: u16 = 0;
@@ -271,8 +264,6 @@ fn render_row(
         });
     }
     {
-        // Same swap as the card footer: past the prompt-cache TTL the clock
-        // becomes the ice-blue snowflake — restarting beats resuming.
         let (icon, color) = activity_clock(session, now);
         let text = match session.last_activity {
             Some(ts) => format!("{} {}", icon, format_elapsed(now, ts)),
@@ -299,8 +290,8 @@ fn render_row(
     }
     let cluster_width: usize = cluster.iter().map(|c| c.target + COL_SEP).sum();
 
-    // Title region: agent badge + Haiku title (falling back
-    // to the last user message, same priority as the card body).
+    // Title region: agent badge, then the Haiku title, falling back to the
+    // last user message as the card body does.
     let title_budget = width.saturating_sub(LEFT_FIXED + cluster_width);
     let agent_badge = agent_prefix(session);
     let prefix_w = agent_badge.chars().count();

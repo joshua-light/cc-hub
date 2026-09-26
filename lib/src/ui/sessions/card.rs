@@ -42,14 +42,14 @@ pub(super) fn render_card(
     frame.render_widget(paragraph, inner);
 }
 
+/// Border weight and colour: white double when selected, thick in the state
+/// colour when the session needs you, the state colour while processing.
 fn border(session: &SessionInfo, selected: bool) -> (BorderType, Color) {
     let border_color = if selected {
         Color::White
     } else if session.needs_attention() || session.state == SessionState::Processing {
-        // Question gets its own blue accent so it's visually distinct from
-        // a generic WaitingForInput card — same source of truth as the
-        // state indicator icon. Processing mirrors that (green frame) so
-        // active sessions read as "alive" at a glance, not as ambient.
+        // The state colour tells a Question (blue) from a plain wait
+        // (yellow); a green Processing frame reads as alive, not ambient.
         state_color(&session.state)
     } else {
         SEP_GRAY
@@ -58,9 +58,8 @@ fn border(session: &SessionInfo, selected: bool) -> (BorderType, Color) {
     let border_type = if selected {
         BorderType::Double
     } else if session.needs_attention() {
-        // Thick frame + the chip title below make "needs you" a categorical
-        // signal, not just a hue shift — Processing shares the colored border
-        // but never gets the weight.
+        // Weight plus the chip title make "needs you" categorical, not a hue
+        // shift: Processing shares the coloured border but not the weight.
         BorderType::Thick
     } else if session.state == SessionState::Inactive {
         BorderType::LightDoubleDashed
@@ -70,29 +69,19 @@ fn border(session: &SessionInfo, selected: bool) -> (BorderType, Color) {
     (border_type, border_color)
 }
 
+/// The top-border title, the card's main skim surface: agent badge, state
+/// glyph, cold-cache mark, then the Haiku title (or `✎ …` while one is
+/// being generated). The project name is left out: the group header shows it.
 fn card_title(session: &SessionInfo, now: u64) -> Span<'static> {
     let (indicator, ind_color) = animated_indicator(&session.state, now);
-    // Claude is the ~99% default — labelling every card "[Claude]" is pure
-    // noise — so the badge is shown only for non-Claude agents.
     let agent_badge = agent_prefix(session);
 
-    // Border title is the primary skim surface — prepending the Haiku-
-    // generated 2-3 word title when available lets users scan what each
-    // session is about without having to read the (truncated, often mid-
-    // sentence) last user message inside the card body. A `✎` placeholder
-    // marks cards with an in-flight Haiku call so the user can tell a
-    // pending title from one that's never going to arrive. The project name
-    // is intentionally absent: it's already the header of the card's group.
+    // Every branch keeps a space right after `indicator`: the Nerd Font
+    // glyph renders two columns but measures one, so without a trailing cell
+    // its second column collides with the border (the bare `󰂞` case).
     //
-    // Every branch keeps a space immediately after `indicator`: the state
-    // glyph is a Nerd Font icon that renders two columns wide but measures as
-    // one, so without a trailing cell its second column collides with the
-    // border (the bare no-title case `󰂞` is where this bit).
-    //
-    // A snowflake after the state icon marks a cold prompt cache: the
-    // session sat quiet past the cache TTL, so restarting it beats resuming.
-    // It rides the title (the primary skim surface) in the title's own
-    // color; the ice-blue version lives in the footer clock.
+    // The snowflake marks a cold prompt cache (restarting beats resuming).
+    // Here it takes the title's colour; the ice-blue one is the footer clock.
     let cold_mark = if session.cache_cold(now) {
         format!("{} ", COLD_CACHE_ICON)
     } else {
@@ -105,10 +94,9 @@ fn card_title(session: &SessionInfo, now: u64) -> Span<'static> {
         _ if session.titling => format!("{}{} {}✎ …", agent_badge, indicator, cold_mark),
         _ => format!("{}{} {}", agent_badge, indicator, cold_mark),
     };
-    // Attention cards get a solid chip title (black on the state color) —
-    // background fill is reserved exclusively for "needs you", so it can't
-    // be confused with the colored-but-ambient Processing border at a
-    // glance. Everything else keeps colored bold text on the border.
+    // Attention cards get a filled chip (black on the state colour).
+    // Background fill is reserved for "needs you", so it can't be mistaken
+    // for the coloured but ambient Processing border.
     let (title, title_style) = if session.needs_attention() {
         let chip = if title.ends_with(' ') {
             format!(" {}", title)
@@ -131,13 +119,11 @@ fn card_title(session: &SessionInfo, now: u64) -> Span<'static> {
     Span::styled(title, title_style)
 }
 
-// Task link mark (`L`): the task title on the bottom border, in a color
-// stable per task id — every card of the same task carries the same
-// mark, wherever it sits in the grid. A stale link (task Done or
-// deleted) dims to gray. The task's priority rides the bottom-right
-// corner in the board's priority hue (colored text, not a filled chip —
-// background fill on this card is reserved for "needs you"), and the
-// title's truncation budget shrinks so the two never collide.
+/// Task link mark (`L`): the task title on the bottom border in the task's
+/// identity colour, so every card of one task carries the same mark. A
+/// stale link dims to gray. The priority sits bottom-right in the board's
+/// priority hue, as text rather than a chip (fill means "needs you"), and
+/// the title's budget shrinks so the two never collide.
 fn with_task_badge<'a>(mut block: Block<'a>, badge: &TaskBadge, width: u16) -> Block<'a> {
     let color = badge_color(badge);
     let prio_w = badge.priority.map_or(0, |p| p.label().chars().count() + 2);
