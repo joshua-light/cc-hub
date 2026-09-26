@@ -1,11 +1,11 @@
 //! Type-to-filter pickers sharing one chrome: a filter row with a match
 //! count, then rows with the matched chars highlighted.
 
-use super::widgets::highlight_spans;
+use super::widgets::{highlight_spans, render_filter_row, RowStyles};
 use crate::app::App;
 use crate::ui::common::{centered_fixed, popup_block};
-use crate::ui::palette::{ACCENT_BLUE, DIM_TEXT};
-use ratatui::layout::{Alignment, Rect};
+use crate::ui::palette::DIM_TEXT;
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
@@ -44,33 +44,11 @@ pub(crate) fn render_model_picker(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let filter_area = Rect::new(inner.x, inner.y, inner.width, 1);
-    let mut filter_line = picker.filter.clone();
-    filter_line.push('▎');
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                " ❯ ",
-                Style::default()
-                    .fg(ACCENT_BLUE)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                filter_line,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])),
-        filter_area,
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!("{}/{} ", picker.rows.len(), choices.len()),
-            Style::default().fg(DIM_TEXT),
-        )))
-        .alignment(Alignment::Right),
-        filter_area,
+    render_filter_row(
+        frame,
+        inner,
+        &picker.filter,
+        format!("{}/{} ", picker.rows.len(), choices.len()),
     );
 
     let list_area = Rect::new(inner.x, inner.y + 2, inner.width, inner.height - 2);
@@ -95,43 +73,25 @@ pub(crate) fn render_model_picker(frame: &mut Frame, area: Rect, app: &App) {
             let label = &choice.label;
             let detail = &choice.detail;
             let selected = i == picker.selected;
-            let bar = if selected {
-                Style::default().bg(Color::White)
-            } else {
-                Style::default()
-            };
-            let (label_base, label_hl, id_base, id_hl) = if selected {
-                (
-                    bar.fg(Color::Black).add_modifier(Modifier::BOLD),
-                    bar.fg(Color::Blue).add_modifier(Modifier::BOLD),
-                    bar.fg(Color::Rgb(90, 90, 100)),
-                    bar.fg(Color::Blue),
-                )
-            } else {
-                (
-                    Style::default().fg(Color::Gray),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                    Style::default().fg(Color::DarkGray),
-                    Style::default().fg(Color::Cyan),
-                )
-            };
-            let mut spans = vec![Span::styled(
-                if selected { "▶ " } else { "  " },
-                bar.fg(Color::Black).add_modifier(Modifier::BOLD),
-            )];
+            let styles = RowStyles::new(selected, Color::Gray);
+            let bar = styles.bar;
+            let mut spans = vec![styles.cursor(selected)];
             spans.extend(highlight_spans(
                 label,
                 &row.label_indices,
-                label_base,
-                label_hl,
+                styles.label,
+                styles.label_hl,
             ));
             spans.push(Span::styled(
                 " ".repeat(label_width.saturating_sub(label.chars().count()) + 2),
                 bar,
             ));
-            spans.extend(highlight_spans(detail, &row.detail_indices, id_base, id_hl));
+            spans.extend(highlight_spans(
+                detail,
+                &row.detail_indices,
+                styles.detail,
+                styles.detail_hl,
+            ));
             lines.push(Line::from(spans));
         }
     }
@@ -175,33 +135,11 @@ pub(crate) fn render_task_link_picker(frame: &mut Frame, area: Rect, app: &App) 
         return;
     }
 
-    let filter_area = Rect::new(inner.x, inner.y, inner.width, 1);
-    let mut filter_line = picker.filter.clone();
-    filter_line.push('▎');
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                " ❯ ",
-                Style::default()
-                    .fg(ACCENT_BLUE)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                filter_line,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])),
-        filter_area,
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!("{}/{} ", picker.rows.len(), choices.len()),
-            Style::default().fg(DIM_TEXT),
-        )))
-        .alignment(Alignment::Right),
-        filter_area,
+    render_filter_row(
+        frame,
+        inner,
+        &picker.filter,
+        format!("{}/{} ", picker.rows.len(), choices.len()),
     );
 
     let list_area = Rect::new(inner.x, inner.y + 2, inner.width, inner.height - 2);
@@ -227,45 +165,20 @@ pub(crate) fn render_task_link_picker(frame: &mut Frame, area: Rect, app: &App) 
             let detail = &choice.detail;
             let selected = i == picker.selected;
             let unlink = choice.action == crate::app::TaskLinkAction::Unlink;
-            let bar = if selected {
-                Style::default().bg(Color::White)
-            } else {
-                Style::default()
-            };
-            let (label_base, label_hl, detail_base, detail_hl) = if selected {
-                (
-                    bar.fg(Color::Black).add_modifier(Modifier::BOLD),
-                    bar.fg(Color::Blue).add_modifier(Modifier::BOLD),
-                    bar.fg(Color::Rgb(90, 90, 100)),
-                    bar.fg(Color::Blue),
-                )
-            } else if unlink {
+            let mut styles = RowStyles::new(selected, Color::Gray);
+            if unlink && !selected {
                 // The destructive row reads differently at a glance.
-                (
-                    Style::default().fg(Color::Red),
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    Style::default().fg(Color::DarkGray),
-                    Style::default().fg(Color::Red),
-                )
-            } else {
-                (
-                    Style::default().fg(Color::Gray),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                    Style::default().fg(Color::DarkGray),
-                    Style::default().fg(Color::Cyan),
-                )
-            };
-            let mut spans = vec![Span::styled(
-                if selected { "▶ " } else { "  " },
-                bar.fg(Color::Black).add_modifier(Modifier::BOLD),
-            )];
+                styles.label = Style::default().fg(Color::Red);
+                styles.label_hl = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+                styles.detail_hl = Style::default().fg(Color::Red);
+            }
+            let bar = styles.bar;
+            let mut spans = vec![styles.cursor(selected)];
             spans.extend(highlight_spans(
                 label,
                 &row.label_indices,
-                label_base,
-                label_hl,
+                styles.label,
+                styles.label_hl,
             ));
             spans.push(Span::styled(
                 " ".repeat(label_width.saturating_sub(label.chars().count()) + 2),
@@ -308,22 +221,22 @@ pub(crate) fn render_task_link_picker(frame: &mut Frame, area: Rect, app: &App) 
                     spans.extend(highlight_spans(
                         &prefix,
                         &prefix_idx,
-                        detail_base,
-                        detail_hl,
+                        styles.detail,
+                        styles.detail_hl,
                     ));
                     spans.push(Span::styled(format!("{} ", icon), status_base));
                     spans.extend(highlight_spans(
                         status_label,
                         &status_idx,
                         status_base,
-                        detail_hl,
+                        styles.detail_hl,
                     ));
                 }
                 None => spans.extend(highlight_spans(
                     detail,
                     &row.detail_indices,
-                    detail_base,
-                    detail_hl,
+                    styles.detail,
+                    styles.detail_hl,
                 )),
             }
             lines.push(Line::from(spans));
@@ -366,37 +279,15 @@ pub(crate) fn render_session_finder(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let filter_area = Rect::new(inner.x, inner.y, inner.width, 1);
-    let mut filter_line = finder.filter.clone();
-    filter_line.push('▎');
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                " ❯ ",
-                Style::default()
-                    .fg(ACCENT_BLUE)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                filter_line,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])),
-        filter_area,
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            if finder.loading {
-                "indexing… ".to_string()
-            } else {
-                format!("{}/{} ", finder.rows.len(), choices.len())
-            },
-            Style::default().fg(DIM_TEXT),
-        )))
-        .alignment(Alignment::Right),
-        filter_area,
+    render_filter_row(
+        frame,
+        inner,
+        &finder.filter,
+        if finder.loading {
+            "indexing… ".to_string()
+        } else {
+            format!("{}/{} ", finder.rows.len(), choices.len())
+        },
     );
 
     let list_area = Rect::new(inner.x, inner.y + 2, inner.width, inner.height - 2);
@@ -431,37 +322,14 @@ pub(crate) fn render_session_finder(frame: &mut Frame, area: Rect, app: &App) {
             let label = &choice.label;
             let detail = &choice.detail;
             let selected = i == finder.selected;
-            let bar = if selected {
-                Style::default().bg(Color::White)
-            } else {
-                Style::default()
-            };
-            let (label_base, label_hl, detail_base, detail_hl) = if selected {
-                (
-                    bar.fg(Color::Black).add_modifier(Modifier::BOLD),
-                    bar.fg(Color::Blue).add_modifier(Modifier::BOLD),
-                    bar.fg(Color::Rgb(90, 90, 100)),
-                    bar.fg(Color::Blue),
-                )
-            } else {
-                (
-                    Style::default().fg(Color::Gray),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                    Style::default().fg(Color::DarkGray),
-                    Style::default().fg(Color::Cyan),
-                )
-            };
-            let mut spans = vec![Span::styled(
-                if selected { "▶ " } else { "  " },
-                bar.fg(Color::Black).add_modifier(Modifier::BOLD),
-            )];
+            let styles = RowStyles::new(selected, Color::Gray);
+            let bar = styles.bar;
+            let mut spans = vec![styles.cursor(selected)];
             spans.extend(highlight_spans(
                 label,
                 &row.label_indices,
-                label_base,
-                label_hl,
+                styles.label,
+                styles.label_hl,
             ));
             spans.push(Span::styled(
                 " ".repeat(label_width.saturating_sub(label.chars().count()) + 2),
@@ -470,8 +338,8 @@ pub(crate) fn render_session_finder(frame: &mut Frame, area: Rect, app: &App) {
             spans.extend(highlight_spans(
                 detail,
                 &row.detail_indices,
-                detail_base,
-                detail_hl,
+                styles.detail,
+                styles.detail_hl,
             ));
             // Age is visual metadata only — the fuzzy filter never sees it.
             let age_secs = now.saturating_sub(choice.mtime_ms) / 1000;

@@ -65,6 +65,9 @@ pub(crate) fn task_color(task_id: &str) -> Color {
     TASK_COLORS[(hash % TASK_COLORS.len() as u64) as usize]
 }
 
+/// The cursor block every text field draws at its end.
+pub(crate) const CURSOR: char = '▎';
+
 pub(crate) fn popup_block<'a>(title: impl Into<ratatui::text::Line<'a>>) -> Block<'a> {
     Block::default()
         .borders(Borders::ALL)

@@ -1,12 +1,12 @@
 //! The new-session / assign-task folder picker (browse, bookmarks, places)
 //! and the `gh repo create` input drawn on top of it.
 
-use super::widgets::highlight_spans;
+use super::widgets::{highlight_spans, render_filter_row, RowStyles};
 use crate::app::App;
 use crate::folder_picker::{FolderPicker, PickerMode, PlaceSource};
-use crate::ui::common::{centered_fixed, popup_block};
+use crate::ui::common::{centered_fixed, popup_block, CURSOR};
 use crate::ui::palette::{ACCENT_BLUE, DIM_TEXT};
-use ratatui::layout::{Alignment, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
@@ -167,33 +167,11 @@ fn render_places_picker(frame: &mut Frame, area: Rect, picker: &FolderPicker, as
         return;
     }
 
-    let filter_area = Rect::new(inner.x, inner.y, inner.width, 1);
-    let mut filter_line = picker.filter.clone();
-    filter_line.push('▎');
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                " ❯ ",
-                Style::default()
-                    .fg(ACCENT_BLUE)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                filter_line,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])),
-        filter_area,
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!("{}/{} ", picker.rows.len(), picker.places.len()),
-            Style::default().fg(DIM_TEXT),
-        )))
-        .alignment(Alignment::Right),
-        filter_area,
+    render_filter_row(
+        frame,
+        inner,
+        &picker.filter,
+        format!("{}/{} ", picker.rows.len(), picker.places.len()),
     );
 
     let list_h = inner.height - 2;
@@ -213,34 +191,9 @@ fn render_places_picker(frame: &mut Frame, area: Rect, picker: &FolderPicker, as
                 continue;
             };
             let selected = i == picker.selection;
-            // Selected rows render as a solid white bar, so every span
-            // needs the bg set or the bar shows gaps.
-            let bar = if selected {
-                Style::default().bg(Color::White)
-            } else {
-                Style::default()
-            };
-            let (name_base, name_hl, path_base, path_hl) = if selected {
-                (
-                    bar.fg(Color::Black).add_modifier(Modifier::BOLD),
-                    bar.fg(Color::Blue).add_modifier(Modifier::BOLD),
-                    bar.fg(Color::Rgb(90, 90, 100)),
-                    bar.fg(Color::Blue),
-                )
-            } else {
-                (
-                    Style::default().fg(Color::Rgb(200, 200, 210)),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                    Style::default().fg(Color::DarkGray),
-                    Style::default().fg(Color::Cyan),
-                )
-            };
-            let cursor = Span::styled(
-                if selected { "▶ " } else { "  " },
-                bar.fg(Color::Black).add_modifier(Modifier::BOLD),
-            );
+            let styles = RowStyles::new(selected, Color::Rgb(200, 200, 210));
+            let bar = styles.bar;
+            let cursor = styles.cursor(selected);
             let badge = match place.source {
                 PlaceSource::Bookmark => Span::styled("★ ", bar.fg(Color::Yellow)),
                 PlaceSource::Recent => Span::styled("· ", bar.fg(Color::DarkGray)),
@@ -249,15 +202,15 @@ fn render_places_picker(frame: &mut Frame, area: Rect, picker: &FolderPicker, as
             spans.extend(highlight_spans(
                 &place.name,
                 &row.name_indices,
-                name_base,
-                name_hl,
+                styles.label,
+                styles.label_hl,
             ));
             spans.push(Span::styled("  ", bar));
             spans.extend(highlight_spans(
                 &place.display_path,
                 &row.path_indices,
-                path_base,
-                path_hl,
+                styles.detail,
+                styles.detail_hl,
             ));
             lines.push(Line::from(spans));
         }
@@ -302,7 +255,7 @@ pub(crate) fn render_gh_create_input(frame: &mut Frame, area: Rect, app: &App) {
     ]);
 
     let mut name_str = input.name.clone();
-    name_str.push('▎');
+    name_str.push(CURSOR);
     let name_line = Line::from(vec![
         Span::styled(" name: ", Style::default().fg(Color::DarkGray)),
         Span::styled(

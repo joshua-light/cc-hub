@@ -1,8 +1,8 @@
 //! The add/rename-task popup and its context box.
 
-use super::widgets::{wrapped_rows, CURSOR};
+use super::widgets::{key_footer, wrapped_rows};
 use crate::app::{App, TaskField};
-use crate::ui::common::{centered_fixed, popup_block};
+use crate::ui::common::{centered_fixed, popup_block, CURSOR};
 use crate::ui::palette::{ACCENT_BLUE, DIM_TEXT};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -75,45 +75,11 @@ pub(crate) fn render_task_input(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let mut footer_spans = vec![
-        Span::raw("  "),
-        Span::styled(
-            "[enter]",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            if renaming { " rename   " } else { " add   " },
-            Style::default().fg(Color::DarkGray),
-        ),
-    ];
-    if !renaming {
-        footer_spans.push(Span::styled(
-            "[tab]",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ));
-        footer_spans.push(Span::styled(
-            if on_context {
-                " task   "
-            } else {
-                " context   "
-            },
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-    footer_spans.push(Span::styled(
-        "[esc]",
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    ));
-    footer_spans.push(Span::styled(
-        " cancel",
-        Style::default().fg(Color::DarkGray),
-    ));
+    let footer = if renaming {
+        key_footer("rename", None)
+    } else {
+        key_footer("add", Some(if on_context { "task" } else { "context" }))
+    };
 
     let mut lines = vec![
         Line::raw(""),
@@ -142,7 +108,7 @@ pub(crate) fn render_task_input(frame: &mut Frame, area: Rect, app: &App) {
         lines.extend(context_body);
     }
     lines.push(Line::raw(""));
-    lines.push(Line::from(footer_spans));
+    lines.push(footer);
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

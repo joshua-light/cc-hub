@@ -15,7 +15,7 @@ use crate::tasks::store::{TaskState, TaskStatus};
 use crate::ui::artifacts::{
     classify_artifact, evidence_card_header, read_text_excerpt, truncated_footer, CardKind,
 };
-use crate::ui::common::{centered_rect, popup_block, priority_color};
+use crate::ui::common::{centered_rect, popup_block, priority_color, CURSOR};
 use crate::ui::now_ms;
 use crate::ui::palette::{
     ACCENT_BLUE, DIM_TEXT, DOT_IDLE, FAINT_TEXT, KIND_TEAL, LABEL_GRAY, META_GRAY, TAG_SLATE,
@@ -89,7 +89,7 @@ fn render_filter_bar(frame: &mut Frame, area: Rect, app: &App, editing: bool) {
         .sum();
     let mut query = app.tasks.filter.clone();
     if editing {
-        query.push('▎');
+        query.push(CURSOR);
     }
     let hint = if editing {
         "  enter:apply  esc:clear"
