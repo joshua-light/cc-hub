@@ -18,12 +18,11 @@ pub use claude::paths::{find_jsonl, find_jsonl_anywhere, scratch_project_dir_nam
 ///
 /// The bucket is deliberately coarse: Processing, WaitingForInput and
 /// Question all rank equally because they flip between each other every few
-/// seconds while agents work, and sorting on those flips made cards swap
-/// positions under the cursor on every scan tick (the selection followed the
-/// session id to its new slot, so a keypress could advance the selection
-/// logically while the highlight visibly stayed put). Falling asleep or
-/// waking up is a rare, meaningful transition, so a card moving then is
-/// intended, not churn.
+/// seconds while agents work, and sorting on those flips would swap cards
+/// under the cursor on every scan tick (the selection follows the session id
+/// to its new slot, so a keypress could advance the selection logically while
+/// the highlight visibly stayed put). Falling asleep or waking up is a rare,
+/// meaningful transition, so a card moving then is intended, not churn.
 pub(super) fn sort_stable(sessions: &mut [SessionInfo]) {
     sessions.sort_by(|a, b| {
         a.state
@@ -60,11 +59,10 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
         sessions.extend(codex::scan(&codex_agents, &titles));
     }
 
-    // The tool-use count cache is shared across Claude and Pi transcripts, so
-    // evict it here — after both scans — with every live path this tick.
-    // (conversation's caches are Claude-only and are retained inside
-    // scan_claude_sessions.) Without this the path-keyed cache grows one entry
-    // per JSONL ever scanned, for the whole process lifetime.
+    // The tool-use count cache is shared by every backend, so evict it here,
+    // after all scans, with every live path this tick. (conversation's other
+    // caches are Claude-only; the Claude scan retains them itself.) Without
+    // this the path-keyed cache grows one entry per JSONL ever scanned.
     let live_paths: HashSet<PathBuf> = sessions
         .iter()
         .filter_map(|s| s.jsonl_path.clone())
@@ -77,20 +75,15 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
 }
 
 /// True if `pid` is still a live process of `kind`. The liveness rule is
-/// per-backend: `is_pid_alive` is Claude-specific (executable path, real
-/// parent), so applying it to a Pi session wrongly declares every live `pi`
-/// process dead. Pi only needs "alive and still a pi process" — pi children
-/// legitimately reparent to init, so the has-real-parent orphan rule must not
-/// apply.
+/// per-backend: Claude's `is_pid_alive` also demands a real parent, but Pi and
+/// Codex children legitimately reparent to init, so they need only "alive and
+/// still that agent's process".
 fn session_pid_alive(kind: AgentKind, pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
     match kind {
         AgentKind::Claude => claude::is_pid_alive(pid),
-        // Pi and Codex both need only "alive and still that agent's process" —
-        // the Claude has-real-parent orphan rule must not apply (their children
-        // legitimately reparent to init).
         AgentKind::Pi | AgentKind::Codex => crate::platform::process::is_agent_process(kind, pid),
     }
 }
@@ -161,12 +154,11 @@ mod tests {
     }
 
     // The fallback liveness pass judges each session by its own backend's
-    // rule. The flicker regression was `refresh_process_liveness` running the
-    // Claude-specific `is_pid_alive` over Pi sessions: a live `pi` process
-    // isn't a `claude` binary, so every fallback tick flipped it to Inactive
-    // and cleared its tmux (the next full scan restored it → blink). This locks
-    // the routing helper: pid 0 is the no-process sentinel for both, and a Pi
-    // session is decided by the Pi detector, never the Claude one.
+    // rule. Running the Claude-specific `is_pid_alive` over Pi sessions would
+    // flip every live `pi` process (not a `claude` binary) to Inactive each
+    // fallback tick, and the next full scan would restore it → blink. pid 0 is
+    // the no-process sentinel for both, and a Pi session is decided by the Pi
+    // detector, never the Claude one.
     #[test]
     fn session_pid_alive_routes_by_backend() {
         assert!(!session_pid_alive(AgentKind::Pi, 0));

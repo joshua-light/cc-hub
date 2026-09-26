@@ -110,8 +110,8 @@ fn resolve_command(name: &str) -> Command {
 /// Only lines that actually resolve `cmd` are accepted: a path whose basename
 /// is `cmd`, or an alias line of the form `<cmd>=…` / `alias <cmd>=…`. This is
 /// deliberate — a `zsh -ic` runs the user's rc files first, so startup chatter
-/// like `EDITOR=nvim` precedes the real output. The old "first line with `=`"
-/// rule parsed that chatter as the alias body and cached the wrong binary for
+/// like `EDITOR=nvim` precedes the real output; a "first line with `=`" rule
+/// would take that chatter as the alias body and cache the wrong binary for
 /// an hour. Returns `None` when nothing resolves `cmd`, so the caller falls
 /// back to running through the shell.
 fn parse_resolution(raw: &str, cmd: &str) -> Option<Vec<String>> {

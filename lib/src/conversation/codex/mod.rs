@@ -406,6 +406,8 @@ mod tests {
         assert_eq!(extract_context_tokens(&e), Some(4242));
     }
 
+    // --- thinking ------------------------------------------------------
+
     #[test]
     fn thinking_true_when_reasoning_trails() {
         let e = vec![

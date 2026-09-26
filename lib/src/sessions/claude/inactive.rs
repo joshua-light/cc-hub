@@ -101,8 +101,7 @@ pub(super) fn scan_orphan_jsonls(
         // Cached per-dir listing: re-`read_dir`s only when the project dir's
         // mtime changes (a new/removed transcript) or the entry ages past the
         // relist TTL. Per-file mtimes come from the cached listing, so the age
-        // filter below may be up to `orphan_relist_secs` stale — within the
-        // TTL budget, and identical in every other respect to the old walk.
+        // filter below may be up to `orphan_relist_secs` stale.
         let files = crate::sessions::dir_cache::list_jsonl_dir(&proj_path, relist_ttl);
         visited_dirs.insert(proj_path);
         let candidates = recent_unclaimed(&files, claimed_paths, cfg.window_secs);

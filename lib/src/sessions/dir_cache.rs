@@ -1,7 +1,7 @@
 //! Per-directory listing cache for the orphan / inactive-session walks.
 //!
-//! Both the Claude orphan walk (`scanner::scan_orphan_jsonls`) and the Pi
-//! inactive walk (`pi::scan_inactive_sessions`) `read_dir` and `stat` every
+//! Both the Claude orphan walk (`claude::inactive::scan_orphan_jsonls`) and the
+//! Pi inactive walk (`pi::scan_inactive_sessions`) `read_dir` and `stat` every
 //! `*.jsonl` under their session tree on every scan tick.
 //! Those trees only change when a session writes a new transcript, so re-listing
 //! a directory whose mtime is unchanged is pure waste.
@@ -12,9 +12,9 @@
 //! the TTL only bounds how stale an *otherwise-unchanged* listing may get (files
 //! rewritten in place don't touch the dir mtime).
 //!
-//! Lives in its own module rather than inside `scanner.rs` so both scanners can
-//! share one cache without either reaching into the other's internals, keeping
-//! the mtime + TTL + retain-by-visited invariants in one place.
+//! Lives in its own module so both scanners share one cache without either
+//! reaching into the other's internals, keeping the mtime + TTL +
+//! retain-by-visited invariants in one place.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

@@ -194,7 +194,7 @@ mod tests {
         assert_eq!(extract_first_user_message(&e), None);
     }
 
-    // --- messages / thinking / tool counts -----------------------------
+    // --- extract_messages ----------------------------------------------
 
     #[test]
     fn extract_messages_maps_user_and_assistant() {

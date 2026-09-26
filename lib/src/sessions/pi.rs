@@ -1,3 +1,7 @@
+//! Pi session discovery under `~/.pi/agent/sessions/<project>/*.jsonl`: live
+//! sessions from bridge heartbeats, heartbeat-less `pi` processes paired to
+//! transcripts by cwd, then recent unclaimed transcripts as Inactive.
+
 use crate::agent::{AgentConfig, AgentKind};
 use crate::config;
 use crate::conversation;
@@ -222,9 +226,9 @@ fn scan_external_live_sessions(
     // platform layer exposes no process start time, so we approximate "newest
     // process first" by descending pid (higher pids are generally started
     // later) and hand each process the next-newest unclaimed transcript in its
-    // cwd. The point is a STABLE mapping: the bug was arbitrary list_pids()
-    // order flip-flopping the transcript↔pid/tmux pairing between ticks, so
-    // focus/send could target a different terminal each tick.
+    // cwd. The point is a STABLE mapping: arbitrary list_pids() order would
+    // flip-flop the transcript↔pid/tmux pairing between ticks, so focus/send
+    // could target a different terminal each tick.
     //
     // Residual ambiguity: two heartbeat-less Pi processes sharing one cwd whose
     // pid order doesn't match their transcripts' creation order stay
