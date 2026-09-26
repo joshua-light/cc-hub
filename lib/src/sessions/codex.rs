@@ -11,9 +11,10 @@
 use crate::agent::{AgentConfig, AgentKind};
 use crate::config;
 use crate::conversation;
-use crate::models::{SessionDetail, SessionInfo, SessionState};
+use crate::models::{SessionInfo, SessionState};
 use crate::platform::process;
 use crate::send;
+use crate::sessions::common::{apply_state_hint, default_agent, project_name};
 use serde_json::Value;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -26,18 +27,6 @@ use std::time::SystemTime;
 /// generous enough to capture that whole first line (else it is dropped as a
 /// partial trailing line and cwd/session id go missing).
 const HEAD_BYTES: u64 = 64 * 1024;
-
-fn project_name(cwd: &str) -> String {
-    Path::new(cwd)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string()
-}
-
-fn default_codex_agent(agents: &[AgentConfig]) -> Option<AgentConfig> {
-    agents.iter().find(|a| a.kind == AgentKind::Codex).cloned()
-}
 
 pub(crate) fn read_head(path: &Path) -> Vec<Value> {
     conversation::read_jsonl_head(path, HEAD_BYTES)
@@ -214,18 +203,7 @@ fn build_session_info(
     let summary = conversation::codex::extract_first_user_message(&head);
 
     let tail = conversation::codex::read_jsonl_tail_for_state(&path);
-    let mut state = conversation::codex::extract_state(&tail);
-    match state_hint {
-        // The scanner's own verdict wins for these two: a dead process forces
-        // Inactive; a caller that already knows the turn is running forces
-        // Processing. For everything else the transcript-derived state stands.
-        SessionState::Inactive => state = SessionState::Inactive,
-        SessionState::Processing => state = SessionState::Processing,
-        SessionState::Idle
-        | SessionState::WaitingForInput
-        | SessionState::Question
-        | SessionState::Starting => {}
-    }
+    let state = apply_state_hint(conversation::codex::extract_state(&tail), state_hint);
 
     let last_user_message = conversation::codex::extract_last_user_message(&tail);
     let last_activity = conversation::codex::extract_last_activity(&tail);
@@ -302,7 +280,7 @@ fn process_only_card(
 }
 
 pub fn scan(agents: &[AgentConfig], titles: &HashMap<String, String>) -> Vec<SessionInfo> {
-    let Some(default_agent) = default_codex_agent(agents) else {
+    let Some(default_agent) = default_agent(agents, AgentKind::Codex) else {
         return Vec::new();
     };
     let cfg = &config::get().inactive;
@@ -409,20 +387,6 @@ pub fn scan(agents: &[AgentConfig], titles: &HashMap<String, String>) -> Vec<Ses
         }
     }
     sessions
-}
-
-pub fn load_detail(info: &SessionInfo) -> Option<SessionDetail> {
-    let path = info.jsonl_path.as_ref()?;
-    let entries = conversation::read_jsonl_tail(path, 65536);
-    let recent_messages = conversation::codex::extract_messages(&entries, 15);
-    let (total_input_tokens, total_output_tokens) =
-        conversation::codex::extract_token_totals(&entries);
-    Some(SessionDetail {
-        info: info.clone(),
-        recent_messages,
-        total_input_tokens,
-        total_output_tokens,
-    })
 }
 
 #[cfg(all(test, unix))]

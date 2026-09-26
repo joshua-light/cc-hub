@@ -29,7 +29,8 @@ pub fn count_recent_sessions() -> SessionCounts {
 
     // Skip the titler's scratch project dir: its JSONLs are one-shot
     // `claude -p` runs cc-hub itself spawns, not real sessions — the same
-    // exclusion scanner.rs applies. Sharing the predicate keeps both aligned.
+    // exclusion the Claude scanner applies. Sharing the predicate keeps both
+    // aligned.
     let scratch_proj_dir = crate::sessions::scanner::scratch_project_dir_name();
 
     let mut counts = SessionCounts::default();
@@ -93,7 +94,7 @@ mod tests {
 
         let projects = paths::claude_home().expect("claude_home").join("projects");
         let real = projects.join("-home-me-proj");
-        // The scratch project dir is exactly what scanner.rs skips.
+        // The scratch project dir is exactly what the Claude scanner skips.
         let scratch = projects.join(
             crate::sessions::scanner::scratch_project_dir_name().expect("scratch project dir name"),
         );

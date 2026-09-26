@@ -252,10 +252,10 @@ mod tests {
         let size = std::fs::metadata(&p).unwrap().len();
 
         // Simulate a cache entry from when the file was larger, with a clean
-        // offset *below* the current (shrunk) size. The old buggy guard
-        // (`size >= clean_offset`) would treat this as append-only growth and
-        // keep the stale count 99; the fix compares against the cached size,
-        // sees a shrink, and recounts from scratch → 2.
+        // offset *below* the current (shrunk) size. A `size >= clean_offset`
+        // guard would treat this as append-only growth and keep the stale
+        // count 99; comparing against the cached size sees the shrink and
+        // recounts from scratch → 2.
         {
             let mut guard = cache().lock().unwrap();
             guard.insert(

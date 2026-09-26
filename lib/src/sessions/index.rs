@@ -15,6 +15,7 @@ use crate::config;
 use crate::conversation;
 use crate::platform::paths;
 use crate::sessions::codex;
+use crate::sessions::common::project_name;
 use crate::sessions::scanner;
 use crate::title;
 use std::collections::HashMap;
@@ -69,14 +70,6 @@ fn mtime_ms(path: &Path) -> Option<u64> {
         .map(|d| d.as_millis() as u64)
 }
 
-fn project_name(cwd: &str) -> String {
-    Path::new(cwd)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string()
-}
-
 /// The configured agent id for `kind`, alphabetically first when several are
 /// configured — a deterministic pick mirroring the sorted pickers. `None`
 /// means the kind has no agent to resume with, so its store is skipped.
@@ -116,13 +109,9 @@ fn scan_claude(titles: &HashMap<String, String>) -> Vec<IndexedSession> {
             };
             let session_id = session_id.to_string();
             let head = conversation::read_jsonl_head(&path, 4096);
-            let Some(cwd) = head
-                .iter()
-                .find_map(|e| e.get("cwd").and_then(|c| c.as_str()))
-            else {
+            let Some(cwd) = conversation::extract_cwd(&head) else {
                 continue;
             };
-            let cwd = cwd.to_string();
             out.push(IndexedSession {
                 agent_id: "claude".into(),
                 agent_kind: AgentKind::Claude,
@@ -156,23 +145,10 @@ fn scan_pi(titles: &HashMap<String, String>) -> Vec<IndexedSession> {
             continue;
         }
         let head = conversation::read_jsonl_head(&path, 4096);
-        let Some(cwd) = head
-            .iter()
-            .find_map(|e| e.get("cwd").and_then(|c| c.as_str()))
-        else {
+        let Some(cwd) = conversation::extract_cwd(&head) else {
             continue;
         };
-        let cwd = cwd.to_string();
-        let Some(session_id) = head
-            .iter()
-            .find_map(|e| e.get("id").and_then(|v| v.as_str()))
-            .map(str::to_string)
-            .or_else(|| {
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(str::to_string)
-            })
-        else {
+        let Some(session_id) = conversation::pi::extract_session_id(&head, &path) else {
             continue;
         };
         out.push(IndexedSession {

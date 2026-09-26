@@ -30,7 +30,7 @@ impl LiveView {
         let file_len = std::fs::metadata(&jsonl_path).map(|m| m.len()).unwrap_or(0);
 
         let entries = conversation::read_jsonl_tail(&jsonl_path, 128 * 1024);
-        let messages = extract_messages(agent_kind, &entries, 100);
+        let messages = conversation::extract_messages_for(agent_kind, &entries, 100);
 
         Self {
             path: jsonl_path,
@@ -50,7 +50,7 @@ impl LiveView {
     pub fn review(jsonl_path: PathBuf, agent_kind: AgentKind, highlight_ts: Option<u64>) -> Self {
         let file_len = std::fs::metadata(&jsonl_path).map(|m| m.len()).unwrap_or(0);
         let entries = conversation::read_jsonl_all(&jsonl_path);
-        let messages = extract_messages(agent_kind, &entries, usize::MAX);
+        let messages = conversation::extract_messages_for(agent_kind, &entries, usize::MAX);
         let highlight_msg_idx = highlight_ts.and_then(|ts| {
             messages
                 .iter()
@@ -101,13 +101,12 @@ impl LiveView {
         self.file_len = new_len;
 
         let entries = conversation::read_jsonl_tail(&self.path, 128 * 1024);
-        let messages = extract_messages(self.agent_kind, &entries, 100);
+        let messages = conversation::extract_messages_for(self.agent_kind, &entries, 100);
 
-        // The file grew (checked above), so re-parse and adopt the result.
-        // Comparing `messages.len()` was wrong: the tail is capped at 100
-        // messages, so once a busy session stays pinned at that cap the length
-        // never changes even as content scrolls in — the old code parsed the
-        // fresh tail then threw it away, freezing the tail forever.
+        // The file grew (checked above), so adopt the re-parse unconditionally.
+        // Comparing `messages.len()` can't detect change: the tail is capped at
+        // 100 messages, so a busy session pinned at that cap keeps the same
+        // length while content scrolls in.
         self.messages = messages;
         true
     }
@@ -126,18 +125,6 @@ impl LiveView {
 
     pub fn scroll_bottom(&mut self) {
         self.auto_scroll = true;
-    }
-}
-
-fn extract_messages(
-    agent_kind: AgentKind,
-    entries: &[serde_json::Value],
-    count: usize,
-) -> Vec<ConversationMessage> {
-    match agent_kind {
-        AgentKind::Claude => conversation::extract_messages(entries, count),
-        AgentKind::Pi => conversation::pi::extract_messages(entries, count),
-        AgentKind::Codex => crate::conversation::codex::extract_messages(entries, count),
     }
 }
 

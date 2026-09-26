@@ -1,30 +1,19 @@
+//! Pi session discovery under `~/.pi/agent/sessions/<project>/*.jsonl`: live
+//! sessions from bridge heartbeats, heartbeat-less `pi` processes paired to
+//! transcripts by cwd, then recent unclaimed transcripts as Inactive.
+
 use crate::agent::{AgentConfig, AgentKind};
 use crate::config;
 use crate::conversation;
-use crate::models::{SessionDetail, SessionInfo, SessionState};
+use crate::models::{SessionInfo, SessionState};
 use crate::platform::paths;
 use crate::platform::process;
 use crate::send;
+use crate::sessions::common::{apply_state_hint, default_agent, project_name, recent_unclaimed};
 use crate::sessions::pi_bridge::{load_heartbeats, HeartbeatState};
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::SystemTime;
-
-fn project_name(cwd: &str) -> String {
-    Path::new(cwd)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string()
-}
-
-fn session_dirs() -> Option<PathBuf> {
-    paths::pi_sessions_dir()
-}
-
-fn default_pi_agent(agents: &[AgentConfig]) -> Option<AgentConfig> {
-    agents.iter().find(|a| a.kind == AgentKind::Pi).cloned()
-}
 
 fn build_session_info(
     agent_id: String,
@@ -35,44 +24,15 @@ fn build_session_info(
     model_override: Option<String>,
 ) -> Option<SessionInfo> {
     let head = conversation::read_jsonl_head(&jsonl_path, 4096);
-    let cwd = head
-        .iter()
-        .find_map(|e| e.get("cwd").and_then(|c| c.as_str()))?
-        .to_string();
-    let started_at = head
-        .iter()
-        .find_map(|e| {
-            e.get("timestamp")
-                .and_then(conversation::parse_timestamp_ms)
-        })
-        .unwrap_or(0);
+    let cwd = conversation::extract_cwd(&head)?;
+    let started_at = conversation::extract_started_at(&head);
     let tail = conversation::pi::read_jsonl_tail_for_state(&jsonl_path);
-    let mut parsed_state = conversation::pi::extract_state(&tail);
-    match state {
-        SessionState::Inactive => parsed_state = SessionState::Inactive,
-        SessionState::Processing => parsed_state = SessionState::Processing,
-        // Pi sessions can't reach Question (no AskUserQuestion tool) and the
-        // scanner never emits the app-synthesized Starting, but the match
-        // must be exhaustive — fall through like WaitingForInput.
-        SessionState::Idle
-        | SessionState::WaitingForInput
-        | SessionState::Question
-        | SessionState::Starting => {}
-    }
+    let parsed_state = apply_state_hint(conversation::pi::extract_state(&tail), state);
     let last_user_message = conversation::pi::extract_last_user_message(&tail);
     let last_activity = conversation::pi::extract_last_activity(&tail);
     let (git_branch, model, version) = conversation::pi::extract_metadata(&tail);
     let summary = conversation::pi::extract_first_user_message(&head);
-    let session_id = head
-        .iter()
-        .find_map(|e| e.get("id").and_then(|v| v.as_str()))
-        .map(str::to_string)
-        .or_else(|| {
-            jsonl_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(str::to_string)
-        })?;
+    let session_id = conversation::pi::extract_session_id(&head, &jsonl_path)?;
 
     let tool_uses_count = crate::conversation::tool_count::count_pi(&jsonl_path);
     Some(SessionInfo {
@@ -159,9 +119,9 @@ fn scan_live_heartbeats(
 ) -> (Vec<SessionInfo>, HashSet<String>, HashSet<PathBuf>) {
     let mut claimed_tmux: HashSet<String> = HashSet::new();
     let mut claimed_paths: HashSet<PathBuf> = HashSet::new();
-    let Some(default_agent) = default_pi_agent(agents) else {
+    if default_agent(agents, AgentKind::Pi).is_none() {
         return (Vec::new(), claimed_tmux, claimed_paths);
-    };
+    }
     // Dedup by highest pid, NOT by newest `updatedAt`: when several live
     // processes shared a session id, the timestamp winner flipped every tick
     // and the surviving card's pid/tmux churned. A pid is stable for a
@@ -191,11 +151,7 @@ fn scan_live_heartbeats(
             HeartbeatState::Idle => SessionState::Idle,
             HeartbeatState::Processing => SessionState::Processing,
         };
-        let agent_id = if hb.agent.is_empty() {
-            default_agent.id.clone()
-        } else {
-            hb.agent.clone()
-        };
+        let agent_id = hb.agent.clone();
         // Prefer the richer transcript-derived card; fall back to a minimal
         // card built from the heartbeat alone while the transcript is missing.
         let info = existing
@@ -229,12 +185,12 @@ fn scan_external_live_sessions(
     claimed_paths: &HashSet<PathBuf>,
     claimed_tmux: &HashSet<String>,
 ) -> Vec<SessionInfo> {
-    let Some(default_agent) = default_pi_agent(agents) else {
+    let Some(default_agent) = default_agent(agents, AgentKind::Pi) else {
         return Vec::new();
     };
     let tmux_panes = send::tmux_panes();
     let mut by_cwd: HashMap<String, Vec<(PathBuf, SystemTime)>> = HashMap::new();
-    let Some(root) = session_dirs() else {
+    let Some(root) = paths::pi_sessions_dir() else {
         return Vec::new();
     };
     let Ok(project_dirs) = std::fs::read_dir(&root) else {
@@ -252,19 +208,13 @@ fn scan_external_live_sessions(
                 continue;
             }
             let head = conversation::read_jsonl_head(&path, 4096);
-            let Some(cwd) = head
-                .iter()
-                .find_map(|e| e.get("cwd").and_then(|c| c.as_str()))
-            else {
+            let Some(cwd) = conversation::extract_cwd(&head) else {
                 continue;
             };
             let Some(mtime) = path.metadata().ok().and_then(|m| m.modified().ok()) else {
                 continue;
             };
-            by_cwd
-                .entry(cwd.to_string())
-                .or_default()
-                .push((path, mtime));
+            by_cwd.entry(cwd).or_default().push((path, mtime));
         }
     }
     for files in by_cwd.values_mut() {
@@ -276,9 +226,9 @@ fn scan_external_live_sessions(
     // platform layer exposes no process start time, so we approximate "newest
     // process first" by descending pid (higher pids are generally started
     // later) and hand each process the next-newest unclaimed transcript in its
-    // cwd. The point is a STABLE mapping: the bug was arbitrary list_pids()
-    // order flip-flopping the transcript↔pid/tmux pairing between ticks, so
-    // focus/send could target a different terminal each tick.
+    // cwd. The point is a STABLE mapping: arbitrary list_pids() order would
+    // flip-flop the transcript↔pid/tmux pairing between ticks, so focus/send
+    // could target a different terminal each tick.
     //
     // Residual ambiguity: two heartbeat-less Pi processes sharing one cwd whose
     // pid order doesn't match their transcripts' creation order stay
@@ -305,7 +255,7 @@ fn scan_external_live_sessions(
             continue;
         };
         files.remove(0);
-        let Some(mut info) = build_session_info(
+        let Some(info) = build_session_info(
             default_agent.id.clone(),
             pid,
             tmux,
@@ -315,9 +265,6 @@ fn scan_external_live_sessions(
         ) else {
             continue;
         };
-        if info.state == SessionState::Inactive {
-            info.state = SessionState::WaitingForInput;
-        }
         out.push(info);
     }
     out
@@ -327,12 +274,12 @@ fn scan_inactive_sessions(
     agents: &[AgentConfig],
     claimed_paths: &HashSet<PathBuf>,
 ) -> Vec<SessionInfo> {
-    let Some(default_agent) = default_pi_agent(agents) else {
+    let Some(default_agent) = default_agent(agents, AgentKind::Pi) else {
         return Vec::new();
     };
     let cfg = &config::get().inactive;
     let relist_ttl = std::time::Duration::from_secs(cfg.orphan_relist_secs);
-    let Some(root) = session_dirs() else {
+    let Some(root) = paths::pi_sessions_dir() else {
         return Vec::new();
     };
     let Ok(project_dirs) = std::fs::read_dir(&root) else {
@@ -347,21 +294,8 @@ fn scan_inactive_sessions(
         // the cache, so the age filter is at most `orphan_relist_secs` stale.
         let files = crate::sessions::dir_cache::list_jsonl_dir(&proj_path, relist_ttl);
         visited_dirs.insert(proj_path);
-        let mut candidates: Vec<(PathBuf, SystemTime)> = Vec::new();
-        for (path, mtime) in files.iter() {
-            if claimed_paths.contains(path) {
-                continue;
-            }
-            let Some(age) = mtime.elapsed().ok().map(|d| d.as_secs()) else {
-                continue;
-            };
-            if age > cfg.window_secs {
-                continue;
-            }
-            candidates.push((path.clone(), *mtime));
-        }
-        candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
-        for (path, _) in candidates.into_iter().take(cfg.max_per_project) {
+        let candidates = recent_unclaimed(&files, claimed_paths, cfg.window_secs);
+        for path in candidates.into_iter().take(cfg.max_per_project) {
             if let Some(info) = build_session_info(
                 default_agent.id.clone(),
                 0,
@@ -405,20 +339,6 @@ pub fn scan(agents: &[AgentConfig], titles: &HashMap<String, String>) -> Vec<Ses
         }
     }
     sessions
-}
-
-pub fn load_detail(info: &SessionInfo) -> Option<SessionDetail> {
-    let path = info.jsonl_path.as_ref()?;
-    let entries = conversation::read_jsonl_tail(path, 65536);
-    let recent_messages = conversation::pi::extract_messages(&entries, 15);
-    let (total_input_tokens, total_output_tokens) =
-        conversation::pi::extract_token_totals(&entries);
-    Some(SessionDetail {
-        info: info.clone(),
-        recent_messages,
-        total_input_tokens,
-        total_output_tokens,
-    })
 }
 
 #[cfg(test)]
