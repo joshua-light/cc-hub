@@ -1,4 +1,4 @@
-use super::{extract_bash_commands, project_name_from_cwd, AssistantCall, ParsedSession, ToolUse};
+use super::{extract_bash_commands, project_of, AssistantCall, ParsedSession, ToolUse};
 use crate::conversation::parse_timestamp_ms;
 use crate::metrics::cost::Tokens;
 use serde_json::Value;
@@ -12,9 +12,7 @@ pub(super) fn parse_claude_session_file(path: &Path, is_subagent: bool) -> Optio
     let reader = BufReader::new(file);
 
     let session_id = path.file_stem()?.to_string_lossy().to_string();
-    let mut project: Option<String> = None;
     let mut cwd: Option<String> = None;
-    let mut end_time_ms: u64 = 0;
 
     // Dedup: requestId → AssistantCall (latest usage wins).
     let mut by_req: HashMap<String, AssistantCall> = HashMap::new();
@@ -51,14 +49,7 @@ pub(super) fn parse_claude_session_file(path: &Path, is_subagent: bool) -> Optio
 
         if cwd.is_none() {
             if let Some(c) = v.get("cwd").and_then(|c| c.as_str()) {
-                project = Some(project_name_from_cwd(c));
                 cwd = Some(c.to_string());
-            }
-        }
-
-        if let Some(ts) = v.get("timestamp").and_then(parse_timestamp_ms) {
-            if ts > end_time_ms {
-                end_time_ms = ts;
             }
         }
 
@@ -236,11 +227,10 @@ pub(super) fn parse_claude_session_file(path: &Path, is_subagent: bool) -> Optio
 
     Some(ParsedSession {
         session_id,
-        project: project.unwrap_or_else(|| "unknown".to_string()),
+        project: project_of(cwd.as_deref()),
         cwd: cwd.unwrap_or_default(),
         jsonl_path: path.to_path_buf(),
         is_subagent,
-        end_time_ms,
         calls,
         tool_result_ids,
         in_flight_tool_use_ids,

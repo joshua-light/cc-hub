@@ -11,12 +11,8 @@ use crate::config;
 use chrono::{Local, NaiveDate, TimeZone};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-pub fn analyze() -> MetricsAnalysis {
-    analyze_with_progress(|_, _| {})
-}
-
-/// Like [`analyze`], but invokes `on_progress(scanned, total)` after each
-/// session file is parsed. Called once with `(0, total)` up front so callers
+/// Parse every discovered transcript and aggregate it. Invokes
+/// `on_progress(scanned, total)` after each session file is parsed. Called once with `(0, total)` up front so callers
 /// can render an initial "0 / N" state before any file has been opened.
 pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> MetricsAnalysis {
     let metrics_cfg = &config::get().metrics;
@@ -86,12 +82,10 @@ pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> Metr
             };
             let m = by_model.entry(model_key.clone()).or_default();
             m.cost += c;
-            m.tokens.add(&call.tokens);
             m.messages += 1;
 
             let proj = by_project.entry(s.project.clone()).or_default();
             proj.cost += c;
-            proj.tokens.add(&call.tokens);
             proj.messages += 1;
 
             if call.timestamp_ms > 0 {
@@ -198,8 +192,6 @@ pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> Metr
                 model,
                 cost: session_cost,
                 tokens: session_tokens,
-                message_count: session_messages,
-                end_time_ms: s.end_time_ms,
                 is_subagent: s.is_subagent,
             });
 
@@ -231,11 +223,7 @@ pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> Metr
         findings: peak_ctx_findings,
     };
 
-    // Bump per-model session counts after the per-call loop.
     for s in &top_sessions {
-        if let Some(m) = by_model.get_mut(&s.model) {
-            m.sessions += 1;
-        }
         if let Some(p) = by_project.get_mut(&s.project) {
             p.sessions += 1;
         }
@@ -257,10 +245,7 @@ pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> Metr
     });
     let top_n: Vec<_> = top_sessions.iter().take(12).cloned().collect();
 
-    let mut top_projects: Vec<(String, ProjectStats)> = by_project
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
+    let mut top_projects: Vec<(String, ProjectStats)> = by_project.into_iter().collect();
     top_projects.sort_by(|a, b| {
         b.1.cost
             .partial_cmp(&a.1.cost)
@@ -275,7 +260,6 @@ pub fn analyze_with_progress<F: FnMut(usize, usize)>(mut on_progress: F) -> Metr
         total_tokens,
         cache_hit_rate,
         by_model,
-        by_project,
         by_day,
         top_sessions: top_n,
         top_projects,

@@ -1,4 +1,4 @@
-use super::{extract_bash_commands, project_name_from_cwd, AssistantCall, ParsedSession, ToolUse};
+use super::{extract_bash_commands, project_of, AssistantCall, ParsedSession, ToolUse};
 use crate::conversation::parse_timestamp_ms;
 use crate::metrics::cost::Tokens;
 use serde_json::Value;
@@ -13,8 +13,6 @@ pub(super) fn parse_pi_session_file(path: &Path) -> Option<ParsedSession> {
 
     let mut session_id = path.file_stem()?.to_string_lossy().to_string();
     let mut cwd: Option<String> = None;
-    let mut project: Option<String> = None;
-    let mut end_time_ms = 0u64;
     let mut calls: Vec<AssistantCall> = Vec::new();
     let mut tool_result_ids: HashSet<String> = HashSet::new();
     // Tool call ids at the transcript tail — in-flight, not interrupted.
@@ -33,10 +31,6 @@ pub(super) fn parse_pi_session_file(path: &Path) -> Option<ParsedSession> {
             Err(_) => continue,
         };
 
-        if let Some(ts) = v.get("timestamp").and_then(parse_timestamp_ms) {
-            end_time_ms = end_time_ms.max(ts);
-        }
-
         match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
             "session" => {
                 if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
@@ -44,7 +38,6 @@ pub(super) fn parse_pi_session_file(path: &Path) -> Option<ParsedSession> {
                 }
                 if let Some(c) = v.get("cwd").and_then(|x| x.as_str()) {
                     cwd = Some(c.to_string());
-                    project = Some(project_name_from_cwd(c));
                 }
             }
             "message" => {
@@ -54,23 +47,17 @@ pub(super) fn parse_pi_session_file(path: &Path) -> Option<ParsedSession> {
                 match msg.get("role").and_then(|r| r.as_str()) {
                     Some("assistant") => {
                         let usage = msg.get("usage");
+                        let f = |k: &str| {
+                            usage
+                                .and_then(|u| u.get(k))
+                                .and_then(|x| x.as_u64())
+                                .unwrap_or(0)
+                        };
                         let tokens = Tokens {
-                            input: usage
-                                .and_then(|u| u.get("input"))
-                                .and_then(|x| x.as_u64())
-                                .unwrap_or(0),
-                            output: usage
-                                .and_then(|u| u.get("output"))
-                                .and_then(|x| x.as_u64())
-                                .unwrap_or(0),
-                            cache_read: usage
-                                .and_then(|u| u.get("cacheRead"))
-                                .and_then(|x| x.as_u64())
-                                .unwrap_or(0),
-                            cache_creation: usage
-                                .and_then(|u| u.get("cacheWrite"))
-                                .and_then(|x| x.as_u64())
-                                .unwrap_or(0),
+                            input: f("input"),
+                            output: f("output"),
+                            cache_read: f("cacheRead"),
+                            cache_creation: f("cacheWrite"),
                         };
                         let cost_override = usage
                             .and_then(|u| u.get("cost"))
@@ -138,9 +125,6 @@ pub(super) fn parse_pi_session_file(path: &Path) -> Option<ParsedSession> {
                         }
                         in_flight_tool_use_ids.clear();
                     }
-                    Some("user") => {
-                        in_flight_tool_use_ids.clear();
-                    }
                     _ => {
                         in_flight_tool_use_ids.clear();
                     }
@@ -156,11 +140,10 @@ pub(super) fn parse_pi_session_file(path: &Path) -> Option<ParsedSession> {
 
     Some(ParsedSession {
         session_id,
-        project: project.unwrap_or_else(|| "unknown".to_string()),
+        project: project_of(cwd.as_deref()),
         cwd: cwd.unwrap_or_default(),
         jsonl_path: path.to_path_buf(),
         is_subagent: false,
-        end_time_ms,
         calls,
         tool_result_ids,
         in_flight_tool_use_ids,

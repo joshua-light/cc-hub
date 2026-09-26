@@ -41,7 +41,6 @@ pub(super) struct ParsedSession {
     pub(super) cwd: String,
     pub(super) jsonl_path: PathBuf,
     pub(super) is_subagent: bool,
-    pub(super) end_time_ms: u64,
     pub(super) calls: Vec<AssistantCall>,
     /// All tool_use_ids that received a tool_result (from user messages).
     pub(super) tool_result_ids: HashSet<String>,
@@ -68,7 +67,12 @@ pub(super) fn parse_session_file(
     }
 }
 
-fn project_name_from_cwd(cwd: &str) -> String {
+/// A session's project name: the cwd's last component, or `unknown` when the
+/// transcript never recorded a cwd.
+fn project_of(cwd: Option<&str>) -> String {
+    let Some(cwd) = cwd else {
+        return "unknown".to_string();
+    };
     Path::new(cwd)
         .file_name()
         .and_then(|n| n.to_str())

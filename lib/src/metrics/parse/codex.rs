@@ -1,4 +1,4 @@
-use super::{project_name_from_cwd, AssistantCall, ParsedSession, ToolUse};
+use super::{project_of, AssistantCall, ParsedSession, ToolUse};
 use crate::conversation::parse_timestamp_ms;
 use crate::metrics::cost::Tokens;
 use serde_json::Value;
@@ -22,7 +22,6 @@ pub(super) fn parse_codex_session_file(path: &Path) -> Option<ParsedSession> {
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
     let mut cwd: Option<String> = None;
-    let mut project: Option<String> = None;
     let mut end_time_ms = 0u64;
     let mut model = String::new();
     let mut total_usage: Option<Value> = None;
@@ -54,7 +53,6 @@ pub(super) fn parse_codex_session_file(path: &Path) -> Option<ParsedSession> {
                     }
                     if let Some(c) = p.get("cwd").and_then(|x| x.as_str()) {
                         cwd = Some(c.to_string());
-                        project = Some(project_name_from_cwd(c));
                     }
                 }
             }
@@ -131,11 +129,10 @@ pub(super) fn parse_codex_session_file(path: &Path) -> Option<ParsedSession> {
 
     Some(ParsedSession {
         session_id,
-        project: project.unwrap_or_else(|| "unknown".to_string()),
+        project: project_of(cwd.as_deref()),
         cwd: cwd.unwrap_or_default(),
         jsonl_path: path.to_path_buf(),
         is_subagent: false,
-        end_time_ms,
         calls: vec![call],
         tool_result_ids,
         in_flight_tool_use_ids: HashSet::new(),

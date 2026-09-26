@@ -1,4 +1,4 @@
-use super::cost::{cost_of, pricing_for, strip_date_suffix};
+use super::cost::{cost_of, known_pricing};
 use super::discover::discover_session_files;
 use super::parse::parse_session_file;
 use crate::agent::AgentKind;
@@ -60,23 +60,10 @@ pub(crate) fn task_usage(
                 .filter(|c| c.is_finite() && *c >= 0.0)
                 .or_else(|| {
                     // Never apply Claude fallback prices to Codex or unknown models.
-                    let model = strip_date_suffix(&call.model);
-                    if matches!(
-                        model,
-                        "claude-opus-4-7"
-                            | "claude-opus-4-6"
-                            | "claude-opus-4-5"
-                            | "claude-sonnet-4-7"
-                            | "claude-sonnet-4-6"
-                            | "claude-sonnet-4-5"
-                            | "claude-haiku-4-5"
-                            | "claude-haiku-4-6"
-                    ) {
+                    known_pricing(&call.model).map(|p| {
                         stats.estimated = true;
-                        Some(cost_of(&call.tokens, &pricing_for(model)))
-                    } else {
-                        None
-                    }
+                        cost_of(&call.tokens, &p)
+                    })
                 });
             stats.cost_nano_usd = stats
                 .cost_nano_usd

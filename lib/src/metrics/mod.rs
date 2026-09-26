@@ -17,26 +17,23 @@ mod discover;
 mod parse;
 mod task_usage;
 
-pub use analyze::{analyze, analyze_with_progress};
+pub use analyze::analyze_with_progress;
 pub use cost::{ModelPricing, Tokens};
 pub(crate) use task_usage::{task_usage, task_usage_files};
 
 use chrono::NaiveDate;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Default, Clone, Debug)]
 pub struct ModelStats {
     pub cost: f64,
-    pub tokens: Tokens,
-    pub sessions: usize,
     pub messages: usize,
 }
 
 #[derive(Default, Clone, Debug)]
 pub struct ProjectStats {
     pub cost: f64,
-    pub tokens: Tokens,
     pub sessions: usize,
     pub messages: usize,
 }
@@ -50,8 +47,6 @@ pub struct SessionSummary {
     pub model: String,
     pub cost: f64,
     pub tokens: Tokens,
-    pub message_count: usize,
-    pub end_time_ms: u64,
     pub is_subagent: bool,
 }
 
@@ -152,7 +147,6 @@ pub struct MetricsAnalysis {
     pub total_tokens: Tokens,
     pub cache_hit_rate: f64,
     pub by_model: BTreeMap<String, ModelStats>,
-    pub by_project: HashMap<String, ProjectStats>,
     pub by_day: BTreeMap<NaiveDate, DayStats>,
     pub top_sessions: Vec<SessionSummary>,
     pub top_projects: Vec<(String, ProjectStats)>,
