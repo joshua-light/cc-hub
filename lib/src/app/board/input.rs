@@ -102,10 +102,10 @@ impl App {
     }
 
     /// Store the add popup's context box on the freshly created task as its
-    /// first `note` attachment — the same shape `p` and the attach popup
-    /// produce, so there is one kind of extra text on a card and the agent
-    /// spawned by `s` reads it (see [`planning_prompt`](super::assign::planning_prompt)). Empty context attaches
-    /// nothing.
+    /// first `note` attachment, the same shape `p` and the attach popup
+    /// produce. So a card has one kind of extra text, and the agent spawned
+    /// by `s` reads it (see [`planning_prompt`](super::assign::planning_prompt)).
+    /// Empty context attaches nothing.
     fn attach_task_context(&mut self, id: &str, context: &str) {
         if context.trim().is_empty() {
             return;

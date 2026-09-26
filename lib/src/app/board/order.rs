@@ -237,8 +237,7 @@ mod tests {
 
             // A scan tick flips both states. The frozen order (and so
             // the card under the cursor) must not move until the tab is
-            // re-entered — live re-sorting is how the Sessions grid used
-            // to swap cards under the cursor.
+            // re-entered.
             app.sessions.last_sessions = vec![
                 fake_session("mux-a", SessionState::Question),
                 fake_session("mux-b", SessionState::Idle),

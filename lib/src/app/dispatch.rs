@@ -45,31 +45,24 @@ impl App {
         let Some(pd) = self.pending_dispatch.pop_front() else {
             return DispatchAction::Wait;
         };
-        // Layered readiness, in order of preference:
-        //   1. scanner says Idle AND pane shows claude's empty input row.
-        //      Tightest gate — guarantees the next paste lands in the
-        //      right place. Preferred when both signals agree.
-        //   2. scanner says Idle AND we've waited long enough for cold
-        //      boot (>5s). Fallback for the case where the pane-ready
-        //      check stays false because claude is rendering something
-        //      we don't recognise (different glyph, different theme).
-        //      Without this, a single cosmetic mismatch loses the prompt
-        //      to the timeout and the user sees a "session that just
-        //      sits there empty" — the real-world failure mode that
-        //      motivated this comment.
+        // Send once the scanner says Idle and either:
+        //   1. the pane shows the agent's empty input row, so the paste is
+        //      sure to land in the right place; or
+        //   2. 5s have passed. The pane check can stay false when the agent
+        //      renders something unrecognised (another glyph or theme), and
+        //      without this fallback one cosmetic mismatch loses the prompt
+        //      to the timeout, leaving an empty session.
         // Walk the unfiltered scan set, not `self.sessions.groups`: the
-        // Sessions view filter (inactive sessions) can hide the very session
-        // we need to dispatch into.
+        // inactive filter can hide the very session to dispatch into.
         let scanner_idle = self.sessions.last_sessions.iter().any(|s| {
             s.tmux_session.as_deref() == Some(pd.tmux.as_str()) && s.state == SessionState::Idle
         });
         if scanner_idle {
             let aged_in = pd.queued_at.elapsed() >= Duration::from_secs(5);
-            // The `pane_ready_for_input` probe is a `tmux capture-pane`
-            // fork+exec — too costly to run every ~50ms render frame. Throttle
-            // it to ~2x/sec; between probes treat the pane as not-yet-ready and
-            // keep waiting. The cold-boot fallback (`aged_in`) and the timeout
-            // below don't need the probe, so they still fire on schedule.
+            // The probe is a `tmux capture-pane` fork+exec, too costly for
+            // every ~50ms frame, so it runs about twice a second; between
+            // probes the pane counts as not ready. The `aged_in` fallback and
+            // the timeout don't need the probe and still fire on schedule.
             let probe_due = self
                 .last_dispatch_probe_at
                 .is_none_or(|t| t.elapsed() >= Duration::from_millis(500));
@@ -105,10 +98,8 @@ impl App {
         DispatchAction::Wait
     }
 
-    /// Time the current pending dispatch has been waiting. None when no
-    /// dispatch is queued. Used by the status bar so the user can tell
-    /// at a glance that a dispatch is still booting rather
-    /// than wondering why nothing is happening.
+    /// How long the front dispatch has waited, for the status bar; `None`
+    /// when nothing is queued.
     pub fn pending_dispatch_age(&self) -> Option<Duration> {
         self.pending_dispatch
             .front()

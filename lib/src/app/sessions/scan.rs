@@ -34,10 +34,9 @@ impl App {
         }
     }
 
-    /// `tmux_session_name → SessionInfo` over the latest scan. Built fresh
-    /// per call so it always reflects [`Self::last_sessions`]. Used by the
-    /// Projects view to enrich task cards with live agent state (context
-    /// tokens, current tool, idle/processing/waiting).
+    /// `tmux_session_name → SessionInfo` over the latest unfiltered scan,
+    /// built fresh per call. The Tasks board reads live agent state for its
+    /// cards through it.
     pub fn sessions_by_tmux(&self) -> HashMap<&str, &SessionInfo> {
         let mut out = HashMap::new();
         for s in &self.sessions.last_sessions {

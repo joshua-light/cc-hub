@@ -399,8 +399,8 @@ mod tests {
         });
     }
 
-    /// The card the retro found: an agent asked, nobody answered, and
-    /// the card went to Done carrying the question.
+    /// An agent asked and nobody answered: the first Done must not close
+    /// the card on the question.
     #[test]
     fn done_on_an_unanswered_ask_is_refused_once() {
         with_temp_home(|| {

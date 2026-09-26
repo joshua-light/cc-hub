@@ -164,10 +164,9 @@ impl App {
     }
 
     /// Resolve a session's task link (`L`) to its card badge: live title and
-    /// status from the board while the task is still there, else the sidecar's title snapshot. `stale`
-    /// covers both a missing task and a Done one — either way the badge
-    /// dims so the link visibly outlived its task. `None` for unlinked
-    /// sessions.
+    /// status from the board while the task is there, else the sidecar's
+    /// title snapshot. `stale` covers both a missing and a Done task; either
+    /// way the badge dims. `None` for unlinked sessions.
     pub(crate) fn task_badge(&self, session_id: &str) -> Option<TaskBadge> {
         let link = self.session_task_links.get(session_id)?;
         let task_id = link.task_id.as_str();
@@ -248,8 +247,8 @@ impl App {
         let groups = self.build_groups(&self.sessions.last_sessions);
         self.adopt_groups(groups);
         // A rebuild (a filter toggle) can reveal already-seen sessions
-        // without a scan. Register them as known now so the next genuine membership change doesn't
-        // mistake one for a fresh arrival and teleport the cursor onto it.
+        // without a scan. Register them as known now so the next scan doesn't
+        // mistake one for a fresh arrival and jump the cursor onto it.
         self.sync_known_session_ids();
     }
 

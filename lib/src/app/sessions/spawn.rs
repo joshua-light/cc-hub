@@ -371,8 +371,8 @@ mod tests {
     // The placeholder must sit where the real card will land: after the
     // group's active sessions, at the head of the idle band (a fresh spawn
     // first scans in as Idle and the scanner orders newest-first within a
-    // bucket). Pinning it to the top of the group made the card jump to the
-    // idle band once the scanner took over.
+    // bucket). Anywhere else, the card would jump once the scanner takes
+    // over.
     #[test]
     fn placeholder_sorts_into_the_idle_band() {
         let mut app = App::new();

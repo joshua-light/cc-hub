@@ -139,10 +139,10 @@ impl App {
         self.view = View::FolderPicker;
     }
 
-    /// `p` on the Sessions tab: the same places picker the task-assign
-    /// flow uses (bookmarks, recent dirs — fuzzy-filterable) to choose where the new session spawns, falling
-    /// back to the filesystem browser when nothing is known yet. The
-    /// selected session's cwd starts highlighted.
+    /// `p` on the Sessions tab: the task-assign places picker, choosing
+    /// where the new session spawns. Falls back to the filesystem browser
+    /// when nothing is known yet. The selected session's cwd starts
+    /// highlighted.
     pub fn enter_session_places_picker(&mut self) {
         let places = self.known_places();
         if places.is_empty() {

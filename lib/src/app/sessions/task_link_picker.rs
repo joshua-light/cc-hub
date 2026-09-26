@@ -1,8 +1,7 @@
-//! State behind [`crate::app::View::TaskLinkPicker`]: the fuzzy task
-//! selector `L` opens on the Sessions tab. The App builds the candidate list
-//! (board tasks, session-local ones first); this
-//! module owns the live filter, rows, and selection — the same shape as
-//! [`crate::app::ModelPickerState`].
+//! The task-link picker (`L` on the Sessions tab,
+//! [`crate::app::View::TaskLinkPicker`]): link the selected session to a
+//! board task, or unlink it. Candidates are banded by board column, tasks
+//! local to the session's cwd first.
 
 use crate::app::picker_list::{rank_rows, step, PickerRow, Searchable};
 use crate::app::{App, View};
@@ -277,12 +276,9 @@ impl App {
                 }
             }
         };
-        // Links *do* shape card order — `cluster_by_task` groups same-task
-        // cards together and ranks the clusters by task priority — so the
-        // grid has to regroup here. Without it the card only moves on the
-        // next scan tick, a visible ~1s lag between the keypress and the
-        // reorder. `adopt_groups` re-anchors the selection on the same
-        // session id, so the cursor rides along with the card it moved.
+        // Links shape card order (`cluster_by_task`), so regroup now rather
+        // than on the next scan tick about a second later. `adopt_groups`
+        // keeps the cursor on the same session id, so it rides with the card.
         if linked {
             self.rebuild_groups();
         }
@@ -372,9 +368,8 @@ mod app_tests {
     use crate::app::test_support::fake_session;
     use crate::models::SessionState;
 
-    // Linking must reorder the grid on the same keypress. Regression: the
-    // confirm handler skipped the regroup, so the card only moved on the
-    // next scan tick — a visible ~1s lag after pressing Enter.
+    // Linking reorders the grid on the keypress itself, not on the next
+    // scan tick about a second later.
     #[test]
     fn confirm_task_link_regroups_without_a_scan() {
         crate::test_util::with_temp_home(|| {

@@ -1,7 +1,13 @@
 //! Fixtures shared by the app test modules.
+//!
+//! Most app tests are unix-only: they redirect `$HOME` with
+//! `with_temp_home`, which `dirs::home_dir()` honours on unix and ignores on
+//! Windows.
 
 use crate::models::{SessionInfo, SessionState};
 
+/// A Claude session in `/tmp` whose session id and tmux name are both
+/// `tmux`.
 pub(super) fn fake_session(tmux: &str, state: SessionState) -> SessionInfo {
     SessionInfo {
         agent_id: "claude".into(),

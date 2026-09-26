@@ -3,8 +3,7 @@
 //! window, the finder searches every transcript the
 //! [`crate::sessions::index`] archive knows — by saved title, session id,
 //! project, or first message — and Enter reopens the pick (attaching when it
-//! is still live, resuming when it is not). Same live-filter shape as
-//! [`crate::app::TaskLinkPickerState`].
+//! is still live, resuming when it is not).
 
 use crate::agent::AgentKind;
 use crate::app::picker_list::{rank_rows, step, PickerRow, Searchable};

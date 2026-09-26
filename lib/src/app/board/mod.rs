@@ -1,6 +1,12 @@
-//! Per-tab state for the Tasks tab: the persistent board plus the kanban
-//! cursor (column, row), the add-task input buffer, and the id of a task
-//! waiting on a folder pick for agent assignment.
+//! The Tasks tab: the persistent board, the kanban cursor, and the state of
+//! its popups.
+//!
+//! - `order`: column order, cursor resolution, the board filter.
+//! - `lifecycle`: status transitions, priority, delete and undo.
+//! - `input`: the add, rename and tag popups.
+//! - `attach`: the Task Info popup and card attachments.
+//! - `kind_picker`: the deliverable-kind picker (`T`).
+//! - `assign`: spawning or resuming the agent bound to a card.
 
 use crate::config;
 use crate::fuzzy::fuzzy_match;
@@ -120,14 +126,13 @@ pub struct TasksView {
     /// Selected attachment index inside the Task Info popup
     /// ([`crate::app::View::TaskInfo`]).
     pub info_sel: usize,
-    /// Frozen display order (task ids) for the In Progress column. The
+    /// Frozen display order (task ids) for the live columns. The
     /// needs-input float is computed once on tab entry
-    /// ([`crate::app::App::refresh_in_progress_order`]) instead of live in
-    /// every render: live session state flips on scan ticks, and re-sorting
-    /// the column by it swapped cards under the positional cursor — the
-    /// exact bug the Sessions grid had before it moved to stable sort keys.
-    /// Ids no longer in the column are skipped; tasks not in the list (e.g.
-    /// assigned since entry) render after it in insertion order.
+    /// ([`crate::app::App::refresh_in_progress_order`]) instead of on every
+    /// render: session state flips on scan ticks, and re-sorting by it would
+    /// swap cards under the positional cursor. Ids no longer in the column
+    /// are skipped; tasks not in the list (e.g. assigned since entry) render
+    /// after it in insertion order.
     pub in_progress_order: Vec<String>,
     /// Active board filter (`/`). Empty means no filter. Applied by
     /// [`Self::matches_filter`] to every column's cards and counts; edited

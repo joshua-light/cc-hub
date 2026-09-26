@@ -119,10 +119,9 @@ pub enum PendingConfirm {
 impl App {
     pub fn set_tab(&mut self, tab: Tab) {
         // Entering the Tasks tab re-reads the board so edits from another
-        // instance (or a hand-edited state.json) show up. The reload and the re-floated
-        // In Progress order can both rearrange rows, so the cursor is
-        // re-anchored to the task it was on (by id) rather than left at a
-        // stale (col, row) pointing at whatever card landed there.
+        // instance (or a hand-edited state.json) show up. The reload and the
+        // re-floated live columns can both rearrange rows, so the cursor
+        // follows its task by id rather than staying on a stale (col, row).
         if tab == Tab::Tasks && self.current_tab != Tab::Tasks {
             let keep = self.selected_board_task().map(|t| t.task_id.clone());
             self.tasks.reload();

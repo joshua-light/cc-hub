@@ -60,11 +60,10 @@ fn task_notes(task: &TaskState) -> Vec<String> {
 }
 
 impl App {
-    /// `s` on a focused task: open the places picker (bookmarks, recent
-    /// dirs — fuzzy-filterable) to choose the cwd the
-    /// agent will run in, falling back to the filesystem browser when
-    /// nothing is known yet. Returns false when no task is focused or the
-    /// task is already Done.
+    /// `s` on a focused task: open the places picker (bookmarks and recent
+    /// dirs, fuzzy-filterable) to choose the cwd the agent will run in,
+    /// falling back to the filesystem browser when nothing is known yet.
+    /// Returns false when no task is focused or the task is already Done.
     pub fn enter_task_assign_picker(&mut self) -> bool {
         let Some(t) = self.selected_board_task() else {
             return false;
@@ -162,11 +161,12 @@ impl App {
         }
     }
 
-    /// Point a task's binding at a freshly-spawned mux session (resume path).
     pub fn task_session_is_live(&self, tmux: &str) -> bool {
         self.runtime.session_exists(tmux)
     }
 
+    /// Respawn the card's agent resuming its recorded session, and point
+    /// the card's binding at the new mux session. Returns its name.
     pub fn resume_board_task(&mut self, task: &TaskState) -> Result<String, String> {
         let sid = task
             .session_id

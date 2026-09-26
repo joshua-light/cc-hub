@@ -2,10 +2,8 @@ use crate::app::App;
 use crate::metrics::{MetricsAnalysis, SelectableSession};
 
 /// Metrics-tab state: the analysis result, the selectable session rows, and
-/// the selection cursor. The scroll offset and the renderer-synced viewport
-/// geometry (`metrics_scroll`, `metrics_view_height`, `metrics_row_lines`) now
-/// live in [`crate::app::RenderState`]; the nav methods that read them moved to
-/// [`crate::app::App`] (`metrics_nav_down` / `metrics_nav_up`).
+/// the selection cursor. The scroll offset and viewport geometry live in
+/// [`crate::app::RenderState`], which the renderer writes.
 pub struct MetricsView {
     /// Latest completed analysis. `None` while a scan is in flight.
     pub analysis: Option<MetricsAnalysis>,

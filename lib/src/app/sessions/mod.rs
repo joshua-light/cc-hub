@@ -1,3 +1,15 @@
+//! The Sessions tab: the grouped session grid, its cursor, and every flow
+//! that starts from a session card.
+//!
+//! - `scan`: applies scan snapshots; view toggles and acks.
+//! - `groups`: turns a snapshot into ordered, task-clustered groups.
+//! - `spawn`: spawn watchdogs, placeholder cards, boot-time naming.
+//! - `rename`: the rename modal (`r`).
+//! - `model_picker`: model and agent choice for new sessions (`N`, `A`).
+//! - `respawn_picker`: continue a session on another account (`R`).
+//! - `task_link_picker`: link a session to a board task (`L`).
+//! - `session_finder`: archive-wide session search (`/`).
+
 use crate::acks::Acks;
 use crate::models::{ProjectGroup, SessionInfo};
 use std::collections::HashSet;
@@ -42,8 +54,8 @@ impl SessionsLayout {
 }
 
 /// Sessions-tab state: the grouped-session grid plus its cursor and
-/// view-filter toggles. Pulled out of [`App`] so the grid cursor can't be
-/// moved out of range without going through the clamping methods here.
+/// view-filter toggles. The cursor only moves through the clamping methods
+/// here, so it can't leave the grid.
 pub struct SessionsView {
     pub groups: Vec<ProjectGroup>,
     pub sel_group: usize,
@@ -51,7 +63,7 @@ pub struct SessionsView {
     pub layout: SessionsLayout,
     pub show_inactive: bool,
     pub acks: Acks,
-    /// Latest scan snapshot; drives [`App::rebuild_groups`].
+    /// Latest scan snapshot; drives [`crate::app::App::rebuild_groups`].
     pub(crate) last_sessions: Vec<SessionInfo>,
     /// Session ids seen on the previous scan tick. `None` means the first
     /// scan hasn't happened yet — used to skip cursor-jump on initial load.
@@ -202,8 +214,8 @@ mod tests {
         }
     }
 
-    /// The grid column count is now owned by `RenderState`; the nav helpers
-    /// take it as a parameter, so the tests thread it through directly.
+    /// Grid column count, passed to the nav helpers the way `RenderState`
+    /// would.
     const COLS: u16 = 3;
 
     fn view(groups: Vec<ProjectGroup>) -> SessionsView {
