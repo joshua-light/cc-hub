@@ -11,7 +11,7 @@ const PROBE_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Redraw gating and draw telemetry carried across loop passes.
 pub(super) struct Redraw {
-    // Redraw gating (issue #18a). The loop wakes every ~5ms but the widget
+    // Redraw gating. The loop wakes every ~5ms but the widget
     // tree only changes on input, on a drained ScanMsg, on a LiveTail poll
     // that picked up new entries, or on the once-per-second elapsed clock.
     // We draw immediately on the first three (so input latency is unchanged)
@@ -26,8 +26,8 @@ pub(super) struct Redraw {
     // event read to frame flushed. If a user-felt lag isn't visible here,
     // the time is being lost outside the process (terminal, compositor).
     pub(super) last_input_at: Option<Instant>,
-    // Full-repaint requests (issue: black stripes after a Mission Control
-    // swipe on a single fullscreen monitor). Ratatui's `autoresize` compares
+    // Full-repaint requests, against black stripes after a Mission Control
+    // swipe on a single fullscreen monitor. Ratatui's `autoresize` compares
     // the terminal size against the size of the *last drawn* frame, so a
     // resize that bounces back before the next draw (the swipe produces
     // Resize pairs ~5ms apart: 244x76 -> 131x35 -> ... -> 244x76) is
@@ -38,7 +38,7 @@ pub(super) struct Redraw {
     pub(super) full_redraw: bool,
     // A resize storm's first frame can land while the window is still
     // animating; the terminal may repaint over it afterwards. Once no Resize
-    // has arrived for RESIZE_SETTLE we repaint in full a second time.
+    // has arrived for `input::RESIZE_SETTLE` we repaint in full a second time.
     pub(super) resize_settle_at: Option<Instant>,
     // Terminal round-trip probe state. In-process telemetry keeps proving
     // the loop innocent while users still feel 500-1000ms on a keypress, so

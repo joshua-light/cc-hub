@@ -76,8 +76,7 @@ impl CliError {
             CliError::NotFound(_) => "notfound",
             CliError::Conflict { .. } => "conflict",
             CliError::Other(_) => "other",
-            // Never surfaced as a `kind` (handled before this is consulted),
-            // but map it for completeness.
+            // Unreachable: `handle` returns before asking.
             CliError::Reported(_) => "other",
         }
     }

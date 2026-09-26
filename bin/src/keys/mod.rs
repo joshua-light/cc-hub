@@ -27,8 +27,7 @@ mod tasks;
 
 /// Map a key press onto a [`Command`] when a converted arm covers it.
 ///
-/// Guards mirror the original match arms exactly; anything returning `None`
-/// falls through to the legacy match below.
+/// `None` sends the key on to [`handle_key`]'s per-view handlers.
 pub(super) fn map_command(
     app: &App,
     key: &KeyEvent,

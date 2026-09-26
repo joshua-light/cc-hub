@@ -2,11 +2,10 @@
 //!
 //! [`cc_hub_lib::app::App::execute`] performs every in-process consequence of
 //! a command and returns the effects that need bin-owned machinery: the
-//! terminal (pane sizing), the `run()` channels, or the window manager. This
-//! module is deliberately a thin IO shim — decisions and status messaging
-//! belong in `App::execute`, with two exceptions that *are* IO outcomes
-//! (pane/shell attach failures, window-reattach results), whose status
-//! strings preserve the original inline arms verbatim.
+//! terminal (pane sizing), the event loop's channels, or the window manager.
+//! This module is a thin IO shim: decisions and status messages belong in
+//! `App::execute`. The exceptions are IO outcomes (pane/shell attach
+//! failures, window-reattach results), which only this side can report.
 
 use crate::scan_msg::ScanMsg;
 use crate::term::Term;

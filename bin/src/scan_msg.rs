@@ -31,24 +31,20 @@ pub(crate) enum ScanMsg {
     /// What each recipe's player runs and who holds each resource.
     BuildsProbe(app::BuildsProbe),
     /// Result of a `send::send_prompt` run off the event-loop thread (see
-    /// [`spawn_dispatch`](crate::workers::spawn_dispatch)). `send_prompt`
-    /// forks+execs tmux twice and sleeps ~80ms; running it inline froze
-    /// render+input. `ok` carries the status line built from the prompt's
-    /// success/failure templates.
+    /// [`spawn_dispatch`](crate::workers::spawn_dispatch)). `ok` carries the
+    /// finished status line, success or failure.
     DispatchResult {
         ok: Result<String, String>,
     },
 }
 
-/// Apply one drained [`ScanMsg`] to `app`. Extracted verbatim from the
-/// `run()` channel-drain loop; the `title`-tracking maps/gate are threaded
-/// through so the `SessionList` arm can kick off missing-title subprocesses
-/// exactly as it did inline.
+/// Apply one drained [`ScanMsg`] to `app`. A `SessionList` also queues
+/// titlers for untitled sessions.
 ///
-/// Returns true when the message changed anything the renderer shows. The
-/// periodic `SessionList` scan arm reports no-change for the
-/// common all-idle tick so the caller can skip the repaint; every other
-/// message exists only to mutate visible state, so they always return true.
+/// Returns true when the message changed anything the renderer shows. A
+/// `SessionList` reports no change on the common all-idle tick so the caller
+/// can skip the repaint; every other message exists to change visible state,
+/// so it always returns true.
 pub(crate) fn apply_scan_msg(app: &mut App, msg: ScanMsg, titles: &Titles) -> bool {
     match msg {
         ScanMsg::SessionList(mut sessions) => {

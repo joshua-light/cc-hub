@@ -256,13 +256,11 @@ pub(crate) fn spawn_metrics(tx: mpsc::Sender<ScanMsg>) {
     });
 }
 
-/// Run `send::send_prompt` off the synchronous run() loop thread and report
-/// the outcome back over `tx` as a [`ScanMsg::DispatchResult`], drained in the
-/// same channel loop as every other scan message. `send_prompt` forks+execs
-/// tmux twice and sleeps ~80ms; called inline it froze render+input for
-/// 100-160ms during dispatch. On success the status line is `ok_msg`; on
-/// failure it is `"<err_prefix>: <error>"` (and the error is logged), matching
-/// the inline templates these call sites used before.
+/// Run `send::send_prompt` off the event-loop thread and report the outcome
+/// over `tx` as a [`ScanMsg::DispatchResult`]. `send_prompt` forks+execs tmux
+/// twice and sleeps ~80ms, which would freeze render and input for
+/// 100-160ms. The status line is `ok_msg` on success and
+/// `"<err_prefix>: <error>"` on failure, which is also logged.
 pub(crate) fn spawn_dispatch(
     tx: mpsc::Sender<ScanMsg>,
     tmux: String,

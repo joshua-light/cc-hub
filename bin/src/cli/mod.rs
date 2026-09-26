@@ -1,14 +1,13 @@
-//! CLI subcommands.
+//! CLI subcommands. When argv starts with a known verb, [`dispatch`] runs it
+//! before the TUI starts and returns the exit code. Parsing is hand-rolled
+//! to avoid a clap dep. Each verb prints one JSON line on stdout so a calling
+//! agent can parse the outcome.
 //!
-//! These run before the TUI starts up — when argv contains a known verb,
-//! [`dispatch`] handles it and returns an exit code. The TUI in `main.rs`
-//! never sees them.
-//!
-//! Argument parsing is hand-rolled to avoid a clap dep. Verbs: `board ...`
-//! (the Tasks board), `open <url>` (a `cc-hub://` deep link; the OS
-//! URL-scheme handler calls it), `agent ...`, `build ...`, `resource ...`, `usage` and
-//! `wake`. They emit a single JSON line on stdout describing the result so a
-//! calling agent can parse the outcome programmatically.
+//! - `error`: [`CliError`] and the JSON error contract.
+//! - `flags`: the shared `--flag` parser and the help-request scan.
+//! - `board`, `link` (`open`), `agent`, `build`, `resource`, `usage`,
+//!   `wake`: one file per verb.
+//! - `help`: `--help` text.
 
 mod agent;
 mod board;
@@ -54,8 +53,9 @@ fn print_json(value: &serde_json::Value) {
     }
 }
 
-/// Map a [`PromptStatus`] to its JSON string, emitting the human warning line
-/// to stderr for the `Deferred` case (presentation stays in cli.rs).
+/// Map a [`PromptStatus`](ops::prompt::PromptStatus) to its JSON string,
+/// printing the human warning to stderr for `Deferred`. Presentation stays
+/// in the CLI, not in `ops`.
 fn report_prompt_status(status: &ops::prompt::PromptStatus) -> &'static str {
     if let ops::prompt::PromptStatus::Deferred(warning) = status {
         eprintln!("warning: {}", warning);

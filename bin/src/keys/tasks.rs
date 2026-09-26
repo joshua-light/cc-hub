@@ -1,12 +1,11 @@
 use cc_hub_lib::app::{App, Command, Tab, TasksCommand, View};
 use crossterm::event::{KeyCode, KeyEvent};
 
-/// Map a Tasks-board or Tasks-modal-submit key onto a [`Command`]. Guards and
-/// arm order mirror the original inline match exactly: input-mode guards fire
-/// before the Grid nav/action arms, and the Esc-clears-filter arm only claims
-/// Esc while a filter is set (an unfiltered board's Esc falls through). Modal
-/// character/backspace editing stays in [`handle`]; only the actions and the
-/// input/tags/filter submit arms become commands.
+/// Map a Tasks-board or Tasks-modal-submit key onto a [`Command`]. The
+/// Esc-clears-filter arm claims Esc only while a filter is set, so an
+/// unfiltered board's Esc falls through. Modal character/backspace editing
+/// stays in [`handle`]; only the actions and the input/tags/filter submits
+/// are commands.
 pub(super) fn map_tasks_command(app: &App, key: &KeyEvent, on_tasks: bool) -> Option<Command> {
     use TasksCommand as T;
     let cmd = match (&app.view, key.code) {

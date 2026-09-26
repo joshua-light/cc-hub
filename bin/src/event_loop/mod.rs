@@ -49,7 +49,6 @@ pub(crate) async fn run(terminal: &mut Term, frame_bytes: Arc<AtomicU64>) -> io:
     let mut last_sys_log = Instant::now();
 
     loop {
-        // Poll live view for new JSONL entries
         if app.view == View::LiveTail {
             if let Some(ref mut lv) = app.live_view {
                 if lv.poll() {

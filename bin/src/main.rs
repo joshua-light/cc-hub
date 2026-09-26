@@ -1,3 +1,14 @@
+//! The cc-hub binary: CLI verbs first, then the TUI.
+//!
+//! - `args`: global flags stripped before verb dispatch.
+//! - `cli`: the JSON CLI verbs.
+//! - `term`: terminal setup and restore.
+//! - `logging`: the file logger and load-average lines.
+//! - `event_loop`: the draw/input loop.
+//! - `keys`, `effects`: key dispatch and the lib `Effect` interpreter.
+//! - `workers`, `scan_msg`: background tasks and the messages they send.
+//! - `titles`: background session titling.
+
 use cc_hub_lib::sessions::scanner;
 use cc_hub_lib::{models, title};
 use std::io;

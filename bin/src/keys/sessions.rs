@@ -108,7 +108,8 @@ pub(super) fn handle_confirm_close(app: &mut App, key: KeyEvent) {
 
 /// Session finder: printable keys (space included — titles and first
 /// messages are prose) belong to the fuzzy filter; navigation is
-/// arrows plus ctrl-j/k and ctrl-n/p. Enter is a command above.
+/// arrows plus ctrl-j/k and ctrl-n/p. Enter is a command
+/// ([`map_sessions_command`]).
 pub(super) fn handle_finder(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {

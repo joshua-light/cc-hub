@@ -71,7 +71,7 @@ impl Titles {
             let gate = Arc::clone(&self.gate);
             tokio::spawn(async move {
                 // Hold the permit across the blocking subprocess call so only
-                // `TITLE_CONCURRENCY` children ever exist at once. The permit
+                // `[title].concurrency` children ever exist at once. The permit
                 // drops at task end, freeing a slot for the next queued title.
                 let _permit = gate.acquire_owned().await.ok();
 
@@ -130,12 +130,11 @@ impl Titles {
             });
         }
 
-        // Second pass: stamp titling on every session whose sid is currently
-        // running (not just queued). Read the active set *after* insertion
-        // races above so UI sees the same instant the subprocess starts. The
-        // "queued but gated" window where a permit is still pending shows up
-        // as no indicator — that's brief and indistinguishable from "about to
-        // start" anyway.
+        // Second pass: stamp titling on every session whose titler is running
+        // (not just queued). Reading the active set after the spawns above
+        // lets the UI show the spinner the instant a subprocess starts. A
+        // titler still waiting for a permit shows no indicator; that window
+        // is brief.
         let set = self.active.lock().unwrap_or_else(|e| e.into_inner());
         for session in sessions.iter_mut() {
             session.titling = set.contains(&session.session_id);

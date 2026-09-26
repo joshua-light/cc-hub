@@ -38,9 +38,7 @@ impl<W: io::Write> io::Write for CountingWriter<W> {
     }
 }
 
-/// The concrete terminal type after the byte-counting writer was threaded
-/// under the backend — one alias so `run()`, `keys::handle_key`, and
-/// `effects::apply_effect` don't each spell the full generic stack.
+/// The TUI's terminal, with the byte-counting writer under the backend.
 pub(crate) type Term = Terminal<CrosstermBackend<CountingWriter<io::Stdout>>>;
 
 /// Which optional terminal modes [`enter`] managed to switch on, so [`leave`]
@@ -80,8 +78,7 @@ pub(crate) fn enter() -> io::Result<(Term, Arc<AtomicU64>, Modes)> {
     // forces every cell out again. Terminals without focus reporting ignore
     // the request; tmux forwards it only with `focus-events on`.
     let focus_events = crossterm::execute!(stdout, EnableFocusChange).is_ok();
-    // Frame-diff byte counter, drained once per draw by `run()` for the
-    // `bytes=` field of the draw trace.
+    // Drained once per draw for the `bytes=` field of the draw trace.
     let frame_bytes = Arc::new(AtomicU64::new(0));
     let backend = CrosstermBackend::new(CountingWriter::new(stdout, Arc::clone(&frame_bytes)));
     let terminal = Terminal::new(backend)?;
