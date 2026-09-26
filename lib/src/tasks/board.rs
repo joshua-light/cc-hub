@@ -5,8 +5,8 @@ use super::archive::archive_tasks;
 use super::binding::Binding;
 use super::meta::{load_board_meta, save_board_meta, BoardMeta};
 use super::store::{
-    self, read_task_state, task_dir, tasks_dir, update_task, write_task_state, TaskPriority,
-    TaskState, TaskStatus,
+    read_task_state, task_dir, tasks_dir, update_task, write_task_state, TaskPriority, TaskState,
+    TaskStatus,
 };
 
 /// In-memory snapshot of the personal board: every `~/.cc-hub/tasks/<id>/`
@@ -170,7 +170,7 @@ impl PersonalBoard {
         }
         let updated = update_task(id, |s| {
             s.status = status;
-            s.done_at = (status == TaskStatus::Done).then(store::now_unix_secs);
+            s.done_at = (status == TaskStatus::Done).then(crate::persist::now_unix_secs);
         })?;
         self.adopt(updated);
         Ok(true)

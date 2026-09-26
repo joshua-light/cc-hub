@@ -107,7 +107,7 @@ pub(crate) fn render_builds_body(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let cell_w = body.width / cols;
-    let now = crate::builds::now();
+    let now = crate::persist::now_unix_secs();
     let now_ms = crate::ui::now_ms();
     for (i, name) in app.builds.recipes.iter().enumerate() {
         let (row, col) = (i as u16 / cols, i as u16 % cols);

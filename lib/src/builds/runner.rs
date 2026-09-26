@@ -10,6 +10,7 @@
 
 use super::recipe::{self, Recipe, Values};
 use super::{append_output, hold, load, update, Build, BuildStatus, Report};
+use crate::persist::now_unix_secs;
 use std::io::{self, BufRead, BufReader};
 use std::process::{Child, ExitStatus};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -55,7 +56,7 @@ fn drive(id: &str) -> io::Result<BuildStatus> {
     let subject = git(&build.cwd, &["log", "-1", "--format=%s", from]);
     let build = update(id, |b| {
         b.status = BuildStatus::Running;
-        b.started_at = Some(super::now());
+        b.started_at = Some(now_unix_secs());
         b.phase = None;
         b.subject = subject;
     })?;
@@ -110,7 +111,7 @@ pub fn serve(id: &str) -> io::Result<()> {
         append_output(id, &line)?;
     }
     if child.wait()?.success() {
-        update(id, |b| b.served_at = Some(super::now()))?;
+        update(id, |b| b.served_at = Some(now_unix_secs()))?;
         Ok(())
     } else {
         append_output(id, "cc-hub: serve failed")?;

@@ -7,6 +7,7 @@
 //! Task ID format: `tk-<unix-nanos>`. Sortable, unique within a single host
 //! to nanosecond resolution, no extra dep.
 
+use crate::persist::now_unix_secs;
 use crate::platform::paths::cc_hub_home;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -42,13 +43,6 @@ fn new_task_id() -> String {
 pub fn short_task_id(task_id: &str) -> String {
     let take = task_id.len().saturating_sub(6);
     task_id[take..].to_string()
-}
-
-pub fn now_unix_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 /// A note or file attached to a card — pasted text, a screenshot, a URL.

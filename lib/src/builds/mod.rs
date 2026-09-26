@@ -14,6 +14,7 @@ pub mod runner;
 
 pub use recipe::Recipe;
 
+use crate::persist::now_unix_secs;
 use crate::platform::paths::cc_hub_home;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -112,7 +113,7 @@ impl Build {
             route,
             serve,
             status: BuildStatus::Queued,
-            created_at: now(),
+            created_at: now_unix_secs(),
             started_at: None,
             finished_at: None,
             exit_code: None,
@@ -148,7 +149,7 @@ impl Build {
 
     fn finish(&mut self, status: BuildStatus, error: Option<String>) {
         self.status = status;
-        self.finished_at = Some(now());
+        self.finished_at = Some(now_unix_secs());
         self.runner = None;
         self.error = error.or(self.error.take());
     }
@@ -211,13 +212,6 @@ fn build_dir(id: &str) -> io::Result<PathBuf> {
 
 pub fn output_path(id: &str) -> io::Result<PathBuf> {
     Ok(build_dir(id)?.join("output.log"))
-}
-
-pub fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 /// `bd-<unix-nanos>`: sortable, like the board's `tk-` ids.
@@ -303,7 +297,7 @@ fn reap(build: Build) -> Build {
     }
     let orphaned = match build.runner {
         Some(pid) => !alive(pid),
-        None => now() - build.created_at > 60,
+        None => now_unix_secs() - build.created_at > 60,
     };
     if !orphaned {
         return build;

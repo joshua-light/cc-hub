@@ -3,6 +3,7 @@
 //! parsing and JSON rendering; everything that mutates on-disk task state
 //! lives here.
 
+use crate::persist::now_unix_secs;
 use std::path::PathBuf;
 
 use crate::ops::OpError;
@@ -71,7 +72,7 @@ pub fn task_artifact_add(
         std::fs::create_dir_all(&dest_dir)
             .map_err(|e| OpError::Other(format!("create {}: {}", dest_dir.display(), e)))?;
 
-        let ts = store::now_unix_secs();
+        let ts = now_unix_secs();
         let dest = dest_dir.join(format!("{}-{}", ts, basename));
         std::fs::copy(&src, &dest).map_err(|e| {
             OpError::Other(format!(
@@ -89,7 +90,7 @@ pub fn task_artifact_add(
         path: stored_path.clone(),
         original: raw_path.to_string(),
         caption,
-        added_at: store::now_unix_secs(),
+        added_at: now_unix_secs(),
     };
     let mark_lead = lead;
     update_task(task_id, |s| {
@@ -136,7 +137,7 @@ pub fn task_artifact_add_text(
     // Every note shares the `note.md` basename, so a same-second double
     // paste would silently overwrite (and removal of one record would
     // delete the other's file) — probe for a free name instead.
-    let ts = store::now_unix_secs();
+    let ts = now_unix_secs();
     let mut dest = dest_dir.join(format!("{}-note.md", ts));
     let mut n = 2;
     while dest.exists() {
