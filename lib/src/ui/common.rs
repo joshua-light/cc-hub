@@ -8,6 +8,7 @@
 //! - [`Cell`], one column of a table row's right-hand cluster
 
 use crate::models;
+use crate::models::first_line_truncated;
 use crate::models::SessionState;
 use crate::tasks::store::{TaskPriority, TaskStatus};
 use crate::ui::palette::{BACKLOG_BLUE, GRAY_80, MUTED_TEXT, PURPLE, SEP_GRAY};
@@ -197,7 +198,7 @@ fn format_reset(iso: &str, fmt: &str) -> Option<String> {
 pub(crate) fn state_indicator(state: &SessionState) -> (&'static str, Color) {
     match state {
         // Static fallback; both session renderers animate Starting with the
-        // orbit spinner (see `ui::sessions::starting_frame`). Magenta keeps
+        // orbit spinner (see [`starting_frame`]). Magenta keeps
         // "booting" visually apart from the green Processing spinner.
         SessionState::Starting => ("◌", Color::Magenta),
         SessionState::Processing => ("󰒓", Color::Green),
@@ -210,6 +211,27 @@ pub(crate) fn state_indicator(state: &SessionState) -> (&'static str, Color) {
 
 pub(crate) fn state_color(state: &SessionState) -> Color {
     state_indicator(state).1
+}
+
+/// Braille spinner shown as the title indicator while a session is
+/// Processing. The frame index derives from wall-clock time, so it advances
+/// on every repaint — at least once a second from the clock tick, faster
+/// while scan events stream in. Motion is the point: a turning glyph reads
+/// as "alive" where the static gear read as ambient.
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+pub(crate) fn spinner_frame(now: u64) -> &'static str {
+    SPINNER_FRAMES[((now / 120) % SPINNER_FRAMES.len() as u64) as usize]
+}
+
+/// Single-dot orbit shown while a spawn placeholder is Starting. Same
+/// braille family as [`SPINNER_FRAMES`] but unmistakably different motion
+/// (one dot circling vs. a churning cluster), so a booting agent can't be
+/// read as one that's already processing.
+const STARTING_FRAMES: [&str; 8] = ["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"];
+
+pub(crate) fn starting_frame(now: u64) -> &'static str {
+    STARTING_FRAMES[((now / 120) % STARTING_FRAMES.len() as u64) as usize]
 }
 
 /// Snowflake marking a cold prompt cache (see
@@ -364,6 +386,51 @@ pub(crate) fn fmt_cost(c: f64) -> String {
     }
 }
 
+pub(crate) fn age(now: i64, at: i64) -> String {
+    let d = (now - at).max(0);
+    if d < 60 {
+        format!("{}s", d)
+    } else if d < 3600 {
+        format!("{}m", d / 60)
+    } else if d < 86_400 {
+        format!("{}h", d / 3600)
+    } else {
+        format!("{}d", d / 86_400)
+    }
+}
+
+/// Cut spans so the line never wraps.
+pub(crate) fn truncate_line(line: Line<'_>, width: usize) -> Line<'_> {
+    let mut used = 0;
+    let mut spans = Vec::new();
+    for span in line.spans {
+        let w = span.content.chars().count();
+        if used + w <= width {
+            used += w;
+            spans.push(span);
+        } else {
+            let room = width.saturating_sub(used);
+            if room > 1 {
+                let s: String = span.content.chars().take(room - 1).collect();
+                spans.push(Span::styled(format!("{}…", s), span.style));
+            }
+            break;
+        }
+    }
+    Line::from(spans)
+}
+
+pub(crate) fn pad(s: &str, w: usize) -> String {
+    let s = first_line_truncated(s, w);
+    let n = s.chars().count();
+    format!("{}{}", s, " ".repeat(w.saturating_sub(n)))
+}
+
+pub(crate) fn pad_left(s: &str, w: usize) -> String {
+    let n = s.chars().count();
+    format!("{}{}", " ".repeat(w.saturating_sub(n)), s)
+}
+
 /// Gap between two columns of a table row's right-hand cluster.
 pub(crate) const COL_SEP: usize = 2;
 
@@ -461,5 +528,21 @@ mod wrapped_rows_tests {
             Line::from(Span::raw("the quick brown")), // 2 rows at width 9
         ];
         assert_eq!(wrapped_total_rows(&lines, 9), 3);
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::age;
+
+    const NOW: i64 = 1_800_000_000;
+
+    #[test]
+    fn ages_are_compact() {
+        assert_eq!(age(NOW, NOW - 5), "5s");
+        assert_eq!(age(NOW, NOW - 600), "10m");
+        assert_eq!(age(NOW, NOW - 7200), "2h");
+        assert_eq!(age(NOW, NOW - 200_000), "2d");
+        assert_eq!(age(NOW, NOW + 50), "0s");
     }
 }

@@ -8,8 +8,7 @@
 use crate::app::{App, BuildForm, FormField, LogView};
 use crate::builds::{recipe, Build, BuildStatus};
 use crate::models::first_line_truncated;
-use crate::ui::agents::age;
-use crate::ui::common::{centered_fixed, centered_rect, popup_block};
+use crate::ui::common::{age, centered_fixed, centered_rect, popup_block, spinner_frame};
 use crate::ui::palette::{ACCENT_BLUE, DIM_TEXT, FAINT_TEXT, LABEL_GRAY, MUTED_TEXT, SEP_GRAY};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -51,7 +50,7 @@ pub(crate) fn space_verb(app: &App) -> Option<&'static str> {
 fn status_mark(status: BuildStatus, now_ms: u64) -> (&'static str, Color) {
     match status {
         BuildStatus::Queued => ("󰔟", Color::Yellow),
-        BuildStatus::Running => (crate::ui::sessions::spinner_frame(now_ms), Color::Green),
+        BuildStatus::Running => (spinner_frame(now_ms), Color::Green),
         BuildStatus::Succeeded => ("✓", Color::Green),
         BuildStatus::Failed => ("✗", Color::Red),
         BuildStatus::Cancelled => ("⊘", LABEL_GRAY),

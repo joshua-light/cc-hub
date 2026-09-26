@@ -21,18 +21,15 @@
 //! renderer's right-edge math does) would skew rows whose cells are blank
 //! or whose padding bottoms out at zero.
 
+use super::{render_group_header, render_no_sessions, GROUP_GAP, GROUP_HEADER_HEIGHT};
 use crate::app::App;
 use crate::models::{first_line_truncated, SessionInfo, SessionState};
 use crate::ui::common::{
-    context_window_size, ctx_color, format_elapsed, short_model, state_indicator, task_color, Cell,
-    COLD_CACHE_ICON, COL_SEP,
+    context_window_size, ctx_color, format_elapsed, short_model, spinner_frame, starting_frame,
+    state_indicator, task_color, Cell, COLD_CACHE_ICON, COL_SEP,
 };
 use crate::ui::now_ms;
 use crate::ui::palette::{CONTEXT_GRAY, ICE_BLUE, MUTED_TEXT};
-use crate::ui::sessions::{
-    render_group_header, render_no_sessions, spinner_frame, starting_frame, GROUP_GAP,
-    GROUP_HEADER_HEIGHT,
-};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -128,7 +125,7 @@ fn body_row_offsets<'a>(tasks: impl Iterator<Item = Option<&'a str>>) -> Vec<u16
     offsets
 }
 
-pub(crate) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
+pub(super) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
     if app.sessions.groups.is_empty() {
         render_no_sessions(frame, area);
         return;
