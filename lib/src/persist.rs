@@ -1,6 +1,6 @@
-//! Shared persistence helper for the JSON state files under `~/.cc-hub/`
-//! (bookmarks, …). Writes go through a tempfile + rename so a
-//! crash mid-write can't leave a torn file behind.
+//! Persistence helpers for the state files under `~/.cc-hub/`: atomic
+//! writes (tempfile, fsync, rename) so a crash mid-write can't leave a torn
+//! file, and the sidecar flock that serializes read-modify-write cycles.
 
 use serde::Serialize;
 use std::fs;

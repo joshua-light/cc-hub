@@ -55,8 +55,8 @@ fn detect() -> Chain {
     Chain { managers }
 }
 
-/// Runs each underlying manager in order until one succeeds. Gives us the
-/// "try Hyprland, fall back to xdotool" behaviour we already relied on.
+/// Runs each underlying manager in order until one succeeds, so Hyprland
+/// falls back to xdotool.
 struct Chain {
     managers: Vec<Box<dyn WindowManager>>,
 }

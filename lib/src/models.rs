@@ -1,3 +1,7 @@
+//! The session model the scanner builds and the UI renders ([`SessionInfo`],
+//! [`SessionState`], [`ProjectGroup`]), plus the formatting helpers every
+//! view shares.
+
 use crate::agent::AgentKind;
 use serde::Deserialize;
 use std::fmt;
@@ -32,9 +36,7 @@ pub fn relative_age_short(secs: u64) -> String {
 /// Canonical first-line preview: take the first line of `text` and, if it
 /// exceeds `max` characters, truncate it to a `max`-char budget ending in a
 /// single-char ellipsis (`…`). The result is always at most `max` characters
-/// wide (counting the ellipsis), so it fits a `max`-column slot. Replaces the
-/// several drifted `one_line`/`first_line_preview`/`truncate_str` copies that
-/// disagreed on the ellipsis string and the boundary math.
+/// wide (counting the ellipsis), so it fits a `max`-column slot.
 pub fn first_line_truncated(text: &str, max: usize) -> String {
     let line = text.lines().next().unwrap_or(text);
     if line.chars().count() <= max {

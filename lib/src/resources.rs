@@ -1,10 +1,17 @@
-//! Account metadata shared with the bundled broker. Never reads credentials.
+//! Subscription accounts and the resource broker's state.
+//!
+//! Accounts come from `~/.cc-hub/resources.toml`, the registry cc-hub shares
+//! with the bundled broker: each names a provider and a home directory. This
+//! module maps agents to accounts, points child processes at an account's
+//! home, and scans every account's sessions. It never reads credentials.
+
 use crate::agent::{AgentConfig, AgentKind};
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// One `[accounts.<name>]` entry in `resources.toml`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Account {
     pub provider: AgentKind,
@@ -21,6 +28,9 @@ struct Registry {
     accounts: BTreeMap<String, Account>,
 }
 
+/// Every account in the registry (`$CC_HUB_RESOURCE_CONFIG`, else
+/// `~/.cc-hub/resources.toml`), keyed by name. Empty when the file is missing
+/// or does not parse.
 pub fn accounts() -> BTreeMap<String, Account> {
     let path = std::env::var_os("CC_HUB_RESOURCE_CONFIG")
         .map(PathBuf::from)
@@ -32,6 +42,8 @@ pub fn accounts() -> BTreeMap<String, Account> {
 }
 
 impl Account {
+    /// The account's data directory: the configured `home`, else the
+    /// provider's default (`~/.claude` or `~/.codex`).
     pub fn home(&self) -> Option<PathBuf> {
         self.home
             .as_deref()
@@ -46,6 +58,10 @@ impl Account {
                 })
             })
     }
+
+    /// Strip inherited credentials, endpoints and home overrides from
+    /// `command`, then point it at this account's home. A Claude account with
+    /// `home_mode = "default"` keeps the default home.
     pub fn apply(&self, command: &mut std::process::Command) {
         for key in [
             "CLAUDE_CONFIG_DIR",
@@ -72,6 +88,8 @@ impl Account {
             }
         }
     }
+
+    /// The agent `id` that launches this account's CLI.
     pub fn agent(&self, id: &str) -> AgentConfig {
         let exe = self.executable.as_deref().unwrap_or(match self.provider {
             AgentKind::Claude => "claude",
@@ -97,6 +115,8 @@ impl Account {
     }
 }
 
+/// The account agent `id` runs under: its `[agents.<id>].account`, else the
+/// account named `id` itself.
 pub fn for_agent(id: &str) -> Option<Account> {
     let cfg = crate::config::get();
     let name = cfg
@@ -107,6 +127,8 @@ pub fn for_agent(id: &str) -> Option<Account> {
     accounts().remove(name)
 }
 
+/// The kind of the broker worker on `task`, from the broker's `state.json`.
+/// Stopped and blocked workers don't count.
 pub fn task_kind(task: &str) -> Option<String> {
     let directory = std::env::var_os("CC_HUB_RESOURCE_DIR")
         .map(PathBuf::from)
@@ -148,9 +170,15 @@ pub fn name_session(worker: &serde_json::Value) -> std::io::Result<()> {
 }
 
 thread_local! { static CLAUDE_HOME: RefCell<Option<PathBuf>> = const { RefCell::new(None) }; }
+
+/// The Claude home the scanner on this thread is walking, when
+/// [`with_claude_home`] set one. `None` means the default home.
 pub fn claude_scan_home() -> Option<PathBuf> {
     CLAUDE_HOME.with(|p| p.borrow().clone())
 }
+
+/// Run `f` with [`claude_scan_home`] set to `home` on this thread, restoring
+/// the previous value afterwards, even on panic.
 pub fn with_claude_home<T>(home: PathBuf, f: impl FnOnce() -> T) -> T {
     struct Restore(Option<PathBuf>);
     impl Drop for Restore {
@@ -163,6 +191,9 @@ pub fn with_claude_home<T>(home: PathBuf, f: impl FnOnce() -> T) -> T {
     let _restore = Restore(CLAUDE_HOME.with(|p| p.replace(Some(home))));
     f()
 }
+
+/// Every Codex sessions directory to scan: the default one plus each Codex
+/// account's, without duplicates.
 pub fn codex_roots() -> Vec<PathBuf> {
     let mut roots: Vec<_> = crate::platform::paths::codex_sessions_dir()
         .into_iter()
@@ -179,6 +210,9 @@ pub fn codex_roots() -> Vec<PathBuf> {
     }
     roots
 }
+
+/// Set each session's `agent_id` to the account whose home holds its
+/// transcript. Sessions outside every account home keep their id.
 pub fn label_sessions(sessions: &mut [crate::models::SessionInfo]) {
     let accounts = accounts();
     for session in sessions {
@@ -195,6 +229,7 @@ pub fn label_sessions(sessions: &mut [crate::models::SessionInfo]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     #[cfg(unix)]
     fn a_worker_session_is_named_by_its_starter_else_by_its_card() {
@@ -223,6 +258,7 @@ mod tests {
             assert_eq!(crate::title::load()["sid-w"], "Polish: The PR");
         });
     }
+
     #[test]
     fn default_claude_removes_override_instead_of_relocating_state() {
         let account: Account = toml::from_str("provider='claude'\nhome_mode='default'").unwrap();
@@ -233,6 +269,7 @@ mod tests {
             .get_envs()
             .any(|(key, value)| key == "CLAUDE_CONFIG_DIR" && value.is_none()));
     }
+
     #[test]
     fn scan_scope_restores_on_nested_calls() {
         with_claude_home(PathBuf::from("/one"), || {

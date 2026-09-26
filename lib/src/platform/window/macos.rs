@@ -11,10 +11,11 @@
 //! 2. **Accessibility API** uses that pid to build the app's
 //!    `AXUIElement`, enumerate its `kAXWindowsAttribute`, and find the
 //!    `AXUIElement` whose `_AXUIElementGetWindow` matches the
-//!    CGWindowID from step 1. We then set the app's
-//!    `kAXFrontmostAttribute` to true (brings the app forward) and
-//!    perform `kAXRaiseAction` on the window (raises it above its
-//!    siblings).
+//!    CGWindowID from step 1, then performs `kAXRaiseAction` on it
+//!    (raises it above its siblings).
+//!
+//! 3. **AppleScript** (`tell application "<name>" to activate`) brings the
+//!    owning app to the front; see [`activate_via_osascript`].
 //!
 //! `_AXUIElementGetWindow` is a private symbol exported by
 //! HIServices/ApplicationServices. It's been stable since 10.5 and is

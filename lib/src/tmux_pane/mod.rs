@@ -165,7 +165,7 @@ impl TmuxPaneView {
             .unwrap_or_default()
     }
 
-    /// Attach like [`spawn`], but take ownership of `session_name`: Drop runs
+    /// Attach like [`Self::spawn`], but take ownership of `session_name`: Drop runs
     /// `tmux kill-session`, and a construction failure kills the session before
     /// returning so the caller does not leak it.
     pub fn spawn_owned(session_name: &str, rows: u16, cols: u16) -> std::io::Result<Self> {

@@ -2,7 +2,7 @@
 //!
 //! Two flavours of lookup:
 //!
-//! - **Detached-tmux agents** (what cc-hub spawns today): the Claude process
+//! - **Detached-tmux agents** (what cc-hub spawns): the Claude process
 //!   tree lives under the tmux server (reparented to init), so walking up
 //!   from the Claude pid never reaches a window. We ask tmux for the
 //!   session's *client* pids — those are the `tmux attach` processes, which
@@ -10,8 +10,8 @@
 //!   Close kills the tmux session (which ends the agent and detaches any
 //!   clients, closing their windows).
 //!
-//! - **Non-tmux agents** (e.g. sessions launched before the tmux refactor):
-//!   fall back to walking up from the Claude pid itself.
+//! - **Non-tmux agents** (e.g. started by hand in a terminal): fall back to
+//!   walking up from the Claude pid itself.
 
 use crate::platform::{process, window};
 use crate::send;

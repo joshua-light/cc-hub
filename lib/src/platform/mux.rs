@@ -394,7 +394,7 @@ mod tests {
     }
 
     /// Real `tmux capture-pane -p` output from a freshly-spawned
-    /// `cc-hub-new` session, captured during the e2e debugging session.
+    /// `cc-hub-new` session.
     /// The input row is `❯ ` — the only `❯` in the pane.
     const COLD_READY_PANE: &str = concat!(
         "╭─── Claude Code v2.1.119 ─────────────────────────────────────────────────────╮\n",

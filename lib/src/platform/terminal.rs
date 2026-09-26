@@ -3,7 +3,7 @@
 //! Each supported emulator plugs in as a [`Launcher`]. [`pick`] returns the
 //! first one that's available, honouring `$TERMINAL` when it matches a known
 //! emulator. Adding a new emulator is a single struct + entry in
-//! [`ALL_LAUNCHERS`].
+//! [`all_launchers`].
 
 use std::process::Command;
 
@@ -89,9 +89,8 @@ impl Launcher for Ghostty {
     }
 }
 
-/// Priority order matches the legacy hardcoded list — kitty/foot first because
-/// those are the most common on the maintainers' boxes, alacritty next, then
-/// the less-frequent options.
+/// Priority order: kitty and foot first because those are the most common on
+/// the maintainers' boxes, alacritty next, then the less-frequent options.
 fn all_launchers() -> [Box<dyn Launcher>; 5] {
     [
         Box::new(Kitty),

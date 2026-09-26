@@ -36,7 +36,7 @@ fn ensure_path_trusted(cwd: &str) -> io::Result<()> {
 
 fn ensure_path_trusted_at(cwd: &str, config_path: PathBuf) -> io::Result<()> {
     // Nothing to trust-mark until claude has written its config at least once
-    // (the original read short-circuits on NotFound). Bailing here also avoids
+    // (the read below also returns early on NotFound). Bailing here also avoids
     // creating a sidecar lock in a config dir that may not exist yet.
     if !config_path.exists() {
         return Ok(());

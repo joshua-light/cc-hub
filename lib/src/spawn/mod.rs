@@ -137,9 +137,9 @@ fn unique_session_name(prefix: &str) -> String {
 mod tests {
     use super::stalled_spawn_message;
 
-    // The real failure this was built for: a pane blocked at oh-my-zsh's
-    // update prompt. The prompt line must surface in the status message so
-    // the user can see *why* the agent never appeared.
+    // A pane blocked at oh-my-zsh's update prompt: the prompt line must
+    // surface in the status message so the user can see *why* the agent
+    // never appeared.
     #[test]
     fn stalled_message_surfaces_last_pane_line() {
         let pane = "\n[oh-my-zsh] Would you like to update? [Y/n]\n\n";

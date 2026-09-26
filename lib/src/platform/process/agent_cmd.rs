@@ -23,16 +23,13 @@ pub(super) fn matches_pi_command(name: &str, cmd: &str) -> bool {
     cmd.contains("pi-coding-agent") || cmd.contains("@mariozechner/pi-coding-agent")
 }
 
-/// Pure detector for `codex` CLI invocations from `comm` + `cmdline`. Both
-/// inputs must be lowercased. Exact-basename match on the first cmdline
-/// argument avoids substring false positives (e.g. a `codex-something` binary),
-/// while still catching a Homebrew/npm shim path like `/opt/homebrew/bin/codex`.
-/// Detect the `codex` CLI by the OS-reported executable name (comm on Linux,
-/// the `proc_pidpath` basename on macOS, the image name on Windows) — NOT the
-/// command line. A joined command line loses argv[0] boundaries, and several
-/// ChatGPT-desktop-app binaries live under spaced paths (`Codex Framework
-/// .framework`, `Codex Computer Use.app`) whose basename would mis-extract onto
-/// "codex"; the OS name splits those correctly ("SkyComputerUseService", etc.).
+/// Detect the `codex` CLI by the lowercased OS-reported executable name (comm
+/// on Linux, the `proc_pidpath` basename on macOS, the image name on Windows),
+/// not the command line. A joined command line loses `argv[0]` boundaries,
+/// and several ChatGPT-desktop-app binaries live under spaced paths (`Codex
+/// Framework.framework`, `Codex Computer Use.app`) whose basename would
+/// mis-extract onto "codex"; the OS name splits those correctly
+/// ("SkyComputerUseService", etc.).
 pub(super) fn matches_codex_command(name: &str) -> bool {
     name == "codex" || name == "codex.exe"
 }
@@ -178,7 +175,7 @@ mod tests {
 
     #[test]
     fn pi_detector_rejects_pipewire() {
-        // Regression: `/usr/bin/pipewire` once substring-matched `/bin/pi`.
+        // `/usr/bin/pipewire` must not substring-match `/bin/pi`.
         assert!(!matches_pi_command("pipewire", "/usr/bin/pipewire"));
         assert!(!matches_pi_command(
             "pipewire-pulse",
@@ -193,7 +190,7 @@ mod tests {
         assert!(matches_codex_command("codex"));
         assert!(matches_codex_command("codex.exe"));
         // Spaced-path desktop-app binaries resolve to their real basenames and
-        // must NOT match (the bug the cmdline heuristic caused).
+        // must NOT match.
         assert!(!matches_codex_command("skycomputeruseservice"));
         assert!(!matches_codex_command("codex (service)"));
         assert!(!matches_codex_command("browser_crashpad_handler"));

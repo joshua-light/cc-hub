@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 /// Cache directory for cc-hub. Falls back to `/tmp` when `dirs::cache_dir`
-/// can't resolve a home — matches the previous log-path behaviour.
+/// can't resolve a home.
 pub fn cache_dir() -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))

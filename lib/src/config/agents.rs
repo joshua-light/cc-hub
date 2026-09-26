@@ -102,7 +102,7 @@ impl Config {
 pub struct SpawnConfig {
     /// The command cc-hub invokes for the default Claude backend. Resolved
     /// through the user's interactive shell so aliases / functions in their rc
-    /// file expand — same contract as before config existed.
+    /// file expand.
     pub command: String,
 }
 

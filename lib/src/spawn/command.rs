@@ -10,9 +10,9 @@ use std::io;
 
 /// Prefix `cmd` with an environment-variable assignment the target shell can
 /// parse. On Unix the command runs through a POSIX shell (`$SHELL -ic`, see
-/// [`crate::platform::mux::spawn_detached`]); on Windows it lands in pwsh. `VAR=value cmd` is
-/// POSIX-only — pwsh reads it as an argument, not an assignment, so the agent
-/// never starts.
+/// [`crate::platform::mux::spawn_detached`]); on Windows it lands in pwsh.
+/// `VAR=value cmd` is POSIX-only — pwsh reads it as an argument, not an
+/// assignment, so the agent never starts.
 ///
 /// Unix keeps the exact `VAR='value' cmd` form (POSIX single-quote escaping via
 /// [`shell_quote`]); Windows emits `$env:VAR = 'value'; cmd` with pwsh
@@ -407,7 +407,7 @@ mod tests {
 
     #[test]
     fn prefix_env_unix_is_posix_and_byte_identical() {
-        // Must match the pre-fix `VAR='value' cmd` form exactly.
+        // Unix keeps the POSIX `VAR='value' cmd` form.
         assert_eq!(
             prefix_env(
                 "CLAUDE_CONFIG_DIR",
