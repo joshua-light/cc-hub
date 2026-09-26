@@ -3,7 +3,7 @@
 //! Each supported emulator plugs in as a [`Launcher`]. [`pick`] returns the
 //! first one that's available, honouring `$TERMINAL` when it matches a known
 //! emulator. Adding a new emulator is a single struct + entry in
-//! [`all_launchers`].
+//! `all_launchers`.
 
 use std::process::Command;
 

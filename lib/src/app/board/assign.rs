@@ -107,7 +107,7 @@ impl App {
 
     /// Picker chose `cwd` for the pending assignment: spawn the default
     /// agent there, hand it the task text wrapped in plan-first framing
-    /// ([`planning_prompt`] — inline when the agent supports a spawn-time
+    /// (`planning_prompt` — inline when the agent supports a spawn-time
     /// prompt, otherwise queued for dispatch once the session reports Idle —
     /// Claude ignores spawn-time prompts), record the binding, and move the
     /// card to Planning. Space on the card later approves the plan and

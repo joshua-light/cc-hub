@@ -1,7 +1,7 @@
 //! Embed a tmux session as a live, interactive pane inside cc-hub.
 //!
-//! - [`osc52`]: extracts clipboard escapes the vt100 parser would drop.
-//! - [`encode`]: encodes keys and mouse buttons as xterm bytes.
+//! - `osc52`: extracts clipboard escapes the vt100 parser would drop.
+//! - `encode`: encodes keys and mouse buttons as xterm bytes.
 
 use crossterm::event::{KeyEvent, KeyModifiers, MouseEvent};
 use encode::{encode_key, mouse_button_code};

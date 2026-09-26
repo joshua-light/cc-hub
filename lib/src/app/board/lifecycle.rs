@@ -5,7 +5,7 @@ use crate::app::App;
 use crate::tasks::store::{TaskPriority, TaskState, TaskStatus};
 
 /// What Space on a Planning card sends to the bound agent. Kept terse: the
-/// plan-first framing in [`planning_prompt`](super::assign::planning_prompt) already told the agent what
+/// plan-first framing in `planning_prompt` already told the agent what
 /// "proceed" means.
 pub const PROCEED_PROMPT: &str = "Proceed with the implementation.";
 

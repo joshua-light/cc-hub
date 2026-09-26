@@ -2,10 +2,10 @@
 //! Read-only: nothing here writes to an agent's transcript or status files.
 //!
 //! - [`scanner`] — the live-grid scan; merges Claude, Pi and Codex sessions.
-//! - [`claude`] — Claude session discovery.
+//! - `claude` — Claude session discovery.
 //! - [`pi`] — Pi session discovery.
 //! - [`codex`] — Codex session discovery.
-//! - [`common`] — helpers shared by the three scanners.
+//! - `common` — helpers shared by the three scanners.
 //! - [`pi_bridge`] — Pi extension heartbeat files.
 //! - [`dir_cache`] — per-directory listing cache for the orphan/inactive walks.
 //! - [`index`] — the session archive: every transcript on disk, however old.

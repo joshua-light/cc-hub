@@ -2,7 +2,7 @@
 //! a build forward.
 //!
 //! It waits for its turn, since a recipe builds one thing at a time, oldest
-//! first. Then it waits for the recipe's [`hold`](super::hold), runs the build
+//! first. Then it waits for the recipe's [`hold`], runs the build
 //! command and writes every line it prints to `output.log`, folding
 //! [`Report`]s into the record. When asked to cancel it runs the recipe's own
 //! cancel and ends the command if that did not. A build that succeeded and

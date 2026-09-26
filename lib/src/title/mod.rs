@@ -6,8 +6,8 @@
 //! one comparison — otherwise every title generation would materialize as a
 //! spurious "Inactive" session in the grid.
 //!
-//! - [`run`] — subprocess plumbing: deadline loop, tty detach, shutdown.
-//! - [`resolve`] — resolves the spawn command through the login shell.
+//! - `run` — subprocess plumbing: deadline loop, tty detach, shutdown.
+//! - `resolve` — resolves the spawn command through the login shell.
 
 mod resolve;
 mod run;
@@ -81,7 +81,7 @@ fn save(titles: &HashMap<String, String>) -> std::io::Result<()> {
     )
 }
 
-/// Atomically insert `title` under `sid`. Holds [`WRITE_LOCK`] across the
+/// Atomically insert `title` under `sid`. Holds `WRITE_LOCK` across the
 /// load/insert/save cycle so two concurrent titlers can't clobber each
 /// other's entries.
 pub fn persist_title(sid: &str, title: &str) -> std::io::Result<()> {

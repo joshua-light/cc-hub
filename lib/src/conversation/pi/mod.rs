@@ -1,7 +1,7 @@
 //! Pi (`~/.pi/agent/sessions/<project>/*.jsonl`) transcript parsing.
 //!
-//! - [`tools`] — tool-call detection, the current tool, and tool-use counts.
-//! - [`messages`] — user/assistant message text and token totals.
+//! - `tools` — tool-call detection, the current tool, and tool-use counts.
+//! - `messages` — user/assistant message text and token totals.
 
 mod messages;
 #[cfg(test)]

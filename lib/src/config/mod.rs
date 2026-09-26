@@ -3,8 +3,8 @@
 //! to [`Default`], so this is a pure knob layer — removing the file yields
 //! the same behaviour as shipped defaults.
 //!
-//! - [`agents`]: `[spawn]`, `[agents.<id>]` and the resolved agent list.
-//! - [`sections`]: every other `[section]`.
+//! - `agents`: `[spawn]`, `[agents.<id>]` and the resolved agent list.
+//! - `sections`: every other `[section]`.
 
 use serde::de::IgnoredAny;
 use serde::Deserialize;

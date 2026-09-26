@@ -4,8 +4,8 @@
 //! focus, and the agent survives an accidentally-closed terminal. Users
 //! attach on demand via the hub UI.
 //!
-//! - [`command`]: builds the agent's shell command line.
-//! - [`trust`]: marks the cwd trusted in Claude's `.claude.json`.
+//! - `command`: builds the agent's shell command line.
+//! - `trust`: marks the cwd trusted in Claude's `.claude.json`.
 
 use crate::agent::AgentKind;
 use crate::config;

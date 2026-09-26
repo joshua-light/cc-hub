@@ -8,7 +8,7 @@ const MAX_TAGS: usize = 6;
 /// Parse a free-text tag line (from the inline editor) into the normalized set
 /// stored on a task. Splits on whitespace *and* commas, strips a leading `#`,
 /// lowercases, trims, drops empties, and dedupes (keeping first-seen order).
-/// Each tag is capped at [`MAX_TAG_LEN`] chars and the set at [`MAX_TAGS`], so
+/// Each tag is capped at `MAX_TAG_LEN` chars and the set at `MAX_TAGS`, so
 /// the card's border badge always has a sane bound. Editing replaces the whole
 /// set, so this is the single chokepoint for what a task's tags can be.
 pub fn parse_tags(input: &str) -> Vec<String> {
