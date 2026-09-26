@@ -40,7 +40,7 @@ struct Args {
     positional: Vec<String>,
 }
 
-fn parse(args: &[String]) -> Result<Args, CliError> {
+fn parse(args: &[String]) -> Args {
     let mut kv = BTreeMap::new();
     let mut positional = Vec::new();
     let mut i = 0;
@@ -65,7 +65,7 @@ fn parse(args: &[String]) -> Result<Args, CliError> {
         }
         i += 1;
     }
-    Ok(Args { kv, positional })
+    Args { kv, positional }
 }
 
 impl Args {
@@ -103,6 +103,17 @@ fn resolve_dir(a: &Args) -> Result<(String, PathBuf), CliError> {
     Ok((name, dir))
 }
 
+/// The event text from `--event`, else the contents of `--event-file`.
+fn event_payload(a: &Args) -> Result<Option<String>, CliError> {
+    match (a.get("event"), a.get("event-file")) {
+        (Some(e), _) => Ok(Some(e.to_string())),
+        (None, Some(f)) => std::fs::read_to_string(f)
+            .map(Some)
+            .map_err(|e| CliError::Usage(format!("{}: {}", f, e))),
+        (None, None) => Ok(None),
+    }
+}
+
 fn snapshot_json(a: &AgentSnapshot) -> serde_json::Value {
     let st = &a.state;
     serde_json::json!({
@@ -126,7 +137,7 @@ fn snapshot_json(a: &AgentSnapshot) -> serde_json::Value {
 }
 
 fn list(args: &[String]) -> Result<(), CliError> {
-    let a = parse(args)?;
+    let a = parse(args);
     let agents = harness::scan();
     if a.flag("json") {
         print_json(&serde_json::json!({
@@ -172,7 +183,7 @@ fn list(args: &[String]) -> Result<(), CliError> {
 }
 
 fn show(args: &[String]) -> Result<(), CliError> {
-    let a = parse(args)?;
+    let a = parse(args);
     let (_, dir) = resolve_dir(&a)?;
     let snap = harness::snapshot(&dir);
     let mut v = snapshot_json(&snap);
@@ -184,7 +195,7 @@ fn show(args: &[String]) -> Result<(), CliError> {
 }
 
 fn new(args: &[String]) -> Result<(), CliError> {
-    let a = parse(args)?;
+    let a = parse(args);
     let name = a
         .positional
         .first()
@@ -194,7 +205,7 @@ fn new(args: &[String]) -> Result<(), CliError> {
         std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::InvalidInput => {
             CliError::Usage(e.to_string())
         }
-        _ => CliError::Other(e.to_string()),
+        _ => CliError::other(e),
     })?;
     print_json(&serde_json::json!({
         "ok": true,
@@ -215,7 +226,7 @@ fn new(args: &[String]) -> Result<(), CliError> {
 /// One tick, synchronously, for iterating on a spec. Ignores `enabled`,
 /// `paused` and halts; honours budgets unless `--force`.
 fn once(args: &[String]) -> Result<(), CliError> {
-    let a = parse(args)?;
+    let a = parse(args);
     let (name, dir) = resolve_dir(&a)?;
     let spec = spec::load(&dir).map_err(CliError::Usage)?;
     let state = harness::load_state(&dir);
@@ -229,13 +240,7 @@ fn once(args: &[String]) -> Result<(), CliError> {
             });
         }
     }
-    let payload = match (a.get("event"), a.get("event-file")) {
-        (Some(e), _) => Some(e.to_string()),
-        (None, Some(f)) => {
-            Some(std::fs::read_to_string(f).map_err(|e| CliError::Usage(format!("{}: {}", f, e)))?)
-        }
-        (None, None) => None,
-    };
+    let payload = event_payload(&a)?;
     let event = payload.map(|p| Event::synthetic("once", p, "once"));
     eprintln!(
         "[{}] running one tick (model={}, tools={})…",
@@ -243,8 +248,7 @@ fn once(args: &[String]) -> Result<(), CliError> {
         spec.run.model.as_deref().unwrap_or("default"),
         spec.run.tools.join(" ")
     );
-    let (tick, state) =
-        harness::tick_once(&spec, event.as_ref()).map_err(|e| CliError::Other(e.to_string()))?;
+    let (tick, state) = harness::tick_once(&spec, event.as_ref()).map_err(CliError::other)?;
     print_json(&serde_json::json!({
         "ok": tick.ok,
         "agent": name,
@@ -272,16 +276,10 @@ fn once(args: &[String]) -> Result<(), CliError> {
 }
 
 fn poke(args: &[String]) -> Result<(), CliError> {
-    let a = parse(args)?;
+    let a = parse(args);
     let (name, dir) = resolve_dir(&a)?;
-    let payload = match (a.get("event"), a.get("event-file")) {
-        (Some(e), _) => e.to_string(),
-        (None, Some(f)) => {
-            std::fs::read_to_string(f).map_err(|e| CliError::Usage(format!("{}: {}", f, e)))?
-        }
-        (None, None) => String::new(),
-    };
-    let id = harness::poke(&dir, &payload).map_err(|e| CliError::Other(e.to_string()))?;
+    let payload = event_payload(&a)?.unwrap_or_default();
+    let id = harness::poke(&dir, &payload).map_err(CliError::other)?;
     print_json(
         &serde_json::json!({ "ok": true, "agent": name, "event": id, "inbox": harness::inbox_path(&dir) }),
     );
@@ -289,9 +287,9 @@ fn poke(args: &[String]) -> Result<(), CliError> {
 }
 
 fn set_paused(args: &[String], paused: bool) -> Result<(), CliError> {
-    let a = parse(args)?;
+    let a = parse(args);
     let (name, dir) = resolve_dir(&a)?;
-    let st = harness::set_paused(&dir, paused).map_err(|e| CliError::Other(e.to_string()))?;
+    let st = harness::set_paused(&dir, paused).map_err(CliError::other)?;
     print_json(
         &serde_json::json!({ "ok": true, "agent": name, "paused": st.paused, "stopped_reason": st.stopped_reason }),
     );
@@ -299,9 +297,9 @@ fn set_paused(args: &[String], paused: bool) -> Result<(), CliError> {
 }
 
 fn reset(args: &[String]) -> Result<(), CliError> {
-    let a = parse(args)?;
+    let a = parse(args);
     let (name, dir) = resolve_dir(&a)?;
-    harness::reset(&dir).map_err(|e| CliError::Other(e.to_string()))?;
+    harness::reset(&dir).map_err(CliError::other)?;
     print_json(&serde_json::json!({ "ok": true, "agent": name }));
     Ok(())
 }
@@ -309,7 +307,7 @@ fn reset(args: &[String]) -> Result<(), CliError> {
 /// `cc-hub agent note --text "..." [--level warn] [--ref URL]`. Run by
 /// agents; the name comes from `CC_HUB_AGENT`.
 fn note(args: &[String]) -> Result<(), CliError> {
-    let a = parse(args)?;
+    let a = parse(args);
     let (name, dir) = resolve_dir(&a)?;
     let text = a
         .get("text")
@@ -328,7 +326,7 @@ fn note(args: &[String]) -> Result<(), CliError> {
         r#ref: a.get("ref").map(str::to_string),
         tick,
     };
-    harness::append_note(&dir, &n).map_err(|e| CliError::Other(e.to_string()))?;
+    harness::append_note(&dir, &n).map_err(CliError::other)?;
     print_json(&serde_json::json!({ "ok": true, "agent": name, "tick": tick }));
     Ok(())
 }
@@ -336,21 +334,17 @@ fn note(args: &[String]) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn s(v: &[&str]) -> Vec<String> {
-        v.iter().map(|x| x.to_string()).collect()
-    }
+    use crate::test_util::argv;
 
     #[test]
     fn parse_mixes_positionals_and_flags() {
-        let a = parse(&s(&[
+        let a = parse(&argv(&[
             "bb-prs",
             "--event",
             "hi there",
             "--json",
             "--level=warn",
-        ]))
-        .unwrap();
+        ]));
         assert_eq!(a.positional, vec!["bb-prs"]);
         assert_eq!(a.get("event"), Some("hi there"));
         assert!(a.flag("json"));
@@ -359,7 +353,7 @@ mod tests {
 
     #[test]
     fn note_requires_text() {
-        let err = note(&s(&["--agent", "nope"])).unwrap_err();
+        let err = note(&argv(&["--agent", "nope"])).unwrap_err();
         assert!(matches!(err, CliError::NotFound(_)), "{err:?}");
     }
 }
