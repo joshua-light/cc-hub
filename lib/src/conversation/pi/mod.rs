@@ -9,6 +9,7 @@ mod test_util;
 mod tools;
 
 use crate::conversation::classify;
+use crate::conversation::io::read_tail_until;
 use crate::conversation::parse_timestamp_ms;
 use crate::models::SessionState;
 use serde_json::Value;
@@ -19,30 +20,11 @@ pub use messages::{
 };
 pub use tools::{count_tool_uses_in_reader, extract_current_tool};
 
+/// The Pi analogue of [`crate::conversation::read_jsonl_tail_for_state`]:
+/// grow the tail until it holds an assistant message.
 pub fn read_jsonl_tail_for_state(path: &Path) -> Vec<Value> {
-    const INITIAL: u64 = 64 * 1024;
-    const MAX: u64 = 4 * 1024 * 1024;
-
-    let total_len = match std::fs::metadata(path) {
-        Ok(m) => m.len(),
-        Err(_) => return Vec::new(),
-    };
-
-    let mut window = INITIAL;
-    loop {
-        let entries = crate::conversation::read_jsonl_tail(path, window);
-        let has_assistant = entries.iter().any(|e| {
-            e.get("type").and_then(|t| t.as_str()) == Some("message")
-                && e.get("message")
-                    .and_then(|m| m.get("role"))
-                    .and_then(|r| r.as_str())
-                    == Some("assistant")
-        });
-        if has_assistant || window >= total_len || window >= MAX {
-            return entries;
-        }
-        window = window.saturating_mul(2);
-    }
+    read_tail_until(path, |e| message_role(e) == Some("assistant"))
+        .map_or_else(Vec::new, |t| t.entries)
 }
 
 fn message_role(entry: &Value) -> Option<&str> {

@@ -18,6 +18,37 @@ use std::sync::{Mutex, OnceLock};
 /// large `tool_result` entries: the spawning assistant `tool_use` entries
 /// scroll out of view, leaving `extract_state` with no meaningful user/
 /// assistant entry to judge from.
+pub fn read_jsonl_tail_for_state(path: &Path) -> Vec<Value> {
+    let Some(tail) = read_tail_until(path, |e| {
+        e.get("type").and_then(|t| t.as_str()) == Some("assistant")
+    }) else {
+        return Vec::new();
+    };
+    debug!(
+        "read_jsonl_tail_for_state: window={}B entries={} has_assistant={} total={}B",
+        tail.window,
+        tail.entries.len(),
+        tail.found,
+        tail.total_len
+    );
+    tail.entries
+}
+
+/// Where [`read_tail_until`] stopped.
+pub(super) struct Tail {
+    pub(super) entries: Vec<Value>,
+    /// Bytes read from the end of the file.
+    pub(super) window: u64,
+    /// Whether some entry matched the predicate.
+    pub(super) found: bool,
+    /// File size in bytes.
+    pub(super) total_len: u64,
+}
+
+/// Read a growing tail of `path` — 64 KiB, doubling up to 4 MiB — until an
+/// entry satisfies `stop_at` or the whole file is read. `None` when the file
+/// can't be stat'ed. Each dialect keys `stop_at` on the entry its state machine
+/// needs to see.
 ///
 /// NOTE: each doubling seeks to `len - window` and re-reads the whole (larger)
 /// window from scratch, so a file that needs several doublings re-reads the
@@ -28,30 +59,23 @@ use std::sync::{Mutex, OnceLock};
 /// first 64 KiB window anyway.
 ///
 /// [`derive_state_cached`]: super::derive_state_cached
-pub fn read_jsonl_tail_for_state(path: &Path) -> Vec<Value> {
+pub(super) fn read_tail_until(path: &Path, stop_at: impl Fn(&Value) -> bool) -> Option<Tail> {
     const INITIAL: u64 = 64 * 1024;
     const MAX: u64 = 4 * 1024 * 1024;
 
-    let total_len = match std::fs::metadata(path) {
-        Ok(m) => m.len(),
-        Err(_) => return Vec::new(),
-    };
+    let total_len = std::fs::metadata(path).ok()?.len();
 
     let mut window = INITIAL;
     loop {
         let entries = read_jsonl_tail(path, window);
-        let has_assistant = entries
-            .iter()
-            .any(|e| e.get("type").and_then(|t| t.as_str()) == Some("assistant"));
-        if has_assistant || window >= total_len || window >= MAX {
-            debug!(
-                "read_jsonl_tail_for_state: window={}B entries={} has_assistant={} total={}B",
+        let found = entries.iter().any(&stop_at);
+        if found || window >= total_len || window >= MAX {
+            return Some(Tail {
+                entries,
                 window,
-                entries.len(),
-                has_assistant,
-                total_len
-            );
-            return entries;
+                found,
+                total_len,
+            });
         }
         window = window.saturating_mul(2);
     }

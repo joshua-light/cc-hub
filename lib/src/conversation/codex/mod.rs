@@ -19,6 +19,7 @@ mod test_util;
 mod tools;
 
 use crate::conversation::classify;
+use crate::conversation::io::read_tail_until;
 use crate::conversation::parse_timestamp_ms;
 use crate::models::SessionState;
 use serde_json::Value;
@@ -144,31 +145,10 @@ pub fn extract_state(entries: &[Value]) -> SessionState {
 /// [`crate::conversation::read_jsonl_tail_for_state`], which keys on a Claude
 /// `type=="assistant"` line that codex transcripts never contain.
 pub fn read_jsonl_tail_for_state(path: &Path) -> Vec<Value> {
-    const INITIAL: u64 = 64 * 1024;
-    const MAX: u64 = 4 * 1024 * 1024;
-
-    let total_len = match std::fs::metadata(path) {
-        Ok(m) => m.len(),
-        Err(_) => return Vec::new(),
-    };
-
-    let mut window = INITIAL;
-    loop {
-        let entries = crate::conversation::read_jsonl_tail(path, window);
-        let has_role = entries.iter().any(|e| CodexDialect.role_present(e));
-        if has_role || window >= total_len || window >= MAX {
-            return entries;
-        }
-        window = window.saturating_mul(2);
-    }
-}
-
-impl CodexDialect {
-    /// Whether `entry` carries a conversational role (used to size the tail
-    /// window). Mirrors [`classify::TranscriptDialect::role`] returning `Some`.
-    fn role_present(&self, entry: &Value) -> bool {
-        classify::TranscriptDialect::role(self, entry).is_some()
-    }
+    read_tail_until(path, |e| {
+        classify::TranscriptDialect::role(&CodexDialect, e).is_some()
+    })
+    .map_or_else(Vec::new, |t| t.entries)
 }
 
 // --- SessionInfo field extractors --------------------------------------
