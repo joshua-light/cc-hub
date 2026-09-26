@@ -17,7 +17,7 @@ full. The other verbs document themselves: `cc-hub help <verb>`.
 - `resource` passes the broker's line through: `{"ok": true, "result": …}`
   or `{"ok": false, "error": "…"}`, exit 1 on any failure. `resource hook`
   prints only a note for the agent, when it has one.
-- `--help` or `-h` after any verb prints its help.
+- `--help` or `-h` after any verb except `wake` prints its help.
 
 ## Verbs
 

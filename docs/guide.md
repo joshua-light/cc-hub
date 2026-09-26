@@ -81,14 +81,18 @@ can start work with `cc-hub open <url>`. There are three links.
   live session for the card in the same folder gets the prompt instead
   (`"reused": true`).
 
-A task link naming a `role` or another folder starts a fresh session and
-closes the card's previous one once the command has reported. A `role` link
-is a hand-over between the `task` skill's sessions. It needs at least one
-note on the card, because the notes are the next session's brief.
+A task link naming a `role` is a hand-over between the `task` skill's
+sessions: it starts a fresh session and, once the command has reported,
+closes the card's previous session in that folder. It needs at least one
+note on the card, because the notes are the next session's brief. A link
+naming another folder without a role starts a new session there and leaves
+the old one running.
 
-With accounts configured in `resources.toml`, fix links and hand-overs start
-through the resource broker, so they run on an account with room and move
-when it runs out ([resource-management.md](resource-management.md)).
+With accounts configured in `resources.toml` and no `--agent`, fix links and
+task links whose kind is known (`&kind=`, or an earlier broker worker on the
+card) start through the resource broker. They run on an account with room
+and move when it runs out. The broker also treats a change of folder as a
+hand-over ([resource-management.md](resource-management.md)).
 
 ## Persistent agents
 

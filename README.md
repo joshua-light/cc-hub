@@ -25,7 +25,7 @@ cc-hub also has JSON CLI verbs (`board`, `open`, `agent`, `build`, `resource`,
 
 | | Linux / macOS | Windows |
 |---|---|---|
-| Rust | 1.86+ | 1.86+ |
+| Rust | 1.88+ | 1.88+ |
 | Multiplexer | [`tmux`](https://github.com/tmux/tmux) on `PATH` | [`psmux`](https://github.com/psmux/psmux), with its `tmux.exe` on `PATH` |
 | Agents | any of `claude`, `pi`, `codex` on `PATH` | `claude.exe` on `PATH` |
 | Launch command | `cc-hub-new` in your interactive shell | `cc-hub-new` in PowerShell `$PROFILE` |
@@ -84,7 +84,7 @@ when an account runs out, set up the resource broker
 
 ## Platform notes
 
-- **Windows** has no window focus or close; psmux ignores the
+- **Windows** has no window focus; psmux ignores the
   `list-clients -F` format cc-hub would need. Use the embedded pane (`f` on a
   session, `o` for a shell) instead of an external window. psmux also takes
   no command in `new-session`, so cc-hub types `cc-hub-new` into the new

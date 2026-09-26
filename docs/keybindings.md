@@ -24,7 +24,7 @@ Sessions. Builds shows once a recipe exists. Agents shows once
 |---|---|
 | `h` `l` / `←` `→` | Previous or next column |
 | `j` `k` / `↓` `↑` | Next or previous card |
-| `H` / `L` | Move the card one column left or right |
+| `H` / `L` | Move the card one column left or right. Skips Planning: `L` on a Planning card does not approve the plan (`Space` does); `H` from Done reopens into Review |
 | `a` / `n` | Add a task |
 | `r` | Rename the card |
 | `t` | Edit its tags |
@@ -39,7 +39,7 @@ Sessions. Builds shows once a recipe exists. Agents shows once
 | `p` | Attach the clipboard text as a note |
 | `/` | Filter cards by text or `#tag` |
 | `Esc` | Clear the filter |
-| `x` | Delete the card (archived) |
+| `x` | Delete the card (archived); its agent session keeps running |
 | `c` | Clear the Done column (archived) |
 | `u` | Undo the last delete or clear |
 
@@ -62,7 +62,7 @@ Sessions. Builds shows once a recipe exists. Agents shows once
 | `r` | Rename the session |
 | `L` | Link the session to a task, or unlink it |
 | `o` | Shell pane in this session's folder |
-| `x` | Close the session's window (asks first) |
+| `x` | End the session (asks first): kills its tmux session, else closes its window and terminates the agent |
 | `Space` | Acknowledge: mark the session idle |
 | `m` | Go to Metrics |
 

@@ -10,9 +10,9 @@ configuration is `~/.cc-hub/resources.toml`;
 - **Profiles** pair an exact model and effort with the accounts that may run
   it.
 - **Routing** picks profiles by task kind and role. The `task` skill has two
-  roles, `implementation` and `verification`. The broker refuses a role no
-  route covers, so a kind worked by one session simply has no
-  `verification` route.
+  roles, `implementation` and `verification`. A kind with no route of its
+  own for a role falls back to `[routing.default.<role>]`; the broker
+  refuses a role only when neither exists.
 - **Hosts** are where commands run (`main`, `wh`). **Resources** are things
   on them only one session may use at a time, such as a checkout or a phone.
   Routing ignores resources: a session claims what its work needs.
@@ -20,9 +20,9 @@ configuration is `~/.cc-hub/resources.toml`;
 ## One session per task
 
 A task has one worker at a time. `cc-hub resource start` returns the live
-worker when one exists in the same role. When the live worker has another
-role, `start` is a hand-over: it launches the new worker, and the next
-supervisor pass stops the old one. The card's notes carry the context
+worker when one exists in the same role and folder. When the live worker has
+another role or folder, `start` is a hand-over: it stops the old worker and
+launches the new one. The card's notes carry the context
 between them.
 
 ```sh
@@ -38,8 +38,9 @@ else `Task: <card text>`. A Claude session is named before launch, a Codex
 session once its id is known. cc-hub never overwrites a name, so a session
 resumed on another account keeps a name you gave it.
 
-A `cc-hub://task?…&role=…` link is the same hand-over from the board: with
-accounts configured, `cc-hub open` starts the new role through the broker.
+A `cc-hub://task?…` link reaches the broker the same way: with accounts
+configured, no `--agent`, and a known kind (`&kind=`, or an earlier broker
+worker on the card), `cc-hub open` starts it through `resource start`.
 
 ## Resources
 

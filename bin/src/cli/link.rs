@@ -4,11 +4,11 @@
 //! so a browser button can start a hub session — and the verb a persistent
 //! agent calls to hand a board card to a real session. A task link whose
 //! card already has a live session in that directory reaches that session
-//! (`"reused": true`) rather than starting a second one — unless the link
-//! names a `role` or another directory: that is a hand-over, which starts a
-//! fresh session and closes the card's old one after this command has
-//! reported. With accounts configured the broker applies the same rule and
-//! stops the old worker itself. A fix link files a board card first and is
+//! (`"reused": true`) rather than starting a second one. A link naming a
+//! `role` is a hand-over: it starts a fresh session and closes the card's old
+//! one in that directory after this command has reported. With accounts
+//! configured the broker also treats a change of directory as a hand-over
+//! and stops the old worker itself. A fix link files a board card first and is
 //! then worked like a task link's card: through the broker when accounts are
 //! configured, so the fix runs on whichever subscription has room, and the
 //! card moves to Running once its worker is bound. It is also handy by hand:
