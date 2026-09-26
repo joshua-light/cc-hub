@@ -15,6 +15,10 @@
 //! - [`codex`] — Codex rollout parsing.
 //! - [`tool_count`] — incremental tool-use counts across every dialect.
 
+use crate::agent::AgentKind;
+use crate::models::ConversationMessage;
+use serde_json::Value;
+
 mod cache;
 pub(crate) mod classify;
 pub mod codex;
@@ -41,3 +45,25 @@ pub(crate) use render::{NO_CONTENT, NO_TEXT_CONTENT, THINKING_MARKER, TOOL_MARKE
 pub use state::{
     extract_context_tokens, extract_current_tool, extract_state, is_currently_thinking, CurrentTool,
 };
+
+/// [`extract_messages`] in `kind`'s transcript dialect.
+pub(crate) fn extract_messages_for(
+    kind: AgentKind,
+    entries: &[Value],
+    count: usize,
+) -> Vec<ConversationMessage> {
+    match kind {
+        AgentKind::Claude => extract_messages(entries, count),
+        AgentKind::Pi => pi::extract_messages(entries, count),
+        AgentKind::Codex => codex::extract_messages(entries, count),
+    }
+}
+
+/// [`extract_token_totals`] in `kind`'s transcript dialect.
+pub(crate) fn extract_token_totals_for(kind: AgentKind, entries: &[Value]) -> (u64, u64) {
+    match kind {
+        AgentKind::Claude => extract_token_totals(entries),
+        AgentKind::Pi => pi::extract_token_totals(entries),
+        AgentKind::Codex => codex::extract_token_totals(entries),
+    }
+}

@@ -115,23 +115,17 @@ pub fn refresh_process_liveness(sessions: &mut [SessionInfo]) -> bool {
 
 pub fn load_detail(session_id: &str, sessions: &[SessionInfo]) -> Option<SessionDetail> {
     let info = sessions.iter().find(|s| s.session_id == session_id)?;
-    match info.agent_kind {
-        AgentKind::Claude => {
-            let jsonl_path = info.jsonl_path.as_ref()?;
-            let entries = conversation::read_jsonl_tail(jsonl_path, 65536);
-            let recent_messages = conversation::extract_messages(&entries, 15);
-            let (total_input_tokens, total_output_tokens) =
-                conversation::extract_token_totals(&entries);
-            Some(SessionDetail {
-                info: info.clone(),
-                recent_messages,
-                total_input_tokens,
-                total_output_tokens,
-            })
-        }
-        AgentKind::Pi => pi::load_detail(info),
-        AgentKind::Codex => codex::load_detail(info),
-    }
+    let jsonl_path = info.jsonl_path.as_ref()?;
+    let entries = conversation::read_jsonl_tail(jsonl_path, 65536);
+    let recent_messages = conversation::extract_messages_for(info.agent_kind, &entries, 15);
+    let (total_input_tokens, total_output_tokens) =
+        conversation::extract_token_totals_for(info.agent_kind, &entries);
+    Some(SessionDetail {
+        info: info.clone(),
+        recent_messages,
+        total_input_tokens,
+        total_output_tokens,
+    })
 }
 
 #[cfg(test)]

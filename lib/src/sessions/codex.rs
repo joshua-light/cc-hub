@@ -11,7 +11,7 @@
 use crate::agent::{AgentConfig, AgentKind};
 use crate::config;
 use crate::conversation;
-use crate::models::{SessionDetail, SessionInfo, SessionState};
+use crate::models::{SessionInfo, SessionState};
 use crate::platform::process;
 use crate::send;
 use serde_json::Value;
@@ -409,20 +409,6 @@ pub fn scan(agents: &[AgentConfig], titles: &HashMap<String, String>) -> Vec<Ses
         }
     }
     sessions
-}
-
-pub fn load_detail(info: &SessionInfo) -> Option<SessionDetail> {
-    let path = info.jsonl_path.as_ref()?;
-    let entries = conversation::read_jsonl_tail(path, 65536);
-    let recent_messages = conversation::codex::extract_messages(&entries, 15);
-    let (total_input_tokens, total_output_tokens) =
-        conversation::codex::extract_token_totals(&entries);
-    Some(SessionDetail {
-        info: info.clone(),
-        recent_messages,
-        total_input_tokens,
-        total_output_tokens,
-    })
 }
 
 #[cfg(all(test, unix))]
