@@ -60,21 +60,14 @@ pub(crate) fn open(args: &[String]) -> Result<(), CliError> {
         if let Link::Fix(fix) = &link {
             let target = ops::link::target(&link, None)?;
             let card = ops::link::file_fix(fix)?;
-            let started = super::resource::resource(&[
-                "start".into(),
-                "--task".into(),
+            let started = broker_start(
                 card.to_string(),
-                "--kind".into(),
                 fix.kind.clone().unwrap_or_else(|| "basic".into()),
-                "--role".into(),
                 "implementation".into(),
-                "--cwd".into(),
                 target.cwd.to_string_lossy().into(),
-                "--prompt".into(),
                 fix.prompt_for(&card),
-                "--title".into(),
                 target.title,
-            ]);
+            );
             if started.is_ok() {
                 ops::link::start_card(card.as_str())?;
             }
@@ -87,24 +80,17 @@ pub(crate) fn open(args: &[String]) -> Result<(), CliError> {
                 .or_else(|| cc_hub_lib::resources::task_kind(task.id.as_str()))
             {
                 let target = ops::link::target(&link, None)?;
-                let started = super::resource::resource(&[
-                    "start".into(),
-                    "--task".into(),
+                let started = broker_start(
                     task.id.to_string(),
-                    "--kind".into(),
                     kind,
-                    "--role".into(),
                     task.role.clone().unwrap_or_else(|| "implementation".into()),
-                    "--cwd".into(),
                     target.cwd.to_string_lossy().into(),
-                    "--prompt".into(),
                     format!(
                         "Read ~/.claude/skills/task/SKILL.md and follow it for:\n{}",
                         target.prompt
                     ),
-                    "--title".into(),
                     target.title,
-                ]);
+                );
                 if started.is_ok() {
                     close_superseded();
                 }
@@ -139,13 +125,36 @@ pub(crate) fn open(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Start a worker for `task` through the resource broker.
+fn broker_start(
+    task: String,
+    kind: String,
+    role: String,
+    cwd: String,
+    prompt: String,
+    title: String,
+) -> Result<(), CliError> {
+    super::resource::resource(&[
+        "start".into(),
+        "--task".into(),
+        task,
+        "--kind".into(),
+        kind,
+        "--role".into(),
+        role,
+        "--cwd".into(),
+        cwd,
+        "--prompt".into(),
+        prompt,
+        "--title".into(),
+        title,
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use crate::cli::dispatch;
-
-    fn argv(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|s| s.to_string()).collect()
-    }
+    use crate::test_util::argv;
 
     #[test]
     fn open_without_url_is_a_usage_error() {

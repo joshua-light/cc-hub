@@ -90,11 +90,7 @@ pub(super) fn handle(app: &mut App, key: KeyEvent) {
             None => app.set_status("no folder selected".into()),
         },
         KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
-            let bookmarks_mode = app
-                .folder_picker
-                .as_ref()
-                .is_some_and(|p| p.mode == PickerMode::Bookmarks);
-            if bookmarks_mode {
+            if in_bookmarks(app) {
                 pick_from_folder_picker(app);
             } else if let Some(p) = app.folder_picker.as_mut() {
                 p.descend();
@@ -112,11 +108,7 @@ pub(super) fn handle(app: &mut App, key: KeyEvent) {
             // Bookmarks mode has no meaningful "current dir" —
             // the entries are absolute paths from disk — so
             // collapse `.` into the same action as space/Enter.
-            let bookmarks_mode = app
-                .folder_picker
-                .as_ref()
-                .is_some_and(|p| p.mode == PickerMode::Bookmarks);
-            if bookmarks_mode {
+            if in_bookmarks(app) {
                 pick_from_folder_picker(app);
             } else {
                 let cwd = app
@@ -130,22 +122,9 @@ pub(super) fn handle(app: &mut App, key: KeyEvent) {
                 }
             }
         }
-        KeyCode::Char('c') => {
-            if !app
-                .folder_picker
-                .as_ref()
-                .is_some_and(|p| p.mode == PickerMode::Bookmarks)
-            {
-                app.enter_gh_create_input(false);
-            }
-        }
-        KeyCode::Char('C') => {
-            if !app
-                .folder_picker
-                .as_ref()
-                .is_some_and(|p| p.mode == PickerMode::Bookmarks)
-            {
-                app.enter_gh_create_input(true);
+        KeyCode::Char(c @ ('c' | 'C')) => {
+            if !in_bookmarks(app) {
+                app.enter_gh_create_input(c == 'C');
             }
         }
         _ => {}
@@ -207,6 +186,12 @@ pub(super) fn handle_gh_create(app: &mut App, key: KeyEvent, scan_tx: &mpsc::Sen
         }
         _ => {}
     }
+}
+
+fn in_bookmarks(app: &App) -> bool {
+    app.folder_picker
+        .as_ref()
+        .is_some_and(|p| p.mode == PickerMode::Bookmarks)
 }
 
 /// Act on a folder-picker pick at `cwd`: assign the pending board task

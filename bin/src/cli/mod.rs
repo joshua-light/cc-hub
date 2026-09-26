@@ -18,8 +18,6 @@ mod flags;
 mod help;
 mod link;
 mod resource;
-#[cfg(test)]
-mod test_util;
 mod usage;
 mod wake;
 

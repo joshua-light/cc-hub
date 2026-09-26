@@ -64,6 +64,11 @@ pub(super) enum CliError {
 }
 
 impl CliError {
+    /// Wrap any displayable error as [`CliError::Other`].
+    pub(super) fn other(e: impl std::fmt::Display) -> Self {
+        CliError::Other(e.to_string())
+    }
+
     /// Stable machine-readable category for the JSON error contract.
     fn kind(&self) -> &'static str {
         match self {

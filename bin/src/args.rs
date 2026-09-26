@@ -48,9 +48,10 @@ fn expand_tilde(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::argv;
 
     fn with_clean_env<F: FnOnce()>(f: F) {
-        let _guard = crate::ENV_TEST_LOCK
+        let _guard = crate::test_util::ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let prev_cfg = std::env::var_os("CLAUDE_CONFIG_DIR");
@@ -65,10 +66,6 @@ mod tests {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
         }
-    }
-
-    fn argv(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]

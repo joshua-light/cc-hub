@@ -175,11 +175,7 @@ pub(crate) fn spawn_session_scanner(
             tokio::select! {
                 _ = fallback.tick() => {
                     if latest_sessions.is_empty() {
-                        let sessions = tokio::task::spawn_blocking(scanner::scan_sessions)
-                            .await
-                            .unwrap_or_default();
-                        latest_sessions = sessions.clone();
-                        let _ = session_scan_tx.send(ScanMsg::SessionList(sessions)).await;
+                        full_scan(&session_scan_tx, &mut latest_sessions).await;
                     } else if scanner::refresh_process_liveness(&mut latest_sessions) {
                         let _ = session_scan_tx
                             .send(ScanMsg::SessionList(latest_sessions.clone()))
@@ -187,18 +183,10 @@ pub(crate) fn spawn_session_scanner(
                     }
                 }
                 _ = full_reconcile.tick() => {
-                    let sessions = tokio::task::spawn_blocking(scanner::scan_sessions)
-                        .await
-                        .unwrap_or_default();
-                    latest_sessions = sessions.clone();
-                    let _ = session_scan_tx.send(ScanMsg::SessionList(sessions)).await;
+                    full_scan(&session_scan_tx, &mut latest_sessions).await;
                 }
                 Some(()) = session_invalidate_rx.recv() => {
-                    let sessions = tokio::task::spawn_blocking(scanner::scan_sessions)
-                        .await
-                        .unwrap_or_default();
-                    latest_sessions = sessions.clone();
-                    let _ = session_scan_tx.send(ScanMsg::SessionList(sessions)).await;
+                    full_scan(&session_scan_tx, &mut latest_sessions).await;
                 }
                 Some(session_id) = detail_rx.recv() => {
                     let sessions = latest_sessions.clone();
@@ -215,6 +203,16 @@ pub(crate) fn spawn_session_scanner(
             }
         }
     });
+}
+
+/// Rescan every session, keep the result as the scanner's latest snapshot,
+/// and publish it.
+async fn full_scan(tx: &mpsc::Sender<ScanMsg>, latest: &mut Vec<models::SessionInfo>) {
+    let sessions = tokio::task::spawn_blocking(scanner::scan_sessions)
+        .await
+        .unwrap_or_default();
+    *latest = sessions.clone();
+    let _ = tx.send(ScanMsg::SessionList(sessions)).await;
 }
 
 /// Refresh per-task usage stats every 30s.

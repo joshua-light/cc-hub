@@ -201,12 +201,8 @@ fn parse_priority(s: &str) -> Result<TaskPriority, CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::test_util::with_tempdir_home;
+    use crate::test_util::{argv, with_tempdir_home};
     use cc_hub_lib::tasks::store::TaskStatus;
-
-    fn argv(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|s| s.to_string()).collect()
-    }
 
     #[test]
     fn add_mints_a_todo_card_with_its_metadata() {

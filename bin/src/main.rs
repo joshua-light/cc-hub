@@ -10,6 +10,8 @@ mod keys;
 mod logging;
 mod scan_msg;
 mod term;
+#[cfg(test)]
+mod test_util;
 mod titles;
 mod workers;
 
@@ -63,11 +65,3 @@ fn run_no_tui() -> io::Result<()> {
     println!("— {} sessions —", sessions.len());
     Ok(())
 }
-
-/// `HOME` and `CLAUDE_CONFIG_DIR` are process-global, so every test that mutates
-/// them — wherever it lives in this binary — must serialize on this one lock.
-/// A per-module lock let `cli`'s HOME-redirecting tests race the env-mutating
-/// tests here, poisoning the lock and cascading `PoisonError` under
-/// `cargo test --workspace`.
-#[cfg(test)]
-pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
