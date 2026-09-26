@@ -27,11 +27,24 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     // the data in the page cache: with delayed allocation a power loss can
     // persist the rename while the bytes are still buffered, leaving a
     // zero-length file — the exact torn write the rename is meant to prevent.
-    // Mirrors the atomic writer in spawn.rs::ensure_path_trusted.
     {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
     }
     fs::rename(&tmp, path)
+}
+
+/// Open the sidecar lock file at `path`, creating it if needed, and block
+/// until this process holds an exclusive flock on it. The lock lasts as long
+/// as the returned `File`, so bind it to a named variable, not `_`.
+pub fn lock_exclusive(path: &Path) -> io::Result<fs::File> {
+    use fs2::FileExt;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)?;
+    lock.lock_exclusive()?;
+    Ok(lock)
 }

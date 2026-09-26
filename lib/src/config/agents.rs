@@ -62,7 +62,7 @@ impl Config {
     /// character. A hotkey must be exactly one character; malformed or
     /// duplicate bindings are dropped with a warning (first agent id in sort
     /// order keeps a contested key) so one typo can't disable the tab.
-    pub fn agent_hotkeys(&self) -> BTreeMap<char, &str> {
+    fn agent_hotkeys(&self) -> BTreeMap<char, &str> {
         let mut out: BTreeMap<char, &str> = BTreeMap::new();
         for (id, cfg) in &self.agents {
             let Some(raw) = cfg.hotkey.as_deref() else {

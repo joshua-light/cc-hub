@@ -19,7 +19,7 @@ pub use agents::*;
 pub use sections::*;
 
 pub fn config_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".cc-hub").join("config.toml"))
+    crate::platform::paths::cc_hub_home().map(|h| h.join("config.toml"))
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

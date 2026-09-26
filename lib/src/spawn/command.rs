@@ -30,7 +30,6 @@ fn prefix_env(var: &str, value: &str, cmd: &str, windows: bool) -> String {
 
 pub(super) fn build_agent_command(
     agent: &AgentConfig,
-    cwd: &str,
     tmux_name: &str,
     target: Option<SessionTarget>,
     initial_prompt: Option<&str>,
@@ -220,7 +219,6 @@ pub(super) fn build_agent_command(
         }
         cmd = format!("{prefix} /bin/sh -c {}", shell_quote(&cmd));
     }
-    let _ = cwd;
     Ok(cmd)
 }
 
@@ -240,7 +238,6 @@ mod tests {
         };
         let cmd = build_agent_command(
             &agent,
-            "/tmp",
             "cchub-1-2",
             None,
             None,
@@ -253,8 +250,7 @@ mod tests {
             "got: {}",
             cmd
         );
-        let cmd =
-            build_agent_command(&agent, "/tmp", "cchub-1-2", None, None, None, false).unwrap();
+        let cmd = build_agent_command(&agent, "cchub-1-2", None, None, None, false).unwrap();
         assert!(!cmd.contains("--model"), "got: {}", cmd);
     }
 
@@ -267,16 +263,8 @@ mod tests {
             use_bridge: false,
             models: Vec::new(),
         };
-        let cmd = build_agent_command(
-            &agent,
-            "/tmp",
-            "cchub-1-2",
-            None,
-            None,
-            Some("gpt-5.6"),
-            false,
-        )
-        .unwrap();
+        let cmd =
+            build_agent_command(&agent, "cchub-1-2", None, None, Some("gpt-5.6"), false).unwrap();
         assert!(cmd.contains("--model 'gpt-5.6'"), "got: {}", cmd);
     }
 
@@ -292,7 +280,6 @@ mod tests {
         };
         let cmd = build_agent_command(
             &agent,
-            "/tmp",
             "cchub-1-2",
             None,
             Some("do the thing"),
@@ -317,7 +304,6 @@ mod tests {
         };
         let cmd = build_agent_command(
             &agent,
-            "/tmp",
             "cchub-1-2",
             Some(super::SessionTarget::Resume("sid-1".into())),
             Some("pick up where you left off"),
@@ -342,7 +328,6 @@ mod tests {
         };
         let cmd = build_agent_command(
             &agent,
-            "/tmp",
             "cchub-1-2",
             Some(super::SessionTarget::Fresh("0000-fresh-uuid".into())),
             None,
@@ -367,7 +352,6 @@ mod tests {
         };
         let err = build_agent_command(
             &agent,
-            "/tmp",
             "cchub-1-2",
             Some(super::SessionTarget::Fresh("0000-fresh-uuid".into())),
             None,
@@ -390,7 +374,6 @@ mod tests {
         // A resumed session restores its own model, so `-m` must NOT be added.
         let cmd = build_agent_command(
             &agent,
-            "/tmp",
             "cchub-1-2",
             Some(super::SessionTarget::Resume("019f60ca-uuid".into())),
             None,
@@ -412,7 +395,6 @@ mod tests {
         };
         let err = build_agent_command(
             &agent,
-            "/tmp",
             "cchub-1-2",
             Some(super::SessionTarget::ResumeFile("/x/s.jsonl".into())),
             None,

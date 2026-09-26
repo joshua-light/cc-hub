@@ -159,7 +159,7 @@ pub struct SessionInfo {
 /// Anthropic's prompt cache expires after about an hour of silence, so a
 /// session quiet for longer re-ingests its whole context on the next turn
 /// anyway — a full restart costs nothing extra at that point.
-pub const CACHE_COLD_AFTER_MS: u64 = 60 * 60 * 1000;
+const CACHE_COLD_AFTER_MS: u64 = 60 * 60 * 1000;
 
 impl SessionInfo {
     pub fn needs_attention(&self) -> bool {

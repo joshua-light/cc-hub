@@ -7,7 +7,7 @@
 //! - [`command`]: builds the agent's shell command line.
 //! - [`trust`]: marks the cwd trusted in Claude's `.claude.json`.
 
-use crate::agent::{AgentConfig, AgentKind};
+use crate::agent::AgentKind;
 use crate::config;
 use crate::platform::mux;
 #[cfg(not(windows))]
@@ -22,7 +22,6 @@ use std::path::PathBuf;
 #[cfg(not(windows))]
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
-use trust::{ensure_path_trusted, ensure_path_trusted_at};
 
 mod command;
 mod trust;
@@ -52,55 +51,15 @@ pub fn spawn_agent_session(
     let agent = config::get()
         .agent(agent_id)
         .ok_or_else(|| io::Error::other(format!("unknown agent id: {}", agent_id)))?;
-    spawn_agent_session_with_config(&agent, cwd, target, initial_prompt, model, readonly_tools)
-}
-
-pub fn spawn_claude_session(cwd: &str, resume_id: Option<&str>) -> io::Result<String> {
-    spawn_agent_session(
-        "claude",
-        cwd,
-        resume_id.map(|sid| SessionTarget::Resume(sid.to_string())),
-        None,
-        None,
-        false,
-    )
-}
-
-pub fn spawn_agent_session_with_config(
-    agent: &AgentConfig,
-    cwd: &str,
-    target: Option<SessionTarget>,
-    initial_prompt: Option<&str>,
-    model: Option<&str>,
-    readonly_tools: bool,
-) -> io::Result<String> {
     let name = unique_session_name("cchub");
-    let cmd = build_agent_command(
-        agent,
-        cwd,
-        &name,
-        target,
-        initial_prompt,
-        model,
-        readonly_tools,
-    )?;
+    let cmd = build_agent_command(&agent, &name, target, initial_prompt, model, readonly_tools)?;
     if agent.kind == AgentKind::Claude {
-        if let Some(account) = crate::resources::for_agent(&agent.id) {
-            let path = if account.home_mode.as_deref() == Some("default") {
-                dirs::home_dir().map(|h| h.join(".claude.json"))
-            } else {
-                account.home().map(|h| h.join(".claude.json"))
-            };
-            if let Some(path) = path {
-                ensure_path_trusted_at(cwd, path)?;
-            }
-        } else {
-            ensure_path_trusted(cwd)?;
-        }
+        trust::ensure_trusted_for(&agent.id, cwd)?;
     }
     mux::spawn_detached(&name, cwd, Some(&cmd))?;
     Ok(name)
 }
+
 /// Post-mortem for a spawn watchdog that expired: the detached session either
 /// exited during startup (rc error, missing alias) or is stuck before the
 /// agent ran — e.g. a shell-rc prompt waiting for input nobody can type into

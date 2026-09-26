@@ -24,7 +24,7 @@ struct Registry {
 pub fn accounts() -> BTreeMap<String, Account> {
     let path = std::env::var_os("CC_HUB_RESOURCE_CONFIG")
         .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".cc-hub/resources.toml")));
+        .or_else(|| crate::platform::paths::cc_hub_home().map(|h| h.join("resources.toml")));
     path.and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| toml::from_str::<Registry>(&s).ok())
         .unwrap_or_default()

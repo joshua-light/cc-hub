@@ -3,10 +3,26 @@
 
 use crate::platform::paths;
 use std::io;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
-pub(super) fn ensure_path_trusted(cwd: &str) -> io::Result<()> {
+/// Mark `cwd` trusted in the `.claude.json` that `agent_id`'s account reads.
+pub(super) fn ensure_trusted_for(agent_id: &str, cwd: &str) -> io::Result<()> {
+    if let Some(account) = crate::resources::for_agent(agent_id) {
+        let path = if account.home_mode.as_deref() == Some("default") {
+            dirs::home_dir().map(|h| h.join(".claude.json"))
+        } else {
+            account.home().map(|h| h.join(".claude.json"))
+        };
+        if let Some(path) = path {
+            ensure_path_trusted_at(cwd, path)?;
+        }
+    } else {
+        ensure_path_trusted(cwd)?;
+    }
+    Ok(())
+}
+
+fn ensure_path_trusted(cwd: &str) -> io::Result<()> {
     // Must target the SAME `.claude.json` the spawned `claude` will read — i.e.
     // the one under CLAUDE_CONFIG_DIR when set, not always `~/.claude.json`.
     // Marking the wrong file leaves the real config untrusted, so claude blocks
@@ -18,7 +34,7 @@ pub(super) fn ensure_path_trusted(cwd: &str) -> io::Result<()> {
     ensure_path_trusted_at(cwd, config_path)
 }
 
-pub(super) fn ensure_path_trusted_at(cwd: &str, config_path: PathBuf) -> io::Result<()> {
+fn ensure_path_trusted_at(cwd: &str, config_path: PathBuf) -> io::Result<()> {
     // Nothing to trust-mark until claude has written its config at least once
     // (the original read short-circuits on NotFound). Bailing here also avoids
     // creating a sidecar lock in a config dir that may not exist yet.
@@ -33,17 +49,11 @@ pub(super) fn ensure_path_trusted_at(cwd: &str, config_path: PathBuf) -> io::Res
     // across a replace. Residual limitation: the running `claude` process does
     // NOT take this lock, so it only prevents cc-hub-vs-cc-hub lost updates and
     // narrows — does not close — the window against an external writer.
-    use fs2::FileExt;
     let mut lock_path = config_path.clone().into_os_string();
     lock_path.push(".cc-hub.lock");
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(PathBuf::from(lock_path))?;
-    lock.lock_exclusive()?;
+    let _lock = crate::persist::lock_exclusive(Path::new(&lock_path))?;
     // Read AFTER taking the lock so the mutation applies to fresh state, not a
-    // snapshot another cc-hub writer has since superseded. `lock` stays live
+    // snapshot another cc-hub writer has since superseded. `_lock` stays live
     // to the end of the function; Drop releases the flock after the rename.
     let canon = std::fs::canonicalize(cwd).unwrap_or_else(|_| Path::new(cwd).to_path_buf());
     let data = match std::fs::read_to_string(&config_path) {
@@ -90,13 +100,7 @@ pub(super) fn ensure_path_trusted_at(cwd: &str, config_path: PathBuf) -> io::Res
     );
     let body = serde_json::to_string_pretty(&root)
         .map_err(|e| io::Error::other(format!("serialize {}: {}", config_path.display(), e)))?;
-    let tmp = config_path.with_extension(format!("tmp.{}", std::process::id()));
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(body.as_bytes())?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, &config_path)?;
+    crate::persist::write_atomic(&config_path, body.as_bytes())?;
     log::info!(
         "marked {} trusted in {} before spawning claude",
         canon.display(),

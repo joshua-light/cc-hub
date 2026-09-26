@@ -61,13 +61,6 @@ pub fn claude_config_json() -> Option<PathBuf> {
     }
 }
 
-/// Path to Claude's OAuth credentials file, which lives inside the data dir.
-/// (On macOS the token is usually in the Keychain instead, so this may be
-/// absent — callers treat that as "no token".)
-pub fn claude_credentials_file() -> Option<PathBuf> {
-    claude_home().map(|d| d.join(".credentials.json"))
-}
-
 /// Pi's user data directory (`~/.pi/agent`). None when home is unresolvable.
 pub fn pi_home() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".pi").join("agent"))
@@ -143,10 +136,6 @@ mod tests {
             assert_eq!(claude_home(), Some(base.clone()));
             // .claude.json lives INSIDE the config dir when overridden.
             assert_eq!(claude_config_json(), Some(base.join(".claude.json")));
-            assert_eq!(
-                claude_credentials_file(),
-                Some(base.join(".credentials.json"))
-            );
         });
     }
 

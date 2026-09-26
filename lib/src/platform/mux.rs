@@ -328,7 +328,7 @@ pub fn pane_ready_for_input(session: &str) -> bool {
 
 /// Pure inspector — pulled out so it's unit-testable against captured
 /// fixtures. See [`pane_ready_for_input`].
-pub fn pane_content_shows_empty_input(pane: &str) -> bool {
+fn pane_content_shows_empty_input(pane: &str) -> bool {
     if pane.is_empty() {
         return false;
     }
@@ -340,6 +340,42 @@ pub fn pane_content_shows_empty_input(pane: &str) -> bool {
         // want to declare "ready" for paste.
         trimmed == "❯"
     })
+}
+
+/// Best-effort: log and swallow failures, since a missing mouse option is
+/// a degraded-experience issue, not a blocker.
+pub fn enable_mouse(session: &str) {
+    if let Err(e) = run(
+        &["set-option", "-t", session, "mouse", "on"],
+        "set-option mouse",
+    ) {
+        warn!("enable_mouse {}: {}", session, e);
+    }
+}
+
+/// argv for attaching to `session`. Used by [`crate::tmux_pane`] when it
+/// spawns a portable-pty child.
+pub fn attach_argv(session: &str) -> Vec<String> {
+    vec![MUX_BIN.into(), "attach".into(), "-t".into(), session.into()]
+}
+
+fn run(args: &[&str], label: &str) -> io::Result<()> {
+    let out = Command::new(MUX_BIN).args(args).output()?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    error!("{} {} failed: {}", MUX_BIN, label, stderr);
+    Err(io::Error::other(format!(
+        "{} {} failed: {}",
+        MUX_BIN,
+        label,
+        if stderr.is_empty() {
+            out.status.to_string()
+        } else {
+            stderr
+        }
+    )))
 }
 
 #[cfg(test)]
@@ -415,40 +451,4 @@ mod tests {
     fn empty_pane_is_not_ready() {
         assert!(!pane_content_shows_empty_input(""));
     }
-}
-
-/// Best-effort: log and swallow failures, since a missing mouse option is
-/// a degraded-experience issue, not a blocker.
-pub fn enable_mouse(session: &str) {
-    if let Err(e) = run(
-        &["set-option", "-t", session, "mouse", "on"],
-        "set-option mouse",
-    ) {
-        warn!("enable_mouse {}: {}", session, e);
-    }
-}
-
-/// argv for attaching to `session`. Used by [`crate::tmux_pane`] when it
-/// spawns a portable-pty child.
-pub fn attach_argv(session: &str) -> Vec<String> {
-    vec![MUX_BIN.into(), "attach".into(), "-t".into(), session.into()]
-}
-
-fn run(args: &[&str], label: &str) -> io::Result<()> {
-    let out = Command::new(MUX_BIN).args(args).output()?;
-    if out.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-    error!("{} {} failed: {}", MUX_BIN, label, stderr);
-    Err(io::Error::other(format!(
-        "{} {} failed: {}",
-        MUX_BIN,
-        label,
-        if stderr.is_empty() {
-            out.status.to_string()
-        } else {
-            stderr
-        }
-    )))
 }

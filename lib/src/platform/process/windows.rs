@@ -91,20 +91,10 @@ pub fn terminate(pid: u32) -> bool {
 }
 
 pub fn list_pids() -> Vec<u32> {
-    unsafe {
-        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if snap == 0 as HANDLE || snap as isize == -1 {
-            return Vec::new();
-        }
-        let mut out = Vec::new();
-        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
-        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-        let mut ok = Process32FirstW(snap, &mut entry);
-        while ok != FALSE {
-            out.push(entry.th32ProcessID);
-            ok = Process32NextW(snap, &mut entry);
-        }
-        CloseHandle(snap);
-        out
-    }
+    let mut out = Vec::new();
+    with_entries(|e| {
+        out.push(e.th32ProcessID);
+        None::<()>
+    });
+    out
 }

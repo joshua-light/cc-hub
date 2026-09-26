@@ -247,14 +247,8 @@ pub fn load(id: &str) -> io::Result<Build> {
 /// Read, mutate and write one build under its lock, so the runner's reports
 /// and a cancel from the TUI never lose each other.
 pub fn update<F: FnOnce(&mut Build)>(id: &str, f: F) -> io::Result<Build> {
-    use fs2::FileExt;
     let dir = build_dir(id)?;
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(dir.join("build.lock"))?;
-    lock.lock_exclusive()?;
+    let _lock = crate::persist::lock_exclusive(&dir.join("build.lock"))?;
     let mut build = load(id)?;
     f(&mut build);
     write(&build)?;
