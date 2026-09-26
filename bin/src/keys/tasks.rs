@@ -98,7 +98,7 @@ pub(super) fn handle(app: &mut App, key: KeyEvent) -> bool {
         (View::TaskInfo, KeyCode::Char('o')) => {
             match app.selected_task_attachment().map(|a| a.path.clone()) {
                 None => app.set_status("no attachment to open".into()),
-                Some(path) => match crate::open_path_detached(&path) {
+                Some(path) => match crate::effects::open_path_detached(&path) {
                     Ok(()) => app.set_status(format!("opening {}", path)),
                     Err(e) => app.set_status(format!("open failed: {}", e)),
                 },
