@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use crate::ops::OpError;
-use crate::task_store::{self, Artifact, TaskState, TaskStatus};
+use crate::tasks::store::{self, Artifact, TaskState, TaskStatus};
 
 fn looks_like_url(s: &str) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
@@ -16,7 +16,7 @@ fn update_task<F>(task_id: &str, f: F) -> Result<TaskState, OpError>
 where
     F: FnOnce(&mut TaskState),
 {
-    task_store::update_task(task_id, f).map_err(|e| OpError::Other(format!("persist state: {}", e)))
+    store::update_task(task_id, f).map_err(|e| OpError::Other(format!("persist state: {}", e)))
 }
 
 /// The Tasks board's attach action: copy a file (or record a URL) into the
@@ -31,7 +31,7 @@ pub fn task_artifact_add(
 ) -> Result<TaskState, OpError> {
     // Confirm the task exists before doing any filesystem work, so we don't
     // copy files into a directory that points at a nonexistent task.
-    let _ = task_store::read_task_state(task_id)
+    let _ = store::read_task_state(task_id)
         .map_err(|e| OpError::Other(format!("load state: {}", e)))?;
 
     let (kind, stored_path) = if looks_like_url(raw_path) {
@@ -58,13 +58,13 @@ pub fn task_artifact_add(
             .map(|n| n.to_string_lossy().into_owned())
             .ok_or_else(|| OpError::Other(format!("{} has no file name", src.display())))?;
 
-        let dest_dir = task_store::task_dir(task_id)
+        let dest_dir = store::task_dir(task_id)
             .ok_or_else(|| OpError::Other("no home dir".into()))?
             .join("artifacts");
         std::fs::create_dir_all(&dest_dir)
             .map_err(|e| OpError::Other(format!("create {}: {}", dest_dir.display(), e)))?;
 
-        let ts = task_store::now_unix_secs();
+        let ts = store::now_unix_secs();
         let dest = dest_dir.join(format!("{}-{}", ts, basename));
         std::fs::copy(&src, &dest).map_err(|e| {
             OpError::Other(format!(
@@ -82,7 +82,7 @@ pub fn task_artifact_add(
         path: stored_path.clone(),
         original: raw_path.to_string(),
         caption,
-        added_at: task_store::now_unix_secs(),
+        added_at: store::now_unix_secs(),
     };
     let mark_lead = lead;
     update_task(task_id, |s| {
@@ -111,7 +111,7 @@ pub fn task_artifact_add_text(
     }
     // Confirm the task exists before touching the filesystem, mirroring
     // `task_artifact_add`.
-    let state = task_store::read_task_state(task_id)
+    let state = store::read_task_state(task_id)
         .map_err(|e| OpError::Other(format!("load state: {}", e)))?;
     // The notes are the card's record, and a record does not say the same
     // thing twice in a row: a session that writes its wait again has not
@@ -123,7 +123,7 @@ pub fn task_artifact_add_text(
         )));
     }
 
-    let dest_dir = task_store::task_dir(task_id)
+    let dest_dir = store::task_dir(task_id)
         .ok_or_else(|| OpError::Other("no home dir".into()))?
         .join("artifacts");
     std::fs::create_dir_all(&dest_dir)
@@ -132,7 +132,7 @@ pub fn task_artifact_add_text(
     // Every note shares the `note.md` basename, so a same-second double
     // paste would silently overwrite (and removal of one record would
     // delete the other's file) — probe for a free name instead.
-    let ts = task_store::now_unix_secs();
+    let ts = store::now_unix_secs();
     let mut dest = dest_dir.join(format!("{}-note.md", ts));
     let mut n = 2;
     while dest.exists() {
@@ -155,8 +155,8 @@ pub fn task_artifact_add_text(
     // once — in the note — is the point; a second command to move the card is
     // one an agent forgets, and then the board lies.
     let opens_pr = matches!(
-        crate::task_activity::Caption::read(trimmed.lines().next().unwrap_or_default()),
-        crate::task_activity::Caption::PullRequest(_)
+        crate::tasks::activity::Caption::read(trimmed.lines().next().unwrap_or_default()),
+        crate::tasks::activity::Caption::PullRequest(_)
     );
     update_task(task_id, |s| {
         s.artifacts.push(artifact.clone());
@@ -211,7 +211,7 @@ pub fn notes_of(task: &TaskState) -> Vec<Note> {
 
 /// `cc-hub board notes` body: the notes of a card.
 pub fn task_notes(task_id: &str) -> Result<Vec<Note>, OpError> {
-    let state = task_store::read_task_state(task_id)
+    let state = store::read_task_state(task_id)
         .map_err(|e| OpError::NotFound(format!("no board task {}: {}", task_id, e)))?;
     Ok(notes_of(&state))
 }
@@ -222,7 +222,7 @@ pub fn task_notes(task_id: &str) -> Result<Vec<Note>, OpError> {
 /// artifacts dir, so a URL or a hand-attached external path is never touched.
 /// Returns the persisted state plus the removed record.
 pub fn task_artifact_remove(task_id: &str, index: usize) -> Result<(TaskState, Artifact), OpError> {
-    let state = task_store::read_task_state(task_id)
+    let state = store::read_task_state(task_id)
         .map_err(|e| OpError::Other(format!("load state: {}", e)))?;
     if index >= state.artifacts.len() {
         return Err(OpError::NotFound(format!(
@@ -252,7 +252,7 @@ pub fn task_artifact_remove(task_id: &str, index: usize) -> Result<(TaskState, A
         recipe: None,
     })?;
 
-    let artifacts_dir = task_store::task_dir(task_id)
+    let artifacts_dir = store::task_dir(task_id)
         .ok_or_else(|| OpError::Other("no home dir".into()))?
         .join("artifacts");
     let stored = PathBuf::from(&removed.path);
@@ -279,7 +279,7 @@ mod tests {
         crate::test_util::with_temp_home(|| {
             let mut state = TaskState::new("Semantic Linter".into());
             state.task_id = "tk-dup".into();
-            task_store::write_task_state(&state).expect("write card");
+            store::write_task_state(&state).expect("write card");
 
             task_artifact_add_text("tk-dup", "Waiting: which branch?", "cli").expect("first");
             match task_artifact_add_text("tk-dup", "Waiting: which branch?\n", "cli") {
@@ -306,7 +306,7 @@ mod tests {
             let mut state = TaskState::new("Semantic Linter".into());
             state.task_id = "tk-pr".into();
             state.status = TaskStatus::Running;
-            task_store::write_task_state(&state).expect("write card");
+            store::write_task_state(&state).expect("write card");
 
             let after = task_artifact_add_text(
                 "tk-pr",
@@ -326,7 +326,7 @@ mod tests {
             let mut state = TaskState::new("Semantic Linter".into());
             state.task_id = "tk-plain".into();
             state.status = TaskStatus::Running;
-            task_store::write_task_state(&state).expect("write card");
+            store::write_task_state(&state).expect("write card");
 
             let after =
                 task_artifact_add_text("tk-plain", "Candidate: fix/linter", "cli").expect("note");

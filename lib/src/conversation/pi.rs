@@ -21,7 +21,7 @@ pub fn count_tool_uses(path: &Path) -> usize {
 }
 
 /// Streaming counter for `toolCall` blocks reading from any `BufRead`.
-/// Shared with [`crate::tool_use_count`] for incremental updates.
+/// Shared with [`crate::conversation::tool_count`] for incremental updates.
 pub fn count_tool_uses_in_reader<R: BufRead>(reader: R) -> usize {
     crate::conversation::count_blocks_in_reader(reader, |val| {
         // Pi wraps assistant entries inside `type=message` with

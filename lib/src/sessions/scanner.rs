@@ -1,11 +1,11 @@
 use crate::agent::AgentKind;
-use crate::codex_scanner;
 use crate::config;
 use crate::conversation;
 use crate::models::{short_sid, RawSession, SessionDetail, SessionInfo, SessionState};
-use crate::pi_scanner;
 use crate::platform::paths;
 use crate::platform::process::{Process, ProcessInfo};
+use crate::sessions::codex;
+use crate::sessions::pi;
 use log::{debug, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -589,7 +589,7 @@ fn synthesize_inactive_from_jsonl(
     let summary = conversation::first_user_message_cached(path);
     let title = titles.get(&session_id).cloned();
 
-    let tool_uses_count = crate::tool_use_count::count_claude(path);
+    let tool_uses_count = crate::conversation::tool_count::count_claude(path);
     Some(SessionInfo {
         agent_id: "claude".into(),
         agent_kind: AgentKind::Claude,
@@ -626,7 +626,7 @@ fn is_scratch_cwd(cwd: &str) -> bool {
 /// encodes to (e.g. `-tmp-cc-hub-summaries`), or `None` when that path isn't
 /// valid UTF-8. Every JSONL under this dir is a one-shot `cc-hub-new -p`
 /// run — not a real session — so callers walking the projects tree skip
-/// it. Shared with [`crate::session_count`] so the exclusion can't drift.
+/// it. Shared with [`crate::sessions::count`] so the exclusion can't drift.
 pub fn scratch_project_dir_name() -> Option<String> {
     crate::title::scratch_cwd().to_str().map(encode_path)
 }
@@ -674,7 +674,7 @@ fn scan_orphan_jsonls(
         // relist TTL. Per-file mtimes come from the cached listing, so the age
         // filter below may be up to `orphan_relist_secs` stale — within the
         // TTL budget, and identical in every other respect to the old walk.
-        let files = crate::dir_cache::list_jsonl_dir(&proj_path, relist_ttl);
+        let files = crate::sessions::dir_cache::list_jsonl_dir(&proj_path, relist_ttl);
         visited_dirs.insert(proj_path);
         let mut candidates: Vec<(PathBuf, SystemTime)> = Vec::new();
         for (path, mtime) in files.iter() {
@@ -699,7 +699,7 @@ fn scan_orphan_jsonls(
     }
     // Drop cache entries for project dirs that disappeared since last tick,
     // scoped to the projects root so the shared cache keeps Pi's entries.
-    crate::dir_cache::retain_under(&projects, &visited_dirs);
+    crate::sessions::dir_cache::retain_under(&projects, &visited_dirs);
     (out, total_in_window)
 }
 
@@ -793,7 +793,7 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
                     // First user message is immutable per session — cached
                     // permanently, so the head is read at most once per path.
                     let summary = conversation::first_user_message_cached(path);
-                    let tool_uses_count = crate::tool_use_count::count_claude(path);
+                    let tool_uses_count = crate::conversation::tool_count::count_claude(path);
 
                     debug!(
                         "  sid={} raw_state={} last_activity={:?}",
@@ -984,7 +984,7 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
             .into_values()
             .filter(|a| a.kind == AgentKind::Pi)
             .collect();
-        sessions.extend(pi_scanner::scan(&pi_agents, &titles));
+        sessions.extend(pi::scan(&pi_agents, &titles));
     }
     if enabled.contains(&AgentKind::Codex) {
         let codex_agents: Vec<_> = config::get()
@@ -992,7 +992,7 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
             .into_values()
             .filter(|a| a.kind == AgentKind::Codex)
             .collect();
-        sessions.extend(codex_scanner::scan(&codex_agents, &titles));
+        sessions.extend(codex::scan(&codex_agents, &titles));
     }
 
     // The tool-use count cache is shared across Claude and Pi transcripts, so
@@ -1004,7 +1004,7 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
         .iter()
         .filter_map(|s| s.jsonl_path.clone())
         .collect();
-    crate::tool_use_count::retain_cached(&live_paths);
+    crate::conversation::tool_count::retain_cached(&live_paths);
 
     crate::resources::label_sessions(&mut sessions);
     sort_stable(&mut sessions);
@@ -1064,8 +1064,8 @@ pub fn load_detail(session_id: &str, sessions: &[SessionInfo]) -> Option<Session
                 total_output_tokens,
             })
         }
-        AgentKind::Pi => pi_scanner::load_detail(info),
-        AgentKind::Codex => codex_scanner::load_detail(info),
+        AgentKind::Pi => pi::load_detail(info),
+        AgentKind::Codex => codex::load_detail(info),
     }
 }
 

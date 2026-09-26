@@ -1,7 +1,7 @@
 //! Card-body helpers for a task's notes and attached files (the Task Info
 //! popup on the Tasks tab).
 
-use crate::task_store::Artifact;
+use crate::tasks::store::Artifact;
 use crate::ui::palette::FAINT_TEXT;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};

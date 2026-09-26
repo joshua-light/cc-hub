@@ -5,7 +5,7 @@
 //! [`crate::app::ModelPickerState`].
 
 use crate::fuzzy;
-use crate::task_store::TaskStatus;
+use crate::tasks::store::TaskStatus;
 
 /// What picking a row does: drop the session's current link, or point it at
 /// a task. `Link` carries everything the sidecar record needs so the confirm

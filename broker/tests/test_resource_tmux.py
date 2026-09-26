@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[2]
-SPEC = importlib.util.spec_from_file_location('broker', REPO / 'lib/src/resource_manager.py')
+SPEC = importlib.util.spec_from_file_location('broker', REPO / 'broker/resource_manager.py')
 broker = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(broker)
 

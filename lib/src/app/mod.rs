@@ -6,8 +6,8 @@ use crate::folder_picker::{FolderPicker, PickerMode, Place};
 use crate::live_view::LiveView;
 use crate::metrics::{MetricsAnalysis, SelectableSession};
 use crate::models::{ProjectGroup, SessionDetail, SessionInfo, SessionState, TaskBadge};
-use crate::session_count::SessionCounts;
-use crate::task_store::{TaskPriority, TaskState, TaskStatus};
+use crate::sessions::count::SessionCounts;
+use crate::tasks::store::{TaskPriority, TaskState, TaskStatus};
 use crate::tmux_pane::TmuxPaneView;
 use crate::usage::UsageInfo;
 use ratatui::text::Line;
@@ -120,7 +120,7 @@ fn task_display_title(task: &TaskState) -> String {
 /// liveness flips already reorder the underlying sort.
 fn cluster_by_task(
     sessions: Vec<SessionInfo>,
-    links: &HashMap<String, crate::session_tasks::TaskLink>,
+    links: &HashMap<String, crate::tasks::session_links::TaskLink>,
     priorities: &HashMap<String, TaskPriority>,
 ) -> Vec<SessionInfo> {
     let mut slots: Vec<Option<SessionInfo>> = sessions.into_iter().map(Some).collect();
@@ -200,7 +200,7 @@ fn task_link_candidate(task: &TaskState, session_cwd: &str) -> (u8, bool, i64, T
 /// origin like "typed", not a path), the *original* file's basename
 /// otherwise (the stored copy's name carries a timestamp prefix nobody
 /// typed).
-fn attachment_label(a: &crate::task_store::Artifact) -> String {
+fn attachment_label(a: &crate::tasks::store::Artifact) -> String {
     if a.kind == "url" {
         return a.path.clone();
     }
@@ -699,7 +699,7 @@ pub struct App {
     /// grouping in [`Self::build_groups`]. Reloaded from disk on every scan
     /// tick (mirroring how the scanner re-reads the title sidecar) so links
     /// written by another instance show up without a restart.
-    pub(crate) session_task_links: HashMap<String, crate::session_tasks::TaskLink>,
+    pub(crate) session_task_links: HashMap<String, crate::tasks::session_links::TaskLink>,
     pub tmux_pane: Option<TmuxPaneView>,
     pub folder_picker: Option<FolderPicker>,
     /// Persistent folder bookmarks shown by the bookmarks picker (`M`) and
@@ -881,7 +881,7 @@ impl App {
             default_session_agent_id: config::get().default_session_agent_id(),
             task_link_picker: None,
             session_finder: None,
-            session_task_links: crate::session_tasks::load(),
+            session_task_links: crate::tasks::session_links::load(),
             tmux_pane: None,
             folder_picker: None,
             bookmarks: Bookmarks::load(),
@@ -1124,7 +1124,7 @@ impl App {
 
     /// The attachment under the Task Info popup cursor, if any. Used by the
     /// `c`/`o` keybinds to know what path to act on.
-    pub fn selected_task_attachment(&self) -> Option<&crate::task_store::Artifact> {
+    pub fn selected_task_attachment(&self) -> Option<&crate::tasks::store::Artifact> {
         self.selected_board_task()?
             .artifacts
             .get(self.tasks.info_sel)
@@ -1539,8 +1539,8 @@ impl App {
             self.done_refused_on = None;
             return None;
         }
-        let label = crate::task_activity::label(id)
-            .filter(|l| l.errand == crate::task_activity::Errand::Answer)?;
+        let label = crate::tasks::activity::label(id)
+            .filter(|l| l.errand == crate::tasks::activity::Errand::Answer)?;
         self.done_refused_on = Some(id.to_string());
         Some(format!(
             "not done — {} · answer it on the card, or press again to close it anyway",
@@ -2477,7 +2477,7 @@ impl App {
         let sid = picker.session_id;
         let mut linked = false;
         let status = match action {
-            TaskLinkAction::Unlink => match crate::session_tasks::unlink(&sid) {
+            TaskLinkAction::Unlink => match crate::tasks::session_links::unlink(&sid) {
                 Ok(()) => {
                     self.session_task_links.remove(&sid);
                     linked = true;
@@ -2489,11 +2489,11 @@ impl App {
                 }
             },
             TaskLinkAction::Link { task_id, title } => {
-                let link = crate::session_tasks::TaskLink {
+                let link = crate::tasks::session_links::TaskLink {
                     task_id,
                     title: title.clone(),
                 };
-                match crate::session_tasks::link(&sid, link.clone()) {
+                match crate::tasks::session_links::link(&sid, link.clone()) {
                     Ok(()) => {
                         self.session_task_links.insert(sid.clone(), link);
                         linked = true;
@@ -2541,7 +2541,7 @@ impl App {
 
     /// Adopt a finished archive scan. Ignored when the finder was closed
     /// while the scan ran — the list is rebuilt fresh on every open.
-    pub fn update_session_index(&mut self, index: Vec<crate::session_index::IndexedSession>) {
+    pub fn update_session_index(&mut self, index: Vec<crate::sessions::index::IndexedSession>) {
         if let Some(finder) = self.session_finder.as_mut() {
             finder.set_index(index);
         }
@@ -3178,7 +3178,7 @@ impl App {
         // Refresh the session→task sidecar so links written by another
         // instance (or the CLI) regroup the grid without a restart — the
         // same per-tick re-read the scanner does for the title sidecar.
-        self.session_task_links = crate::session_tasks::load();
+        self.session_task_links = crate::tasks::session_links::load();
         let acks_active = !self.sessions.acks.is_empty();
         if acks_active {
             // Apply user acks: if a non-Idle session is still at its acked
@@ -3486,7 +3486,7 @@ impl App {
             None => {
                 let snapshot = Some(link.title.clone())
                     .filter(|t| !t.is_empty())
-                    .unwrap_or_else(|| crate::task_store::short_task_id(task_id));
+                    .unwrap_or_else(|| crate::tasks::store::short_task_id(task_id));
                 TaskBadge {
                     task_id: task_id.to_string(),
                     title: snapshot,
@@ -3687,7 +3687,7 @@ impl App {
 mod tests {
     use super::*;
     use crate::agent_runtime::testing::RecordingRuntime;
-    use crate::task_store::TaskStatus;
+    use crate::tasks::store::TaskStatus;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -4112,15 +4112,15 @@ mod tests {
             let a = fake_session("s-a", SessionState::Idle);
             let b = fake_session("s-b", SessionState::Idle);
             let c = fake_session("s-c", SessionState::Idle);
-            crate::session_tasks::link(
+            crate::tasks::session_links::link(
                 "s-b",
-                crate::session_tasks::TaskLink {
+                crate::tasks::session_links::TaskLink {
                     task_id: "tk-9".into(),
                     title: "Fix auth".into(),
                 },
             )
             .unwrap();
-            app.session_task_links = crate::session_tasks::load();
+            app.session_task_links = crate::tasks::session_links::load();
 
             // A link is card metadata, not structure: all three sessions
             // stay in their one cwd group.
@@ -4151,16 +4151,16 @@ mod tests {
             let c = fake_session("s-c", SessionState::Idle);
             let d = fake_session("s-d", SessionState::Idle);
             for sid in ["s-a", "s-c"] {
-                crate::session_tasks::link(
+                crate::tasks::session_links::link(
                     sid,
-                    crate::session_tasks::TaskLink {
+                    crate::tasks::session_links::TaskLink {
                         task_id: "tk-1".into(),
                         title: "Fix auth".into(),
                     },
                 )
                 .unwrap();
             }
-            app.session_task_links = crate::session_tasks::load();
+            app.session_task_links = crate::tasks::session_links::load();
 
             let groups = app.build_groups(&[b, a, c, d]);
             assert_eq!(groups.len(), 1);
@@ -4180,7 +4180,7 @@ mod tests {
     #[test]
     fn task_clusters_order_by_liveness_then_priority() {
         crate::test_util::with_temp_home(|| {
-            use crate::task_store::TaskPriority;
+            use crate::tasks::store::TaskPriority;
             let mut app = App::new();
             let low = app.tasks.board.add("low task").unwrap().unwrap();
             app.tasks
@@ -4206,16 +4206,16 @@ mod tests {
                 ("s-low", low.as_str()),
                 ("s-high", high.as_str()),
             ] {
-                crate::session_tasks::link(
+                crate::tasks::session_links::link(
                     sid,
-                    crate::session_tasks::TaskLink {
+                    crate::tasks::session_links::TaskLink {
                         task_id: task_id.into(),
                         title: String::new(),
                     },
                 )
                 .unwrap();
             }
-            app.session_task_links = crate::session_tasks::load();
+            app.session_task_links = crate::tasks::session_links::load();
 
             let groups = app.build_groups(&[gone_s, low_s, high_s, unlinked]);
             assert_eq!(groups.len(), 1);
@@ -4275,7 +4275,7 @@ mod tests {
     fn task_link_candidates_band_in_tasks_board_column_order() {
         crate::test_util::with_temp_home(|| {
             let mut app = App::new();
-            use crate::task_store::TaskStatus;
+            use crate::tasks::store::TaskStatus;
             // Insert out of band order so the sort has to do the work.
             let done = app.tasks.board.add("done task").unwrap().unwrap();
             app.tasks.board.set_status(&done, TaskStatus::Done).unwrap();
@@ -4312,15 +4312,15 @@ mod tests {
         crate::test_util::with_temp_home(|| {
             let mut app = App::new();
             let id = app.tasks.board.add("Ship the parser").unwrap().unwrap();
-            crate::session_tasks::link(
+            crate::tasks::session_links::link(
                 "s-linked",
-                crate::session_tasks::TaskLink {
+                crate::tasks::session_links::TaskLink {
                     task_id: id.clone(),
                     title: "old snapshot".into(),
                 },
             )
             .unwrap();
-            app.session_task_links = crate::session_tasks::load();
+            app.session_task_links = crate::tasks::session_links::load();
 
             let badge = app.task_badge("s-linked").expect("badge");
             // Live board task wins over the sidecar snapshot.
@@ -4330,7 +4330,7 @@ mod tests {
             // A Done task keeps the badge but dims it.
             app.tasks
                 .board
-                .set_status(&id, crate::task_store::TaskStatus::Done)
+                .set_status(&id, crate::tasks::store::TaskStatus::Done)
                 .unwrap();
             assert!(app.task_badge("s-linked").unwrap().stale);
         });

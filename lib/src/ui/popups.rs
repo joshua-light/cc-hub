@@ -2158,7 +2158,7 @@ mod places_picker_tests {
 #[cfg(all(test, unix))]
 mod task_link_picker_tests {
     use crate::app::{App, TaskLinkAction, TaskLinkChoice, TaskLinkPickerState, View};
-    use crate::task_store::TaskStatus;
+    use crate::tasks::store::TaskStatus;
     use crate::test_util::with_temp_home;
     use crate::ui::common::buffer_to_string;
     use ratatui::backend::TestBackend;

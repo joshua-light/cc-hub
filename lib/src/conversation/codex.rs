@@ -486,7 +486,7 @@ pub fn extract_messages(entries: &[Value], count: usize) -> Vec<ConversationMess
 }
 
 /// Streaming counter for codex tool calls (`function_call` /
-/// `custom_tool_call` response items). Shared with [`crate::tool_use_count`].
+/// `custom_tool_call` response items). Shared with [`crate::conversation::tool_count`].
 pub fn count_tool_uses_in_reader<R: BufRead>(reader: R) -> usize {
     crate::conversation::count_blocks_in_reader(reader, |val| if is_tool_call(val) { 1 } else { 0 })
 }

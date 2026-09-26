@@ -8,7 +8,7 @@
 //! note carries the card to Review — the column for work that wants reading
 //! rather than answering.
 //!
-//! A board task is a [`task_store::TaskState`], stored one file per task at
+//! A board task is a [`store::TaskState`], stored one file per task at
 //! `~/.cc-hub/tasks/<task-id>/state.json` behind a per-task lock, with the
 //! legal status edges enforced by the store's transition table. [`PersonalBoard`]
 //! is the in-memory snapshot the TUI mutates through; every mutation is a
@@ -34,9 +34,9 @@ use std::path::PathBuf;
 
 use crate::models::{SessionInfo, SessionState};
 use crate::platform::paths::cc_hub_home;
-use crate::task_store::{
-    self, read_task_state, task_dir, tasks_dir, update_task, write_task_state, TaskPriority,
-    TaskState, TaskStatus,
+use store::{
+    read_task_state, task_dir, tasks_dir, update_task, write_task_state, TaskPriority, TaskState,
+    TaskStatus,
 };
 
 /// Longest a single tag may be after normalization; longer ones are truncated.
@@ -229,7 +229,7 @@ impl PersonalBoard {
     }
 
     /// Apply background usage snapshots without replacing newer task edits.
-    pub fn update_stats(&mut self, stats: Vec<(String, crate::task_stats::TaskStats)>) {
+    pub fn update_stats(&mut self, stats: Vec<(String, crate::tasks::stats::TaskStats)>) {
         for (id, stats) in stats {
             if let Some(task) = self.tasks.iter_mut().find(|t| t.task_id == id) {
                 task.stats = Some(stats);
@@ -336,7 +336,7 @@ impl PersonalBoard {
         }
         let updated = update_task(id, |s| {
             s.status = status;
-            s.done_at = (status == TaskStatus::Done).then(task_store::now_unix_secs);
+            s.done_at = (status == TaskStatus::Done).then(store::now_unix_secs);
         })?;
         self.apply(updated);
         Ok(true)

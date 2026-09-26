@@ -1,9 +1,7 @@
 #![allow(clippy::collapsible_match)]
 
-use cc_hub_lib::{
-    app, config, harness, metrics, models, platform, scanner, send, session_count, spawn, title,
-    ui, usage, watcher,
-};
+use cc_hub_lib::sessions::{count, scanner, watcher};
+use cc_hub_lib::{app, config, harness, metrics, models, platform, send, spawn, title, ui, usage};
 
 use app::{App, Tab, View};
 
@@ -212,12 +210,12 @@ pub(crate) enum ScanMsg {
     SessionList(Vec<models::SessionInfo>),
     /// The full transcript archive for the session finder, built off the
     /// event loop by [`Effect::BuildSessionIndex`].
-    SessionIndex(Vec<cc_hub_lib::session_index::IndexedSession>),
+    SessionIndex(Vec<cc_hub_lib::sessions::index::IndexedSession>),
     Detail(models::SessionDetail),
     Usage(usage::UsageInfo),
-    SessionCounts(session_count::SessionCounts),
+    SessionCounts(count::SessionCounts),
     Metrics(metrics::MetricsAnalysis),
-    TaskStats(Vec<(String, cc_hub_lib::task_stats::TaskStats)>),
+    TaskStats(Vec<(String, cc_hub_lib::tasks::stats::TaskStats)>),
     MetricsProgress {
         scanned: usize,
         total: usize,
@@ -689,10 +687,10 @@ async fn run(terminal: &mut Term, frame_bytes: Arc<AtomicU64>) -> io::Result<()>
         loop {
             interval.tick().await;
             let (usage_opt, counts) = tokio::task::spawn_blocking(|| {
-                (usage::fetch_usage(), session_count::count_recent_sessions())
+                (usage::fetch_usage(), count::count_recent_sessions())
             })
             .await
-            .unwrap_or((None, session_count::SessionCounts::default()));
+            .unwrap_or((None, count::SessionCounts::default()));
             let _ = usage_tx.send(ScanMsg::SessionCounts(counts)).await;
             if let Some(u) = usage_opt {
                 let _ = usage_tx.send(ScanMsg::Usage(u)).await;
@@ -839,7 +837,8 @@ async fn run(terminal: &mut Term, frame_bytes: Arc<AtomicU64>) -> io::Result<()>
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            if let Ok(stats) = tokio::task::spawn_blocking(cc_hub_lib::task_stats::refresh).await {
+            if let Ok(stats) = tokio::task::spawn_blocking(cc_hub_lib::tasks::stats::refresh).await
+            {
                 if task_stats_tx.send(ScanMsg::TaskStats(stats)).await.is_err() {
                     break;
                 }

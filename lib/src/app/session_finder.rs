@@ -1,7 +1,7 @@
 //! State behind [`crate::app::View::SessionFinder`]: the archive-wide fuzzy
 //! finder `/` opens on the Sessions tab. Where the grid shows the recent
 //! window, the finder searches every transcript the
-//! [`crate::session_index`] archive knows — by saved title, session id,
+//! [`crate::sessions::index`] archive knows — by saved title, session id,
 //! project, or first message — and Enter reopens the pick (attaching when it
 //! is still live, resuming when it is not). Same live-filter shape as
 //! [`crate::app::TaskLinkPickerState`].
@@ -9,7 +9,7 @@
 use crate::agent::AgentKind;
 use crate::fuzzy;
 use crate::models::{first_line_truncated, short_sid};
-use crate::session_index::IndexedSession;
+use crate::sessions::index::IndexedSession;
 use std::path::PathBuf;
 
 /// One archived session as a finder row: the searchable `label`/`detail`

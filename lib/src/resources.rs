@@ -124,13 +124,13 @@ pub fn task_kind(task: &str) -> Option<String> {
 /// The name a broker worker's session is born with: the one `resource start
 /// --title` gave it, else its card's title — the agents that file their own
 /// cards (`Polish: …`, `Hub: …`, `Alert: …`) title them as their session —
-/// else the card's [`session_title`](crate::task_store::TaskState::session_title).
+/// else the card's [`session_title`](crate::tasks::store::TaskState::session_title).
 /// `None` only when there is neither a name nor a card to take one from.
 pub fn session_title(task: &str, given: Option<&str>) -> Option<String> {
     if let Some(title) = given.filter(|t| !t.trim().is_empty()) {
         return Some(title.to_string());
     }
-    let card = crate::task_store::read_task_state(task).ok()?;
+    let card = crate::tasks::store::read_task_state(task).ok()?;
     Some(card.title.clone().unwrap_or_else(|| card.session_title()))
 }
 
@@ -201,7 +201,7 @@ mod tests {
         crate::test_util::with_temp_home(|| {
             let mut board = crate::tasks::PersonalBoard::load_result().unwrap();
             let filed = board.add("polish it").unwrap().unwrap();
-            crate::task_store::set_task_title(&filed, "Polish: The PR").unwrap();
+            crate::tasks::store::set_task_title(&filed, "Polish: The PR").unwrap();
             let hand_made = board.add("do  the\nthing").unwrap().unwrap();
 
             assert_eq!(

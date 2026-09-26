@@ -985,8 +985,8 @@ pub(crate) fn task_usage_files() -> Vec<(PathBuf, bool, AgentKind)> {
 pub(crate) fn task_usage(
     ids: &std::collections::BTreeSet<String>,
     files: &[(PathBuf, bool, AgentKind)],
-) -> Option<crate::task_stats::TaskStats> {
-    let mut stats = crate::task_stats::TaskStats {
+) -> Option<crate::tasks::stats::TaskStats> {
+    let mut stats = crate::tasks::stats::TaskStats {
         cost_nano_usd: Some(0),
         ..Default::default()
     };

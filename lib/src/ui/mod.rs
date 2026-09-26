@@ -209,7 +209,7 @@ pub(crate) fn render_title_bar(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 pub(crate) fn build_session_count_spans(
-    c: &crate::session_count::SessionCounts,
+    c: &crate::sessions::count::SessionCounts,
 ) -> Vec<Span<'static>> {
     if c.today == 0 && c.week == 0 {
         return Vec::new();
@@ -327,7 +327,7 @@ pub(crate) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             // Space is status-aware on the Tasks board: it approves a
             // focused Planning card's plan, and toggles Done elsewhere.
             (View::Grid, Tab::Tasks) => Some(match app.selected_board_task().map(|t| t.status) {
-                Some(crate::task_store::TaskStatus::Planning) => "proceed ",
+                Some(crate::tasks::store::TaskStatus::Planning) => "proceed ",
                 _ => "done ",
             }),
             (View::Grid, Tab::Sessions) => Some("ack "),

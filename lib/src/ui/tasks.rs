@@ -10,8 +10,8 @@
 
 use crate::app::{visible_task_columns, App, View};
 use crate::models::{self, SessionInfo, SessionState};
-use crate::task_activity::Errand;
-use crate::task_store::{TaskState, TaskStatus};
+use crate::tasks::activity::Errand;
+use crate::tasks::store::{TaskState, TaskStatus};
 use crate::ui::artifacts::{
     classify_artifact, evidence_card_header, read_text_excerpt, truncated_footer, CardKind,
 };
@@ -138,10 +138,13 @@ pub(crate) fn render_task_info(frame: &mut Frame, area: Rect, app: &mut App) {
     let title = match t.title.as_deref().filter(|s| !s.is_empty()) {
         Some(name) => format!(
             " Task · {} · {} ",
-            crate::task_store::short_task_id(&t.task_id),
+            crate::tasks::store::short_task_id(&t.task_id),
             name,
         ),
-        None => format!(" Task · {} ", crate::task_store::short_task_id(&t.task_id)),
+        None => format!(
+            " Task · {} ",
+            crate::tasks::store::short_task_id(&t.task_id)
+        ),
     };
     let block = popup_block(Span::styled(
         title,
@@ -675,7 +678,7 @@ fn meta_line(
         // input even when its pane sits at a prompt — the distinction the
         // Review column is drawn along, carried onto the card in the
         // column's own glyph and hue.
-        let activity = crate::task_activity::label(&t.task_id);
+        let activity = crate::tasks::activity::label(&t.task_id);
         let (glyph, color) = match activity.as_ref().map(|item| item.errand) {
             Some(Errand::Answer) => (glyph, Color::Yellow),
             Some(Errand::Review) => crate::ui::common::task_status_meta(TaskStatus::Review),
@@ -790,7 +793,7 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task_store::{TaskPriority, TaskStatus};
+    use crate::tasks::store::{TaskPriority, TaskStatus};
     use crate::ui::common::buffer_to_string;
     use crate::ui::palette::BACKLOG_BLUE;
     use ratatui::backend::TestBackend;
@@ -862,7 +865,7 @@ mod tests {
     #[test]
     fn card_shows_attachment_chip() {
         let mut t = card(TaskPriority::P3);
-        t.artifacts.push(crate::task_store::Artifact {
+        t.artifacts.push(crate::tasks::store::Artifact {
             kind: "file".into(),
             path: "/tmp/store/1-doc.md".into(),
             original: "/tmp/doc.md".into(),
@@ -933,7 +936,7 @@ mod tests {
         use ratatui::{backend::TestBackend, Terminal};
         let mut task = card(TaskPriority::P3);
         task.status = TaskStatus::Done;
-        task.stats = Some(crate::task_stats::TaskStats {
+        task.stats = Some(crate::tasks::stats::TaskStats {
             input_tokens: 123_000,
             cost_nano_usd: Some(250_000_000),
             estimated: true,
@@ -1020,7 +1023,7 @@ mod tests {
             let id = board.add("ship the linter").unwrap().unwrap();
             board.assign(&id, "/tmp", "claude", "mux-pr").unwrap();
             crate::ops::task::task_artifact_add_text(&id, "PR: sample-project#42", "cli").unwrap();
-            let t = crate::task_store::read_task_state(&id).unwrap();
+            let t = crate::tasks::store::read_task_state(&id).unwrap();
             assert_eq!(t.status, TaskStatus::Review, "the note moved the card");
 
             let mut session = idle_session("mux-pr");

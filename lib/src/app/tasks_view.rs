@@ -4,7 +4,7 @@
 
 use crate::config;
 use crate::fuzzy::fuzzy_match;
-use crate::task_store::{TaskState, TaskStatus};
+use crate::tasks::store::{TaskState, TaskStatus};
 use crate::tasks::PersonalBoard;
 
 /// Full board column order. Planning is optional at render time (see

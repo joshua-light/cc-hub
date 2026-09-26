@@ -29,7 +29,7 @@ pub(crate) async fn apply_effect(
         Effect::BuildSessionIndex => {
             let tx = scan_tx.clone();
             tokio::spawn(async move {
-                let index = tokio::task::spawn_blocking(cc_hub_lib::session_index::scan)
+                let index = tokio::task::spawn_blocking(cc_hub_lib::sessions::index::scan)
                     .await
                     .unwrap_or_default();
                 let _ = tx.send(crate::ScanMsg::SessionIndex(index)).await;

@@ -4,7 +4,8 @@
 use std::time::{Duration, Instant};
 
 use crate::models;
-use crate::{scanner, send};
+use crate::send;
+use crate::sessions::scanner;
 
 /// Cold claude sessions in fresh cwds (no JSONL history, no trust-store
 /// entry) take longer to reach Idle than warm dev directories. 120s leaves

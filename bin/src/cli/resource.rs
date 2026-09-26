@@ -49,9 +49,9 @@ pub(crate) fn resource(args: &[String]) -> Result<(), CliError> {
             .bind_resource(task, field("cwd")?, field("account")?, field("tmux")?, sid)
             .map_err(|e| CliError::Other(e.to_string()))?;
         if let Some(sid) = sid {
-            cc_hub_lib::session_tasks::link(
+            cc_hub_lib::tasks::session_links::link(
                 sid,
-                cc_hub_lib::session_tasks::TaskLink {
+                cc_hub_lib::tasks::session_links::TaskLink {
                     task_id: task.into(),
                     title: format!("{} / {}", task, field("role")?),
                 },
@@ -67,7 +67,7 @@ pub(crate) fn resource(args: &[String]) -> Result<(), CliError> {
         super::print_json(&serde_json::json!({"ok": true}));
         return Ok(());
     }
-    let source = include_str!("../../../lib/src/resource_manager.py");
+    let source = include_str!("../../../broker/resource_manager.py");
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     source.hash(&mut hash);
     let dir = cc_hub_lib::platform::paths::cache_dir().join("resources");

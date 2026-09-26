@@ -17,7 +17,7 @@ use super::harness_view::{Detail, Section};
 use super::{App, RenameSubmit, SessionsLayout, Tab};
 use crate::agent::AgentKind;
 use crate::config;
-use crate::task_store::TaskPriority;
+use crate::tasks::store::TaskPriority;
 use crate::{models, spawn, title};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -243,7 +243,7 @@ pub enum Effect {
     /// Kick the background metrics analysis.
     SpawnMetricsScan,
     /// Walk the transcript stores off the event loop and deliver the archive
-    /// to the session finder ([`crate::session_index::scan`]).
+    /// to the session finder ([`crate::sessions::index::scan`]).
     BuildSessionIndex,
     /// Attach a tmux session as the embedded pane. `owned` panes are killed
     /// with the pane (shell panes); un-owned panes outlive it (agents).
@@ -1794,7 +1794,10 @@ mod tests {
             app.confirm_task_link_picker();
             assert_eq!(app.view, crate::app::View::Grid);
             assert_eq!(
-                crate::session_tasks::load().get("sid-1").unwrap().task_id,
+                crate::tasks::session_links::load()
+                    .get("sid-1")
+                    .unwrap()
+                    .task_id,
                 tid
             );
             // The card badge resolves live (non-stale) from the board task;
@@ -1821,7 +1824,7 @@ mod tests {
             }
             app.task_link_picker.as_mut().unwrap().move_selection(-100);
             app.confirm_task_link_picker();
-            assert!(crate::session_tasks::load().is_empty());
+            assert!(crate::tasks::session_links::load().is_empty());
             assert!(app.task_badge("sid-1").is_none());
             assert_eq!(status(&app), "task link removed");
         });
@@ -1842,8 +1845,8 @@ mod tests {
         });
     }
 
-    fn indexed(sid: &str) -> crate::session_index::IndexedSession {
-        crate::session_index::IndexedSession {
+    fn indexed(sid: &str) -> crate::sessions::index::IndexedSession {
+        crate::sessions::index::IndexedSession {
             agent_id: "claude".into(),
             agent_kind: AgentKind::Claude,
             session_id: sid.into(),
@@ -2076,7 +2079,7 @@ mod tests {
     // ---- Tasks-tab command flows ----
 
     use crate::app::PROCEED_PROMPT;
-    use crate::task_store::TaskStatus;
+    use crate::tasks::store::TaskStatus;
 
     /// App on the Tasks tab wired to a recording runtime, no seeded sessions.
     fn task_app() -> (App, Arc<RecordingRuntime>) {
@@ -2449,7 +2452,7 @@ mod tests {
             }
             // Mark the second attachment as lead directly in the store; the
             // removal below must shift the designation, not drop it.
-            crate::task_store::update_task(&id, |s| s.lead_artifact = Some(1)).unwrap();
+            crate::tasks::store::update_task(&id, |s| s.lead_artifact = Some(1)).unwrap();
             app.tasks.reload();
             app.focus_task(&id);
 

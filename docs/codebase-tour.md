@@ -67,24 +67,24 @@ groups per-tab state into `SessionsView` / `TasksView` / `MetricsView` /
 `HarnessView` sub-structs — cursor mutations go through their clamping
 methods.
 
-A Tasks-board card is a `task_store::TaskState`, stored per task at
+A Tasks-board card is a `tasks::store::TaskState`, stored per task at
 `~/.cc-hub/tasks/<tid>/state.json` behind a per-task lock and atomic writes,
-with every status change gated by `task_store::validate_status_transition`.
-`PersonalBoard` in `lib/src/tasks.rs` is the in-memory snapshot the TUI
+with every status change gated by `tasks::store::validate_status_transition`.
+`PersonalBoard` in `lib/src/tasks/mod.rs` is the in-memory snapshot the TUI
 mutates through; board-level metadata lives in `~/.cc-hub/board.json`.
 Malformed files are surfaced to the Tasks status bar instead of silently
 overwriting or resetting state.
 
 ### Sessions layer
 
-- **`scanner.rs`** — walks `~/.claude/sessions/*.json` (Claude's own session
+- **`sessions/scanner.rs`** — walks `~/.claude/sessions/*.json` (Claude's own session
   index), pairs each with its JSONL transcript under
   `~/.claude/projects/<encoded-cwd>/<sid>.jsonl`, and probes process
   liveness via `platform::process`. Emits `SessionInfo`. Inactive sessions
   (no live PID) are kept for `[inactive].window_secs` so the user can
   resume.
-- **`pi_scanner.rs`** — the equivalent for Pi sessions in
-  `~/.pi/agent/sessions`. `pi_bridge.rs` writes/reads heartbeats so cc-hub
+- **`sessions/pi.rs`** — the equivalent for Pi sessions in
+  `~/.pi/agent/sessions`. `sessions/pi_bridge.rs` writes/reads heartbeats so cc-hub
   can detect a live Pi session whose PID it doesn't own.
 - **`conversation/`** — JSONL parsing + state classification. Reads a
   growing tail until at least one assistant entry is in window
@@ -106,12 +106,12 @@ overwriting or resetting state.
 
 ### Tasks
 
-- **`task_store.rs`** — schema + on-disk helpers for board cards:
+- **`tasks/store.rs`** — schema + on-disk helpers for board cards:
   `TaskState`, `TaskStatus` (`Backlog → Planning → Running → Review →
   Done`), `Artifact` (notes and attachments). `read_task_state` /
   `write_task_state` (tempfile + rename) and `update_task(tid, |s| ...)`
   for locked read-mutate-write. Task id format: `tk-<unix-nanos>`.
-- **`tasks.rs`** — `PersonalBoard`, the board snapshot the TUI mutates.
+- **`tasks/mod.rs`** — `PersonalBoard`, the board snapshot the TUI mutates.
 - **`ops/`** — the single implementation of compound task and link
   operations (attach a note, `cc-hub open`). Typed parameters in, typed
   outcome out; `OpError` maps 1:1 onto the CLI's `CliError`. Both
@@ -213,10 +213,10 @@ render one JSON line so a calling agent can parse the outcome. `cc-hub help
 | What | Where | Owner |
 |---|---|---|
 | Compiled config | `~/.cc-hub/config.toml` | `lib/src/config.rs` (loads once, deny-unknown) |
-| Per-task state | `~/.cc-hub/tasks/<tid>/state.json` (+ `board.json`, `tasks-archive-v2.json`) | `task_store`, `tasks::PersonalBoard` |
+| Per-task state | `~/.cc-hub/tasks/<tid>/state.json` (+ `board.json`, `tasks-archive-v2.json`) | `tasks::store`, `tasks::PersonalBoard` |
 | Builds, their output and holds | `~/.cc-hub/builds/<id>/{build.json,output.log}`, `~/.cc-hub/builds/holds/<resource>.json` | `lib/src/builds/` |
 | Persistent agent spec / state | `~/.cc-hub/agents/<name>/{agent.toml,state.json,notes.jsonl,inbox/,log/,work/}` | `lib/src/harness/` (`state.lock` guards `state.json`) |
-| Pi bridge heartbeats | `~/.cc-hub/pi-heartbeats/<sid>.json` | `lib/src/pi_bridge.rs` |
+| Pi bridge heartbeats | `~/.cc-hub/pi-heartbeats/<sid>.json` | `lib/src/sessions/pi_bridge.rs` |
 | Claude sessions | `~/.claude/sessions/*.json` | (Claude Code, read-only) |
 | Claude transcripts | `~/.claude/projects/<encoded-cwd>/<sid>.jsonl` | (Claude Code, read-only) |
 | Pi sessions | `~/.pi/agent/sessions/*` | (Pi, read-only) |
@@ -227,15 +227,15 @@ render one JSON line so a calling agent can parse the outcome. `cc-hub help
 - **Adding a new agent backend.** Implement an `AgentKind` variant in
   `lib/src/agent.rs`, teach `spawn::build_agent_command` how to construct
   its command, and (if it has its own JSONL layout) add a scanner like
-  `pi_scanner.rs` and wire it into `scanner::scan_sessions`. The TUI
+  `sessions/pi.rs` and wire it into `scanner::scan_sessions`. The TUI
   renders backends generically via `agent_badge()`.
 - **Adding a new CLI verb.** Put the body in `lib/src/ops/` (typed
   parameters in, typed outcome out, mutate state via
-  `task_store::update_task`), then add a branch to
+  `tasks::store::update_task`), then add a branch to
   `cli::dispatch` (`bin/src/cli/mod.rs:35`) with a thin parse → call →
   print-JSON wrapper in the matching `bin/src/cli/<verb>.rs` module.
 - **Adding a new task field.** Extend `TaskState` in
-  `lib/src/task_store.rs` with `#[serde(default)]` for back-compat
+  `lib/src/tasks/store.rs` with `#[serde(default)]` for back-compat
   with older `state.json` files; `read_task_state` returns `InvalidData`
   on parse errors so schema drift is loud.
 - **Adding a new view / popup.** Add a `View` variant in
@@ -272,5 +272,5 @@ render one JSON line so a calling agent can parse the outcome. `cc-hub help
   isn't available).
 
 Several `lib/src/*.rs` modules also have `#[cfg(test)]` blocks with unit
-tests; the `test_util::HOME_TEST_LOCK` mutex in `lib/src/lib.rs:23` exists
+tests; the `test_util::HOME_TEST_LOCK` mutex in `lib/src/test_util.rs` exists
 because some tests redirect `$HOME` and would otherwise race.

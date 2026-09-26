@@ -86,7 +86,7 @@ fn mutate(f: impl FnOnce(&mut HashMap<String, TaskLink>)) -> io::Result<()> {
 }
 
 // Unix-only: isolation works by redirecting `$HOME`, which `dirs::home_dir()`
-// ignores on Windows — same policy as bookmarks.rs / tasks.rs.
+// ignores on Windows — same policy as bookmarks.rs / tasks/mod.rs.
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

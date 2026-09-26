@@ -6,7 +6,7 @@
 //! immediately; if it grew, we seek to the old size and only count the
 //! suffix; if it shrank (rewrite), we recount from scratch.
 
-use crate::{codex_conversation, conversation, pi_conversation};
+use crate::conversation::{self, codex, pi};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -138,8 +138,8 @@ fn count_from(path: &Path, start: u64, kind: Kind) -> Option<(u64, u64)> {
             // still grow into a tool_use we'd otherwise miss/double-count.
             let line_count = match kind {
                 Kind::Claude => conversation::count_tool_uses_in_reader(buf.as_bytes()),
-                Kind::Pi => pi_conversation::count_tool_uses_in_reader(buf.as_bytes()),
-                Kind::Codex => codex_conversation::count_tool_uses_in_reader(buf.as_bytes()),
+                Kind::Pi => pi::count_tool_uses_in_reader(buf.as_bytes()),
+                Kind::Codex => codex::count_tool_uses_in_reader(buf.as_bytes()),
             };
             count = count.saturating_add(line_count as u64);
             clean_offset = start + consumed;

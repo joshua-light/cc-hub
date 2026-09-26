@@ -27,7 +27,7 @@ pub(super) fn map_tasks_command(app: &App, key: &KeyEvent, on_tasks: bool) -> Op
         (View::Grid, KeyCode::Char('t')) if on_tasks => T::OpenTags,
         (View::Grid, KeyCode::Char('T')) if on_tasks => T::OpenKindPicker,
         (View::Grid, KeyCode::Char(c @ ('1' | '2' | '3' | '4'))) if on_tasks => {
-            use cc_hub_lib::task_store::TaskPriority;
+            use cc_hub_lib::tasks::store::TaskPriority;
             let priority = match c {
                 '1' => TaskPriority::P1,
                 '2' => TaskPriority::P2,

@@ -184,7 +184,7 @@ Account IDs also appear as ordinary hub backends (`[agents.NAME] account =
 ## Verification
 
 ```sh
-python3 -m unittest discover -s lib/tests -p 'test_resource*.py'
+python3 -m unittest discover -s broker/tests -p 'test_resource*.py'
 cargo test --workspace --no-fail-fast
 ```
 

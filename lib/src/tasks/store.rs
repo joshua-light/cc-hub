@@ -188,7 +188,7 @@ pub struct TaskState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub usage_session_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stats: Option<crate::task_stats::TaskStats>,
+    pub stats: Option<crate::tasks::stats::TaskStats>,
     pub status: TaskStatus,
     /// The card's text as the user typed it.
     pub prompt: String,
@@ -429,7 +429,10 @@ where
 }
 
 /// Save usage without changing the task's activity timestamp.
-pub fn set_task_stats(task_id: &str, stats: crate::task_stats::TaskStats) -> io::Result<TaskState> {
+pub fn set_task_stats(
+    task_id: &str,
+    stats: crate::tasks::stats::TaskStats,
+) -> io::Result<TaskState> {
     update_task_inner(task_id, false, |s| s.stats = Some(stats))
 }
 

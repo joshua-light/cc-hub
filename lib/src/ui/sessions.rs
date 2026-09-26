@@ -895,13 +895,13 @@ mod tests {
         let live = crate::models::TaskBadge {
             task_id: "tk-live".into(),
             title: "Fix auth".into(),
-            priority: Some(crate::task_store::TaskPriority::P1),
+            priority: Some(crate::tasks::store::TaskPriority::P1),
             stale: false,
         };
         let stale = crate::models::TaskBadge {
             task_id: "tk-gone".into(),
             title: "Old task".into(),
-            priority: Some(crate::task_store::TaskPriority::P2),
+            priority: Some(crate::tasks::store::TaskPriority::P2),
             stale: true,
         };
         let s = fake_session();

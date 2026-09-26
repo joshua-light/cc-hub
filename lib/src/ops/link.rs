@@ -54,11 +54,12 @@ use crate::link::{BoardTaskId, FixLink, Link, PullRequestUrl, ReviewLink, TaskLi
 use crate::ops::prompt::{wait_until_idle_and_send, PromptStatus, DEFAULT_PROMPT_WAIT_SECS};
 use crate::ops::OpError;
 use crate::platform::paths::expand_home;
-use crate::session_tasks;
+use crate::sessions::scanner;
 use crate::spawn::SessionTarget;
-use crate::task_store::{self, TaskState, TaskStatus};
+use crate::tasks::session_links;
+use crate::tasks::store::{self, TaskState, TaskStatus};
 use crate::tasks::PersonalBoard;
-use crate::{config, scanner, send, spawn, title};
+use crate::{config, send, spawn, title};
 
 /// Options for [`open`].
 #[derive(Default)]
@@ -218,7 +219,7 @@ pub fn file_fix(fix: &FixLink) -> Result<BoardTaskId, OpError> {
     board
         .set_kind(&task_id, kind)
         .map_err(|e| OpError::Other(format!("write kind: {}", e)))?;
-    task_store::set_task_title(&task_id, &fix.session_title())
+    store::set_task_title(&task_id, &fix.session_title())
         .map_err(|e| OpError::Other(format!("write title: {}", e)))?;
     crate::ops::task::task_artifact_add_text(&task_id, &fix_brief(fix), "link")?;
     Ok(task_id.parse().expect("the board mints tk- ids"))
@@ -305,7 +306,7 @@ fn without_a_verification_role(task: &TaskLink, filed: Option<&str>) -> Result<(
 
 /// The board card a task link addresses.
 fn board_card(task_id: &str) -> Result<TaskState, OpError> {
-    task_store::read_task_state(task_id)
+    store::read_task_state(task_id)
         .map_err(|e| OpError::NotFound(format!("no board task {}: {}", task_id, e)))
 }
 
@@ -324,7 +325,7 @@ fn live_session_in(card: &TaskState, cwd: &Path, alive: impl Fn(&str) -> bool) -
 /// and a link never moves a card. `session_id` is left for the first scan
 /// that sees the mux session to resolve, as it is for a board assignment.
 fn bind_card(task_id: &str, cwd: &Path, agent_id: &str, tmux: &str) -> Result<(), OpError> {
-    task_store::update_task(task_id, |s| {
+    store::update_task(task_id, |s| {
         s.cwd = Some(cwd.to_string_lossy().into_owned());
         s.agent_id = Some(agent_id.to_string());
         s.tmux = Some(tmux.to_string());
@@ -458,11 +459,11 @@ fn link_session_to_card(session_id: &str, task_id: &str) {
             return;
         }
     };
-    let link = session_tasks::TaskLink {
+    let link = session_links::TaskLink {
         task_id: task_id.to_string(),
         title,
     };
-    if let Err(e) = session_tasks::link(session_id, link) {
+    if let Err(e) = session_links::link(session_id, link) {
         log::warn!(
             "open task: linking session {} to card {} failed: {}",
             session_id,
@@ -533,7 +534,7 @@ mod tests {
         let mut state = TaskState::new("Semantic Linter".into());
         state.task_id = "tk-1".into();
         state.cwd = cwd.map(str::to_string);
-        task_store::write_task_state(&state).expect("write card");
+        store::write_task_state(&state).expect("write card");
         state.task_id
     }
 
@@ -727,7 +728,7 @@ mod tests {
         crate::test_util::with_temp_home(|| {
             let id = card(None);
             link_session_to_card("sid-1", &id);
-            let links = session_tasks::load();
+            let links = session_links::load();
             let link = links.get("sid-1").expect("linked");
             assert_eq!(link.task_id, id);
             assert_eq!(link.title, "Semantic Linter");

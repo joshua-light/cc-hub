@@ -647,8 +647,8 @@ impl AgentSnapshot {
 
     /// Transcript of session `sid`, if Claude Code has written one.
     pub fn transcript(&self, sid: &str) -> Option<PathBuf> {
-        crate::scanner::find_jsonl(&self.workdir().to_string_lossy(), sid)
-            .or_else(|| crate::scanner::find_jsonl_anywhere(sid))
+        crate::sessions::scanner::find_jsonl(&self.workdir().to_string_lossy(), sid)
+            .or_else(|| crate::sessions::scanner::find_jsonl_anywhere(sid))
     }
 
     /// Every run the agent remembers, newest first: the one in flight, then

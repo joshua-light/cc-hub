@@ -6,12 +6,12 @@
 
 use crate::agent::{AgentConfig, AgentKind};
 use crate::config;
-use crate::pi_bridge;
 use crate::platform::mux;
 use crate::platform::paths;
 #[cfg(not(windows))]
 use crate::platform::terminal;
 use crate::platform::terminal::shell_quote;
+use crate::sessions::pi_bridge;
 #[cfg(not(windows))]
 use log::info;
 use std::io;

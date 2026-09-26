@@ -11,13 +11,11 @@
 //! event loop (see `Effect::BuildSessionIndex`), never on a key press.
 
 use crate::agent::AgentKind;
-use crate::codex_conversation;
-use crate::codex_scanner;
 use crate::config;
 use crate::conversation;
-use crate::pi_conversation;
 use crate::platform::paths;
-use crate::scanner;
+use crate::sessions::codex;
+use crate::sessions::scanner;
 use crate::title;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -185,7 +183,7 @@ fn scan_pi(titles: &HashMap<String, String>) -> Vec<IndexedSession> {
             project_name: project_name(&cwd),
             cwd,
             mtime_ms: mtime_ms(&path).unwrap_or(0),
-            first_message: pi_conversation::extract_first_user_message(&head),
+            first_message: conversation::pi::extract_first_user_message(&head),
             jsonl_path: path,
         });
     }
@@ -200,13 +198,13 @@ fn scan_codex(titles: &HashMap<String, String>) -> Vec<IndexedSession> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for (path, _) in codex_scanner::walk_rollouts(&root) {
-        let head = codex_scanner::read_head(&path);
-        let Some(cwd) = codex_conversation::extract_cwd(&head) else {
+    for (path, _) in codex::walk_rollouts(&root) {
+        let head = codex::read_head(&path);
+        let Some(cwd) = conversation::codex::extract_cwd(&head) else {
             continue;
         };
-        let Some(session_id) = codex_conversation::extract_session_id(&head)
-            .or_else(|| codex_scanner::session_id_from_filename(&path))
+        let Some(session_id) = conversation::codex::extract_session_id(&head)
+            .or_else(|| codex::session_id_from_filename(&path))
         else {
             continue;
         };
@@ -218,7 +216,7 @@ fn scan_codex(titles: &HashMap<String, String>) -> Vec<IndexedSession> {
             project_name: project_name(&cwd),
             cwd,
             mtime_ms: mtime_ms(&path).unwrap_or(0),
-            first_message: codex_conversation::extract_first_user_message(&head),
+            first_message: conversation::codex::extract_first_user_message(&head),
             jsonl_path: path,
         });
     }

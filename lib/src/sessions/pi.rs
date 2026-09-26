@@ -2,11 +2,10 @@ use crate::agent::{AgentConfig, AgentKind};
 use crate::config;
 use crate::conversation;
 use crate::models::{SessionDetail, SessionInfo, SessionState};
-use crate::pi_bridge::{load_heartbeats, HeartbeatState};
-use crate::pi_conversation;
 use crate::platform::paths;
 use crate::platform::process;
 use crate::send;
+use crate::sessions::pi_bridge::{load_heartbeats, HeartbeatState};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -47,8 +46,8 @@ fn build_session_info(
                 .and_then(conversation::parse_timestamp_ms)
         })
         .unwrap_or(0);
-    let tail = pi_conversation::read_jsonl_tail_for_state(&jsonl_path);
-    let mut parsed_state = pi_conversation::extract_state(&tail);
+    let tail = conversation::pi::read_jsonl_tail_for_state(&jsonl_path);
+    let mut parsed_state = conversation::pi::extract_state(&tail);
     match state {
         SessionState::Inactive => parsed_state = SessionState::Inactive,
         SessionState::Processing => parsed_state = SessionState::Processing,
@@ -60,10 +59,10 @@ fn build_session_info(
         | SessionState::Question
         | SessionState::Starting => {}
     }
-    let last_user_message = pi_conversation::extract_last_user_message(&tail);
-    let last_activity = pi_conversation::extract_last_activity(&tail);
-    let (git_branch, model, version) = pi_conversation::extract_metadata(&tail);
-    let summary = pi_conversation::extract_first_user_message(&head);
+    let last_user_message = conversation::pi::extract_last_user_message(&tail);
+    let last_activity = conversation::pi::extract_last_activity(&tail);
+    let (git_branch, model, version) = conversation::pi::extract_metadata(&tail);
+    let summary = conversation::pi::extract_first_user_message(&head);
     let session_id = head
         .iter()
         .find_map(|e| e.get("id").and_then(|v| v.as_str()))
@@ -75,7 +74,7 @@ fn build_session_info(
                 .map(str::to_string)
         })?;
 
-    let tool_uses_count = crate::tool_use_count::count_pi(&jsonl_path);
+    let tool_uses_count = crate::conversation::tool_count::count_pi(&jsonl_path);
     Some(SessionInfo {
         agent_id,
         agent_kind: AgentKind::Pi,
@@ -95,9 +94,9 @@ fn build_session_info(
         version,
         jsonl_path: Some(jsonl_path),
         tmux_session,
-        current_tool: pi_conversation::extract_current_tool(&tail),
-        is_thinking: pi_conversation::is_currently_thinking(&tail),
-        context_tokens: pi_conversation::extract_context_tokens(&tail),
+        current_tool: conversation::pi::extract_current_tool(&tail),
+        is_thinking: conversation::pi::is_currently_thinking(&tail),
+        context_tokens: conversation::pi::extract_context_tokens(&tail),
         tool_uses_count,
     })
 }
@@ -109,7 +108,7 @@ fn build_session_info(
 /// until the file appears and [`build_session_info`] takes over on a later tick
 /// (the session id is identical, so the card does not jump).
 fn session_from_heartbeat(
-    hb: &crate::pi_bridge::Heartbeat,
+    hb: &crate::sessions::pi_bridge::Heartbeat,
     agent_id: &str,
     state: SessionState,
 ) -> Option<SessionInfo> {
@@ -346,7 +345,7 @@ fn scan_inactive_sessions(
         // Cached per-dir listing shared with the Claude orphan walk: re-lists
         // only on a dir mtime change or TTL expiry. Per-file mtimes come from
         // the cache, so the age filter is at most `orphan_relist_secs` stale.
-        let files = crate::dir_cache::list_jsonl_dir(&proj_path, relist_ttl);
+        let files = crate::sessions::dir_cache::list_jsonl_dir(&proj_path, relist_ttl);
         visited_dirs.insert(proj_path);
         let mut candidates: Vec<(PathBuf, SystemTime)> = Vec::new();
         for (path, mtime) in files.iter() {
@@ -377,7 +376,7 @@ fn scan_inactive_sessions(
     }
     // Evict entries for Pi session dirs gone this tick, scoped to the Pi root
     // so the Claude scanner's entries in the shared cache survive.
-    crate::dir_cache::retain_under(&root, &visited_dirs);
+    crate::sessions::dir_cache::retain_under(&root, &visited_dirs);
     out
 }
 
@@ -411,8 +410,9 @@ pub fn scan(agents: &[AgentConfig], titles: &HashMap<String, String>) -> Vec<Ses
 pub fn load_detail(info: &SessionInfo) -> Option<SessionDetail> {
     let path = info.jsonl_path.as_ref()?;
     let entries = conversation::read_jsonl_tail(path, 65536);
-    let recent_messages = pi_conversation::extract_messages(&entries, 15);
-    let (total_input_tokens, total_output_tokens) = pi_conversation::extract_token_totals(&entries);
+    let recent_messages = conversation::pi::extract_messages(&entries, 15);
+    let (total_input_tokens, total_output_tokens) =
+        conversation::pi::extract_token_totals(&entries);
     Some(SessionDetail {
         info: info.clone(),
         recent_messages,
@@ -431,7 +431,7 @@ mod tests {
         // transcript yet. The card must still be built, straight from the
         // heartbeat, so the session shows instead of being dropped (and then
         // mis-paired to an old transcript by the external scan → flicker).
-        let hb = crate::pi_bridge::Heartbeat {
+        let hb = crate::sessions::pi_bridge::Heartbeat {
             agent: "codex".into(),
             pid: 4242,
             tmux: "cchub-1-2".into(),

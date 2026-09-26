@@ -1,4 +1,4 @@
-//! `cc-hub board ...` — the personal Tasks board (`lib/src/tasks.rs`).
+//! `cc-hub board ...` — the personal Tasks board (`lib/src/tasks/`).
 //!
 //! `add` mints a card in To-Do the way the `a` key does in the TUI. It exists
 //! so a script can hand the user a card — the escalation record — and then
@@ -15,7 +15,7 @@ use std::io::{IsTerminal, Read};
 
 use super::{parse_flags, print_json, CliError};
 use cc_hub_lib::ops;
-use cc_hub_lib::task_store::{self, TaskPriority};
+use cc_hub_lib::tasks::store::{self, TaskPriority};
 use cc_hub_lib::tasks::{parse_tags, PersonalBoard};
 
 const VERBS: &str = "`add`, `note` or `notes`";
@@ -72,7 +72,7 @@ fn board_add(args: &[String]) -> Result<(), CliError> {
             .map_err(|e| CliError::Other(format!("write kind: {}", e)))?;
     }
     if let Some(title) = f.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
-        task_store::set_task_title(&task_id, title)
+        store::set_task_title(&task_id, title)
             .map_err(|e| CliError::Other(format!("write title: {}", e)))?;
     }
 
@@ -202,7 +202,7 @@ fn parse_priority(s: &str) -> Result<TaskPriority, CliError> {
 mod tests {
     use super::*;
     use crate::cli::test_util::with_tempdir_home;
-    use cc_hub_lib::task_store::TaskStatus;
+    use cc_hub_lib::tasks::store::TaskStatus;
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()

@@ -156,7 +156,7 @@ pub fn count_tool_uses(path: &Path) -> usize {
 
 /// Streaming counter for assistant `tool_use` blocks reading from any
 /// `BufRead`. Shared with the incremental cache in
-/// [`crate::tool_use_count`], which seeks to a previously-known offset and
+/// [`crate::conversation::tool_count`], which seeks to a previously-known offset and
 /// counts only the suffix.
 pub fn count_tool_uses_in_reader<R: BufRead>(reader: R) -> usize {
     count_blocks_in_reader(reader, |val| {

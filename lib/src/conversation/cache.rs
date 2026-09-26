@@ -63,7 +63,7 @@ type StateCache = HashMap<PathBuf, (SystemTime, Arc<StateDerivation>)>;
 /// file and only re-reads + re-derives on an mtime change — otherwise it hands
 /// back the `Arc` clone, short-circuiting the read_jsonl_tail_for_state +
 /// extract_* pipeline entirely. Compare the size-keyed cache in
-/// [`crate::tool_use_count`].
+/// [`crate::conversation::tool_count`].
 fn state_cache() -> &'static Mutex<StateCache> {
     static CACHE: OnceLock<Mutex<StateCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))

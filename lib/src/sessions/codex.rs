@@ -2,14 +2,13 @@
 //!
 //! Codex writes a rich transcript to disk like Claude, so per-session fields
 //! (state, model, tokens, current tool) are derived from the rollout by
-//! [`crate::codex_conversation`]. Unlike Claude it writes no live status file,
+//! [`crate::conversation::codex`]. Unlike Claude it writes no live status file,
 //! so liveness comes from a process scan: enumerate running `codex` processes,
 //! then bind each process to the rollout file it holds open (or the explicit
 //! UUID in `codex resume`). Cwd is only a validation constraint because many
 //! concurrent sessions commonly share one project directory.
 
 use crate::agent::{AgentConfig, AgentKind};
-use crate::codex_conversation;
 use crate::config;
 use crate::conversation;
 use crate::models::{SessionDetail, SessionInfo, SessionState};
@@ -112,7 +111,7 @@ fn index_recent_by_cwd(
             continue;
         }
         let head = read_head(path);
-        if let Some(cwd) = codex_conversation::extract_cwd(&head) {
+        if let Some(cwd) = conversation::codex::extract_cwd(&head) {
             by_cwd.entry(cwd).or_default().push((path.clone(), *mtime));
         }
     }
@@ -190,7 +189,7 @@ fn resolve_live_rollouts(
             continue;
         };
         let belongs_to_cwd = all_rollouts.contains(path)
-            && codex_conversation::extract_cwd(&read_head(path)).as_deref()
+            && conversation::codex::extract_cwd(&read_head(path)).as_deref()
                 == Some(process.cwd.as_str());
         if belongs_to_cwd && claimed.insert(path.clone()) {
             resolved.insert(process.pid, path.clone());
@@ -208,14 +207,14 @@ fn build_session_info(
     path: PathBuf,
 ) -> Option<SessionInfo> {
     let head = read_head(&path);
-    let cwd = codex_conversation::extract_cwd(&head)?;
-    let session_id = codex_conversation::extract_session_id(&head)
+    let cwd = conversation::codex::extract_cwd(&head)?;
+    let session_id = conversation::codex::extract_session_id(&head)
         .or_else(|| session_id_from_filename(&path))?;
-    let started_at = codex_conversation::extract_started_at(&head);
-    let summary = codex_conversation::extract_first_user_message(&head);
+    let started_at = conversation::codex::extract_started_at(&head);
+    let summary = conversation::codex::extract_first_user_message(&head);
 
-    let tail = codex_conversation::read_jsonl_tail_for_state(&path);
-    let mut state = codex_conversation::extract_state(&tail);
+    let tail = conversation::codex::read_jsonl_tail_for_state(&path);
+    let mut state = conversation::codex::extract_state(&tail);
     match state_hint {
         // The scanner's own verdict wins for these two: a dead process forces
         // Inactive; a caller that already knows the turn is running forces
@@ -228,17 +227,17 @@ fn build_session_info(
         | SessionState::Starting => {}
     }
 
-    let last_user_message = codex_conversation::extract_last_user_message(&tail);
-    let last_activity = codex_conversation::extract_last_activity(&tail);
+    let last_user_message = conversation::codex::extract_last_user_message(&tail);
+    let last_activity = conversation::codex::extract_last_activity(&tail);
     // The latest model lives in the newest `turn_context` (tail); `cli_version`
     // and the git branch live in `session_meta` (head). Fall back to the head's
     // first turn_context for a session whose only turn is still within the head
     // window.
-    let (_, model_tail, _) = codex_conversation::extract_metadata(&tail);
-    let (git_branch, model_head, version) = codex_conversation::extract_metadata(&head);
+    let (_, model_tail, _) = conversation::codex::extract_metadata(&tail);
+    let (git_branch, model_head, version) = conversation::codex::extract_metadata(&head);
     let model = model_tail.or(model_head);
 
-    let tool_uses_count = crate::tool_use_count::count_codex(&path);
+    let tool_uses_count = crate::conversation::tool_count::count_codex(&path);
     Some(SessionInfo {
         agent_id,
         agent_kind: AgentKind::Codex,
@@ -258,9 +257,9 @@ fn build_session_info(
         version,
         jsonl_path: Some(path),
         tmux_session,
-        current_tool: codex_conversation::extract_current_tool(&tail),
-        is_thinking: codex_conversation::is_currently_thinking(&tail),
-        context_tokens: codex_conversation::extract_context_tokens(&tail),
+        current_tool: conversation::codex::extract_current_tool(&tail),
+        is_thinking: conversation::codex::is_currently_thinking(&tail),
+        context_tokens: conversation::codex::extract_context_tokens(&tail),
         tool_uses_count,
     })
 }
@@ -415,9 +414,9 @@ pub fn scan(agents: &[AgentConfig], titles: &HashMap<String, String>) -> Vec<Ses
 pub fn load_detail(info: &SessionInfo) -> Option<SessionDetail> {
     let path = info.jsonl_path.as_ref()?;
     let entries = conversation::read_jsonl_tail(path, 65536);
-    let recent_messages = codex_conversation::extract_messages(&entries, 15);
+    let recent_messages = conversation::codex::extract_messages(&entries, 15);
     let (total_input_tokens, total_output_tokens) =
-        codex_conversation::extract_token_totals(&entries);
+        conversation::codex::extract_token_totals(&entries);
     Some(SessionDetail {
         info: info.clone(),
         recent_messages,

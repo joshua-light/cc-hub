@@ -13,7 +13,7 @@
 //!     caller reconstructs its JSON / human output from the returned data.
 //!   * Presentation side effects (`println!`, `print_json`, `eprintln!`
 //!     warnings) stay in the caller. `log::*` diagnostics may live here.
-//!   * Ops mutate tasks through `task_store::update_task` — the per-task
+//!   * Ops mutate tasks through `store::update_task` — the per-task
 //!     lock and transition validation live inside it.
 
 pub mod link;

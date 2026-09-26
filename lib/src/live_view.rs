@@ -1,7 +1,6 @@
 use crate::agent::AgentKind;
 use crate::conversation;
 use crate::models::ConversationMessage;
-use crate::pi_conversation;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -137,8 +136,8 @@ fn extract_messages(
 ) -> Vec<ConversationMessage> {
     match agent_kind {
         AgentKind::Claude => conversation::extract_messages(entries, count),
-        AgentKind::Pi => pi_conversation::extract_messages(entries, count),
-        AgentKind::Codex => crate::codex_conversation::extract_messages(entries, count),
+        AgentKind::Pi => conversation::pi::extract_messages(entries, count),
+        AgentKind::Codex => crate::conversation::codex::extract_messages(entries, count),
     }
 }
 

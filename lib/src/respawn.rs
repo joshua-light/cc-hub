@@ -1,11 +1,12 @@
 //! Continue an existing session on another subscription account.
 //!
 //! The rules mirror the resource broker's worker replacement
-//! (`resource_manager.py`): a Claude session moving between Claude homes is
-//! resumed natively — its transcript is copied into the target account's
-//! `projects/` so `--resume` finds it — and every other pairing starts a
-//! fresh session that reads the old transcript. Native resume stays limited
-//! to the paths the broker has proven; see docs/account-routing-design.md.
+//! (`broker/resource_manager.py`): a Claude session moving between Claude
+//! homes is resumed natively — its transcript is copied into the target
+//! account's `projects/` so `--resume` finds it — and every other pairing
+//! starts a fresh session that reads the old transcript. Native resume stays
+//! limited to the paths the broker has proven; see
+//! docs/account-routing-design.md.
 
 use crate::agent::AgentKind;
 use crate::models::SessionInfo;
@@ -64,7 +65,7 @@ impl Continuation {
                     .ok_or_else(|| io::Error::other("target account home unavailable"))?;
                 let to = home
                     .join("projects")
-                    .join(crate::scanner::encode_path(&session.cwd))
+                    .join(crate::sessions::scanner::encode_path(&session.cwd))
                     .join(format!("{}.jsonl", session.session_id));
                 let carry = (from != to).then_some(Carry { from, to });
                 Ok(Continuation::Resume {
