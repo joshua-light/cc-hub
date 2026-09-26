@@ -3,7 +3,7 @@
 debug
 target
 
-# cc-hub worktree directories — created by orchestrator runs
+# Worktree directories left by older cc-hub versions
 .cc-hub-wt/
 
 # Claude Code session state (per-project), recreated each run

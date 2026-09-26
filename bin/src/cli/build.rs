@@ -19,12 +19,12 @@ pub(crate) fn build(args: &[String]) -> Result<(), CliError> {
             Ok(())
         }
         "cancel" => {
-            let build = builds::cancel(&flags.build()?).map_err(other)?;
+            let build = builds::cancel(&flags.build()?).map_err(CliError::other)?;
             print_json(&serde_json::json!({ "ok": true, "build": build }));
             Ok(())
         }
         "rebuild" => {
-            let build = builds::rebuild(&flags.build()?).map_err(other)?;
+            let build = builds::rebuild(&flags.build()?).map_err(CliError::other)?;
             finish(build, flags.wait)
         }
         "serve" => {
@@ -40,16 +40,16 @@ pub(crate) fn build(args: &[String]) -> Result<(), CliError> {
                     recipe: None,
                 });
             }
-            runner::serve(&id).map_err(other)?;
+            runner::serve(&id).map_err(CliError::other)?;
             print_json(
-                &serde_json::json!({ "ok": true, "build": builds::load(&id).map_err(other)? }),
+                &serde_json::json!({ "ok": true, "build": builds::load(&id).map_err(CliError::other)? }),
             );
             Ok(())
         }
         "reserve" => {
             let mut holds = Vec::new();
             for resource in resources(flags.resource) {
-                holds.push(hold::ensure(&resource).map_err(other)?);
+                holds.push(hold::ensure(&resource).map_err(CliError::other)?);
             }
             print_json(&serde_json::json!({ "ok": true, "holds": holds }));
             Ok(())
@@ -58,7 +58,7 @@ pub(crate) fn build(args: &[String]) -> Result<(), CliError> {
             let resources = resources(flags.resource);
             let mut released = Vec::new();
             for resource in resources {
-                if hold::release(&resource).map_err(other)? {
+                if hold::release(&resource).map_err(CliError::other)? {
                     released.push(resource);
                 }
             }
@@ -66,11 +66,11 @@ pub(crate) fn build(args: &[String]) -> Result<(), CliError> {
             Ok(())
         }
         "_run" => {
-            runner::run(flags.positional()?).map_err(other)?;
+            runner::run(flags.positional()?).map_err(CliError::other)?;
             Ok(())
         }
-        "_serve" => runner::serve(flags.positional()?).map_err(other),
-        "_hold" => hold::keep(flags.positional()?).map_err(other),
+        "_serve" => runner::serve(flags.positional()?).map_err(CliError::other),
+        "_hold" => hold::keep(flags.positional()?).map_err(CliError::other),
         other => Err(CliError::Usage(format!("unknown build verb: {}", other))),
     }
 }
@@ -95,7 +95,7 @@ fn start(flags: Flags) -> Result<(), CliError> {
     let cwd = match flags.cwd {
         Some(dir) => dir,
         None => std::env::current_dir()
-            .map_err(other)?
+            .map_err(CliError::other)?
             .display()
             .to_string(),
     };
@@ -113,10 +113,10 @@ fn finish(build: Build, wait: bool) -> Result<(), CliError> {
     }
     let id = build.id;
     loop {
-        let build = builds::load(&id).map_err(other)?;
+        let build = builds::load(&id).map_err(CliError::other)?;
         if build.status.is_finished() {
             let ok = build.status == BuildStatus::Succeeded;
-            let output = builds::output_path(&id).map_err(other)?;
+            let output = builds::output_path(&id).map_err(CliError::other)?;
             print_json(&serde_json::json!({ "ok": ok, "build": build, "output": output }));
             return if ok {
                 Ok(())
@@ -139,10 +139,6 @@ fn resources(named: Option<String>) -> Vec<String> {
             .filter_map(|(_, r)| r.resource.clone())
             .collect(),
     }
-}
-
-fn other(e: impl std::fmt::Display) -> CliError {
-    CliError::Other(e.to_string())
 }
 
 #[derive(Default)]
@@ -206,10 +202,7 @@ impl Flags {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn s(v: &[&str]) -> Vec<String> {
-        v.iter().map(|x| x.to_string()).collect()
-    }
+    use crate::test_util::argv;
 
     #[test]
     fn a_verb_is_required() {
@@ -218,13 +211,20 @@ mod tests {
 
     #[test]
     fn a_flag_without_its_value_is_refused() {
-        let err = Flags::parse(&s(&["--ref", "--wait"])).err().unwrap();
+        let err = Flags::parse(&argv(&["--ref", "--wait"])).err().unwrap();
         assert!(matches!(err, CliError::Usage(m) if m.contains("--ref")));
     }
 
     #[test]
     fn flags_read_what_start_needs() {
-        let f = Flags::parse(&s(&["--ref", "origin/main", "--route", "swap", "--serve"])).unwrap();
+        let f = Flags::parse(&argv(&[
+            "--ref",
+            "origin/main",
+            "--route",
+            "swap",
+            "--serve",
+        ]))
+        .unwrap();
         assert_eq!(f.r#ref.as_deref(), Some("origin/main"));
         assert_eq!(f.route.as_deref(), Some("swap"));
         assert!(f.serve && !f.wait);

@@ -14,6 +14,7 @@
 //! doing nothing but living. Its file under `~/.cc-hub/builds/holds/` says
 //! where it stands, for the runners that wait on it and the tab that shows it.
 
+use crate::persist::now_unix_secs;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -56,17 +57,11 @@ fn write(hold: &Hold) -> io::Result<()> {
 /// Make sure something holds, or is queued to hold, `resource` for the tab.
 /// Serialized by a lock so two runners starting at once start one hold.
 pub fn ensure(resource: &str) -> io::Result<Hold> {
-    use fs2::FileExt;
     let lock_path = path(resource)?.with_extension("lock");
     if let Some(dir) = lock_path.parent() {
         fs::create_dir_all(dir)?;
     }
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)?;
-    lock.lock_exclusive()?;
+    let _lock = crate::persist::lock_exclusive(&lock_path)?;
     if let Some(hold) = read(resource) {
         return Ok(hold);
     }
@@ -74,7 +69,7 @@ pub fn ensure(resource: &str) -> io::Result<Hold> {
     let hold = Hold {
         resource: resource.to_string(),
         pid,
-        since: super::now(),
+        since: now_unix_secs(),
         granted: false,
         behind: None,
     };
@@ -107,7 +102,7 @@ pub fn keep(resource: &str) -> io::Result<()> {
         .unwrap_or_else(|| Hold {
             resource: resource.to_string(),
             pid: me,
-            since: super::now(),
+            since: now_unix_secs(),
             granted: false,
             behind: None,
         });
@@ -123,7 +118,7 @@ pub fn keep(resource: &str) -> io::Result<()> {
             Ok(result) if result["ok"].as_bool() == Some(true) => {
                 hold.granted = true;
                 hold.behind = None;
-                hold.since = super::now();
+                hold.since = now_unix_secs();
                 write(&hold)?;
                 break;
             }

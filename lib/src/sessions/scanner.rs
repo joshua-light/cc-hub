@@ -1,0 +1,212 @@
+//! The live-grid scan: merges every enabled backend's sessions into one
+//! stably ordered list, plus the cheap liveness pass between full scans.
+
+use crate::agent::AgentKind;
+use crate::config;
+use crate::conversation;
+use crate::models::{SessionDetail, SessionInfo, SessionState};
+use crate::sessions::{claude, codex, pi};
+use std::collections::HashSet;
+use std::path::PathBuf;
+
+pub(crate) use claude::paths::encode_path;
+pub use claude::paths::{find_jsonl, find_jsonl_anywhere, scratch_project_dir_name};
+
+/// Order sessions by liveness bucket, then stable keys — active sessions
+/// first, idle after them, inactive last; within a bucket newest first with
+/// session id as the deterministic tiebreak.
+///
+/// The bucket is deliberately coarse: Processing, WaitingForInput and
+/// Question all rank equally because they flip between each other every few
+/// seconds while agents work, and sorting on those flips would swap cards
+/// under the cursor on every scan tick (the selection follows the session id
+/// to its new slot, so a keypress could advance the selection logically while
+/// the highlight visibly stayed put). Falling asleep or waking up is a rare,
+/// meaningful transition, so a card moving then is intended, not churn.
+pub(super) fn sort_stable(sessions: &mut [SessionInfo]) {
+    sessions.sort_by(|a, b| {
+        a.state
+            .liveness_rank()
+            .cmp(&b.state.liveness_rank())
+            .then_with(|| b.started_at.cmp(&a.started_at))
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+}
+
+pub fn scan_sessions() -> Vec<SessionInfo> {
+    let enabled = config::get().enabled_agent_kinds();
+    let mut sessions = Vec::new();
+    // Titles are cheap to load and don't change within a scan — read once and
+    // hand a reference to every site that builds a SessionInfo.
+    let titles = crate::title::load();
+    if enabled.contains(&AgentKind::Claude) {
+        sessions.extend(claude::scan(&titles));
+    }
+    if enabled.contains(&AgentKind::Pi) {
+        let pi_agents: Vec<_> = config::get()
+            .resolved_agents()
+            .into_values()
+            .filter(|a| a.kind == AgentKind::Pi)
+            .collect();
+        sessions.extend(pi::scan(&pi_agents, &titles));
+    }
+    if enabled.contains(&AgentKind::Codex) {
+        let codex_agents: Vec<_> = config::get()
+            .resolved_agents()
+            .into_values()
+            .filter(|a| a.kind == AgentKind::Codex)
+            .collect();
+        sessions.extend(codex::scan(&codex_agents, &titles));
+    }
+
+    // The tool-use count cache is shared by every backend, so evict it here,
+    // after all scans, with every live path this tick. (conversation's other
+    // caches are Claude-only; the Claude scan retains them itself.) Without
+    // this the path-keyed cache grows one entry per JSONL ever scanned.
+    let live_paths: HashSet<PathBuf> = sessions
+        .iter()
+        .filter_map(|s| s.jsonl_path.clone())
+        .collect();
+    crate::conversation::tool_count::retain_cached(&live_paths);
+
+    crate::resources::label_sessions(&mut sessions);
+    sort_stable(&mut sessions);
+    sessions
+}
+
+/// True if `pid` is still a live process of `kind`. The liveness rule is
+/// per-backend: Claude's `is_pid_alive` also demands a real parent, but Pi and
+/// Codex children legitimately reparent to init, so they need only "alive and
+/// still that agent's process".
+fn session_pid_alive(kind: AgentKind, pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    match kind {
+        AgentKind::Claude => claude::is_pid_alive(pid),
+        AgentKind::Pi | AgentKind::Codex => crate::platform::process::is_agent_process(kind, pid),
+    }
+}
+
+/// Cheap fallback between full filesystem reconciliations. File watchers drive
+/// transcript/state updates; this pass only catches processes that exited
+/// without writing another event, avoiding directory walks and tmux snapshots
+/// on every short fallback tick.
+pub fn refresh_process_liveness(sessions: &mut [SessionInfo]) -> bool {
+    let mut changed = false;
+    for session in sessions {
+        if session.state != SessionState::Inactive
+            && !session_pid_alive(session.agent_kind, session.pid)
+        {
+            session.state = SessionState::Inactive;
+            session.tmux_session = None;
+            changed = true;
+        }
+    }
+    changed
+}
+
+pub fn load_detail(session_id: &str, sessions: &[SessionInfo]) -> Option<SessionDetail> {
+    let info = sessions.iter().find(|s| s.session_id == session_id)?;
+    let jsonl_path = info.jsonl_path.as_ref()?;
+    let entries = conversation::read_jsonl_tail(jsonl_path, 65536);
+    let recent_messages = conversation::extract_messages_for(info.agent_kind, &entries, 15);
+    let (total_input_tokens, total_output_tokens) =
+        conversation::extract_token_totals_for(info.agent_kind, &entries);
+    Some(SessionDetail {
+        info: info.clone(),
+        recent_messages,
+        total_input_tokens,
+        total_output_tokens,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::process::ProcessInfo;
+
+    fn session(id: &str, started_at: u64, state: SessionState) -> SessionInfo {
+        SessionInfo {
+            session_id: id.into(),
+            started_at,
+            state,
+            ..crate::test_util::session_info()
+        }
+    }
+
+    // The fallback liveness pass judges each session by its own backend's
+    // rule. Running the Claude-specific `is_pid_alive` over Pi sessions would
+    // flip every live `pi` process (not a `claude` binary) to Inactive each
+    // fallback tick, and the next full scan would restore it → blink. pid 0 is
+    // the no-process sentinel for both, and a Pi session is decided by the Pi
+    // detector, never the Claude one.
+    #[test]
+    fn session_pid_alive_routes_by_backend() {
+        assert!(!session_pid_alive(AgentKind::Pi, 0));
+        assert!(!session_pid_alive(AgentKind::Claude, 0));
+        // The test process is a real, live pid that is neither `claude` nor
+        // `pi`. Both branches must therefore report it dead — proving each
+        // consults its own detector rather than blindly trusting kill(0).
+        let live_pid = std::process::id();
+        assert!(crate::platform::process::Process::is_alive(live_pid));
+        assert!(!session_pid_alive(AgentKind::Claude, live_pid));
+        assert!(!session_pid_alive(AgentKind::Pi, live_pid));
+    }
+
+    // A live Pi session must not be reaped by the fallback pass. We can't
+    // fabricate a real `pi` process in a unit test, so drive the reaping branch
+    // instead: a Pi session with the no-process sentinel pid is flipped to
+    // Inactive and its tmux cleared, exactly as a genuinely-dead one would be.
+    #[test]
+    fn refresh_liveness_reaps_dead_pi_session() {
+        let mut dead = session("pi-dead", 0, SessionState::Idle);
+        dead.agent_kind = AgentKind::Pi;
+        dead.pid = 0;
+        dead.tmux_session = Some("mux".into());
+        let mut list = [dead];
+        assert!(refresh_process_liveness(&mut list));
+        assert_eq!(list[0].state, SessionState::Inactive);
+        assert_eq!(list[0].tmux_session, None);
+    }
+
+    #[test]
+    fn sort_stable_puts_idle_after_active_and_inactive_last() {
+        let mut sessions = vec![
+            session("idle-new", 400, SessionState::Idle),
+            session("inactive", 500, SessionState::Inactive),
+            session("processing-old", 100, SessionState::Processing),
+            session("idle-old", 200, SessionState::Idle),
+            session("waiting", 300, SessionState::WaitingForInput),
+        ];
+        sort_stable(&mut sessions);
+        let order: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
+        // Active bucket first (newest first), then idle (newest first),
+        // inactive dead last regardless of recency.
+        assert_eq!(
+            order,
+            vec![
+                "waiting",
+                "processing-old",
+                "idle-new",
+                "idle-old",
+                "inactive"
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_stable_ranks_all_active_flavors_equally() {
+        // Processing / WaitingForInput / Question must not order against each
+        // other by state — only by the stable keys — so the rapid flips
+        // between them can't reshuffle cards.
+        let mut sessions = vec![
+            session("question", 100, SessionState::Question),
+            session("processing", 300, SessionState::Processing),
+            session("waiting", 200, SessionState::WaitingForInput),
+        ];
+        sort_stable(&mut sessions);
+        let order: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
+        assert_eq!(order, vec!["processing", "waiting", "question"]);
+    }
+}

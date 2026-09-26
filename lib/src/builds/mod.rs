@@ -14,6 +14,7 @@ pub mod runner;
 
 pub use recipe::Recipe;
 
+use crate::persist::now_unix_secs;
 use crate::platform::paths::cc_hub_home;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -112,7 +113,7 @@ impl Build {
             route,
             serve,
             status: BuildStatus::Queued,
-            created_at: now(),
+            created_at: now_unix_secs(),
             started_at: None,
             finished_at: None,
             exit_code: None,
@@ -148,7 +149,7 @@ impl Build {
 
     fn finish(&mut self, status: BuildStatus, error: Option<String>) {
         self.status = status;
-        self.finished_at = Some(now());
+        self.finished_at = Some(now_unix_secs());
         self.runner = None;
         self.error = error.or(self.error.take());
     }
@@ -192,6 +193,11 @@ impl Report {
     }
 }
 
+/// The first eleven characters of a commit, as `git log --oneline` shows it.
+pub fn short_commit(commit: &str) -> &str {
+    &commit[..commit.len().min(11)]
+}
+
 // ---- the store --------------------------------------------------------------
 
 pub fn builds_dir() -> Option<PathBuf> {
@@ -206,13 +212,6 @@ fn build_dir(id: &str) -> io::Result<PathBuf> {
 
 pub fn output_path(id: &str) -> io::Result<PathBuf> {
     Ok(build_dir(id)?.join("output.log"))
-}
-
-pub fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 /// `bd-<unix-nanos>`: sortable, like the board's `tk-` ids.
@@ -247,14 +246,8 @@ pub fn load(id: &str) -> io::Result<Build> {
 /// Read, mutate and write one build under its lock, so the runner's reports
 /// and a cancel from the TUI never lose each other.
 pub fn update<F: FnOnce(&mut Build)>(id: &str, f: F) -> io::Result<Build> {
-    use fs2::FileExt;
     let dir = build_dir(id)?;
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(dir.join("build.lock"))?;
-    lock.lock_exclusive()?;
+    let _lock = crate::persist::lock_exclusive(&dir.join("build.lock"))?;
     let mut build = load(id)?;
     f(&mut build);
     write(&build)?;
@@ -304,7 +297,7 @@ fn reap(build: Build) -> Build {
     }
     let orphaned = match build.runner {
         Some(pid) => !alive(pid),
-        None => now() - build.created_at > 60,
+        None => now_unix_secs() - build.created_at > 60,
     };
     if !orphaned {
         return build;

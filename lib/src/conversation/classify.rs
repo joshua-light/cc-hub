@@ -139,8 +139,8 @@ fn note_unknown_stop(dialect: &str, source: Option<&Path>, stop: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conversation::pi::PiDialect;
     use crate::conversation::state::ClaudeDialect;
-    use crate::pi_conversation::PiDialect;
     use serde_json::json;
 
     // --- synthetic entry builders, one set per dialect -------------------

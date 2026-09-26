@@ -1,3 +1,7 @@
+//! The session model the scanner builds and the UI renders ([`SessionInfo`],
+//! [`SessionState`], [`ProjectGroup`]), plus the formatting helpers every
+//! view shares.
+
 use crate::agent::AgentKind;
 use serde::Deserialize;
 use std::fmt;
@@ -32,9 +36,7 @@ pub fn relative_age_short(secs: u64) -> String {
 /// Canonical first-line preview: take the first line of `text` and, if it
 /// exceeds `max` characters, truncate it to a `max`-char budget ending in a
 /// single-char ellipsis (`…`). The result is always at most `max` characters
-/// wide (counting the ellipsis), so it fits a `max`-column slot. Replaces the
-/// several drifted `one_line`/`first_line_preview`/`truncate_str` copies that
-/// disagreed on the ellipsis string and the boundary math.
+/// wide (counting the ellipsis), so it fits a `max`-column slot.
 pub fn first_line_truncated(text: &str, max: usize) -> String {
     let line = text.lines().next().unwrap_or(text);
     if line.chars().count() <= max {
@@ -159,7 +161,7 @@ pub struct SessionInfo {
 /// Anthropic's prompt cache expires after about an hour of silence, so a
 /// session quiet for longer re-ingests its whole context on the next turn
 /// anyway — a full restart costs nothing extra at that point.
-pub const CACHE_COLD_AFTER_MS: u64 = 60 * 60 * 1000;
+const CACHE_COLD_AFTER_MS: u64 = 60 * 60 * 1000;
 
 impl SessionInfo {
     pub fn needs_attention(&self) -> bool {
@@ -239,7 +241,7 @@ pub struct TaskBadge {
     pub title: String,
     /// Priority of the linked task while it's still readable; `None` once
     /// only the sidecar title snapshot remains (it records no priority).
-    pub priority: Option<crate::task_store::TaskPriority>,
+    pub priority: Option<crate::tasks::store::TaskPriority>,
     pub stale: bool,
 }
 
@@ -299,28 +301,12 @@ mod tests {
 
     fn session(state: SessionState, started_at: u64, last_activity: Option<u64>) -> SessionInfo {
         SessionInfo {
-            agent_id: "claude".into(),
-            agent_kind: AgentKind::Claude,
-            pid: 1,
-            session_id: "s".into(),
             cwd: "/tmp/p".into(),
             project_name: "p".into(),
             started_at,
             last_activity,
             state,
-            last_user_message: None,
-            summary: None,
-            title: None,
-            titling: false,
-            model: None,
-            git_branch: None,
-            version: None,
-            jsonl_path: None,
-            tmux_session: None,
-            current_tool: None,
-            is_thinking: false,
-            context_tokens: None,
-            tool_uses_count: 0,
+            ..crate::test_util::session_info()
         }
     }
 

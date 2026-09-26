@@ -1,17 +1,26 @@
-//! Cross-tab UI helpers: popup/centering geometry, the title-bar usage line,
-//! state colours/indicators, and the truncation / time / token / cost
-//! formatters shared by the session grid, kanban cards, and metrics tables.
+//! Helpers shared across the UI:
+//!
+//! - session state, task status, priority and identity colours; the
+//!   spinner frames
+//! - popup block, centering geometry, the text cursor, wrapped-row count and
+//!   scroll-position label
+//! - the title-bar usage line
+//! - model/tool labels, context-window bars, and time, age, token and cost
+//!   formatters
+//! - one-line row helpers: padding, truncation, the selection stripe
+//! - `Cell`, one column of a table row's right-hand cluster
 
 use crate::models;
+use crate::models::first_line_truncated;
 use crate::models::SessionState;
-use crate::task_store::{TaskPriority, TaskStatus};
+use crate::tasks::store::{TaskPriority, TaskStatus};
 use crate::ui::palette::{BACKLOG_BLUE, GRAY_80, MUTED_TEXT, PURPLE, SEP_GRAY};
 use crate::usage::UsageInfo;
 use chrono::{DateTime, Local, TimeZone};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 
 /// Canonical (icon, accent color) for a task status: the Tasks-board column
 /// palette. Every surface that colors a status (board columns, the task-link picker)
@@ -65,6 +74,9 @@ pub(crate) fn task_color(task_id: &str) -> Color {
     TASK_COLORS[(hash % TASK_COLORS.len() as u64) as usize]
 }
 
+/// The cursor block every text field draws at its end.
+pub(crate) const CURSOR: char = '▎';
+
 pub(crate) fn popup_block<'a>(title: impl Into<ratatui::text::Line<'a>>) -> Block<'a> {
     Block::default()
         .borders(Borders::ALL)
@@ -87,6 +99,25 @@ pub(crate) fn centered_fixed(area: Rect, w: u16, h: u16) -> Rect {
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     Rect::new(x, y, w, h)
+}
+
+/// Visual rows `lines` occupy when a `Paragraph` with `Wrap { trim: false }`
+/// renders them into `width` columns. ratatui scrolls a wrapped paragraph by
+/// wrapped rows, not logical lines, so every scroll clamp and jump target must
+/// be summed in this unit or the last screenful becomes unreachable.
+///
+/// Delegates to ratatui's `Paragraph::line_count` (the
+/// `unstable-rendered-line-info` feature) so the count is the renderer's own,
+/// including word breaks, trailing spaces, tabs and wide chars.
+pub(crate) fn wrapped_total_rows(lines: &[Line], width: u16) -> u16 {
+    if width == 0 {
+        return lines.len().min(u16::MAX as usize) as u16;
+    }
+    Paragraph::new(Text::from(lines.to_vec()))
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+        .max(lines.len().min(1))
+        .min(u16::MAX as usize) as u16
 }
 
 pub fn build_usage_line(u: &UsageInfo) -> Line<'static> {
@@ -133,7 +164,7 @@ pub fn build_usage_line(u: &UsageInfo) -> Line<'static> {
     Line::from(spans)
 }
 
-pub(crate) fn append_bar(spans: &mut Vec<Span<'static>>, pct: u8, width: u16) {
+fn append_bar(spans: &mut Vec<Span<'static>>, pct: u8, width: u16) {
     let pct = pct.min(100);
     let mut filled = (pct as u16 * width) / 100;
     if pct > 0 && filled == 0 {
@@ -147,7 +178,7 @@ pub(crate) fn append_bar(spans: &mut Vec<Span<'static>>, pct: u8, width: u16) {
     spans.push(Span::styled(empty_s, Style::default().fg(color)));
 }
 
-pub(crate) fn bar_color(pct: u8) -> Color {
+fn bar_color(pct: u8) -> Color {
     if pct > 80 {
         Color::Red
     } else if pct >= 50 {
@@ -157,7 +188,7 @@ pub(crate) fn bar_color(pct: u8) -> Color {
     }
 }
 
-pub(crate) fn format_reset(iso: &str, fmt: &str) -> Option<String> {
+fn format_reset(iso: &str, fmt: &str) -> Option<String> {
     let dt = DateTime::parse_from_rfc3339(iso).ok()?;
     Some(
         dt.with_timezone(&Local)
@@ -170,7 +201,7 @@ pub(crate) fn format_reset(iso: &str, fmt: &str) -> Option<String> {
 pub(crate) fn state_indicator(state: &SessionState) -> (&'static str, Color) {
     match state {
         // Static fallback; both session renderers animate Starting with the
-        // orbit spinner (see `ui::sessions::starting_frame`). Magenta keeps
+        // orbit spinner (see [`starting_frame`]). Magenta keeps
         // "booting" visually apart from the green Processing spinner.
         SessionState::Starting => ("◌", Color::Magenta),
         SessionState::Processing => ("󰒓", Color::Green),
@@ -183,6 +214,27 @@ pub(crate) fn state_indicator(state: &SessionState) -> (&'static str, Color) {
 
 pub(crate) fn state_color(state: &SessionState) -> Color {
     state_indicator(state).1
+}
+
+/// Braille spinner for work in flight: a Processing session, a ticking agent,
+/// a running build. The frame derives from wall-clock time, so it advances
+/// on every repaint: at least once a second from the clock tick, faster
+/// while scan events stream in. Motion is the point: a turning glyph reads
+/// as alive where a static one reads as ambient.
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+pub(crate) fn spinner_frame(now: u64) -> &'static str {
+    SPINNER_FRAMES[((now / 120) % SPINNER_FRAMES.len() as u64) as usize]
+}
+
+/// Single-dot orbit shown while a spawn placeholder is Starting. Same
+/// braille family as [`SPINNER_FRAMES`] but unmistakably different motion
+/// (one dot circling vs. a churning cluster), so a booting agent can't be
+/// read as one that's already processing.
+const STARTING_FRAMES: [&str; 8] = ["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"];
+
+pub(crate) fn starting_frame(now: u64) -> &'static str {
+    STARTING_FRAMES[((now / 120) % STARTING_FRAMES.len() as u64) as usize]
 }
 
 /// Snowflake marking a cold prompt cache (see
@@ -198,7 +250,7 @@ pub(crate) fn short_model(model: &str) -> &str {
 /// Tool names for the card HUD: strip MCP-server prefixes and cap at 18 chars
 /// so long names like `mcp__claude_ai_Notion__notion-search` fit in narrow
 /// cards.
-pub(crate) fn short_tool(tool: &str) -> String {
+fn short_tool(tool: &str) -> String {
     // `mcp__<server>__<name>` → just the name (the leaf is what's distinctive).
     let leaf = crate::models::mcp_leaf(tool);
     let chars: Vec<char> = leaf.chars().collect();
@@ -337,6 +389,66 @@ pub(crate) fn fmt_cost(c: f64) -> String {
     }
 }
 
+/// Compact age of `at` relative to `now`, both unix seconds: `45s`, `3m`,
+/// `2h`, `5d`. A timestamp in the future reads as `0s`.
+pub(crate) fn age(now: i64, at: i64) -> String {
+    models::relative_age_short((now - at).max(0) as u64)
+}
+
+/// Cut spans so the line never wraps.
+pub(crate) fn truncate_line(line: Line<'_>, width: usize) -> Line<'_> {
+    let mut used = 0;
+    let mut spans = Vec::new();
+    for span in line.spans {
+        let w = span.content.chars().count();
+        if used + w <= width {
+            used += w;
+            spans.push(span);
+        } else {
+            let room = width.saturating_sub(used);
+            if room > 1 {
+                let s: String = span.content.chars().take(room - 1).collect();
+                spans.push(Span::styled(format!("{}…", s), span.style));
+            }
+            break;
+        }
+    }
+    Line::from(spans)
+}
+
+/// `s`'s first line, truncated or right-padded to exactly `w` chars.
+pub(crate) fn pad(s: &str, w: usize) -> String {
+    let s = first_line_truncated(s, w);
+    let n = s.chars().count();
+    format!("{}{}", s, " ".repeat(w.saturating_sub(n)))
+}
+
+/// `s` left-padded to `w` chars; a longer `s` is kept whole.
+pub(crate) fn pad_left(s: &str, w: usize) -> String {
+    let n = s.chars().count();
+    format!("{}{}", " ".repeat(w.saturating_sub(n)), s)
+}
+
+/// ` 3/40 `: the 1-based position of `scroll` among `total` rows, clamped to
+/// the last row, for a scrollable view's corner.
+pub(crate) fn scroll_position(scroll: u16, total: u16) -> String {
+    format!(
+        " {}/{} ",
+        (scroll as usize).min(total.saturating_sub(1) as usize) + 1,
+        total
+    )
+}
+
+/// First cell of a selectable one-line row: a white bar when selected, a
+/// blank otherwise, so selected and plain rows stay aligned.
+pub(crate) fn selection_stripe(selected: bool) -> Span<'static> {
+    if selected {
+        Span::styled("▌", Style::default().fg(Color::White))
+    } else {
+        Span::raw(" ")
+    }
+}
+
 /// Gap between two columns of a table row's right-hand cluster.
 pub(crate) const COL_SEP: usize = 2;
 
@@ -375,4 +487,80 @@ pub(crate) fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
         out.push('\n');
     }
     out
+}
+
+#[cfg(test)]
+mod wrapped_rows_tests {
+    use super::wrapped_total_rows;
+    use ratatui::text::{Line, Span};
+
+    fn rows(s: &str, w: u16) -> usize {
+        wrapped_total_rows(&[Line::from(Span::raw(s.to_string()))], w) as usize
+    }
+
+    #[test]
+    fn empty_and_short_lines_are_one_row() {
+        assert_eq!(rows("", 10), 1);
+        assert_eq!(rows("hello", 10), 1);
+        assert_eq!(rows("hello", 5), 1); // exactly fills one row
+    }
+
+    #[test]
+    fn breaks_on_word_boundaries() {
+        assert_eq!(rows("the quick brown fox", 9), 2);
+        assert_eq!(rows("hello world", 5), 2);
+    }
+
+    #[test]
+    fn hard_splits_a_word_wider_than_the_row() {
+        assert_eq!(rows("abcdefgh", 3), 3); // abc/def/gh
+    }
+
+    #[test]
+    fn zero_width_never_divides_by_zero() {
+        assert_eq!(rows("abc", 0), 1); // degenerate area; renderer shows nothing
+    }
+
+    // Shapes where a naive char-count wrap disagrees with the renderer. These
+    // pin the renderer's behaviour so a reimplementation cannot drift from it.
+    #[test]
+    fn matches_renderer_on_divergent_shapes() {
+        // Leading whitespace before an overflowing token: WordWrapper packs
+        // the whitespace + word-head onto the first row.
+        assert_eq!(rows(" leading", 4), 2);
+        // Trailing space at exact row boundary is dropped, not wrapped.
+        assert_eq!(rows("aaaa ", 4), 1);
+        // Wide chars (CJK, emoji) occupy two columns each.
+        assert_eq!(rows("日本語のテキスト", 8), 2);
+        assert_eq!(rows("emoji 🚀🚀🚀 line", 8), 3);
+    }
+
+    #[test]
+    fn spans_concatenate_and_lines_sum() {
+        // Two spans concatenate into one logical line for wrap purposes.
+        let wide = Line::from(vec![Span::raw("the quick "), Span::raw("brown fox")]);
+        assert_eq!(wrapped_total_rows(&[wide], 9), 2);
+
+        let lines = vec![
+            Line::from(Span::raw("short")),           // 1 row
+            Line::from(Span::raw("the quick brown")), // 2 rows at width 9
+        ];
+        assert_eq!(wrapped_total_rows(&lines, 9), 3);
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::age;
+
+    const NOW: i64 = 1_800_000_000;
+
+    #[test]
+    fn ages_are_compact() {
+        assert_eq!(age(NOW, NOW - 5), "5s");
+        assert_eq!(age(NOW, NOW - 600), "10m");
+        assert_eq!(age(NOW, NOW - 7200), "2h");
+        assert_eq!(age(NOW, NOW - 200_000), "2d");
+        assert_eq!(age(NOW, NOW + 50), "0s");
+    }
 }

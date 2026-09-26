@@ -2,7 +2,7 @@
 //! a build forward.
 //!
 //! It waits for its turn, since a recipe builds one thing at a time, oldest
-//! first. Then it waits for the recipe's [`hold`](super::hold), runs the build
+//! first. Then it waits for the recipe's [`hold`], runs the build
 //! command and writes every line it prints to `output.log`, folding
 //! [`Report`]s into the record. When asked to cancel it runs the recipe's own
 //! cancel and ends the command if that did not. A build that succeeded and
@@ -10,6 +10,7 @@
 
 use super::recipe::{self, Recipe, Values};
 use super::{append_output, hold, load, update, Build, BuildStatus, Report};
+use crate::persist::now_unix_secs;
 use std::io::{self, BufRead, BufReader};
 use std::process::{Child, ExitStatus};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -55,7 +56,7 @@ fn drive(id: &str) -> io::Result<BuildStatus> {
     let subject = git(&build.cwd, &["log", "-1", "--format=%s", from]);
     let build = update(id, |b| {
         b.status = BuildStatus::Running;
-        b.started_at = Some(super::now());
+        b.started_at = Some(now_unix_secs());
         b.phase = None;
         b.subject = subject;
     })?;
@@ -110,7 +111,7 @@ pub fn serve(id: &str) -> io::Result<()> {
         append_output(id, &line)?;
     }
     if child.wait()?.success() {
-        update(id, |b| b.served_at = Some(super::now()))?;
+        update(id, |b| b.served_at = Some(now_unix_secs()))?;
         Ok(())
     } else {
         append_output(id, "cc-hub: serve failed")?;

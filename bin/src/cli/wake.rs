@@ -13,7 +13,7 @@ pub(crate) fn wake(args: &[String]) -> Result<(), CliError> {
         .ok_or_else(|| CliError::Usage("wake <name> (e.g. `cc-hub wake board`)".into()))?;
     let wake = Wake::named(name)
         .ok_or_else(|| CliError::Usage(format!("not a usable wake name: {:?}", name)))?;
-    wake.now().map_err(|e| CliError::Other(e.to_string()))?;
+    wake.now().map_err(CliError::other)?;
     print_json(&serde_json::json!({ "ok": true, "wake": wake.name() }));
     Ok(())
 }
@@ -21,20 +21,17 @@ pub(crate) fn wake(args: &[String]) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn s(v: &[&str]) -> Vec<String> {
-        v.iter().map(|x| x.to_string()).collect()
-    }
+    use crate::test_util::argv;
 
     #[test]
     fn a_name_is_required() {
-        let err = wake(&s(&["--json"])).unwrap_err();
+        let err = wake(&argv(&["--json"])).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)), "{err:?}");
     }
 
     #[test]
     fn a_name_that_cannot_be_a_file_is_refused() {
-        let err = wake(&s(&["../escape"])).unwrap_err();
+        let err = wake(&argv(&["../escape"])).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)), "{err:?}");
     }
 }

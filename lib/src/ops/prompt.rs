@@ -4,7 +4,8 @@
 use std::time::{Duration, Instant};
 
 use crate::models;
-use crate::{scanner, send};
+use crate::send;
+use crate::sessions::scanner;
 
 /// Cold claude sessions in fresh cwds (no JSONL history, no trust-store
 /// entry) take longer to reach Idle than warm dev directories. 120s leaves
@@ -70,8 +71,6 @@ pub fn wait_until_idle_and_send(
 pub enum PromptStatus {
     /// The prompt was sent (or the agent accepted it as an initial prompt).
     Sent,
-    /// No prompt was supplied — nothing to dispatch.
-    Skipped,
     /// Dispatch failed; the session is up but the prompt could not be
     /// delivered. Carries the human warning string the caller should
     /// surface on stderr.
@@ -83,7 +82,6 @@ impl PromptStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             PromptStatus::Sent => "sent",
-            PromptStatus::Skipped => "skipped",
             PromptStatus::Deferred(_) => "deferred",
         }
     }

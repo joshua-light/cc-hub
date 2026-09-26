@@ -75,17 +75,11 @@ async fn agent_loop(dir: PathBuf, tx: mpsc::Sender<TickReport>) {
         })
         .await;
     }
-    // Interval/poll pacing lives here, not in state.json: a restart simply
-    // fires the first poll straight away.
-    let mut last_poll: Option<Instant> = None;
-    let mut last_interval: Option<Instant> = None;
-    let mut last_digest: Option<String> = None;
-    let mut interval_n: u64 = 0;
+    let mut pacing = Pacing::default();
     let mut wakes: HashMap<String, Stamp> = HashMap::new();
-    // The last spec error and poll failure written to the event log, so a
-    // condition that persists is logged once, not every loop.
+    // The last spec error written to the event log, so an error that persists
+    // is logged once, not every loop.
     let mut spec_error: Option<String> = None;
-    let mut poll_error: Option<String> = None;
 
     loop {
         let spec = match super::spec::load(&dir) {
@@ -118,23 +112,13 @@ async fn agent_loop(dir: PathBuf, tx: mpsc::Sender<TickReport>) {
         // there is an event — so forgetting when it last ran is the whole
         // mechanism.
         if woken(&spec, &mut wakes) {
-            last_poll = None;
-            last_interval = None;
+            pacing.last_poll = None;
+            pacing.last_interval = None;
         }
 
         // Inbox first, for every trigger kind: a poke or an answer must not
         // wait behind a poll interval.
-        let event = match next_event(
-            &spec,
-            &inbox,
-            &mut last_poll,
-            &mut last_interval,
-            &mut last_digest,
-            &mut interval_n,
-            &mut poll_error,
-        )
-        .await
-        {
+        let event = match next_event(&spec, &inbox, &mut pacing).await {
             Some(ev) => ev,
             None => {
                 tokio::time::sleep(IDLE_POLL).await;
@@ -275,15 +259,20 @@ async fn halt(dir: &std::path::Path, spec: &Spec, reason: &str, tx: &mpsc::Sende
     tokio::time::sleep(PARKED_POLL).await;
 }
 
-async fn next_event(
-    spec: &Spec,
-    inbox: &std::path::Path,
-    last_poll: &mut Option<Instant>,
-    last_interval: &mut Option<Instant>,
-    last_digest: &mut Option<String>,
-    interval_n: &mut u64,
-    poll_error: &mut Option<String>,
-) -> Option<Event> {
+/// Interval/poll pacing. It lives in memory, not state.json: a restart
+/// simply fires the first poll straight away.
+#[derive(Default)]
+struct Pacing {
+    last_poll: Option<Instant>,
+    last_interval: Option<Instant>,
+    last_digest: Option<String>,
+    interval_n: u64,
+    /// The last poll failure written to the event log, so a failure that
+    /// persists is logged once, not every loop.
+    poll_error: Option<String>,
+}
+
+async fn next_event(spec: &Spec, inbox: &std::path::Path, pacing: &mut Pacing) -> Option<Event> {
     let inbox_owned = inbox.to_path_buf();
     if let Ok(Ok(Some(ev))) = tokio::task::spawn_blocking(move || trigger::take(&inbox_owned)).await
     {
@@ -293,10 +282,10 @@ async fn next_event(
     match spec.trigger.kind {
         TriggerKind::Inbox => None,
         TriggerKind::Poll => {
-            if last_poll.is_some_and(|t| t.elapsed() < every) {
+            if pacing.last_poll.is_some_and(|t| t.elapsed() < every) {
                 return None;
             }
-            *last_poll = Some(Instant::now());
+            pacing.last_poll = Some(Instant::now());
             let command = spec.trigger.command.clone()?;
             let cwd = spec.dir.clone();
             let timeout = Duration::from_secs(spec.trigger.timeout_s);
@@ -306,34 +295,34 @@ async fn next_event(
                     .ok()?;
             let out = match polled {
                 Ok(out) => {
-                    if poll_error.take().is_some() {
+                    if pacing.poll_error.take().is_some() {
                         super::log_event(&spec.dir, "info", "poll works again");
                     }
                     out?
                 }
                 Err(e) => {
-                    if poll_error.as_deref() != Some(e.as_str()) {
+                    if pacing.poll_error.as_deref() != Some(e.as_str()) {
                         super::log_event(&spec.dir, "warn", e.clone());
-                        *poll_error = Some(e);
+                        pacing.poll_error = Some(e);
                     }
                     return None;
                 }
             };
             let digest = trigger::digest(&out);
-            if spec.trigger.dedupe && last_digest.as_deref() == Some(&digest) {
+            if spec.trigger.dedupe && pacing.last_digest.as_deref() == Some(&digest) {
                 return None;
             }
-            *last_digest = Some(digest.clone());
+            pacing.last_digest = Some(digest.clone());
             Some(Event::synthetic(format!("poll-{}", digest), out, "poll"))
         }
         TriggerKind::Interval => {
-            if last_interval.is_some_and(|t| t.elapsed() < every) {
+            if pacing.last_interval.is_some_and(|t| t.elapsed() < every) {
                 return None;
             }
-            *last_interval = Some(Instant::now());
-            *interval_n += 1;
+            pacing.last_interval = Some(Instant::now());
+            pacing.interval_n += 1;
             Some(Event::synthetic(
-                format!("tick-{}", interval_n),
+                format!("tick-{}", pacing.interval_n),
                 "",
                 "interval",
             ))

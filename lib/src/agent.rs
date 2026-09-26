@@ -1,3 +1,6 @@
+//! Coding-agent backend registry: [`AgentKind`], [`AgentConfig`] and the
+//! default Claude models. The persistent-agent harness is [`crate::harness`].
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -9,7 +12,7 @@ pub enum AgentKind {
     /// OpenAI's `codex` CLI. Like Claude it writes its own rollout transcript
     /// to disk (`~/.codex/sessions/…`), so discovery is transcript-based; but
     /// it has no live status file, so liveness comes from a process scan (see
-    /// [`crate::codex_scanner`]).
+    /// [`crate::sessions::codex`]).
     Codex,
 }
 

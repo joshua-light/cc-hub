@@ -1,11 +1,12 @@
 //! Continue an existing session on another subscription account.
 //!
 //! The rules mirror the resource broker's worker replacement
-//! (`resource_manager.py`): a Claude session moving between Claude homes is
-//! resumed natively — its transcript is copied into the target account's
-//! `projects/` so `--resume` finds it — and every other pairing starts a
-//! fresh session that reads the old transcript. Native resume stays limited
-//! to the paths the broker has proven; see docs/account-routing-design.md.
+//! (`broker/resource_manager.py`): a Claude session moving between Claude
+//! homes is resumed natively — its transcript is copied into the target
+//! account's `projects/` so `--resume` finds it — and every other pairing
+//! starts a fresh session that reads the old transcript. Native resume stays
+//! limited to the paths the broker has proven; see "Replacement from the
+//! transcript" in docs/resource-management.md.
 
 use crate::agent::AgentKind;
 use crate::models::SessionInfo;
@@ -64,7 +65,7 @@ impl Continuation {
                     .ok_or_else(|| io::Error::other("target account home unavailable"))?;
                 let to = home
                     .join("projects")
-                    .join(crate::scanner::encode_path(&session.cwd))
+                    .join(crate::sessions::scanner::encode_path(&session.cwd))
                     .join(format!("{}.jsonl", session.session_id));
                 let carry = (from != to).then_some(Carry { from, to });
                 Ok(Continuation::Resume {
@@ -129,26 +130,12 @@ mod tests {
         SessionInfo {
             agent_id: agent_id.into(),
             agent_kind: kind,
-            pid: 1,
             session_id: "sid-1".into(),
             cwd: "/tmp/proj".into(),
             project_name: "proj".into(),
-            started_at: 0,
-            last_activity: None,
             state: crate::models::SessionState::Inactive,
-            last_user_message: None,
-            summary: None,
-            title: None,
-            titling: false,
-            model: None,
-            git_branch: None,
-            version: None,
             jsonl_path: jsonl.map(PathBuf::from),
-            tmux_session: None,
-            current_tool: None,
-            is_thinking: false,
-            context_tokens: None,
-            tool_uses_count: 0,
+            ..crate::test_util::session_info()
         }
     }
 

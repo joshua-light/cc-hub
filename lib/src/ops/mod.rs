@@ -1,29 +1,29 @@
-//! Shared domain logic for compound operations on tasks and deep links.
-//!
-//! These functions are the single implementation that both the CLI
-//! (`bin/src/cli/`) and the TUI (`lib/src/app/`) drive. The CLI keeps argument parsing, JSON rendering,
-//! and exit-code mapping; everything that mutates on-disk state lives here.
+//! Domain logic for compound operations on tasks and deep links, shared by
+//! the CLI (`bin/src/cli/`) and the TUI (`lib/src/app/`). The CLI keeps
+//! argument parsing, JSON rendering and exit-code mapping; everything that
+//! mutates on-disk state lives here.
 //!
 //! Conventions:
-//!   * Ops take explicit typed parameters (`task_id: &str`, …), grouped
-//!     into small option structs for many-arg verbs — never the CLI's
-//!     `Flags`.
-//!   * Ops return typed results (the `TaskState` they produce,
-//!     or a small outcome enum when a verb has multiple result shapes). The
-//!     caller reconstructs its JSON / human output from the returned data.
-//!   * Presentation side effects (`println!`, `print_json`, `eprintln!`
-//!     warnings) stay in the caller. `log::*` diagnostics may live here.
-//!   * Ops mutate tasks through `task_store::update_task` — the per-task
-//!     lock and transition validation live inside it.
+//!   * Ops take typed parameters, grouped into small option structs for
+//!     many-arg verbs, never the CLI's `Flags`.
+//!   * Ops return typed results (the `TaskState` they produce, or an outcome
+//!     enum when a verb has several result shapes). The caller renders its
+//!     JSON or human output from them.
+//!   * Presentation side effects (`println!`, `print_json`, `eprintln!`)
+//!     stay in the caller. `log::*` diagnostics may live here.
+//!   * Ops mutate tasks through `store::update_task`, which holds the
+//!     per-task lock and validates transitions.
+//!
+//! - `link`: act on a parsed `cc-hub://` link (`cc-hub open`).
+//! - `prompt`: deliver a prompt once a fresh session is ready for input.
+//! - `task`: attach, list and remove a card's notes and attachments.
 
 pub mod link;
 pub mod prompt;
 pub mod task;
 
-/// Error type for domain ops. Mirrors the variants of the CLI's
-/// `CliError` that domain code needs, so the CLI can convert losslessly via a
-/// `From<OpError>` impl on its side (and tests asserting `kind()` /
-/// `CliError::Usage(..)` keep passing).
+/// Error type for domain ops. Mirrors the `CliError` variants domain code
+/// needs, so the CLI converts losslessly through its `From<OpError>` impl.
 #[derive(Debug)]
 pub enum OpError {
     /// Bad invocation: missing/unknown flag, malformed value, illegal
@@ -39,12 +39,6 @@ pub enum OpError {
     /// Everything else (I/O, serialization). Maps to
     /// `CliError::Other` (exit 1, kind "other").
     Other(String),
-    /// The op already produced a rich, domain-specific result the caller
-    /// printed as its own `{"ok":false,...}` JSON line. The caller must NOT
-    /// print a second JSON line; it only sets the nonzero exit code and a
-    /// human stderr line. The string is that stderr message. Maps to
-    /// `CliError::Reported`.
-    Reported(String),
 }
 
 impl OpError {
@@ -62,9 +56,7 @@ impl OpError {
 impl std::fmt::Display for OpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            OpError::Usage(m) | OpError::NotFound(m) | OpError::Other(m) | OpError::Reported(m) => {
-                f.write_str(m)
-            }
+            OpError::Usage(m) | OpError::NotFound(m) | OpError::Other(m) => f.write_str(m),
             OpError::Conflict { msg, .. } => f.write_str(msg),
         }
     }
