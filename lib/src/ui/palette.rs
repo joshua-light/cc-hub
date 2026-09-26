@@ -1,11 +1,9 @@
-//! Named colour constants for literal `Color::Rgb` values shared across the
-//! UI. The file started as a pure de-duplication of values the code already
-//! used; role colours introduced since also live here. Names describe the
-//! role where one is obvious, otherwise the value.
+//! Named RGB colours shared across the UI, named by role where one is
+//! obvious, else by value.
 
 use ratatui::style::Color;
 
-/// Low-priority/dim body text and footers (the most common gray in the file).
+/// Low-priority/dim body text and footers.
 pub(crate) const DIM_TEXT: Color = Color::Rgb(110, 110, 130);
 
 /// Faint secondary text — captions, prompt previews, queued-card body.

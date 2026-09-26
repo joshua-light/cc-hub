@@ -8,9 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-/// Shared dark band background painted by the tab strip, project chip strip,
-/// and contention strip — keeping these identical avoids a visible seam when
-/// rows abut.
+/// Background of the tab-strip band.
 const BAND_BG: Color = Color::Rgb(20, 20, 28);
 
 pub(super) fn render_tab_strip(frame: &mut Frame, area: Rect, app: &App) {

@@ -278,8 +278,7 @@ pub(crate) fn render_gh_create_input(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-// Unix-only: `with_temp_home` isolates `$HOME` for `App::new()`'s loads,
-// same as the todo-panel suite below.
+// Unix-only: `with_temp_home` isolates `$HOME` for `App::new()`'s loads.
 #[cfg(all(test, unix))]
 mod places_picker_tests {
     use crate::app::{App, View};

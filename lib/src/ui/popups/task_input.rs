@@ -10,10 +10,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-/// The add/rename-task popup. Renaming is the one-line editor it always was;
-/// adding shows a second field under it — the context box, where a pasted
-/// spec, stack trace or ticket lands (see [`App::paste_into_input`]). Tab
-/// moves between the two, enter commits both, esc cancels.
+/// The add/rename-task popup. Renaming edits one line; adding shows a second
+/// field under it — the context box, where a pasted spec, stack trace or
+/// ticket lands (see [`App::paste_into_input`]). Tab moves between the two,
+/// enter commits both, esc cancels.
 pub(crate) fn render_task_input(frame: &mut Frame, area: Rect, app: &App) {
     let renaming = app.tasks.renaming.is_some();
     let on_context = !renaming && app.tasks.field == TaskField::Context;
@@ -190,8 +190,7 @@ fn column_rows(raw: &str, width: usize) -> Vec<String> {
     }
 }
 
-// Unix-only: `with_temp_home` isolates `$HOME` for `App::new()`'s loads,
-// same as the todo-panel suite below.
+// Unix-only: `with_temp_home` isolates `$HOME` for `App::new()`'s loads.
 #[cfg(all(test, unix))]
 mod task_input_tests {
     use crate::app::{App, TaskField, View};

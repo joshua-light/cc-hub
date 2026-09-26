@@ -1,8 +1,14 @@
-//! Top-level TUI render entry point and shared chrome (title bar, tab strip,
-//! status bar). `render` is the entry the binary's draw loop calls. The
-//! per-tab bodies and overlays live in the sibling modules; the band
-//! background and layout split are defined here so the tab strip and project
-//! chip strip share one source of truth.
+//! TUI render entry: [`render`] is what the binary's draw loop calls. It lays
+//! out the bands, draws the current tab's body, and dispatches the overlay
+//! for the current view.
+//!
+//! - `chrome`: title bar and tab strip
+//! - `status_bar`: key hints, status message and refresh age
+//! - `popups`: overlays drawn over the body
+//! - `common`, `palette`: helpers and colours shared across the UI
+//! - `tasks`, `sessions`, `sessions_list`, `builds`, `agents`, `metrics`:
+//!   one module per tab body
+//! - `artifacts`: task attachment cards for the Task Info popup
 
 pub mod agents;
 pub mod artifacts;
@@ -38,10 +44,8 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Top-level vertical split: title bar, tab strip, body, status bar. Shared
-/// between `render` and overlays that anchor to the body region so the band
-/// heights are defined in exactly one place.
-pub(crate) fn main_layout(area: Rect) -> std::rc::Rc<[Rect]> {
+/// Top-level vertical split: title bar, tab strip, body, status bar.
+fn main_layout(area: Rect) -> std::rc::Rc<[Rect]> {
     Layout::default()
         .direction(Direction::Vertical)
         .constraints([

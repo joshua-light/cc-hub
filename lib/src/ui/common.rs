@@ -1,6 +1,11 @@
-//! Cross-tab UI helpers: popup/centering geometry, the title-bar usage line,
-//! state colours/indicators, and the truncation / time / token / cost
-//! formatters shared by the session grid, kanban cards, and metrics tables.
+//! Helpers shared across the UI:
+//!
+//! - session state, task status, priority and identity colours
+//! - popup block, centering geometry, the text cursor and wrapped-row count
+//! - the title-bar usage line
+//! - model/tool labels, context-window bars, and time, token and cost
+//!   formatters
+//! - [`Cell`], one column of a table row's right-hand cluster
 
 use crate::models;
 use crate::models::SessionState;
@@ -92,18 +97,14 @@ pub(crate) fn centered_fixed(area: Rect, w: u16, h: u16) -> Rect {
     Rect::new(x, y, w, h)
 }
 
-/// Visual rows one logical `Line` occupies when a `Paragraph` with
-/// `Wrap { trim: false }` renders it into `width` columns. ratatui scrolls a
-/// wrapped paragraph by these *wrapped rows*, not by logical lines, so every
-/// scroll clamp and jump target has to be summed in this unit — counting
-/// logical lines leaves the last wrapped screenful permanently unreachable.
+/// Visual rows `lines` occupy when a `Paragraph` with `Wrap { trim: false }`
+/// renders them into `width` columns. ratatui scrolls a wrapped paragraph by
+/// wrapped rows, not logical lines, so every scroll clamp and jump target must
+/// be summed in this unit or the last screenful becomes unreachable.
 ///
-/// Delegates to ratatui's own `Paragraph::line_count` (the
-/// `unstable-rendered-line-info` feature) so the count is by construction the
-/// renderer's: a hand-rolled mirror of `WordWrapper` diverged on
-/// whitespace-led rows, trailing spaces, tabs, and wide (CJK/emoji) chars —
-/// under-counts made the last screenful unreachable again, over-counts let
-/// auto-follow scroll past the bottom into blank rows.
+/// Delegates to ratatui's `Paragraph::line_count` (the
+/// `unstable-rendered-line-info` feature) so the count is the renderer's own,
+/// including word breaks, trailing spaces, tabs and wide chars.
 pub(crate) fn wrapped_total_rows(lines: &[Line], width: u16) -> u16 {
     if width == 0 {
         return lines.len().min(u16::MAX as usize) as u16;
@@ -159,7 +160,7 @@ pub fn build_usage_line(u: &UsageInfo) -> Line<'static> {
     Line::from(spans)
 }
 
-pub(crate) fn append_bar(spans: &mut Vec<Span<'static>>, pct: u8, width: u16) {
+fn append_bar(spans: &mut Vec<Span<'static>>, pct: u8, width: u16) {
     let pct = pct.min(100);
     let mut filled = (pct as u16 * width) / 100;
     if pct > 0 && filled == 0 {
@@ -173,7 +174,7 @@ pub(crate) fn append_bar(spans: &mut Vec<Span<'static>>, pct: u8, width: u16) {
     spans.push(Span::styled(empty_s, Style::default().fg(color)));
 }
 
-pub(crate) fn bar_color(pct: u8) -> Color {
+fn bar_color(pct: u8) -> Color {
     if pct > 80 {
         Color::Red
     } else if pct >= 50 {
@@ -183,7 +184,7 @@ pub(crate) fn bar_color(pct: u8) -> Color {
     }
 }
 
-pub(crate) fn format_reset(iso: &str, fmt: &str) -> Option<String> {
+fn format_reset(iso: &str, fmt: &str) -> Option<String> {
     let dt = DateTime::parse_from_rfc3339(iso).ok()?;
     Some(
         dt.with_timezone(&Local)
@@ -224,7 +225,7 @@ pub(crate) fn short_model(model: &str) -> &str {
 /// Tool names for the card HUD: strip MCP-server prefixes and cap at 18 chars
 /// so long names like `mcp__claude_ai_Notion__notion-search` fit in narrow
 /// cards.
-pub(crate) fn short_tool(tool: &str) -> String {
+fn short_tool(tool: &str) -> String {
     // `mcp__<server>__<name>` → just the name (the leaf is what's distinctive).
     let leaf = crate::models::mcp_leaf(tool);
     let chars: Vec<char> = leaf.chars().collect();
@@ -435,10 +436,8 @@ mod wrapped_rows_tests {
         assert_eq!(rows("abc", 0), 1); // degenerate area; renderer shows nothing
     }
 
-    // The cases where the previous hand-rolled WordWrapper mirror diverged
-    // from the renderer (fuzz-verified against Paragraph rendering). These pin
-    // the renderer's actual behavior so a future reimplementation can't
-    // silently drift again.
+    // Shapes where a naive char-count wrap disagrees with the renderer. These
+    // pin the renderer's behaviour so a reimplementation cannot drift from it.
     #[test]
     fn matches_renderer_on_divergent_shapes() {
         // Leading whitespace before an overflowing token: WordWrapper packs

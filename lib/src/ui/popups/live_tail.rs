@@ -7,7 +7,7 @@ use super::transcript::{
 use crate::app::App;
 use crate::ui::common::{centered_rect, format_tokens, wrapped_total_rows};
 use crate::ui::palette::DIM_TEXT;
-use ratatui::layout::Rect;
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
@@ -57,9 +57,9 @@ pub(crate) fn render_live_tail(frame: &mut Frame, area: Rect, app: &mut App) {
     );
 
     let (lines, highlight_range) = build_live_tail_content(&lv.messages, lv.highlight_msg_idx);
-    // The Paragraph wraps, so `.scroll` counts wrapped rows, not logical lines.
-    // Any line wider than the popup adds rows the logical count misses, which
-    // is what left the bottom rows unreachable and the highlight off-target.
+    // The Paragraph wraps, so `.scroll` counts wrapped rows, not logical
+    // lines: a logical count would leave the bottom rows unreachable and the
+    // highlight off-target.
     let wrap_w = content_area.width;
     let total_rows = wrapped_total_rows(&lines, wrap_w);
 
@@ -108,7 +108,6 @@ pub(crate) fn render_live_tail(frame: &mut Frame, area: Rect, app: &mut App) {
     let hint_area = Rect::new(inner.x, bottom_y, hint_width, 1);
     frame.render_widget(hint, hint_area);
 
-    // Scroll indicator on the right of the bottom border
     let scroll_info = format!(
         " {}/{} ",
         (lv.scroll as usize).min(total_rows.saturating_sub(1) as usize) + 1,
@@ -118,7 +117,7 @@ pub(crate) fn render_live_tail(frame: &mut Frame, area: Rect, app: &mut App) {
         scroll_info,
         Style::default().fg(DIM_TEXT),
     )))
-    .alignment(ratatui::layout::Alignment::Right);
+    .alignment(Alignment::Right);
 
     let indicator_area = Rect::new(inner.x, bottom_y, inner.width, 1);
     frame.render_widget(indicator, indicator_area);

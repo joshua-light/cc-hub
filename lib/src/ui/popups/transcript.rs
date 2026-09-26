@@ -150,7 +150,8 @@ pub(super) fn render_thinking(lines: &mut Vec<Line<'static>>) {
     ]));
 }
 
-// Continuation lines indent two spaces so body text lines up under the prefix.
+/// Continuation lines indent two spaces so body text lines up under the
+/// prefix.
 pub(super) fn push_bullet_block(
     lines: &mut Vec<Line<'static>>,
     prefix: Span<'static>,
