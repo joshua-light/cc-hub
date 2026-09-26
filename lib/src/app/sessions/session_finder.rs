@@ -7,8 +7,9 @@
 //! [`crate::app::TaskLinkPickerState`].
 
 use crate::agent::AgentKind;
+use crate::app::{App, Effect, View};
 use crate::fuzzy;
-use crate::models::{first_line_truncated, short_sid};
+use crate::models::{first_line_truncated, short_sid, SessionState};
 use crate::sessions::index::IndexedSession;
 use std::path::PathBuf;
 
@@ -176,6 +177,103 @@ fn choice_of(session: IndexedSession) -> SessionFinderChoice {
         mtime_ms: session.mtime_ms,
         label,
         detail,
+    }
+}
+
+impl App {
+    /// `/` on the Sessions tab: open the archive-wide session finder. It
+    /// opens empty and typing-ready; the archive itself arrives via
+    /// [`Effect::BuildSessionIndex`] → [`Self::update_session_index`].
+    pub fn enter_session_finder(&mut self) {
+        self.session_finder = Some(SessionFinderState::loading());
+        self.view = View::SessionFinder;
+    }
+
+    pub fn close_session_finder(&mut self) {
+        self.session_finder = None;
+        self.view = View::Grid;
+    }
+
+    /// Move the finder highlight by `delta` rows, clamped to the live
+    /// filtered result list.
+    pub fn session_finder_move(&mut self, delta: isize) {
+        if let Some(finder) = self.session_finder.as_mut() {
+            finder.move_selection(delta);
+        }
+    }
+
+    /// Adopt a finished archive scan. Ignored when the finder was closed
+    /// while the scan ran — the list is rebuilt fresh on every open.
+    pub fn update_session_index(&mut self, index: Vec<crate::sessions::index::IndexedSession>) {
+        if let Some(finder) = self.session_finder.as_mut() {
+            finder.set_index(index);
+        }
+    }
+
+    /// Enter on the session finder: reopen the highlighted session. A
+    /// still-live session is attached (tmux pane) or window-focused — never
+    /// resumed into a duplicate process; a dead one is resumed in its cwd
+    /// and its fresh pane attached. An empty match list keeps the finder
+    /// open, mirroring the model picker.
+    pub fn confirm_session_finder(&mut self) -> Vec<Effect> {
+        let Some(choice) = self
+            .session_finder
+            .as_ref()
+            .and_then(SessionFinderState::selected_choice)
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        self.session_finder = None;
+        self.view = View::Grid;
+        // Live already? Match by session id or by transcript path — a Pi/
+        // Codex resume runs on the same file, so a second spawn would put
+        // two processes on one JSONL (see `focus_selected_session`).
+        let live = self.sessions.last_sessions.iter().find(|s| {
+            s.state != SessionState::Inactive
+                && (s.session_id == choice.session_id
+                    || s.jsonl_path.as_deref() == Some(choice.jsonl_path.as_path()))
+        });
+        if let Some(live) = live {
+            let sid = crate::models::short_sid(&live.session_id).to_string();
+            if let Some(tmux) = live.tmux_session.clone() {
+                self.set_status(format!("attached live {} [{}]", sid, tmux));
+                return vec![Effect::OpenTmuxPane { tmux, owned: false }];
+            }
+            let (pid, cwd) = (live.pid, live.cwd.clone());
+            self.set_status(format!("focused live {}", sid));
+            return vec![Effect::FocusWindow { pid, cwd }];
+        }
+        let resume = match choice.agent_kind {
+            // Claude and Codex resume by session id; Pi by transcript path.
+            crate::agent::AgentKind::Claude | crate::agent::AgentKind::Codex => {
+                crate::spawn::SessionTarget::Resume(choice.session_id.clone())
+            }
+            crate::agent::AgentKind::Pi => {
+                crate::spawn::SessionTarget::ResumeFile(choice.jsonl_path.clone())
+            }
+        };
+        match self.runtime.spawn_session(
+            &choice.agent_id,
+            &choice.cwd,
+            Some(resume),
+            None,
+            None,
+            false,
+        ) {
+            Ok(tmux) => {
+                self.set_status(format!(
+                    "resumed {} [{}]",
+                    crate::models::short_sid(&choice.session_id),
+                    tmux
+                ));
+                vec![Effect::OpenTmuxPane { tmux, owned: false }]
+            }
+            Err(e) => {
+                self.set_status(format!("resume failed: {}", e));
+                Vec::new()
+            }
+        }
     }
 }
 

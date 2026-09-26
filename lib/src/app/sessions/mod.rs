@@ -2,10 +2,22 @@ use crate::acks::Acks;
 use crate::models::{ProjectGroup, SessionInfo};
 use std::collections::HashSet;
 
+mod groups;
+mod model_picker;
+mod rename;
+mod respawn_picker;
+mod scan;
 mod session_finder;
+mod spawn;
 mod task_link_picker;
 
+pub use model_picker::{
+    AgentPickerState, ModelPickerChoice, ModelPickerRow, ModelPickerState, SPAWN_MODELS,
+};
+pub use rename::RenameSubmit;
+pub use respawn_picker::{RespawnChoice, RespawnPickerState};
 pub use session_finder::{SessionFinderChoice, SessionFinderRow, SessionFinderState};
+pub(super) use spawn::SpawnWatch;
 pub use task_link_picker::{TaskLinkAction, TaskLinkChoice, TaskLinkPickerState, TaskLinkRow};
 
 /// How the Sessions tab lays out its sessions. `List` renders one compact

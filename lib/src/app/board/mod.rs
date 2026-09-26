@@ -7,6 +7,16 @@ use crate::fuzzy::fuzzy_match;
 use crate::tasks::store::{TaskState, TaskStatus};
 use crate::tasks::PersonalBoard;
 
+mod assign;
+mod attach;
+mod input;
+mod kind_picker;
+mod lifecycle;
+mod order;
+
+pub use kind_picker::TaskKindPickerState;
+pub use lifecycle::PROCEED_PROMPT;
+
 /// Full board column order. Planning is optional at render time (see
 /// [`visible_task_columns`]); this stays the canonical set the board logic
 /// and on-disk statuses are defined against. Review holds cards whose
