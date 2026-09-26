@@ -2,6 +2,7 @@
 //! Read-only: nothing here writes to an agent's transcript or status files.
 //!
 //! - [`scanner`] — the live-grid scan; merges Claude, Pi and Codex sessions.
+//! - [`claude`] — Claude session discovery.
 //! - [`pi`] — Pi session discovery.
 //! - [`codex`] — Codex session discovery.
 //! - [`pi_bridge`] — Pi extension heartbeat files.
@@ -10,6 +11,7 @@
 //! - [`count`] — sessions created today and this week.
 //! - [`watcher`] — filesystem watcher that signals a rescan.
 
+mod claude;
 pub mod codex;
 pub mod count;
 pub mod dir_cache;
