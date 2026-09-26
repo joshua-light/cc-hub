@@ -11,7 +11,7 @@ use crate::platform::paths::cc_hub_home;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use super::status::{validate_status_transition, TaskPriority, TaskStatus};
@@ -25,11 +25,11 @@ pub fn task_dir(task_id: &str) -> Option<PathBuf> {
     tasks_dir().map(|d| d.join(task_id))
 }
 
-pub fn task_state_file(task_id: &str) -> Option<PathBuf> {
+fn task_state_file(task_id: &str) -> Option<PathBuf> {
     task_dir(task_id).map(|d| d.join("state.json"))
 }
 
-pub fn new_task_id() -> String {
+fn new_task_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -177,20 +177,9 @@ pub fn read_task_state(task_id: &str) -> io::Result<TaskState> {
 /// dirs on demand.
 pub fn write_task_state(state: &TaskState) -> io::Result<()> {
     let path = task_state_file(&state.task_id).ok_or_else(|| io::Error::other("no home dir"))?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let body = serde_json::to_string_pretty(state)
         .map_err(|e| io::Error::other(format!("serialize state: {}", e)))?;
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    {
-        use std::io::Write;
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(body.as_bytes())?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, &path)?;
-    Ok(())
+    crate::persist::write_atomic(&path, body.as_bytes())
 }
 
 /// Take the per-task exclusive advisory lock that serializes every
@@ -200,49 +189,43 @@ pub fn write_task_state(state: &TaskState) -> io::Result<()> {
 /// directly. Returns `None` when the task directory doesn't exist yet:
 /// there's nothing to protect, and the caller's read will surface
 /// `NotFound` with its usual error.
-pub(crate) fn lock_task_state(task_id: &str) -> io::Result<Option<fs::File>> {
-    use fs2::FileExt;
+fn lock_task_state(task_id: &str) -> io::Result<Option<fs::File>> {
     let Some(dir) = task_dir(task_id) else {
         return Ok(None);
     };
     if !dir.exists() {
         return Ok(None);
     }
+    lock_exclusive(&dir.join("state.lock")).map(Some)
+}
+
+/// Open (creating it, never truncating) the sidecar lock file at `path` and
+/// block until this process holds its exclusive advisory lock. The lock is
+/// released when the returned file drops.
+pub(super) fn lock_exclusive(path: &Path) -> io::Result<fs::File> {
+    use fs2::FileExt;
     let f = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(dir.join("state.lock"))?;
+        .open(path)?;
     f.lock_exclusive()?;
-    Ok(Some(f))
+    Ok(f)
 }
 
 fn update_task_inner<F>(task_id: &str, touch: bool, f: F) -> io::Result<TaskState>
 where
     F: FnOnce(&mut TaskState),
 {
-    try_update_task_inner(task_id, touch, |s| {
-        let previous_session = s.session_id.clone();
-        f(s);
-        for sid in previous_session.iter().chain(s.session_id.iter()) {
-            if !s.usage_session_ids.contains(sid) {
-                s.usage_session_ids.push(sid.clone());
-            }
-        }
-        true
-    })
-    .map(|(state, _)| state)
-}
-
-fn try_update_task_inner<F>(task_id: &str, touch: bool, f: F) -> io::Result<(TaskState, bool)>
-where
-    F: FnOnce(&mut TaskState) -> bool,
-{
     let _lock = lock_task_state(task_id)?;
     let mut state = read_task_state(task_id)?;
     let prev_status = state.status;
-    if !f(&mut state) {
-        return Ok((state, false));
+    let previous_session = state.session_id.clone();
+    f(&mut state);
+    for sid in previous_session.iter().chain(state.session_id.iter()) {
+        if !state.usage_session_ids.contains(sid) {
+            state.usage_session_ids.push(sid.clone());
+        }
     }
     if state.status != prev_status {
         validate_status_transition(&prev_status, &state.status)
@@ -263,7 +246,7 @@ where
             }
         }
     }
-    Ok((state, true))
+    Ok(state)
 }
 
 /// In-place update under `read → mutate → write`, serialized by the

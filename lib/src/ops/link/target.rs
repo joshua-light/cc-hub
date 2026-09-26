@@ -20,7 +20,7 @@ pub struct LinkTarget {
 }
 
 /// The live session a hand-over for `task` would replace, if any.
-pub fn session_to_supersede(task: &crate::link::TaskLink) -> Result<Option<String>, OpError> {
+pub fn session_to_supersede(task: &TaskLink) -> Result<Option<String>, OpError> {
     let target = self::target(&Link::Task(task.clone()), None)?;
     let card = board_card(task.id.as_str())?;
     Ok(live_session_in(

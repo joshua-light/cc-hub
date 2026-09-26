@@ -122,7 +122,7 @@ pub struct Label {
     pub errand: Errand,
 }
 
-pub fn label_at(root: &Path, task: &str) -> Option<Label> {
+fn label_at(root: &Path, task: &str) -> Option<Label> {
     if task.contains('/') || task.contains('\\') || task == ".." {
         return None;
     }
@@ -163,7 +163,7 @@ pub fn label_at(root: &Path, task: &str) -> Option<Label> {
 }
 
 pub fn label(task: &str) -> Option<Label> {
-    label_at(&dirs::home_dir()?.join(".cc-hub/tasks"), task)
+    label_at(&super::store::tasks_dir()?, task)
 }
 
 #[cfg(test)]

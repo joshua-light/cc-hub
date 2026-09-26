@@ -59,12 +59,6 @@ impl ReviewLink {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PostThreshold(u8);
 
-impl PostThreshold {
-    pub fn percent(self) -> u8 {
-        self.0
-    }
-}
-
 impl fmt::Display for PostThreshold {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -164,7 +158,7 @@ mod tests {
         let Link::Review(r) = r else {
             panic!("expected a review link")
         };
-        assert_eq!(r.post.map(PostThreshold::percent), Some(80));
+        assert_eq!(r.post.map(|p| p.to_string()).as_deref(), Some("80"));
         assert_eq!(
             r.prompt(),
             format!(
@@ -198,8 +192,8 @@ mod tests {
                 raw
             );
         }
-        assert_eq!("100".parse::<PostThreshold>().unwrap().percent(), 100);
-        assert_eq!("1".parse::<PostThreshold>().unwrap().percent(), 1);
+        assert_eq!("100".parse::<PostThreshold>().unwrap().to_string(), "100");
+        assert_eq!("1".parse::<PostThreshold>().unwrap().to_string(), "1");
     }
 
     #[test]

@@ -1,9 +1,8 @@
-use fs2::FileExt;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use super::store::TaskState;
+use super::store::{lock_exclusive, TaskState};
 use crate::platform::paths::cc_hub_home;
 
 fn archive_path() -> Option<PathBuf> {
@@ -26,13 +25,7 @@ pub(super) fn archive_tasks(items: &[TaskState]) -> io::Result<()> {
         .parent()
         .ok_or_else(|| io::Error::other("task archive path has no parent"))?;
     fs::create_dir_all(parent)?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(parent.join("tasks-archive.lock"))?;
-    lock.lock_exclusive()?;
+    let _lock = lock_exclusive(&parent.join("tasks-archive.lock"))?;
     let mut archived: Vec<TaskState> = match fs::read_to_string(&path) {
         Ok(raw) => {
             serde_json::from_str(&raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?

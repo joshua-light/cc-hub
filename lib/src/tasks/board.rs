@@ -120,7 +120,7 @@ impl PersonalBoard {
             return Ok(false);
         }
         let updated = update_task(id, |s| s.prompt = text.to_string())?;
-        self.apply(updated);
+        self.adopt(updated);
         Ok(true)
     }
 
@@ -132,7 +132,7 @@ impl PersonalBoard {
             return Ok(false);
         }
         let updated = update_task(id, |s| s.priority = priority)?;
-        self.apply(updated);
+        self.adopt(updated);
         Ok(true)
     }
 
@@ -144,7 +144,7 @@ impl PersonalBoard {
             return Ok(false);
         }
         let updated = update_task(id, |s| s.tags = tags)?;
-        self.apply(updated);
+        self.adopt(updated);
         Ok(true)
     }
 
@@ -156,7 +156,7 @@ impl PersonalBoard {
             return Ok(false);
         }
         let updated = update_task(id, |s| s.kind = kind)?;
-        self.apply(updated);
+        self.adopt(updated);
         Ok(true)
     }
 
@@ -172,7 +172,7 @@ impl PersonalBoard {
             s.status = status;
             s.done_at = (status == TaskStatus::Done).then(store::now_unix_secs);
         })?;
-        self.apply(updated);
+        self.adopt(updated);
         Ok(true)
     }
 
@@ -195,7 +195,7 @@ impl PersonalBoard {
             s.status = TaskStatus::Planning;
             s.done_at = None;
         })?;
-        self.apply(updated);
+        self.adopt(updated);
         self.last_assign_cwd = Some(cwd.to_string());
         save_board_meta(&BoardMeta {
             last_assign_cwd: self.last_assign_cwd.clone(),
@@ -210,7 +210,7 @@ impl PersonalBoard {
             return Ok(false);
         }
         let updated = update_task(id, |s| s.tmux = Some(tmux.to_string()))?;
-        self.apply(updated);
+        self.adopt(updated);
         Ok(true)
     }
 
@@ -232,7 +232,7 @@ impl PersonalBoard {
             s.tmux = Some(tmux.into());
             s.session_id = sid.map(str::to_string);
         })?;
-        self.apply(updated);
+        self.adopt(updated);
         Ok(true)
     }
 
@@ -255,7 +255,7 @@ impl PersonalBoard {
         }
         for (id, binding) in bindings {
             let updated = update_task(&id, |s| binding.apply(s))?;
-            self.apply(updated);
+            self.adopt(updated);
         }
         Ok(true)
     }
@@ -272,13 +272,7 @@ impl PersonalBoard {
         // the task dir before a failed archive write would report failure
         // after the card had already disappeared.
         archive_tasks(std::slice::from_ref(&removed))?;
-        if let Some(dir) = task_dir(id) {
-            match fs::remove_dir_all(&dir) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
-        }
+        delete_task_dir(id)?;
         self.tasks.remove(idx);
         Ok(Some(removed))
     }
@@ -310,32 +304,33 @@ impl PersonalBoard {
         }
         archive_tasks(&done)?;
         for t in &done {
-            if let Some(dir) = task_dir(&t.task_id) {
-                match fs::remove_dir_all(&dir) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e),
-                }
-            }
+            delete_task_dir(&t.task_id)?;
         }
         self.tasks.retain(|t| t.status != TaskStatus::Done);
         Ok(done)
     }
 
-    /// Adopt the state a locked write performed *outside* the board returned
-    /// (e.g. the attach/remove artifact ops in `ops::task`), so the snapshot
-    /// shows what landed without a full disk reload.
-    pub(crate) fn adopt(&mut self, updated: TaskState) {
-        self.apply(updated);
-    }
-
     /// Replace the in-memory copy of a task with the state a locked write
-    /// returned, so the snapshot always shows what actually landed on disk.
-    fn apply(&mut self, updated: TaskState) {
+    /// returned, so the snapshot shows what landed without a full reload.
+    /// Ops that write outside the board (the artifact ops in `ops::task`)
+    /// hand their result back through here too.
+    pub(crate) fn adopt(&mut self, updated: TaskState) {
         if let Some(t) = self.tasks.iter_mut().find(|t| t.task_id == updated.task_id) {
             *t = updated;
         }
     }
+}
+
+/// Delete a task's directory. Already gone counts as deleted.
+fn delete_task_dir(id: &str) -> io::Result<()> {
+    if let Some(dir) = task_dir(id) {
+        match fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 // Unix-only for the same reason as todo.rs: isolation works by redirecting
