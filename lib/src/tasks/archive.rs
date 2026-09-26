@@ -2,7 +2,8 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use super::store::{lock_exclusive, TaskState};
+use super::store::TaskState;
+use crate::persist::lock_exclusive;
 use crate::platform::paths::cc_hub_home;
 
 fn archive_path() -> Option<PathBuf> {

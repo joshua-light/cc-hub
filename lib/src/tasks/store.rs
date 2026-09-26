@@ -11,7 +11,7 @@ use crate::platform::paths::cc_hub_home;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use super::status::{validate_status_transition, TaskPriority, TaskStatus};
@@ -196,21 +196,7 @@ fn lock_task_state(task_id: &str) -> io::Result<Option<fs::File>> {
     if !dir.exists() {
         return Ok(None);
     }
-    lock_exclusive(&dir.join("state.lock")).map(Some)
-}
-
-/// Open (creating it, never truncating) the sidecar lock file at `path` and
-/// block until this process holds its exclusive advisory lock. The lock is
-/// released when the returned file drops.
-pub(super) fn lock_exclusive(path: &Path) -> io::Result<fs::File> {
-    use fs2::FileExt;
-    let f = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(path)?;
-    f.lock_exclusive()?;
-    Ok(f)
+    crate::persist::lock_exclusive(&dir.join("state.lock")).map(Some)
 }
 
 fn update_task_inner<F>(task_id: &str, touch: bool, f: F) -> io::Result<TaskState>
