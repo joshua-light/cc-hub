@@ -1,3 +1,6 @@
+//! Space-to-idle acknowledgements, persisted to `~/.cc-hub/acks.json`; see
+//! [`Acks`].
+
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;

@@ -56,17 +56,11 @@ fn write(hold: &Hold) -> io::Result<()> {
 /// Make sure something holds, or is queued to hold, `resource` for the tab.
 /// Serialized by a lock so two runners starting at once start one hold.
 pub fn ensure(resource: &str) -> io::Result<Hold> {
-    use fs2::FileExt;
     let lock_path = path(resource)?.with_extension("lock");
     if let Some(dir) = lock_path.parent() {
         fs::create_dir_all(dir)?;
     }
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)?;
-    lock.lock_exclusive()?;
+    let _lock = crate::persist::lock_exclusive(&lock_path)?;
     if let Some(hold) = read(resource) {
         return Ok(hold);
     }
