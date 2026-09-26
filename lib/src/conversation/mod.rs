@@ -3,7 +3,8 @@
 //!
 //! Claude parsing lives in focused submodules, all re-exported flat at
 //! `conversation::*`:
-//! - [`io`] — JSONL reading and streaming block counters.
+//! - [`io`] — JSONL reading, the grow-the-tail loop every dialect shares, and
+//!   streaming block counters.
 //! - [`cache`] — mtime-keyed memoization of derived state and summaries.
 //! - [`state`] — entry classification and the session-state machine.
 //! - [`messages`] — message and metadata extraction.
@@ -14,6 +15,7 @@
 //! - [`pi`] — Pi transcript parsing.
 //! - [`codex`] — Codex rollout parsing.
 //! - [`tool_count`] — incremental tool-use counts across every dialect.
+//! - [`classify`] — the session-state machine every dialect adapts to.
 
 use crate::agent::AgentKind;
 use crate::models::ConversationMessage;
