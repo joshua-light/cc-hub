@@ -1,9 +1,10 @@
-//! Builds tab: a card per recipe. A card answers "can I play on it, and is
-//! anything in the way?": its border carries the recipe and the state of its
-//! build; inside, the resource it holds, what its player runs, and the build
-//! that matters now (running, else next to run, else the last to finish) with
-//! its route, time against the route's usual, and phase or failure. A
-//! recipe's older builds are its history, not cards.
+//! Builds tab: a card per recipe. A card answers "what did it last run, and
+//! is it running now?": its border carries the recipe, the state of its build,
+//! the resource it holds and its description; inside is the build that
+//! matters now (running, else next to run, else the last to finish), each
+//! thing said once: its commit, its route and time against the route's
+//! usual, its phase or failure, and what comes after it. A recipe's older
+//! builds are its history, not cards.
 
 use crate::app::{App, BuildForm, FormField, LogView};
 use crate::builds::{recipe, Build, BuildStatus};
@@ -19,18 +20,16 @@ use ratatui::Frame;
 
 /// The narrowest a card gets before the cards stack into fewer columns.
 const CARD_W: u16 = 72;
-/// Seven body lines and the border: hold, player, a gap, then the build's
-/// four.
-const CARD_H: u16 = 9;
+/// Four body lines and the border: the build's commit, its time, what it is
+/// doing, and what comes after it.
+const CARD_H: u16 = 6;
 const BAR_W: usize = 10;
 
 pub(crate) fn hints(app: &App) -> &'static str {
     match app.view {
-        crate::app::View::BuildForm => {
-            "tab/↑↓:field  ←/→:change  type:edit  enter:build  esc:cancel"
-        }
+        crate::app::View::BuildForm => "tab/↑↓:field  ←/→:change  type:edit  enter:run  esc:cancel",
         crate::app::View::BuildLog => "j/k:scroll  PgUp/PgDn:page  G:follow  esc:close",
-        _ => "r:build now  n:new…  c:cancel  b:serve  enter/f:log  h/j/k/l:nav  tab:next  q:quit",
+        _ => "r:run  n:run with…  c:cancel  enter/f:log  h/j/k/l:nav  tab:next  q:quit",
     }
 }
 
@@ -153,7 +152,6 @@ fn render_card(
 ) {
     let recipe = recipe::named(name);
     let shown = app.builds.shown(name);
-    let in_player = app.builds.in_player(name);
     let width = area.width.saturating_sub(4) as usize;
 
     let (mark, color) = match shown {
@@ -180,6 +178,9 @@ fn render_card(
             format!(" {} {} ", mark, name),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
+    if let Some(resource) = recipe.and_then(|r| r.resource.as_deref()) {
+        block = block.title(hold_title(app, resource, now));
+    }
     if let Some(description) = recipe
         .map(|r| r.description.as_str())
         .filter(|d| !d.is_empty())
@@ -195,102 +196,59 @@ fn render_card(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let mut lines = Vec::new();
-    if let Some(resource) = recipe.and_then(|r| r.resource.as_deref()) {
-        lines.push(hold_line(app, resource, now, width));
-    }
-    if let Some(line) = player_line(app, name, in_player, now, width) {
-        lines.push(line);
-    }
-    // The gap sets the build apart from the recipe's own lines, when it has any.
-    if !lines.is_empty() {
-        lines.push(Line::raw(""));
-    }
-    match shown {
+    let mut lines = match shown {
         Some(build) => {
-            lines.push(build_line(build, color, mark, width));
-            lines.push(time_line(app, build, now));
-            lines.push(say_line(build, width));
-            if let Some(line) = after_line(app, name, build, now, width) {
-                lines.push(line);
-            }
+            let mut lines = vec![commit_line(build, color, width), time_line(app, build, now)];
+            lines.extend(say_line(build, width));
+            lines
         }
-        None => {
-            lines.push(Line::from(text(
-                "nothing built yet — r builds the checkout as it is now",
-                width,
-                Style::default().fg(DIM_TEXT),
-            )));
-        }
-    }
+        None => vec![Line::from(text(
+            "never run — r runs it",
+            width,
+            Style::default().fg(DIM_TEXT),
+        ))],
+    };
+    lines.extend(after_line(app, name, shown, now, width));
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// `󰌾 holding build-box · 12m`, or who it waits behind.
-fn hold_line(app: &App, resource: &str, now: i64, width: usize) -> Line<'static> {
+/// The top border's right end: `󰌾 build-box · 12m`, or who is in the way.
+fn hold_title(app: &App, resource: &str, now: i64) -> Line<'static> {
     let hold = app.builds.holds.get(resource).cloned().flatten();
     let other = app.builds.probe.holders.get(resource).cloned().flatten();
     let (s, color) = match (hold, other) {
         (Some(h), _) if h.granted => (
-            format!("󰌾 holding {} · {}", resource, age(now, h.since)),
+            format!("󰌾 {} · {}", resource, age(now, h.since)),
             Color::Green,
         ),
         (Some(h), _) => (
             match h.behind {
-                Some(who) => format!("󰔟 waiting for {}, held by {}", resource, who),
-                None => format!("󰔟 waiting for {}", resource),
+                Some(who) => format!("󰔟 {} · behind {}", resource, who),
+                None => format!("󰔟 {}", resource),
             },
             Color::Yellow,
         ),
         (None, Some(who)) => (format!("󰌾 {} held by {}", resource, who), Color::Yellow),
-        (None, None) => (format!("󰍁 {} free", resource), DIM_TEXT),
+        (None, None) => (format!("{} free", resource), DIM_TEXT),
     };
-    Line::from(text(s, width, Style::default().fg(color)))
+    Line::from(Span::styled(format!(" {} ", s), Style::default().fg(color))).right_aligned()
 }
 
-/// `● player 1a2b3c4d5e6 · <subject> · served 3m ago`.
-fn player_line(
-    app: &App,
-    name: &str,
-    built: Option<&Build>,
-    now: i64,
-    width: usize,
-) -> Option<Line<'static>> {
-    let current = app.builds.probe.current.get(name)?;
-    let mut s = format!("player {}", short(current));
-    if let Some(subject) = built.and_then(|b| b.subject.as_deref()) {
-        s.push_str(&format!(" · {}", subject));
-    }
-    let served = built.and_then(|b| b.served_at).map(|at| age(now, at));
-    let tail = match (built, served) {
-        (Some(_), Some(ago)) => format!(" · served {} ago", ago),
-        (Some(_), None) => " · b serves it".to_string(),
-        (None, _) => " · not built from here".to_string(),
+/// `1a2b3c4d5e6 · <subject>`, after the ref when one was pinned; the ref or
+/// the working tree until the recipe says what it built.
+fn commit_line(build: &Build, color: Color, width: usize) -> Line<'static> {
+    let parts: Vec<&str> = [
+        build.r#ref.as_deref(),
+        build.commit.as_deref().map(short),
+        build.subject.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let s = match parts.is_empty() {
+        true => build.target().to_string(),
+        false => parts.join(" · "),
     };
-    let room = width.saturating_sub(2 + tail.chars().count());
-    Some(Line::from(vec![
-        Span::styled(
-            "● ",
-            Style::default().fg(if built.is_some() {
-                Color::Green
-            } else {
-                DIM_TEXT
-            }),
-        ),
-        text(s, room, Style::default().fg(ACCENT_BLUE)),
-        Span::styled(tail, Style::default().fg(MUTED_TEXT)),
-    ]))
-}
-
-/// `✓ working tree · 1a2b3c4d5e6 · <subject>`.
-fn build_line(build: &Build, color: Color, mark: &str, width: usize) -> Line<'static> {
-    let mut s = format!("{} {}", mark, build.target());
-    if let Some(commit) = &build.commit {
-        s.push_str(&format!(" · {}", short(commit)));
-    }
-    if let Some(subject) = &build.subject {
-        s.push_str(&format!(" · {}", subject));
-    }
     Line::from(text(
         s,
         width,
@@ -353,8 +311,9 @@ fn time_line(app: &App, build: &Build, now: i64) -> Line<'static> {
     Line::from(spans)
 }
 
-/// What the build is doing, or why it did not work.
-fn say_line(build: &Build, width: usize) -> Line<'static> {
+/// What the build is doing, or why it did not work. A build that succeeded
+/// has nothing to add.
+fn say_line(build: &Build, width: usize) -> Option<Line<'static>> {
     let (s, style) = match build.status {
         BuildStatus::Queued | BuildStatus::Running => (
             build.phase.clone().unwrap_or_else(|| "starting".into()),
@@ -369,17 +328,18 @@ fn say_line(build: &Build, width: usize) -> Line<'static> {
             Style::default().fg(Color::Red),
         ),
         BuildStatus::Cancelled => ("cancelled".into(), Style::default().fg(LABEL_GRAY)),
-        BuildStatus::Succeeded => ("built".into(), Style::default().fg(DIM_TEXT)),
+        BuildStatus::Succeeded => return None,
     };
-    Line::from(text(s, width, style))
+    Some(Line::from(text(s, width, style)))
 }
 
-/// What comes after it: builds queued behind it, or, when it did not
-/// succeed, the last build that did.
+/// What comes after it: builds queued behind it; when it did not succeed,
+/// the last build that did; or, when `current` reports a commit other than
+/// the last success, that commit, since something ran it since.
 fn after_line(
     app: &App,
     name: &str,
-    build: &Build,
+    shown: Option<&Build>,
     now: i64,
     width: usize,
 ) -> Option<Line<'static>> {
@@ -391,11 +351,33 @@ fn after_line(
             Style::default().fg(Color::Yellow),
         )));
     }
-    if matches!(build.status, BuildStatus::Failed | BuildStatus::Cancelled) {
+    if let Some(current) = app.builds.drifted(name) {
+        let mut s = format!("now at {}", short(current));
+        let known = app.builds.builds_of(name).find(|b| {
+            b.commit
+                .as_deref()
+                .is_some_and(|c| c.starts_with(current) || current.starts_with(c))
+        });
+        match known.and_then(|b| b.subject.as_deref()) {
+            Some(subject) => s.push_str(&format!(" · {}", subject)),
+            None => s.push_str(" · not run from here"),
+        }
+        return Some(Line::from(text(
+            s,
+            width,
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    let failed =
+        shown.is_some_and(|b| matches!(b.status, BuildStatus::Failed | BuildStatus::Cancelled));
+    if failed {
         let last = app.builds.last_success(name)?;
-        let mut s = format!("last built ✓ {}", last.target());
-        if let Some(commit) = &last.commit {
-            s.push_str(&format!(" · {}", short(commit)));
+        let mut s = format!(
+            "last ✓ {}",
+            last.commit.as_deref().map(short).unwrap_or(last.target())
+        );
+        if let Some(subject) = &last.subject {
+            s.push_str(&format!(" · {}", subject));
         }
         if let Some(at) = last.finished_at {
             s.push_str(&format!(" · {} ago", age(now, at)));
@@ -411,10 +393,10 @@ pub(crate) fn render_build_form(frame: &mut Frame, area: Rect, app: &App) {
     let Some(form) = app.builds.form.as_ref() else {
         return;
     };
-    let popup = centered_fixed(area, 72, 11);
+    let popup = centered_fixed(area, 72, 10);
     frame.render_widget(Clear, popup);
     let block = popup_block(Span::styled(
-        " New build ",
+        " Run with… ",
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
@@ -448,7 +430,6 @@ fn field_line(form: &BuildForm, field: FormField, width: usize) -> Line<'static>
         FormField::Ref if form.r#ref.is_empty() && !focused => "working tree".into(),
         FormField::Ref => form.r#ref.clone(),
         FormField::Route => form.route.clone().unwrap_or_else(|| "auto".into()),
-        FormField::Serve => if form.serve { "yes, once built" } else { "no" }.into(),
     };
     let value = if field.is_text() {
         let cursor = if focused { "▎" } else { "" };

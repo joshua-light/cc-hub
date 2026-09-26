@@ -115,6 +115,12 @@ past the shells and past itself to find it, and `--pid` names it outright when
 that walk would guess wrong. When the process ends, so does the hold; a guest
 that forgets to release still leaks nothing.
 
+A release is found the same way, and when it runs from some other process —
+an agent's commands do not always come from the one that claimed — `--as`
+finds the guest by the name it claimed under instead. A release names what it
+hands back and what it no longer waits for alike, so a claim still in the
+queue is withdrawn by the same command that would have handed it back.
+
 ## Replacement from the transcript
 
 Each worker carries the `PreToolUse` hook, which records the provider session

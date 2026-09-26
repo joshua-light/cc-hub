@@ -458,8 +458,8 @@ pub struct BuildsConfig {
     pub recipes: BTreeMap<String, crate::builds::Recipe>,
     /// How often the TUI re-reads builds from disk.
     pub refresh_secs: u64,
-    /// How often it asks each recipe what is built into its player, and the
-    /// broker who holds each recipe's resource. Both cost a process or an
+    /// How often it asks each recipe's `current` what its last run left in
+    /// place, and the broker who holds each recipe's resource. Both cost a process or an
     /// ssh round trip, so this is slower than the refresh.
     pub probe_secs: u64,
 }

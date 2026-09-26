@@ -36,8 +36,8 @@ pub enum BuildsCommand {
     NavDown,
     NavLeft,
     NavRight,
-    /// `n` — the new-build form for the selected recipe, seeded from its
-    /// last build.
+    /// `n` — run the selected recipe with a checkout, ref or route of your
+    /// own: the form, seeded from its last build.
     OpenForm,
     /// Tab / Shift-Tab and ↓/↑ in the form: the next field.
     FormNext,
@@ -49,12 +49,10 @@ pub enum BuildsCommand {
     FormBackspace,
     FormSubmit,
     FormCancel,
-    /// `r` — build the selected recipe's checkout as it is now.
-    Rebuild,
+    /// `r` — run the selected recipe as its checkout is now.
+    Run,
     /// `c` — cancel the selected recipe's running and queued builds.
     Cancel,
-    /// `b` — serve the build in the selected recipe's player.
-    Serve,
     /// Space — reserve the selected recipe's resource, or let it go when the
     /// tab holds or waits for it.
     ToggleHold,
@@ -257,11 +255,6 @@ pub enum Effect {
     OpenExternal { target: String },
 }
 
-/// The first eleven characters of a commit, as `git log --oneline` shows it.
-pub(crate) fn short_commit(commit: Option<&str>) -> Option<&str> {
-    commit.map(|c| &c[..c.len().min(11)])
-}
-
 impl App {
     /// Execute a user command: apply every in-process consequence and return
     /// the effects bin must interpret. Status messaging happens here so the
@@ -325,7 +318,7 @@ impl App {
                     return Vec::new();
                 };
                 if build.cwd.is_empty() {
-                    self.set_status("a build needs a checkout".into());
+                    self.set_status("a run needs a checkout".into());
                     return Vec::new();
                 }
                 // A refused build keeps the form open, so it can be fixed.
@@ -334,15 +327,11 @@ impl App {
                     self.view = View::Grid;
                 }
             }
-            Rebuild => {
+            Run => {
                 let Some(name) = self.builds_recipe() else {
                     return Vec::new();
                 };
-                let started = match self.builds.builds_of(&name).next() {
-                    Some(last) => builds::rebuild(&last.id),
-                    None => builds::fresh(&name),
-                };
-                self.builds_start(started);
+                self.builds_start(builds::run(&name));
             }
             Cancel => {
                 let Some(name) = self.builds_recipe() else {
@@ -355,7 +344,7 @@ impl App {
                     .map(|b| b.id.clone())
                     .collect();
                 if ids.is_empty() {
-                    self.set_status(format!("{}: nothing is building", name));
+                    self.set_status(format!("{}: nothing is running", name));
                     return Vec::new();
                 }
                 let failed: Vec<String> = ids
@@ -366,35 +355,6 @@ impl App {
                     (Some(e), _) => format!("cancel failed: {}", e),
                     (None, 1) => format!("{}: cancelling", name),
                     (None, n) => format!("{}: cancelling {} builds", name, n),
-                };
-                self.set_status(msg);
-            }
-            Serve => {
-                let Some(name) = self.builds_recipe() else {
-                    return Vec::new();
-                };
-                let knows_current = recipe::named(&name).is_some_and(|r| !r.current.is_empty());
-                // Without a `current` there is no telling what the player runs,
-                // so the newest success is the best guess.
-                let build = if knows_current {
-                    self.builds.in_player(&name)
-                } else {
-                    self.builds.last_success(&name)
-                };
-                let msg = match build {
-                    Some(b) => {
-                        let label = short_commit(b.commit.as_deref())
-                            .unwrap_or(b.target())
-                            .to_string();
-                        match builds::serve(&b.id) {
-                            Ok(()) => format!("serving {}", label),
-                            Err(e) => format!("serve failed: {}", e),
-                        }
-                    }
-                    None if knows_current => {
-                        format!("{}: the player was not built from here; r builds it", name)
-                    }
-                    None => format!("{}: nothing built yet; r builds it", name),
                 };
                 self.set_status(msg);
             }
@@ -439,7 +399,7 @@ impl App {
                         self.builds.log = Some(LogView::open(&id));
                         self.view = View::BuildLog;
                     }
-                    None => self.set_status(format!("{}: nothing built yet", name)),
+                    None => self.set_status(format!("{}: never run", name)),
                 }
             }
             CloseLog => {
@@ -475,13 +435,13 @@ impl App {
     fn builds_start(&mut self, started: std::io::Result<crate::builds::Build>) -> bool {
         match started {
             Ok(build) => {
-                self.set_status(format!("queued {} ({})", build.target(), build.recipe));
+                self.set_status(format!("{}: queued {}", build.recipe, build.target()));
                 self.builds.select_recipe(&build.recipe);
                 self.builds.builds.insert(0, build);
                 true
             }
             Err(e) => {
-                self.set_status(format!("build refused: {}", e));
+                self.set_status(format!("run refused: {}", e));
                 false
             }
         }

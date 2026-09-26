@@ -1,12 +1,13 @@
 //! Builds (the Builds tab): one run of a [`Recipe`] over a checkout, from the
-//! moment it is asked for until it succeeds, fails or is cancelled.
+//! moment it is asked for until every step succeeded, one failed, or it was
+//! cancelled.
 //!
 //! Each build is a directory under `~/.cc-hub/builds/<id>/`, `build.json`
 //! beside `output.log`, so the TUI, `cc-hub build` and the runner doing the
 //! work read one record. Only the [`runner`] changes a build by doing
 //! something: it waits its turn, gets the recipe's resource [`hold`], runs the
-//! recipe and folds what the recipe [`Report`]s into the record. Everybody else
-//! asks: a cancel is a flag the runner acts on, a serve is a runner of its own.
+//! recipe's steps and folds what they [`Report`] into the record. Everybody
+//! else asks: a cancel is a flag the runner acts on.
 
 pub mod hold;
 pub mod recipe;
@@ -61,8 +62,6 @@ pub struct Build {
     pub r#ref: Option<String>,
     /// The route asked for. `None` lets the recipe choose.
     pub route: Option<String>,
-    /// Serve it the moment it is built.
-    pub serve: bool,
     pub status: BuildStatus,
     pub created_at: i64,
     #[serde(default)]
@@ -89,28 +88,19 @@ pub struct Build {
     pub runner: Option<u32>,
     #[serde(default)]
     pub cancel: bool,
-    #[serde(default)]
-    pub served_at: Option<i64>,
     /// Why it failed, when that is not the command's exit code.
     #[serde(default)]
     pub error: Option<String>,
 }
 
 impl Build {
-    pub fn new(
-        recipe: &str,
-        cwd: &str,
-        r#ref: Option<String>,
-        route: Option<String>,
-        serve: bool,
-    ) -> Self {
+    pub fn new(recipe: &str, cwd: &str, r#ref: Option<String>, route: Option<String>) -> Self {
         Self {
             id: new_id(),
             recipe: recipe.to_string(),
             cwd: cwd.to_string(),
             r#ref,
             route,
-            serve,
             status: BuildStatus::Queued,
             created_at: now(),
             started_at: None,
@@ -122,17 +112,15 @@ impl Build {
             phase: None,
             runner: None,
             cancel: false,
-            served_at: None,
             error: None,
         }
     }
 
-    /// This build's checkout as it is now: the same checkout and serve, but
-    /// the working tree rather than the ref, and whatever route the recipe
-    /// picks for what changed. A pinned ref or route is a new build, not a
-    /// rebuild.
+    /// This build's checkout as it is now: the same checkout, but the working
+    /// tree rather than the ref, and whatever route the recipe picks for what
+    /// changed. A pinned ref or route is asked for, not run again.
     pub fn again(&self) -> Build {
-        Build::new(&self.recipe, &self.cwd, None, None, self.serve)
+        Build::new(&self.recipe, &self.cwd, None, None)
     }
 
     /// What the card calls it: the ref, or the working tree.
@@ -382,18 +370,21 @@ pub fn start(build: Build) -> io::Result<Build> {
     Ok(build)
 }
 
-/// The checkout of build `id`, built again as it is now ([`Build::again`]).
-pub fn rebuild(id: &str) -> io::Result<Build> {
-    start(load(id)?.again())
-}
-
-/// Build a recipe's own checkout as it is now, for when there is no build to
-/// rebuild yet.
-pub fn fresh(name: &str) -> io::Result<Build> {
-    let checkout = recipe::named(name)
-        .and_then(|r| r.checkout.clone())
-        .ok_or_else(|| io::Error::other(format!("{} names no checkout; n picks one", name)))?;
-    start(Build::new(name, &checkout, None, None, true))
+/// Run a recipe as it stands: the checkout of its last build
+/// ([`Build::again`]), else the recipe's own, as the working tree is now.
+pub fn run(name: &str) -> io::Result<Build> {
+    let build = match all().into_iter().find(|b| b.recipe == name) {
+        Some(last) => last.again(),
+        None => {
+            let checkout = recipe::named(name)
+                .and_then(|r| r.checkout.clone())
+                .ok_or_else(|| {
+                    io::Error::other(format!("{} names no checkout; n picks one", name))
+                })?;
+            Build::new(name, &checkout, None, None)
+        }
+    };
+    start(build)
 }
 
 /// Ask the runner to stop. A queued build has nothing to stop yet and is
@@ -409,23 +400,6 @@ pub fn cancel(id: &str) -> io::Result<Build> {
             b.finish(BuildStatus::Cancelled, None);
         }
     })
-}
-
-/// Serve a build in the background: a runner of its own that takes the hold,
-/// runs the recipe's serve and records it on the build.
-pub fn serve(id: &str) -> io::Result<()> {
-    let build = load(id)?;
-    let recipe = recipe::named(&build.recipe)
-        .ok_or_else(|| io::Error::other(format!("no recipe named {:?}", build.recipe)))?;
-    if recipe.serve.is_empty() {
-        return Err(io::Error::other(format!("{} cannot serve", build.recipe)));
-    }
-    if build.status != BuildStatus::Succeeded {
-        return Err(io::Error::other(
-            "only a build that succeeded can be served",
-        ));
-    }
-    detach(&["build", "_serve", id]).map(|_| ())
 }
 
 /// Start `cc-hub <args>` as a process of its own session, so it outlives the
@@ -485,7 +459,7 @@ mod tests {
     #[test]
     fn a_runner_that_died_fails_its_build() {
         with_temp_home(|| {
-            let mut build = Build::new("build-server", "/tmp", None, None, false);
+            let mut build = Build::new("build-server", "/tmp", None, None);
             build.runner = Some(i32::MAX as u32);
             create(&build).unwrap();
             let read = all();
@@ -495,17 +469,16 @@ mod tests {
     }
 
     #[test]
-    fn a_rebuild_takes_the_checkout_as_it_is_now() {
+    fn running_again_takes_the_checkout_as_it_is_now() {
         let pinned = Build::new(
             "build-server",
             "/repo",
             Some("1a2b3c4".into()),
             Some("full".into()),
-            true,
         );
         let again = pinned.again();
         assert_eq!((again.r#ref, again.route), (None, None));
-        assert_eq!((again.cwd.as_str(), again.serve), ("/repo", true));
+        assert_eq!(again.cwd, "/repo");
         assert_ne!(again.id, pinned.id);
     }
 
@@ -514,13 +487,13 @@ mod tests {
         with_temp_home(|| {
             let mut ids = Vec::new();
             for n in 0..KEPT + 3 {
-                let mut b = Build::new("build-server", "/tmp", None, None, false);
+                let mut b = Build::new("build-server", "/tmp", None, None);
                 b.id = format!("bd-{:04}", n);
                 b.status = BuildStatus::Succeeded;
                 create(&b).unwrap();
                 ids.push(b.id);
             }
-            let mut other = Build::new("other", "/tmp", None, None, false);
+            let mut other = Build::new("other", "/tmp", None, None);
             other.id = "bd-0000-other".into();
             other.status = BuildStatus::Failed;
             create(&other).unwrap();
@@ -536,7 +509,7 @@ mod tests {
     #[test]
     fn a_queued_build_is_cancelled_on_the_spot() {
         with_temp_home(|| {
-            let build = Build::new("build-server", "/tmp", None, None, false);
+            let build = Build::new("build-server", "/tmp", None, None);
             create(&build).unwrap();
             let cancelled = cancel(&build.id).unwrap();
             assert_eq!(cancelled.status, BuildStatus::Cancelled);
@@ -547,7 +520,7 @@ mod tests {
     #[test]
     fn the_typical_time_is_the_median_of_the_route() {
         let run = |route: &str, secs: i64, status| {
-            let mut b = Build::new("build-server", "/tmp", None, None, false);
+            let mut b = Build::new("build-server", "/tmp", None, None);
             b.taken = Some(route.into());
             b.status = status;
             b.started_at = Some(0);
