@@ -326,3 +326,105 @@ mod tests {
         assert!(state.selected_choice().is_none());
     }
 }
+
+#[cfg(all(test, unix))]
+mod app_tests {
+    use crate::agent::AgentKind;
+    use crate::app::test_support::{app_with, session, status};
+    use crate::app::{Command, Effect, SessionsCommand};
+    use crate::models::SessionState;
+
+    fn indexed(sid: &str) -> crate::sessions::index::IndexedSession {
+        crate::sessions::index::IndexedSession {
+            agent_id: "claude".into(),
+            agent_kind: AgentKind::Claude,
+            session_id: sid.into(),
+            cwd: "/tmp/proj".into(),
+            project_name: "proj".into(),
+            jsonl_path: std::path::PathBuf::from(format!("/x/{sid}.jsonl")),
+            mtime_ms: 0,
+            title: Some("Old refactor".into()),
+            first_message: None,
+        }
+    }
+
+    #[test]
+    fn session_finder_opens_loading_and_requests_the_index() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt) = app_with(vec![]);
+            let effects = app.execute(Command::Sessions(SessionsCommand::OpenSessionFinder));
+            assert_eq!(effects, vec![Effect::BuildSessionIndex]);
+            assert_eq!(app.view, crate::app::View::SessionFinder);
+            assert!(app.session_finder.as_ref().is_some_and(|f| f.loading));
+        });
+    }
+
+    #[test]
+    fn session_finder_confirm_resumes_a_dead_session_and_attaches() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, runtime) = app_with(vec![]);
+            app.execute(Command::Sessions(SessionsCommand::OpenSessionFinder));
+            app.update_session_index(vec![indexed("sid-old")]);
+
+            let effects = app.execute(Command::Sessions(SessionsCommand::ConfirmSessionFinder));
+            assert_eq!(
+                effects,
+                vec![Effect::OpenTmuxPane {
+                    tmux: "mock-spawn".into(),
+                    owned: false
+                }]
+            );
+            assert_eq!(app.view, crate::app::View::Grid);
+            assert!(app.session_finder.is_none());
+            let spawns = runtime.spawns.lock().unwrap();
+            assert_eq!(spawns.len(), 1);
+            assert_eq!(spawns[0].cwd, "/tmp/proj");
+            assert_eq!(spawns[0].resume.as_deref(), Some("Resume(\"sid-old\")"));
+            assert!(status(&app).starts_with("resumed"), "got: {}", status(&app));
+        });
+    }
+
+    #[test]
+    fn session_finder_confirm_attaches_a_live_session_instead_of_respawning() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, runtime) = app_with(vec![session(
+                "sid-old",
+                SessionState::Processing,
+                Some("cc-agent-live"),
+            )]);
+            app.execute(Command::Sessions(SessionsCommand::OpenSessionFinder));
+            app.update_session_index(vec![indexed("sid-old")]);
+
+            let effects = app.execute(Command::Sessions(SessionsCommand::ConfirmSessionFinder));
+            assert_eq!(
+                effects,
+                vec![Effect::OpenTmuxPane {
+                    tmux: "cc-agent-live".into(),
+                    owned: false
+                }]
+            );
+            assert!(
+                runtime.spawns.lock().unwrap().is_empty(),
+                "a live session must be attached, never resumed into a duplicate"
+            );
+        });
+    }
+
+    #[test]
+    fn session_finder_confirm_with_no_match_keeps_the_finder_open() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, runtime) = app_with(vec![]);
+            app.execute(Command::Sessions(SessionsCommand::OpenSessionFinder));
+            app.update_session_index(vec![indexed("sid-old")]);
+            for c in "zzz".chars() {
+                app.session_finder.as_mut().unwrap().push_filter(c);
+            }
+
+            let effects = app.execute(Command::Sessions(SessionsCommand::ConfirmSessionFinder));
+            assert!(effects.is_empty());
+            assert_eq!(app.view, crate::app::View::SessionFinder);
+            assert!(app.session_finder.is_some());
+            assert!(runtime.spawns.lock().unwrap().is_empty());
+        });
+    }
+}

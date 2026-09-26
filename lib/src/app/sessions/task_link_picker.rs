@@ -365,7 +365,8 @@ mod tests {
 #[cfg(all(test, unix))]
 mod app_tests {
     use super::*;
-    use crate::app::test_support::fake_session;
+    use crate::app::test_support::{app_with, fake_session, session, status};
+    use crate::app::{Command, SessionsCommand};
     use crate::models::SessionState;
 
     // Linking reorders the grid on the keypress itself, not on the next
@@ -441,6 +442,77 @@ mod app_tests {
             assert_eq!(choices[0].detail, "To-Do");
             assert_eq!(choices[0].status, Some(TaskStatus::Backlog));
             assert_eq!(choices[2].detail, "In Progress");
+        });
+    }
+
+    #[test]
+    fn task_link_picker_links_then_unlinks_selected_session() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt) = app_with(vec![session("sid-1", SessionState::Idle, None)]);
+            let tid = app.tasks.board.add("fix the auth flow").unwrap().unwrap();
+
+            // First open: no link yet, so no unlink row; Enter links.
+            let effects = app.execute(Command::Sessions(SessionsCommand::OpenTaskLinkPicker));
+            assert!(effects.is_empty());
+            assert_eq!(app.view, crate::app::View::TaskLinkPicker);
+            {
+                let picker = app.task_link_picker.as_ref().expect("picker state");
+                assert!(picker
+                    .choices
+                    .iter()
+                    .all(|c| c.action != crate::app::TaskLinkAction::Unlink));
+            }
+            app.confirm_task_link_picker();
+            assert_eq!(app.view, crate::app::View::Grid);
+            assert_eq!(
+                crate::tasks::session_links::load()
+                    .get("sid-1")
+                    .unwrap()
+                    .task_id,
+                tid
+            );
+            // The card badge resolves live (non-stale) from the board task;
+            // the grid's groups are untouched by links.
+            let badge = app.task_badge("sid-1").expect("badge");
+            assert_eq!(badge.task_id, tid);
+            assert!(!badge.stale);
+            assert!(
+                status(&app).starts_with("linked to"),
+                "got: {}",
+                status(&app)
+            );
+
+            // Second open: the unlink row leads and the linked task is
+            // pre-selected; picking unlink drops the link and the badge.
+            app.execute(Command::Sessions(SessionsCommand::OpenTaskLinkPicker));
+            {
+                let picker = app.task_link_picker.as_ref().expect("picker state");
+                assert_eq!(picker.choices[0].action, crate::app::TaskLinkAction::Unlink);
+                assert!(matches!(
+                    picker.selected_action(),
+                    Some(crate::app::TaskLinkAction::Link { task_id, .. }) if *task_id == tid
+                ));
+            }
+            app.task_link_picker.as_mut().unwrap().move_selection(-100);
+            app.confirm_task_link_picker();
+            assert!(crate::tasks::session_links::load().is_empty());
+            assert!(app.task_badge("sid-1").is_none());
+            assert_eq!(status(&app), "task link removed");
+        });
+    }
+
+    #[test]
+    fn task_link_picker_without_tasks_reports_instead_of_opening() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt) = app_with(vec![session("sid-1", SessionState::Idle, None)]);
+            app.execute(Command::Sessions(SessionsCommand::OpenTaskLinkPicker));
+            assert_eq!(app.view, crate::app::View::Grid);
+            assert!(app.task_link_picker.is_none());
+            assert!(
+                status(&app).starts_with("no tasks to link"),
+                "got: {}",
+                status(&app)
+            );
         });
     }
 }
