@@ -1,8 +1,8 @@
 //! Per-directory listing cache for the orphan / inactive-session walks.
 //!
-//! Both the Claude orphan walk ([`crate::sessions::scanner::scan_orphan_jsonls`]) and the
-//! Pi inactive walk ([`crate::sessions::pi::scan_inactive_sessions`]) `read_dir`
-//! and `stat` every `*.jsonl` under their session tree on every scan tick.
+//! Both the Claude orphan walk (`scanner::scan_orphan_jsonls`) and the Pi
+//! inactive walk (`pi::scan_inactive_sessions`) `read_dir` and `stat` every
+//! `*.jsonl` under their session tree on every scan tick.
 //! Those trees only change when a session writes a new transcript, so re-listing
 //! a directory whose mtime is unchanged is pure waste.
 //!
