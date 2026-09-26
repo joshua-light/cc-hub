@@ -15,20 +15,18 @@ use cc_hub_lib::{focus, spawn, tmux_pane};
 use std::io;
 use tokio::sync::mpsc;
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_effect(
     app: &mut App,
     effect: Effect,
     terminal: &Term,
     scan_tx: &mpsc::Sender<ScanMsg>,
     detail_tx: &mpsc::Sender<String>,
-    spawn_metrics: &impl Fn(),
 ) {
     match effect {
         Effect::RequestSessionDetail { session_id } => {
             let _ = detail_tx.send(session_id).await;
         }
-        Effect::SpawnMetricsScan => spawn_metrics(),
+        Effect::SpawnMetricsScan => crate::workers::spawn_metrics(scan_tx.clone()),
         Effect::BuildSessionIndex => {
             let tx = scan_tx.clone();
             tokio::spawn(async move {

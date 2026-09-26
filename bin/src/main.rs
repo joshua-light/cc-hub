@@ -1,5 +1,3 @@
-#![allow(clippy::collapsible_match)]
-
 use cc_hub_lib::sessions::scanner;
 use cc_hub_lib::{models, title};
 use std::io;

@@ -1,8 +1,10 @@
+use crate::scan_msg::ScanMsg;
 use cc_hub_lib::app::App;
 use cc_hub_lib::{live_view, models, platform};
 use crossterm::event::{KeyCode, KeyEvent};
+use tokio::sync::mpsc;
 
-pub(super) fn handle(app: &mut App, key: KeyEvent, spawn_metrics: &impl Fn()) {
+pub(super) fn handle(app: &mut App, key: KeyEvent, scan_tx: &mpsc::Sender<ScanMsg>) {
     match key.code {
         KeyCode::Down | KeyCode::Char('j') => {
             app.metrics_nav_down();
@@ -38,7 +40,7 @@ pub(super) fn handle(app: &mut App, key: KeyEvent, spawn_metrics: &impl Fn()) {
         }
         KeyCode::Char('r') => {
             app.metrics.analysis = None;
-            spawn_metrics();
+            crate::workers::spawn_metrics(scan_tx.clone());
         }
         _ => {}
     }

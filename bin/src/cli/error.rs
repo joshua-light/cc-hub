@@ -89,12 +89,6 @@ impl CliError {
     }
 }
 
-impl From<String> for CliError {
-    fn from(s: String) -> Self {
-        CliError::Other(s)
-    }
-}
-
 impl From<OpError> for CliError {
     /// Lossless 1:1 mapping from the domain-layer error to the CLI error so
     /// the JSON error contract (kind / recipe / exit code) is unchanged.
@@ -106,11 +100,5 @@ impl From<OpError> for CliError {
             OpError::Other(msg) => CliError::Other(msg),
             OpError::Reported(msg) => CliError::Reported(msg),
         }
-    }
-}
-
-impl<E: std::fmt::Display> From<(&'static str, E)> for CliError {
-    fn from((ctx, e): (&'static str, E)) -> Self {
-        CliError::Other(format!("{}: {}", ctx, e))
     }
 }

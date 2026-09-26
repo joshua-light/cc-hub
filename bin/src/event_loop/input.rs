@@ -2,7 +2,7 @@ use super::render::Redraw;
 use crate::keys;
 use crate::scan_msg::ScanMsg;
 use crate::term::Term;
-use cc_hub_lib::app::{App, Tab, View};
+use cc_hub_lib::app::{App, View};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::io;
 use std::time::{Duration, Instant};
@@ -19,7 +19,6 @@ pub(super) async fn drain_input(
     terminal: &mut Term,
     scan_tx: &mpsc::Sender<ScanMsg>,
     detail_tx: &mpsc::Sender<String>,
-    spawn_metrics: &impl Fn(),
     r: &mut Redraw,
 ) -> io::Result<Duration> {
     let poll_ms = if app.view == View::TmuxPane { 16 } else { 5 };
@@ -107,32 +106,8 @@ pub(super) async fn drain_input(
                         {
                             app.close_tmux_pane();
                         }
-                        let on_sessions =
-                            app.view == View::Grid && app.current_tab == Tab::Sessions;
-                        let on_metrics = app.view == View::Grid && app.current_tab == Tab::Metrics;
-                        let on_tasks = app.view == View::Grid && app.current_tab == Tab::Tasks;
-                        let on_agents = app.view == View::Grid && app.current_tab == Tab::Agents;
-                        let on_builds = app.view == View::Grid && app.current_tab == Tab::Builds;
-
                         let sel_before = (app.sessions.sel_group, app.sessions.sel_in_group);
-                        // KeyOutcome::Continue used to skip this pass's
-                        // scan drain; with the whole burst handled before
-                        // a single drain, both outcomes proceed
-                        // identically here.
-                        let _ = keys::handle_key(
-                            app,
-                            key,
-                            terminal,
-                            scan_tx,
-                            detail_tx,
-                            spawn_metrics,
-                            on_sessions,
-                            on_metrics,
-                            on_tasks,
-                            on_agents,
-                            on_builds,
-                        )
-                        .await;
+                        keys::handle_key(app, key, terminal, scan_tx, detail_tx).await;
                         let sel_after = (app.sessions.sel_group, app.sessions.sel_in_group);
                         if sel_before != sel_after {
                             log::debug!("key: selection {:?} -> {:?}", sel_before, sel_after);

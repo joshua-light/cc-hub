@@ -37,13 +37,10 @@ pub(crate) async fn run(terminal: &mut Term, frame_bytes: Arc<AtomicU64>) -> io:
     let (detail_tx, detail_rx) = mpsc::channel::<String>(4);
 
     workers::spawn_usage(scan_tx.clone());
-    let scan_tx_main = scan_tx.clone();
     app.harness.supervisor_on = workers::spawn_harness(scan_tx.clone());
     workers::spawn_builds(&scan_tx);
     workers::spawn_session_scanner(scan_tx.clone(), detail_rx);
-    workers::spawn_task_stats(scan_tx_main.clone());
-
-    let spawn_metrics = || workers::spawn_metrics(scan_tx_main.clone());
+    workers::spawn_task_stats(scan_tx.clone());
 
     // Capture only while the embedded tmux pane is visible so the host
     // terminal's native wheel scroll keeps working elsewhere.
@@ -84,15 +81,8 @@ pub(crate) async fn run(terminal: &mut Term, frame_bytes: Arc<AtomicU64>) -> io:
         let draw_dur = render::draw(terminal, &mut app, &frame_bytes, &mut redraw)?;
         render::replay_osc52(terminal, &app);
 
-        let input_dur = input::drain_input(
-            &mut app,
-            terminal,
-            &scan_tx_main,
-            &detail_tx,
-            &spawn_metrics,
-            &mut redraw,
-        )
-        .await?;
+        let input_dur =
+            input::drain_input(&mut app, terminal, &scan_tx, &detail_tx, &mut redraw).await?;
 
         // Drain channel messages. Repaint only when a message actually
         // changed visible state — the periodic scan ticks usually carry an
@@ -117,7 +107,7 @@ pub(crate) async fn run(terminal: &mut Term, frame_bytes: Arc<AtomicU64>) -> io:
                     prompt.len()
                 );
                 workers::spawn_dispatch(
-                    scan_tx_main.clone(),
+                    scan_tx.clone(),
                     tmux.clone(),
                     prompt,
                     format!("dispatched queued prompt to [{}]", tmux),

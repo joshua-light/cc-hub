@@ -1,3 +1,8 @@
+// Clippy wants each arm's lone `if` folded into a match guard. A failing
+// guard falls through to later arms (Places-mode Space would then type into
+// the filter), so the nested `if`s stay.
+#![allow(clippy::collapsible_match)]
+
 use crate::scan_msg::ScanMsg;
 use cc_hub_lib::app::App;
 use cc_hub_lib::folder_picker::PickerMode;
@@ -147,7 +152,7 @@ pub(super) fn handle(app: &mut App, key: KeyEvent) {
     }
 }
 
-pub(super) fn handle_gh_create(app: &mut App, key: KeyEvent, scan_tx_main: &mpsc::Sender<ScanMsg>) {
+pub(super) fn handle_gh_create(app: &mut App, key: KeyEvent, scan_tx: &mpsc::Sender<ScanMsg>) {
     match key.code {
         KeyCode::Esc => {
             app.close_gh_create_input();
@@ -178,7 +183,7 @@ pub(super) fn handle_gh_create(app: &mut App, key: KeyEvent, scan_tx_main: &mpsc
             }
             if let Some((cwd, name, private)) = app.submit_gh_create_input() {
                 let trimmed = name.trim().to_string();
-                let tx = scan_tx_main.clone();
+                let tx = scan_tx.clone();
                 let name_for_msg = trimmed.clone();
                 tokio::spawn(async move {
                     let result = tokio::task::spawn_blocking(move || {
