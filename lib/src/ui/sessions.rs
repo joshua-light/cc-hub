@@ -2,13 +2,13 @@
 
 use crate::app::App;
 use crate::models::{first_line_truncated, short_sid, SessionDetail, SessionInfo, SessionState};
+use crate::ui::common::wrapped_total_rows;
 use crate::ui::common::{
     centered_rect, context_window_size, ctx_bar, ctx_color, format_datetime, format_elapsed,
     format_time, format_tokens, format_tool_label, popup_block, priority_color, short_model,
     state_color, state_indicator, task_color, COLD_CACHE_ICON,
 };
 use crate::ui::palette::{CONTEXT_GRAY, ICE_BLUE, MUTED_TEXT, PURPLE, SEP_GRAY};
-use crate::ui::popups::wrapped_total_rows;
 use crate::ui::{cell_height, now_ms};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};

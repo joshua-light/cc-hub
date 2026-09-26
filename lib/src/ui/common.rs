@@ -10,8 +10,8 @@ use crate::usage::UsageInfo;
 use chrono::{DateTime, Local, TimeZone};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 
 /// Canonical (icon, accent color) for a task status: the Tasks-board column
 /// palette. Every surface that colors a status (board columns, the task-link picker)
@@ -87,6 +87,29 @@ pub(crate) fn centered_fixed(area: Rect, w: u16, h: u16) -> Rect {
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     Rect::new(x, y, w, h)
+}
+
+/// Visual rows one logical `Line` occupies when a `Paragraph` with
+/// `Wrap { trim: false }` renders it into `width` columns. ratatui scrolls a
+/// wrapped paragraph by these *wrapped rows*, not by logical lines, so every
+/// scroll clamp and jump target has to be summed in this unit — counting
+/// logical lines leaves the last wrapped screenful permanently unreachable.
+///
+/// Delegates to ratatui's own `Paragraph::line_count` (the
+/// `unstable-rendered-line-info` feature) so the count is by construction the
+/// renderer's: a hand-rolled mirror of `WordWrapper` diverged on
+/// whitespace-led rows, trailing spaces, tabs, and wide (CJK/emoji) chars —
+/// under-counts made the last screenful unreachable again, over-counts let
+/// auto-follow scroll past the bottom into blank rows.
+pub(crate) fn wrapped_total_rows(lines: &[Line], width: u16) -> u16 {
+    if width == 0 {
+        return lines.len().min(u16::MAX as usize) as u16;
+    }
+    Paragraph::new(Text::from(lines.to_vec()))
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+        .max(lines.len().min(1))
+        .min(u16::MAX as usize) as u16
 }
 
 pub fn build_usage_line(u: &UsageInfo) -> Line<'static> {
@@ -375,4 +398,66 @@ pub(crate) fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
         out.push('\n');
     }
     out
+}
+
+#[cfg(test)]
+mod wrapped_rows_tests {
+    use super::wrapped_total_rows;
+    use ratatui::text::{Line, Span};
+
+    fn rows(s: &str, w: u16) -> usize {
+        wrapped_total_rows(&[Line::from(Span::raw(s.to_string()))], w) as usize
+    }
+
+    #[test]
+    fn empty_and_short_lines_are_one_row() {
+        assert_eq!(rows("", 10), 1);
+        assert_eq!(rows("hello", 10), 1);
+        assert_eq!(rows("hello", 5), 1); // exactly fills one row
+    }
+
+    #[test]
+    fn breaks_on_word_boundaries() {
+        assert_eq!(rows("the quick brown fox", 9), 2);
+        assert_eq!(rows("hello world", 5), 2);
+    }
+
+    #[test]
+    fn hard_splits_a_word_wider_than_the_row() {
+        assert_eq!(rows("abcdefgh", 3), 3); // abc/def/gh
+    }
+
+    #[test]
+    fn zero_width_never_divides_by_zero() {
+        assert_eq!(rows("abc", 0), 1); // degenerate area; renderer shows nothing
+    }
+
+    // The cases where the previous hand-rolled WordWrapper mirror diverged
+    // from the renderer (fuzz-verified against Paragraph rendering). These pin
+    // the renderer's actual behavior so a future reimplementation can't
+    // silently drift again.
+    #[test]
+    fn matches_renderer_on_divergent_shapes() {
+        // Leading whitespace before an overflowing token: WordWrapper packs
+        // the whitespace + word-head onto the first row.
+        assert_eq!(rows(" leading", 4), 2);
+        // Trailing space at exact row boundary is dropped, not wrapped.
+        assert_eq!(rows("aaaa ", 4), 1);
+        // Wide chars (CJK, emoji) occupy two columns each.
+        assert_eq!(rows("日本語のテキスト", 8), 2);
+        assert_eq!(rows("emoji 🚀🚀🚀 line", 8), 3);
+    }
+
+    #[test]
+    fn spans_concatenate_and_lines_sum() {
+        // Two spans concatenate into one logical line for wrap purposes.
+        let wide = Line::from(vec![Span::raw("the quick "), Span::raw("brown fox")]);
+        assert_eq!(wrapped_total_rows(&[wide], 9), 2);
+
+        let lines = vec![
+            Line::from(Span::raw("short")),           // 1 row
+            Line::from(Span::raw("the quick brown")), // 2 rows at width 9
+        ];
+        assert_eq!(wrapped_total_rows(&lines, 9), 3);
+    }
 }
