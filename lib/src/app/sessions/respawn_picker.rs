@@ -161,7 +161,7 @@ mod tests {
     use crate::app::{Command, SessionsCommand};
     use crate::models::{SessionInfo, SessionState};
 
-    /// The four-account registry from docs/resource-management.md, homes
+    /// The four-account registry from contrib/resources.toml, homes
     /// under the (redirected) test $HOME.
     fn write_accounts_registry() {
         let dir = dirs::home_dir().unwrap().join(".cc-hub");
