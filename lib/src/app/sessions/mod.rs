@@ -1,6 +1,36 @@
+//! The Sessions tab: the grouped session grid, its cursor, and every flow
+//! that starts from a session card.
+//!
+//! - `scan`: applies scan snapshots; view toggles and acks.
+//! - `groups`: turns a snapshot into ordered, task-clustered groups.
+//! - `spawn`: spawn watchdogs, placeholder cards, boot-time naming.
+//! - `rename`: the rename modal (`r`).
+//! - `model_picker`: model and agent choice for new sessions (`N`, `A`).
+//! - `respawn_picker`: continue a session on another account (`R`).
+//! - `task_link_picker`: link a session to a board task (`L`).
+//! - `session_finder`: archive-wide session search (`/`).
+
 use crate::acks::Acks;
 use crate::models::{ProjectGroup, SessionInfo};
 use std::collections::HashSet;
+
+mod groups;
+mod model_picker;
+mod rename;
+mod respawn_picker;
+mod scan;
+mod session_finder;
+mod spawn;
+mod task_link_picker;
+
+pub use model_picker::{
+    AgentPickerState, ModelPickerChoice, ModelPickerRow, ModelPickerState, SPAWN_MODELS,
+};
+pub use rename::RenameSubmit;
+pub use respawn_picker::{RespawnChoice, RespawnPickerState};
+pub use session_finder::{SessionFinderChoice, SessionFinderRow, SessionFinderState};
+pub(super) use spawn::SpawnWatch;
+pub use task_link_picker::{TaskLinkAction, TaskLinkChoice, TaskLinkPickerState, TaskLinkRow};
 
 /// How the Sessions tab lays out its sessions. `List` renders one compact
 /// row per session, table-style, and is what the app opens on — it fits far
@@ -24,8 +54,8 @@ impl SessionsLayout {
 }
 
 /// Sessions-tab state: the grouped-session grid plus its cursor and
-/// view-filter toggles. Pulled out of [`App`] so the grid cursor can't be
-/// moved out of range without going through the clamping methods here.
+/// view-filter toggles. The cursor only moves through the clamping methods
+/// here, so it can't leave the grid.
 pub struct SessionsView {
     pub groups: Vec<ProjectGroup>,
     pub sel_group: usize,
@@ -33,7 +63,7 @@ pub struct SessionsView {
     pub layout: SessionsLayout,
     pub show_inactive: bool,
     pub acks: Acks,
-    /// Latest scan snapshot; drives [`App::rebuild_groups`].
+    /// Latest scan snapshot; drives [`crate::app::App::rebuild_groups`].
     pub(crate) last_sessions: Vec<SessionInfo>,
     /// Session ids seen on the previous scan tick. `None` means the first
     /// scan hasn't happened yet — used to skip cursor-jump on initial load.
@@ -132,6 +162,25 @@ impl SessionsView {
         self.selected_session_info().map(|s| s.session_id.clone())
     }
 
+    /// `(group, index)` of the first visible session matching `pred`.
+    pub(super) fn position_of(
+        &self,
+        pred: impl Fn(&SessionInfo) -> bool,
+    ) -> Option<(usize, usize)> {
+        self.groups
+            .iter()
+            .enumerate()
+            .find_map(|(gi, group)| group.sessions.iter().position(&pred).map(|si| (gi, si)))
+    }
+
+    /// Ids of every session currently on the grid.
+    pub(super) fn visible_ids(&self) -> HashSet<String> {
+        self.groups
+            .iter()
+            .flat_map(|g| g.sessions.iter().map(|s| s.session_id.clone()))
+            .collect()
+    }
+
     pub fn session_count(&self) -> usize {
         self.groups.iter().map(|g| g.sessions.len()).sum()
     }
@@ -148,34 +197,13 @@ impl SessionsView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::AgentKind;
+    use crate::app::test_support::fake_session;
     use crate::models::SessionState;
 
     fn session(id: &str) -> SessionInfo {
-        SessionInfo {
-            agent_id: "claude".into(),
-            agent_kind: AgentKind::Claude,
-            pid: 1,
-            session_id: id.into(),
-            cwd: "/tmp".into(),
-            project_name: "tmp".into(),
-            started_at: 0,
-            last_activity: None,
-            state: SessionState::Idle,
-            last_user_message: None,
-            summary: None,
-            title: None,
-            titling: false,
-            model: None,
-            git_branch: None,
-            version: None,
-            jsonl_path: None,
-            tmux_session: None,
-            current_tool: None,
-            is_thinking: false,
-            context_tokens: None,
-            tool_uses_count: 0,
-        }
+        let mut s = fake_session(id, SessionState::Idle);
+        s.tmux_session = None;
+        s
     }
 
     fn group(name: &str, n: usize) -> ProjectGroup {
@@ -186,8 +214,8 @@ mod tests {
         }
     }
 
-    /// The grid column count is now owned by `RenderState`; the nav helpers
-    /// take it as a parameter, so the tests thread it through directly.
+    /// Grid column count, passed to the nav helpers the way `RenderState`
+    /// would.
     const COLS: u16 = 3;
 
     fn view(groups: Vec<ProjectGroup>) -> SessionsView {

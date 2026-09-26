@@ -7,7 +7,8 @@
 /// [`crate::ui::popups`]).
 ///
 /// All writer sites:
-/// - `ui/mod.rs` → [`App::update_grid_cols`] writes [`Self::grid_cols`].
+/// - `ui/mod.rs` → [`crate::app::App::update_grid_cols`] writes
+///   [`Self::grid_cols`].
 /// - `ui/sessions.rs` and `ui/sessions_list.rs` write [`Self::grid_scroll`]
 ///   (keep-selection-visible clamp, one writer per layout);
 ///   `ui/sessions.rs` also clamps [`Self::popup_scroll`].
@@ -19,7 +20,7 @@ pub struct RenderState {
     /// keeps the selected card visible by writing this each frame.
     pub grid_scroll: u16,
     /// Session-grid column count, derived from the terminal width by
-    /// [`App::update_grid_cols`] each frame.
+    /// [`crate::app::App::update_grid_cols`] each frame.
     pub grid_cols: u16,
     /// Scroll offset of the session-detail popup; clamped to content by the
     /// renderer.
