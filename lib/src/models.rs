@@ -301,28 +301,12 @@ mod tests {
 
     fn session(state: SessionState, started_at: u64, last_activity: Option<u64>) -> SessionInfo {
         SessionInfo {
-            agent_id: "claude".into(),
-            agent_kind: AgentKind::Claude,
-            pid: 1,
-            session_id: "s".into(),
             cwd: "/tmp/p".into(),
             project_name: "p".into(),
             started_at,
             last_activity,
             state,
-            last_user_message: None,
-            summary: None,
-            title: None,
-            titling: false,
-            model: None,
-            git_branch: None,
-            version: None,
-            jsonl_path: None,
-            tmux_session: None,
-            current_tool: None,
-            is_thinking: false,
-            context_tokens: None,
-            tool_uses_count: 0,
+            ..crate::test_util::session_info()
         }
     }
 

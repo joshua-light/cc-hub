@@ -454,28 +454,10 @@ mod tests {
 
     fn idle_session(tmux: &str) -> SessionInfo {
         SessionInfo {
-            agent_id: "claude".into(),
-            agent_kind: crate::agent::AgentKind::Claude,
-            pid: 1,
             session_id: tmux.into(),
-            cwd: "/tmp".into(),
-            project_name: "tmp".into(),
-            started_at: 0,
-            last_activity: None,
             state: SessionState::Idle,
-            last_user_message: None,
-            summary: None,
-            title: None,
-            titling: false,
-            model: None,
-            git_branch: None,
-            version: None,
-            jsonl_path: None,
             tmux_session: Some(tmux.into()),
-            current_tool: None,
-            is_thinking: false,
-            context_tokens: None,
-            tool_uses_count: 0,
+            ..crate::test_util::session_info()
         }
     }
 

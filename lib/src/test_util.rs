@@ -56,3 +56,33 @@ pub fn with_temp_home<F: FnOnce()>(f: F) {
     std::env::set_var("HOME", tmp.path());
     f();
 }
+
+/// A Claude session with every optional field empty. Fixtures override the
+/// fields they care about with struct-update syntax
+/// (`SessionInfo { state, ..session_info() }`).
+pub fn session_info() -> crate::models::SessionInfo {
+    crate::models::SessionInfo {
+        agent_id: "claude".into(),
+        agent_kind: crate::agent::AgentKind::Claude,
+        pid: 1,
+        session_id: "s".into(),
+        cwd: "/tmp".into(),
+        project_name: "tmp".into(),
+        started_at: 0,
+        last_activity: None,
+        state: crate::models::SessionState::Idle,
+        last_user_message: None,
+        summary: None,
+        title: None,
+        titling: false,
+        model: None,
+        git_branch: None,
+        version: None,
+        jsonl_path: None,
+        tmux_session: None,
+        current_tool: None,
+        is_thinking: false,
+        context_tokens: None,
+        tool_uses_count: 0,
+    }
+}

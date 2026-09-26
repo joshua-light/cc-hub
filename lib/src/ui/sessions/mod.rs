@@ -149,7 +149,6 @@ fn badge_color(badge: &TaskBadge) -> Color {
 
 #[cfg(test)]
 mod fixtures {
-    use crate::agent::AgentKind;
     use crate::models::{SessionInfo, SessionState};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -159,8 +158,6 @@ mod fixtures {
 
     pub(super) fn fake_session() -> SessionInfo {
         SessionInfo {
-            agent_id: "claude".into(),
-            agent_kind: AgentKind::Claude,
             pid: 4242,
             session_id: "abcd1234efgh".into(),
             cwd: "/tmp/p".into(),
@@ -168,19 +165,9 @@ mod fixtures {
             started_at: NOW - 3_600_000,
             last_activity: Some(NOW - 720_000), // 12m ago
             state: SessionState::Idle,
-            last_user_message: None,
-            summary: None,
-            title: None,
-            titling: false,
             model: Some("claude-opus-4-8".into()),
             git_branch: Some("main".into()),
-            version: None,
-            jsonl_path: None,
-            tmux_session: None,
-            current_tool: None,
-            is_thinking: false,
-            context_tokens: None,
-            tool_uses_count: 0,
+            ..crate::test_util::session_info()
         }
     }
 
