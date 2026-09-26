@@ -1,125 +1,9 @@
-//! Cheap 2-3 word titles for sessions, generated once via `cc-hub-new -p`
-//! (Haiku) and cached forever on disk.
-//!
-//! Runs in a dedicated scratch cwd so the JSONL that Claude Code writes for
-//! each `-p` invocation lands in a directory the scanner can filter out in
-//! one comparison — otherwise every title generation would materialize as a
-//! spurious "Inactive" session in the grid.
-
+use super::run::run_with_timeout;
 use crate::config;
-use crate::platform::paths;
 use log::{debug, warn};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
-
-static SHUTDOWN: AtomicBool = AtomicBool::new(false);
-
-/// Signal all in-flight title subprocesses to kill their children and
-/// return, so quitting the app doesn't block on up to ~45s of pending
-/// Haiku calls. Call this once from the TUI just before cleanup.
-pub fn request_shutdown() {
-    SHUTDOWN.store(true, Ordering::SeqCst);
-}
-
-/// Whether [`request_shutdown`] has been called. Subprocess loops poll it
-/// so a quit doesn't wait on an in-flight child.
-pub(crate) fn shutting_down() -> bool {
-    SHUTDOWN.load(Ordering::Relaxed)
-}
-
-#[derive(Default, Serialize, Deserialize)]
-struct TitleCacheFile {
-    titles: HashMap<String, String>,
-}
-
-/// Serializes concurrent writers so a load/insert/save cycle from one
-/// titling task can't race another's. Scanners reading the file are
-/// independently safe thanks to the tmp-and-rename in [`save`].
-static WRITE_LOCK: Mutex<()> = Mutex::new(());
-
-fn cache_file() -> PathBuf {
-    paths::cache_dir().join("session-titles.json")
-}
-
-/// Scratch cwd used for every `cc-hub-new -p` run. Pinned so the scanner
-/// can skip this directory in a single equality check and the Claude
-/// projects dir contains at most one encoded folder for all our summaries.
-///
-/// Canonicalized at init: on macOS `/tmp` is a symlink to `/private/tmp`, so
-/// the cwd Claude Code records in JSONL is the resolved form. Storing the
-/// canonical path here keeps both the string compare in `is_scratch_cwd` and
-/// the encoded-projects-dir skip in the scanner aligned with what's on disk.
-pub fn scratch_cwd() -> &'static Path {
-    static SCRATCH: OnceLock<PathBuf> = OnceLock::new();
-    SCRATCH.get_or_init(|| {
-        let base = PathBuf::from("/tmp/cc-hub-summaries");
-        let _ = fs::create_dir_all(&base);
-        fs::canonicalize(&base).unwrap_or(base)
-    })
-}
-
-/// Current on-disk map of `session_id → title`. Empty on any read/parse
-/// failure — a missing cache is the normal first-run state.
-pub fn load() -> HashMap<String, String> {
-    let path = cache_file();
-    let Ok(data) = fs::read_to_string(&path) else {
-        return HashMap::new();
-    };
-    match serde_json::from_str::<TitleCacheFile>(&data) {
-        Ok(v) => v.titles,
-        Err(e) => {
-            warn!("title cache parse error at {}: {}", path.display(), e);
-            HashMap::new()
-        }
-    }
-}
-
-fn save(titles: &HashMap<String, String>) -> std::io::Result<()> {
-    let path = cache_file();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let body = serde_json::to_string_pretty(&TitleCacheFile {
-        titles: titles.clone(),
-    })?;
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(body.as_bytes())?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, &path)
-}
-
-/// Atomically insert `title` under `sid`. Holds [`WRITE_LOCK`] across the
-/// load/insert/save cycle so two concurrent titlers can't clobber each
-/// other's entries.
-pub fn persist_title(sid: &str, title: &str) -> std::io::Result<()> {
-    let _g = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut map = load();
-    map.insert(sid.to_string(), title.to_string());
-    save(&map)
-}
-
-/// [`persist_title`], unless `sid` already has a name — the user's rename, or
-/// the one it was born with — which is never overwritten. Returns whether
-/// `title` was written.
-pub fn name_if_nameless(sid: &str, title: &str) -> std::io::Result<bool> {
-    let _g = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut map = load();
-    if map.contains_key(sid) {
-        return Ok(false);
-    }
-    map.insert(sid.to_string(), title.to_string());
-    save(&map).map(|()| true)
-}
 
 /// Cached result of resolving the configured spawn command through the
 /// user's login shell. `Some(argv)` is the direct argv to exec, skipping
@@ -131,73 +15,6 @@ static RESOLVED_CMD: Mutex<Option<ResolveCache>> = Mutex::new(None);
 struct ResolveCache {
     fetched_at: Instant,
     value: Option<Vec<String>>,
-}
-
-/// Put the child in its own session so it can't touch our controlling
-/// terminal. An interactive zsh left in our session calls `tcsetpgrp` on
-/// `/dev/tty` as part of its job-control setup — with the TUI owning that
-/// same tty, the parent's raw-mode / alt-screen state ends up scrambled.
-/// `setsid` both gives the child a fresh process group and detaches it
-/// from any controlling terminal; a later `open("/dev/tty")` then fails
-/// cleanly instead of hijacking ours.
-#[cfg(unix)]
-pub(crate) fn detach_from_tty(cmd: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-}
-
-#[cfg(not(unix))]
-pub(crate) fn detach_from_tty(_cmd: &mut Command) {}
-
-/// Spawn `cmd` and poll `try_wait` until it finishes or `timeout` expires,
-/// killing on timeout. Stdin/stdout/stderr configuration is the caller's
-/// responsibility — this helper just owns the deadline loop so resolution
-/// and generation don't duplicate it.
-/// Run `cmd` detached from our tty, killing it past `timeout` or on
-/// shutdown. Shared with the persistent-agent harness, which drives the
-/// same spawn command in `-p` mode.
-pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
-    detach_from_tty(&mut cmd);
-    let mut child: Child = cmd
-        .spawn()
-        .map_err(|e| warn!("title: spawn failed: {}", e))
-        .ok()?;
-
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if SHUTDOWN.load(Ordering::Relaxed) {
-                    debug!("title: shutdown signal, killing subprocess");
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                if std::time::Instant::now() >= deadline {
-                    warn!("title: subprocess timed out after {:?}, killing", timeout);
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                // Short poll so a quit that lands mid-sleep adds at most
-                // 100ms of quit latency per in-flight title.
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => {
-                warn!("title: try_wait failed: {}", e);
-                return None;
-            }
-        }
-    }
-    child.wait_with_output().ok()
 }
 
 /// Ask the user's login shell once to resolve the configured spawn
@@ -215,7 +32,7 @@ pub fn spawn_argv() -> Option<Vec<String>> {
     resolve_spawn_command()
 }
 
-fn resolve_spawn_command() -> Option<Vec<String>> {
+pub(super) fn resolve_spawn_command() -> Option<Vec<String>> {
     // Successful resolutions are stable enough to cache for an hour; failures
     // re-attempt every minute so a transient shell hiccup doesn't disable
     // titling for the rest of the process.
@@ -385,137 +202,9 @@ fn is_windows_exe_path(s: &str) -> bool {
         && s.to_ascii_lowercase().ends_with(".exe")
 }
 
-/// Run `<spawn.command> --model <model> -p <prompt>` in the scratch cwd
-/// and return the raw stdout. Resolves the configured spawn command
-/// through the user's login shell on first call (cached afterwards), then
-/// execs the resolved binary directly. Returns `None` on any failure
-/// (resolve, spawn, non-zero exit, timeout, shutdown).
-pub fn run_claude_blocking(model: &str, prompt: &str, timeout: Duration) -> Option<String> {
-    fs::create_dir_all(scratch_cwd()).ok()?;
-    let resolved = resolve_spawn_command()?;
-    let (exe, base_args) = resolved.split_first()?;
-    let mut cmd = Command::new(exe);
-    cmd.args(base_args)
-        .arg("--model")
-        .arg(model)
-        .arg("-p")
-        .arg(prompt)
-        .current_dir(scratch_cwd())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    debug!(
-        "claude_blocking: model={} prompt_len={} timeout={:?}",
-        model,
-        prompt.len(),
-        timeout
-    );
-
-    let output = run_with_timeout(cmd, timeout)?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        warn!(
-            "claude_blocking: {} exit={} stderr={:?}",
-            config::get().spawn.command,
-            output.status,
-            stderr.trim()
-        );
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// Generate a sanitized short title for a session by running the title
-/// prompt through `run_claude_blocking`. `None` when titling is disabled,
-/// the input is empty, or the underlying Claude call fails.
-pub fn generate_title_blocking(first_msg: &str) -> Option<String> {
-    let title_cfg = &config::get().title;
-    if !title_cfg.enabled {
-        return None;
-    }
-    if first_msg.trim().is_empty() {
-        return None;
-    }
-    let prompt = format!("{}{}", title_cfg.prompt, first_msg);
-    let raw = run_claude_blocking(&title_cfg.model, &prompt, title_cfg.run_timeout())?;
-    sanitize_title(&raw, title_cfg.max_length)
-}
-
-fn sanitize_title(raw: &str, max: usize) -> Option<String> {
-    let line = raw.lines().map(str::trim).find(|l| !l.is_empty())?;
-    let cleaned: String = line
-        .trim_matches(|c: char| c == '"' || c == '\'' || c == '.' || c == '`' || c.is_whitespace())
-        .to_string();
-    if cleaned.is_empty() {
-        return None;
-    }
-    let mut end = cleaned.len().min(max);
-    while end > 0 && !cleaned.is_char_boundary(end) {
-        end -= 1;
-    }
-    Some(cleaned[..end].to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    #[cfg(unix)]
-    fn naming_never_overwrites_a_name() {
-        crate::test_util::with_temp_home(|| {
-            assert!(name_if_nameless("sid-1", "Task: born with").unwrap());
-            persist_title("sid-1", "renamed by hand").unwrap();
-            assert!(!name_if_nameless("sid-1", "Task: born with").unwrap());
-            assert_eq!(load()["sid-1"], "renamed by hand");
-        });
-    }
-
-    #[test]
-    fn sanitize_strips_quotes_and_trailing_period() {
-        assert_eq!(
-            sanitize_title("\"refactor auth module\"", 40),
-            Some("refactor auth module".into())
-        );
-        assert_eq!(
-            sanitize_title("Fix flaky test.", 40),
-            Some("Fix flaky test".into())
-        );
-    }
-
-    #[test]
-    fn sanitize_takes_first_nonempty_line() {
-        assert_eq!(
-            sanitize_title("\n\n  Debug CI  \nignore this", 40),
-            Some("Debug CI".into())
-        );
-    }
-
-    #[test]
-    fn sanitize_empty_returns_none() {
-        assert_eq!(sanitize_title("", 40), None);
-        assert_eq!(sanitize_title("   \n", 40), None);
-    }
-
-    #[test]
-    fn sanitize_clamps_long_output() {
-        let long = "a".repeat(100);
-        let out = sanitize_title(&long, 40).unwrap();
-        assert!(out.len() <= 40);
-    }
-
-    #[test]
-    fn sanitize_respects_custom_max_length() {
-        let long = "a".repeat(100);
-        let out = sanitize_title(&long, 10).unwrap();
-        assert_eq!(out.len(), 10);
-    }
-
-    #[test]
-    fn generate_title_blocking_rejects_empty_input() {
-        assert_eq!(generate_title_blocking("   \n"), None);
-    }
 
     #[test]
     fn parse_resolution_prefers_absolute_path() {
