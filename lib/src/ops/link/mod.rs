@@ -2,29 +2,24 @@
 //!
 //! A review runs in the local checkout of the pull request's repository,
 //! found by name among bookmarks and scanned session cwds. Without one it
-//! runs from the home directory against the pull request alone, and its
-//! prompt says there is no working tree.
+//! runs from the home directory, and its prompt says there is no working tree.
 //!
-//! A fix writes and pushes, so it needs a checkout. It is filed as a
-//! Tasks-board card first ([`file_fix`]), with its brief as the first note.
-//! The comments are the brief, so the card skips Planning and moves to
-//! Running once its session is bound ([`start_card`]). The card also gives
-//! the resource broker something to hold a worker against.
+//! A fix writes and pushes, so it needs a checkout. It is filed as a board
+//! card ([`file_fix`]) with its brief as the first note. The comments are the
+//! brief, so the card skips Planning and moves to Running once its session is
+//! bound ([`start_card`]). The card also gives the resource broker something
+//! to hold a worker against.
 //!
-//! A task link starts a session in the directory it names, running the
-//! `task` skill on one card, bound to the card and linked back to it so the
-//! Sessions grid shows the card's badge.
+//! A task link starts a session in the directory it names, bound and linked
+//! to the card so the Sessions grid shows its badge. A card has at most one
+//! session per place: a link to a place with a live session delivers the
+//! prompt there, so the link that started a queued task can also wake it. A
+//! link naming a `role` is a hand-over: it always starts fresh, reports the
+//! old session as `superseded`, and is refused when the card has no note.
 //!
-//! A card has at most one session per place. A link to a directory where
-//! the card already has a live session delivers the prompt there instead of
-//! spawning, so the link that started a queued task can also wake it. A
-//! link naming a `role` is a hand-over: it always starts fresh and reports
-//! the old session as `superseded`, and it is refused when the card has no
-//! note to hand over.
-//!
-//! When the backend lets cc-hub pick the session id (Claude's
-//! `--session-id`), the title is persisted before the spawn, so the session
-//! is never seen nameless. Other backends are named once a scan finds them.
+//! A backend that takes a chosen session id (Claude's `--session-id`) gets
+//! its title before the spawn, so it is never seen nameless. Other backends
+//! are named once a scan finds them.
 //!
 //! - `target`: resolve a link to its [`LinkTarget`] without side effects.
 //! - `fix`: file a fix link as a board card and start it.
