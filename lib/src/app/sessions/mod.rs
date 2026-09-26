@@ -150,6 +150,25 @@ impl SessionsView {
         self.selected_session_info().map(|s| s.session_id.clone())
     }
 
+    /// `(group, index)` of the first visible session matching `pred`.
+    pub(super) fn position_of(
+        &self,
+        pred: impl Fn(&SessionInfo) -> bool,
+    ) -> Option<(usize, usize)> {
+        self.groups
+            .iter()
+            .enumerate()
+            .find_map(|(gi, group)| group.sessions.iter().position(&pred).map(|si| (gi, si)))
+    }
+
+    /// Ids of every session currently on the grid.
+    pub(super) fn visible_ids(&self) -> HashSet<String> {
+        self.groups
+            .iter()
+            .flat_map(|g| g.sessions.iter().map(|s| s.session_id.clone()))
+            .collect()
+    }
+
     pub fn session_count(&self) -> usize {
         self.groups.iter().map(|g| g.sessions.len()).sum()
     }
@@ -166,34 +185,13 @@ impl SessionsView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::AgentKind;
+    use crate::app::test_support::fake_session;
     use crate::models::SessionState;
 
     fn session(id: &str) -> SessionInfo {
-        SessionInfo {
-            agent_id: "claude".into(),
-            agent_kind: AgentKind::Claude,
-            pid: 1,
-            session_id: id.into(),
-            cwd: "/tmp".into(),
-            project_name: "tmp".into(),
-            started_at: 0,
-            last_activity: None,
-            state: SessionState::Idle,
-            last_user_message: None,
-            summary: None,
-            title: None,
-            titling: false,
-            model: None,
-            git_branch: None,
-            version: None,
-            jsonl_path: None,
-            tmux_session: None,
-            current_tool: None,
-            is_thinking: false,
-            context_tokens: None,
-            tool_uses_count: 0,
-        }
+        let mut s = fake_session(id, SessionState::Idle);
+        s.tmux_session = None;
+        s
     }
 
     fn group(name: &str, n: usize) -> ProjectGroup {

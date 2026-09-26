@@ -1,7 +1,7 @@
 //! The rename modal (`r`), including names typed for a session still
 //! booting behind a spawn placeholder.
 
-use super::spawn::{spawning_session_id, spawning_tmux_of};
+use super::spawn::{is_codex_process_only, spawning_session_id, spawning_tmux_of};
 use crate::app::{App, View};
 
 /// Outcome of committing the rename modal, so the command layer knows where
@@ -27,9 +27,7 @@ impl App {
         let Some(session) = self.selected_session_info() else {
             return false;
         };
-        let is_codex_process_only =
-            session.agent_kind == crate::agent::AgentKind::Codex && session.jsonl_path.is_none();
-        let sid = if is_codex_process_only {
+        let sid = if is_codex_process_only(session) {
             session
                 .tmux_session
                 .as_deref()
@@ -144,10 +142,7 @@ impl App {
         self.sessions
             .last_sessions
             .iter()
-            .find(|s| {
-                s.tmux_session.as_deref() == Some(tmux)
-                    && !(s.agent_kind == crate::agent::AgentKind::Codex && s.jsonl_path.is_none())
-            })
+            .find(|s| s.tmux_session.as_deref() == Some(tmux) && !is_codex_process_only(s))
             .map(|s| s.session_id.clone())
     }
 }

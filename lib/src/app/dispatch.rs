@@ -32,10 +32,6 @@ impl App {
         });
     }
 
-    pub fn has_pending_dispatch(&self) -> bool {
-        !self.pending_dispatch.is_empty()
-    }
-
     pub fn pending_dispatch_count(&self) -> usize {
         self.pending_dispatch.len()
     }

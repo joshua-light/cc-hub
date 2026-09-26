@@ -4,8 +4,8 @@
 //! module owns the live filter, rows, and selection — the same shape as
 //! [`crate::app::ModelPickerState`].
 
+use crate::app::picker_list::{rank_rows, step, PickerRow, Searchable};
 use crate::app::{App, View};
-use crate::fuzzy;
 use crate::models::SessionInfo;
 use crate::tasks::store::{TaskState, TaskStatus};
 
@@ -30,14 +30,7 @@ pub struct TaskLinkChoice {
     pub action: TaskLinkAction,
 }
 
-/// One visible row plus the character indices highlighted in the label or
-/// detail. Only the better-scoring side is highlighted.
-#[derive(Clone, Debug, Default)]
-pub struct TaskLinkRow {
-    pub choice: usize,
-    pub label_indices: Vec<usize>,
-    pub detail_indices: Vec<usize>,
-}
+pub type TaskLinkRow = PickerRow;
 
 #[derive(Clone, Debug)]
 pub struct TaskLinkPickerState {
@@ -48,7 +41,7 @@ pub struct TaskLinkPickerState {
     pub session_label: String,
     pub selected: usize,
     pub filter: String,
-    pub rows: Vec<TaskLinkRow>,
+    pub rows: Vec<PickerRow>,
     pub choices: Vec<TaskLinkChoice>,
 }
 
@@ -94,8 +87,7 @@ impl TaskLinkPickerState {
     }
 
     pub fn move_selection(&mut self, delta: isize) {
-        let last = self.rows.len().saturating_sub(1);
-        self.selected = self.selected.saturating_add_signed(delta).min(last);
+        self.selected = step(self.selected, delta, self.rows.len());
     }
 
     pub fn selected_action(&self) -> Option<&TaskLinkAction> {
@@ -106,41 +98,14 @@ impl TaskLinkPickerState {
     }
 
     fn refilter(&mut self) {
-        if self.filter.is_empty() {
-            self.rows = (0..self.choices.len())
-                .map(|choice| TaskLinkRow {
-                    choice,
-                    ..Default::default()
-                })
-                .collect();
-        } else {
-            let mut scored = Vec::new();
-            for (choice, task) in self.choices.iter().enumerate() {
-                let label_match = fuzzy::fuzzy_match(&self.filter, &task.label);
-                let detail_match = fuzzy::fuzzy_match(&self.filter, &task.detail);
-                let label_score = label_match.as_ref().map(|m| m.score * 2);
-                let detail_score = detail_match.as_ref().map(|m| m.score);
-                let Some(score) = label_score.max(detail_score) else {
-                    continue;
-                };
-                let row = if label_score >= detail_score {
-                    TaskLinkRow {
-                        choice,
-                        label_indices: label_match.map(|m| m.indices).unwrap_or_default(),
-                        detail_indices: Vec::new(),
-                    }
-                } else {
-                    TaskLinkRow {
-                        choice,
-                        label_indices: Vec::new(),
-                        detail_indices: detail_match.map(|m| m.indices).unwrap_or_default(),
-                    }
-                };
-                scored.push((score, row));
-            }
-            scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.choice.cmp(&b.1.choice)));
-            self.rows = scored.into_iter().map(|(_, row)| row).collect();
-        }
+        self.rows = rank_rows(
+            &self.filter,
+            self.choices.iter().map(|task| Searchable {
+                label: &task.label,
+                detail: &task.detail,
+                id: None,
+            }),
+        );
         self.selected = 0;
     }
 }
@@ -454,7 +419,6 @@ mod app_tests {
     fn task_link_candidates_band_in_tasks_board_column_order() {
         crate::test_util::with_temp_home(|| {
             let mut app = App::new();
-            use crate::tasks::store::TaskStatus;
             // Insert out of band order so the sort has to do the work.
             let done = app.tasks.board.add("done task").unwrap().unwrap();
             app.tasks.board.set_status(&done, TaskStatus::Done).unwrap();
@@ -463,7 +427,7 @@ mod app_tests {
                 .board
                 .set_status(&running, TaskStatus::Running)
                 .unwrap();
-            let todo = app.tasks.board.add("todo task").unwrap().unwrap();
+            app.tasks.board.add("todo task").unwrap().unwrap();
             let planning = app.tasks.board.add("planning task").unwrap().unwrap();
             app.tasks
                 .board
@@ -482,7 +446,6 @@ mod app_tests {
             assert_eq!(choices[0].detail, "To-Do");
             assert_eq!(choices[0].status, Some(TaskStatus::Backlog));
             assert_eq!(choices[2].detail, "In Progress");
-            let _ = todo;
         });
     }
 }

@@ -1,6 +1,7 @@
 //! The deliverable-kind picker (`T`): choose the kind the task router
 //! places a card by.
 
+use crate::app::picker_list::step;
 use crate::app::{App, View};
 use crate::config;
 
@@ -33,8 +34,7 @@ impl TaskKindPickerState {
     }
 
     pub fn move_selection(&mut self, delta: isize) {
-        let last = self.rows().saturating_sub(1);
-        self.selected = self.selected.saturating_add_signed(delta).min(last);
+        self.selected = step(self.selected, delta, self.rows());
     }
 
     /// The kind under the cursor; `None` on the clear row.

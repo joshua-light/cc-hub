@@ -219,21 +219,22 @@ impl App {
 
     pub fn close_gh_create_input(&mut self) {
         self.gh_create_input = None;
-        if self.folder_picker.is_some() {
-            self.view = View::FolderPicker;
-        } else {
-            self.view = View::Grid;
-        }
+        self.leave_gh_create_input();
     }
 
     pub fn submit_gh_create_input(&mut self) -> Option<(String, String, bool)> {
         let input = self.gh_create_input.take()?;
-        if self.folder_picker.is_some() {
-            self.view = View::FolderPicker;
-        } else {
-            self.view = View::Grid;
-        }
+        self.leave_gh_create_input();
         Some((input.cwd, input.name, input.private))
+    }
+
+    /// Back to the picker the overlay sat on, or the grid if it is gone.
+    fn leave_gh_create_input(&mut self) {
+        self.view = if self.folder_picker.is_some() {
+            View::FolderPicker
+        } else {
+            View::Grid
+        };
     }
 }
 

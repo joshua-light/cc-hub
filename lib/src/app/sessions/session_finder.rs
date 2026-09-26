@@ -7,8 +7,8 @@
 //! [`crate::app::TaskLinkPickerState`].
 
 use crate::agent::AgentKind;
+use crate::app::picker_list::{rank_rows, step, PickerRow, Searchable};
 use crate::app::{App, Effect, View};
-use crate::fuzzy;
 use crate::models::{first_line_truncated, short_sid, SessionState};
 use crate::sessions::index::IndexedSession;
 use std::path::PathBuf;
@@ -29,15 +29,7 @@ pub struct SessionFinderChoice {
     pub detail: String,
 }
 
-/// One visible row plus the character indices highlighted in the label or
-/// detail. Only the better-scoring side is highlighted; a match won on the
-/// full session id highlights nothing (the id is searchable, not displayed).
-#[derive(Clone, Debug, Default)]
-pub struct SessionFinderRow {
-    pub choice: usize,
-    pub label_indices: Vec<usize>,
-    pub detail_indices: Vec<usize>,
-}
+pub type SessionFinderRow = PickerRow;
 
 #[derive(Clone, Debug)]
 pub struct SessionFinderState {
@@ -46,7 +38,7 @@ pub struct SessionFinderState {
     pub loading: bool,
     pub selected: usize,
     pub filter: String,
-    pub rows: Vec<SessionFinderRow>,
+    pub rows: Vec<PickerRow>,
     pub choices: Vec<SessionFinderChoice>,
 }
 
@@ -82,8 +74,7 @@ impl SessionFinderState {
     }
 
     pub fn move_selection(&mut self, delta: isize) {
-        let last = self.rows.len().saturating_sub(1);
-        self.selected = self.selected.saturating_add_signed(delta).min(last);
+        self.selected = step(self.selected, delta, self.rows.len());
     }
 
     pub fn selected_choice(&self) -> Option<&SessionFinderChoice> {
@@ -92,52 +83,18 @@ impl SessionFinderState {
             .and_then(|row| self.choices.get(row.choice))
     }
 
+    /// Ties keep archive order: newest first.
     fn refilter(&mut self) {
-        if self.filter.is_empty() {
-            self.rows = (0..self.choices.len())
-                .map(|choice| SessionFinderRow {
-                    choice,
-                    ..Default::default()
-                })
-                .collect();
-        } else {
-            let mut scored = Vec::new();
-            for (choice, session) in self.choices.iter().enumerate() {
-                let label_match = fuzzy::fuzzy_match(&self.filter, &session.label);
-                let detail_match = fuzzy::fuzzy_match(&self.filter, &session.detail);
-                // The full id is searchable even though only its short form
-                // renders — pasting an id from anywhere must find the session.
-                let id_match = fuzzy::fuzzy_match(&self.filter, &session.session_id);
-                let label_score = label_match.as_ref().map(|m| m.score * 2);
-                let detail_score = detail_match.as_ref().map(|m| m.score);
-                let id_score = id_match.as_ref().map(|m| m.score);
-                let Some(score) = label_score.max(detail_score).max(id_score) else {
-                    continue;
-                };
-                let row = if label_score == Some(score) {
-                    SessionFinderRow {
-                        choice,
-                        label_indices: label_match.map(|m| m.indices).unwrap_or_default(),
-                        detail_indices: Vec::new(),
-                    }
-                } else if detail_score == Some(score) {
-                    SessionFinderRow {
-                        choice,
-                        label_indices: Vec::new(),
-                        detail_indices: detail_match.map(|m| m.indices).unwrap_or_default(),
-                    }
-                } else {
-                    SessionFinderRow {
-                        choice,
-                        ..Default::default()
-                    }
-                };
-                scored.push((score, row));
-            }
-            // Equal scores keep archive order — newest first.
-            scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.choice.cmp(&b.1.choice)));
-            self.rows = scored.into_iter().map(|(_, row)| row).collect();
-        }
+        self.rows = rank_rows(
+            &self.filter,
+            self.choices.iter().map(|session| Searchable {
+                label: &session.label,
+                detail: &session.detail,
+                // The full id is searchable though only its short form
+                // renders, so a pasted id finds its session.
+                id: Some(&session.session_id),
+            }),
+        );
         self.selected = 0;
     }
 }

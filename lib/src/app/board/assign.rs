@@ -206,7 +206,6 @@ mod tests {
     // A session the board starts for a card is named after it, instead of
     // arriving nameless and asking.
     #[test]
-    #[cfg(unix)]
     fn assigned_session_is_named_after_its_card() {
         crate::test_util::with_temp_home(|| {
             let runtime = Arc::new(RecordingRuntime::default());

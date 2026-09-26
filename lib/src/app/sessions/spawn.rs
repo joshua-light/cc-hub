@@ -45,6 +45,13 @@ pub(super) fn spawning_tmux_of(id: &str) -> Option<&str> {
     id.strip_prefix(SPAWNING_ID_PREFIX)
 }
 
+/// A Codex session the scanner knows only as a live process: Codex opens its
+/// rollout file (and so gets its durable UUID) some time after it starts.
+/// Until then its card is keyed by a PID-derived id that won't survive.
+pub(super) fn is_codex_process_only(s: &SessionInfo) -> bool {
+    s.agent_kind == crate::agent::AgentKind::Codex && s.jsonl_path.is_none()
+}
+
 /// Loading-state stand-in for a spawn the scanner hasn't seen yet: Starting
 /// (its own orbit spinner and color, and the idle liveness rank — the slot
 /// the real card first appears in) with a "starting …" title. `tmux_session`
@@ -204,10 +211,9 @@ impl App {
                 continue;
             };
             let title = title.clone();
-            // Codex exposes a live process before it opens a rollout. Its
-            // PID-backed card is still temporary: show the pending name, but
-            // keep the tmux bridge until the durable UUID appears.
-            if s.agent_kind == crate::agent::AgentKind::Codex && s.jsonl_path.is_none() {
+            // A process-only Codex card is temporary: show the pending name,
+            // but keep the tmux bridge until the durable UUID appears.
+            if is_codex_process_only(s) {
                 s.title = Some(title);
                 continue;
             }

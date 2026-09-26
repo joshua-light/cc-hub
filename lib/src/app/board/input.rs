@@ -6,10 +6,7 @@ use crate::app::{App, View};
 impl App {
     /// Open the add-task popup on the Tasks tab.
     pub fn enter_task_input(&mut self) {
-        self.tasks.input.clear();
-        self.tasks.context.clear();
-        self.tasks.field = TaskField::Text;
-        self.tasks.renaming = None;
+        self.reset_task_input();
         self.view = View::TaskInput;
     }
 
@@ -32,11 +29,15 @@ impl App {
     }
 
     pub fn close_task_input(&mut self) {
+        self.reset_task_input();
+        self.view = View::Grid;
+    }
+
+    fn reset_task_input(&mut self) {
         self.tasks.input.clear();
         self.tasks.context.clear();
         self.tasks.field = TaskField::Text;
         self.tasks.renaming = None;
-        self.view = View::Grid;
     }
 
     /// Tab in the add popup: move between the task line and the context box.

@@ -6,7 +6,7 @@ use super::task_link_picker::task_display_title;
 use crate::app::App;
 use crate::models::{ProjectGroup, SessionInfo, SessionState, TaskBadge};
 use crate::tasks::store::{TaskPriority, TaskStatus};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Reorder one group's sessions so task-linked cards lead the group and
 /// cards linked to the same task always sit next to each other. Clusters
@@ -61,19 +61,7 @@ fn cluster_by_task(
 impl App {
     /// Move the cursor onto `session_id` if it's currently visible.
     pub(super) fn select_session_by_id(&mut self, session_id: &str) {
-        let found = self
-            .sessions
-            .groups
-            .iter()
-            .enumerate()
-            .find_map(|(gi, group)| {
-                group
-                    .sessions
-                    .iter()
-                    .position(|s| s.session_id == session_id)
-                    .map(|si| (gi, si))
-            });
-        if let Some((gi, si)) = found {
+        if let Some((gi, si)) = self.sessions.position_of(|s| s.session_id == session_id) {
             self.sessions.sel_group = gi;
             self.sessions.sel_in_group = si;
         }
@@ -218,19 +206,7 @@ impl App {
 
         // Re-anchor the selection on the previously-selected session id;
         // clamp into range when it's gone.
-        let restored = prev_id.and_then(|id| {
-            self.sessions
-                .groups
-                .iter()
-                .enumerate()
-                .find_map(|(gi, group)| {
-                    group
-                        .sessions
-                        .iter()
-                        .position(|s| s.session_id == id)
-                        .map(|si| (gi, si))
-                })
-        });
+        let restored = prev_id.and_then(|id| self.sessions.position_of(|s| s.session_id == id));
         match restored {
             Some((gi, si)) => {
                 self.sessions.sel_group = gi;
@@ -286,13 +262,7 @@ impl App {
         if self.sessions.known_session_ids.is_none() {
             return;
         }
-        let current: HashSet<String> = self
-            .sessions
-            .groups
-            .iter()
-            .flat_map(|g| g.sessions.iter().map(|s| s.session_id.clone()))
-            .collect();
-        self.sessions.known_session_ids = Some(current);
+        self.sessions.known_session_ids = Some(self.sessions.visible_ids());
     }
 }
 
@@ -403,7 +373,6 @@ mod tests {
     #[test]
     fn task_clusters_order_by_liveness_then_priority() {
         crate::test_util::with_temp_home(|| {
-            use crate::tasks::store::TaskPriority;
             let mut app = App::new();
             let low = app.tasks.board.add("low task").unwrap().unwrap();
             app.tasks

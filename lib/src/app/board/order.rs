@@ -9,26 +9,13 @@ impl App {
     /// Tasks in `status` in display order: To-Do and Done keep the board's
     /// insertion order; the live columns (Planning and In Progress) follow
     /// the frozen needs-input float captured on tab entry
-    /// ([`super::TasksView::in_progress_order`]), with tasks that joined since then
-    /// after it in insertion order. Every column then sorts by priority (P1
-    /// at the top). Selection ([`Self::selected_board_task`]) and focus
-    /// ([`Self::focus_task`]) resolve against this same ordering, so cursor
-    /// row N is always the Nth rendered card.
+    /// ([`super::TasksView::in_progress_order`]), with tasks that joined
+    /// since after it in insertion order. Every column then sorts by
+    /// priority (P1 at the top). Selection ([`Self::selected_board_task`])
+    /// and focus ([`Self::focus_task`]) resolve against this same ordering,
+    /// so cursor row N is always the Nth rendered card.
     pub fn task_column(&self, status: TaskStatus) -> Vec<&TaskState> {
-        let mut tasks = self.tasks.board.column(status);
-        tasks.retain(|t| self.tasks.matches_filter(t));
-        if matches!(status, TaskStatus::Planning | TaskStatus::Running) {
-            let frozen = |id: &str| self.tasks.in_progress_order.iter().position(|x| x == id);
-            // Stable sort: ids missing from the frozen order all key to MAX
-            // and keep their relative insertion order at the tail.
-            tasks.sort_by_key(|t| frozen(&t.task_id).unwrap_or(usize::MAX));
-        }
-        // Priority is the primary order in every column (P1 at the top). The
-        // sort is stable, so equal-priority tasks keep the order established
-        // above — insertion order, or the live columns' frozen needs-input
-        // float.
-        tasks.sort_by_key(|t| t.priority);
-        tasks
+        self.cards_in(&[status])
     }
 
     /// Recompute the live columns' display order: cards whose agent waits on
@@ -63,20 +50,28 @@ impl App {
     /// in via [`column_statuses`]) so plan-ready work stays visible. The
     /// merged set keeps the live columns' needs-input float and priority sort.
     pub fn task_display_column(&self, col: TaskStatus) -> Vec<&TaskState> {
-        let statuses = column_statuses(col);
-        if statuses.len() == 1 {
-            return self.task_column(statuses[0]);
-        }
-        // Merged In Progress (absorbing Planning): both are live columns, so
-        // apply the same frozen needs-input float then priority sort as
-        // `task_column` does for a single live column.
+        self.cards_in(&column_statuses(col))
+    }
+
+    /// The filtered cards of `statuses` in the order [`Self::task_column`]
+    /// documents.
+    fn cards_in(&self, statuses: &[TaskStatus]) -> Vec<&TaskState> {
         let mut tasks: Vec<&TaskState> = statuses
             .iter()
             .flat_map(|s| self.tasks.board.column(*s))
             .filter(|t| self.tasks.matches_filter(t))
             .collect();
-        let frozen = |id: &str| self.tasks.in_progress_order.iter().position(|x| x == id);
-        tasks.sort_by_key(|t| frozen(&t.task_id).unwrap_or(usize::MAX));
+        if statuses
+            .iter()
+            .any(|s| matches!(s, TaskStatus::Planning | TaskStatus::Running))
+        {
+            let frozen = |id: &str| self.tasks.in_progress_order.iter().position(|x| x == id);
+            // Stable sort: ids missing from the frozen order all key to MAX
+            // and keep their relative insertion order at the tail.
+            tasks.sort_by_key(|t| frozen(&t.task_id).unwrap_or(usize::MAX));
+        }
+        // Priority is the primary order in every column. The sort is stable,
+        // so equal-priority tasks keep the order established above.
         tasks.sort_by_key(|t| t.priority);
         tasks
     }

@@ -1,6 +1,7 @@
 //! The respawn picker (`R`): continue a session on another subscription
 //! account.
 
+use crate::app::picker_list::step;
 use crate::app::{App, View};
 use crate::models::SessionInfo;
 
@@ -40,8 +41,7 @@ impl RespawnPickerState {
     }
 
     pub fn move_selection(&mut self, delta: isize) {
-        let last = self.choices.len().saturating_sub(1);
-        self.selected = self.selected.saturating_add_signed(delta).min(last);
+        self.selected = step(self.selected, delta, self.choices.len());
     }
 
     pub fn selected_choice(&self) -> Option<&RespawnChoice> {

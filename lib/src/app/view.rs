@@ -141,24 +141,24 @@ impl App {
     }
 
     pub fn cycle_tab(&mut self) {
-        let tabs = visible_tabs();
-        let next = match tabs.iter().position(|t| *t == self.current_tab) {
-            Some(i) => tabs[(i + 1) % tabs.len()],
-            // Current tab got hidden out from under us (config reload via
-            // restart can't do this mid-run, but stay defensive): land on
-            // the first visible tab rather than panicking.
-            None => tabs.first().copied().unwrap_or(Tab::Sessions),
-        };
-        self.set_tab(next);
+        self.step_tab(1);
     }
 
     pub fn cycle_tab_back(&mut self) {
+        self.step_tab(-1);
+    }
+
+    /// Move `delta` tabs along the visible strip, wrapping at both ends.
+    fn step_tab(&mut self, delta: isize) {
         let tabs = visible_tabs();
-        let prev = match tabs.iter().position(|t| *t == self.current_tab) {
-            Some(i) => tabs[(i + tabs.len() - 1) % tabs.len()],
+        let next = match tabs.iter().position(|t| *t == self.current_tab) {
+            Some(i) => tabs[(i as isize + delta).rem_euclid(tabs.len() as isize) as usize],
+            // The current tab can only be hidden by a config change, which
+            // needs a restart; stay defensive and land on the first visible
+            // tab rather than panicking.
             None => tabs.first().copied().unwrap_or(Tab::Sessions),
         };
-        self.set_tab(prev);
+        self.set_tab(next);
     }
 
     pub fn enter_tmux_pane(&mut self, view: TmuxPaneView) {
@@ -189,12 +189,9 @@ impl App {
 
     pub fn take_pending_close(&mut self) -> Option<PendingClose> {
         self.view = View::Grid;
-        if matches!(self.pending_confirm, Some(PendingConfirm::Close(_))) {
-            if let Some(PendingConfirm::Close(p)) = self.pending_confirm.take() {
-                return Some(p);
-            }
-        }
-        None
+        self.pending_confirm
+            .take()
+            .map(|PendingConfirm::Close(p)| p)
     }
 
     pub fn scroll_down(&mut self) {

@@ -2,12 +2,17 @@
 //! reprioritise, delete and undo.
 
 use crate::app::App;
-use crate::tasks::store::{TaskPriority, TaskStatus};
+use crate::tasks::store::{TaskPriority, TaskState, TaskStatus};
 
 /// What Space on a Planning card sends to the bound agent. Kept terse: the
 /// plan-first framing in [`planning_prompt`](super::assign::planning_prompt) already told the agent what
 /// "proceed" means.
 pub const PROCEED_PROMPT: &str = "Proceed with the implementation.";
+
+/// A card's prompt as quoted in status lines.
+fn card_preview(t: &TaskState) -> String {
+    crate::models::first_line_truncated(&t.prompt, 32)
+}
 
 impl App {
     /// Space on the board, status-aware: a Planning card tells its agent to
@@ -33,7 +38,7 @@ impl App {
             return "no task focused".into();
         };
         let id = t.task_id.clone();
-        let preview = crate::models::first_line_truncated(&t.prompt, 32);
+        let preview = card_preview(t);
         let live_tmux = t.tmux.clone().filter(|n| self.runtime.session_exists(n));
         if let Some(tmux) = live_tmux {
             return match self.runtime.send_prompt(&tmux, PROCEED_PROMPT) {
@@ -99,7 +104,7 @@ impl App {
     pub fn toggle_task_done(&mut self) -> Option<String> {
         let t = self.selected_board_task()?;
         let id = t.task_id.clone();
-        let preview = crate::models::first_line_truncated(&t.prompt, 32);
+        let preview = card_preview(t);
         let tmux = t.tmux.clone();
         if t.status == TaskStatus::Done {
             if let Err(e) = self.tasks.board.set_status(&id, TaskStatus::Backlog) {
@@ -168,7 +173,7 @@ impl App {
     pub fn move_selected_task(&mut self, dir: i8) -> Option<String> {
         let t = self.selected_board_task()?;
         let id = t.task_id.clone();
-        let preview = crate::models::first_line_truncated(&t.prompt, 32);
+        let preview = card_preview(t);
         let tmux = t.tmux.clone();
         let to = match (t.status, dir < 0) {
             (TaskStatus::Backlog, false) => TaskStatus::Running,
@@ -215,7 +220,7 @@ impl App {
     pub fn set_selected_task_priority(&mut self, priority: TaskPriority) -> Option<String> {
         let t = self.selected_board_task()?;
         let id = t.task_id.clone();
-        let preview = crate::models::first_line_truncated(&t.prompt, 32);
+        let preview = card_preview(t);
         if let Err(e) = self.tasks.board.set_priority(&id, priority) {
             return Some(format!("priority update failed: {e}"));
         }
@@ -233,7 +238,7 @@ impl App {
             Err(e) => return Some(format!("delete failed: {e}")),
         };
         self.tasks.clamp_row();
-        let preview = crate::models::first_line_truncated(&removed.prompt, 32);
+        let preview = card_preview(&removed);
         let tmux = removed.tmux.clone();
         self.tasks.undo = Some(vec![removed]);
         Some(match tmux {
@@ -310,7 +315,6 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    #[cfg(unix)]
     fn task_controller_uses_runtime_boundary_to_proceed() {
         crate::test_util::with_temp_home(|| {
             let runtime = Arc::new(RecordingRuntime::default());

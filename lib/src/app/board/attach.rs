@@ -97,12 +97,19 @@ impl App {
     pub fn close_task_attach(&mut self) {
         self.tasks.input.clear();
         self.tasks.attaching = None;
-        self.view = if self.tasks.attach_from_info {
+        self.leave_task_attach();
+    }
+
+    /// Return from the attach input to where it was opened; true when that
+    /// is the Task Info popup.
+    fn leave_task_attach(&mut self) -> bool {
+        let from_info = std::mem::take(&mut self.tasks.attach_from_info);
+        self.view = if from_info {
             View::TaskInfo
         } else {
             View::Grid
         };
-        self.tasks.attach_from_info = false;
+        from_info
     }
 
     /// Commit the attach input: in note mode write the text as a `note`
@@ -113,13 +120,7 @@ impl App {
     pub fn submit_task_attach(&mut self) -> bool {
         let text = std::mem::take(&mut self.tasks.input);
         let raw = text.trim().to_string();
-        let from_info = self.tasks.attach_from_info;
-        self.tasks.attach_from_info = false;
-        self.view = if from_info {
-            View::TaskInfo
-        } else {
-            View::Grid
-        };
+        let from_info = self.leave_task_attach();
         let Some(id) = self.tasks.attaching.take() else {
             return false;
         };

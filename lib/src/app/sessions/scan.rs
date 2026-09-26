@@ -1,6 +1,7 @@
 //! Applying scan snapshots to the grid, plus the grid's view toggles and
 //! acks.
 
+use super::spawn::is_codex_process_only;
 use super::SessionsLayout;
 use crate::app::{App, Tab};
 use crate::models::{SessionInfo, SessionState};
@@ -172,26 +173,12 @@ impl App {
         self.sessions.last_sessions = sessions;
         self.adopt_groups(new_groups);
 
-        let current_ids: HashSet<String> = self
-            .sessions
-            .groups
-            .iter()
-            .flat_map(|g| g.sessions.iter().map(|s| s.session_id.clone()))
-            .collect();
+        let current_ids = self.sessions.visible_ids();
         // First tick seeds known ids without hijacking the cursor; later ticks
         // jump selection to a freshly-appeared session so it gets focus.
         let new_selection = self.sessions.known_session_ids.as_ref().and_then(|known| {
             self.sessions
-                .groups
-                .iter()
-                .enumerate()
-                .find_map(|(gi, group)| {
-                    group
-                        .sessions
-                        .iter()
-                        .position(|s| !known.contains(&s.session_id))
-                        .map(|si| (gi, si))
-                })
+                .position_of(|s| !known.contains(&s.session_id))
         });
         self.sessions.known_session_ids = Some(current_ids);
         if let Some((gi, si)) = new_selection {
@@ -221,11 +208,10 @@ impl App {
             if !live_tmux.contains(tmux) {
                 return true;
             }
-            self.sessions.last_sessions.iter().any(|s| {
-                s.tmux_session.as_deref() == Some(tmux)
-                    && s.agent_kind == crate::agent::AgentKind::Codex
-                    && s.jsonl_path.is_none()
-            })
+            self.sessions
+                .last_sessions
+                .iter()
+                .any(|s| s.tmux_session.as_deref() == Some(tmux) && is_codex_process_only(s))
         });
         true
     }

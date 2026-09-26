@@ -36,10 +36,11 @@ mod command;
 mod dispatch;
 mod harness_view;
 mod metrics_view;
+mod picker_list;
 mod places;
 mod render_state;
 mod sessions;
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod test_support;
 mod view;
 
@@ -54,6 +55,7 @@ pub use command::{
 pub use dispatch::{DispatchAction, PendingDispatch};
 pub use harness_view::{Detail, HarnessView, Section};
 pub use metrics_view::MetricsView;
+pub use picker_list::PickerRow;
 pub use places::GhCreateInput;
 pub use render_state::RenderState;
 pub use sessions::{
