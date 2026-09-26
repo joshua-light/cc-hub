@@ -184,9 +184,8 @@ pub fn extract_started_at(entries: &[Value]) -> u64 {
         .unwrap_or(0)
 }
 
-/// `(git_branch, model, version)` — codex records no git branch, so that is
-/// always `None`. The model is the most recent `turn_context.model`; the
-/// version is `session_meta.cli_version`.
+/// `(git_branch, model, version)`. The model is the most recent
+/// `turn_context.model`; the version is `session_meta.cli_version`.
 pub fn extract_metadata(entries: &[Value]) -> (Option<String>, Option<String>, Option<String>) {
     let model = entries
         .iter()
