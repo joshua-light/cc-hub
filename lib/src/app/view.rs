@@ -104,16 +104,11 @@ pub fn visible_tabs() -> Vec<Tab> {
         .collect()
 }
 
+/// The terminal close staged behind [`View::ConfirmClose`].
 #[derive(Clone, Debug)]
 pub struct PendingClose {
     pub pid: u32,
     pub display: String,
-}
-
-/// The destructive action staged behind [`View::ConfirmClose`].
-#[derive(Clone, Debug)]
-pub enum PendingConfirm {
-    Close(PendingClose),
 }
 
 impl App {
@@ -174,23 +169,21 @@ impl App {
         let Some(session) = self.selected_session_info() else {
             return;
         };
-        self.pending_confirm = Some(PendingConfirm::Close(PendingClose {
+        self.pending_close = Some(PendingClose {
             pid: session.pid,
             display: format!("{} (PID {})", session.project_name, session.pid),
-        }));
+        });
         self.view = View::ConfirmClose;
     }
 
     pub fn cancel_confirm_close(&mut self) {
-        self.pending_confirm = None;
+        self.pending_close = None;
         self.view = View::Grid;
     }
 
     pub fn take_pending_close(&mut self) -> Option<PendingClose> {
         self.view = View::Grid;
-        self.pending_confirm
-            .take()
-            .map(|PendingConfirm::Close(p)| p)
+        self.pending_close.take()
     }
 
     pub fn scroll_down(&mut self) {

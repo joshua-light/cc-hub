@@ -29,8 +29,6 @@ pub struct TaskLinkChoice {
     pub action: TaskLinkAction,
 }
 
-pub type TaskLinkRow = PickerRow;
-
 #[derive(Clone, Debug)]
 pub struct TaskLinkPickerState {
     /// Session being linked, captured at open time so a rescan can't move

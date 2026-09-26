@@ -23,14 +23,12 @@ mod session_finder;
 mod spawn;
 mod task_link_picker;
 
-pub use model_picker::{
-    AgentPickerState, ModelPickerChoice, ModelPickerRow, ModelPickerState, SPAWN_MODELS,
-};
+pub use model_picker::{AgentPickerState, ModelPickerChoice, ModelPickerState};
 pub use rename::RenameSubmit;
 pub use respawn_picker::{RespawnChoice, RespawnPickerState};
-pub use session_finder::{SessionFinderChoice, SessionFinderRow, SessionFinderState};
+pub use session_finder::{SessionFinderChoice, SessionFinderState};
 pub(super) use spawn::SpawnWatch;
-pub use task_link_picker::{TaskLinkAction, TaskLinkChoice, TaskLinkPickerState, TaskLinkRow};
+pub use task_link_picker::{TaskLinkAction, TaskLinkChoice, TaskLinkPickerState};
 
 /// How the Sessions tab lays out its sessions. `List` renders one compact
 /// row per session, table-style, and is what the app opens on — it fits far

@@ -20,7 +20,8 @@ pub(crate) fn render_model_picker(frame: &mut Frame, area: Rect, app: &App) {
     let choices = &picker.choices;
 
     let desired_w = 60u16.min(area.width);
-    let desired_h = (crate::app::SPAWN_MODELS.len().max(choices.len()) as u16 + 5).min(area.height);
+    let desired_h =
+        (crate::agent::DEFAULT_CLAUDE_MODELS.len().max(choices.len()) as u16 + 5).min(area.height);
     let popup = centered_fixed(area, desired_w, desired_h);
     frame.render_widget(Clear, popup);
 
