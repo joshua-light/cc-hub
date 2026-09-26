@@ -2,6 +2,12 @@ use crate::acks::Acks;
 use crate::models::{ProjectGroup, SessionInfo};
 use std::collections::HashSet;
 
+mod session_finder;
+mod task_link_picker;
+
+pub use session_finder::{SessionFinderChoice, SessionFinderRow, SessionFinderState};
+pub use task_link_picker::{TaskLinkAction, TaskLinkChoice, TaskLinkPickerState, TaskLinkRow};
+
 /// How the Sessions tab lays out its sessions. `List` renders one compact
 /// row per session, table-style, and is what the app opens on — it fits far
 /// more sessions on screen than the cards do; `Grid` is the classic card

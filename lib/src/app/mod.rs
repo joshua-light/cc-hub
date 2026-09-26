@@ -16,16 +16,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod board;
 mod builds_view;
 mod command;
 mod harness_view;
 mod metrics_view;
 mod render_state;
-mod session_finder;
-mod sessions_view;
-mod task_link_picker;
-mod tasks_view;
+mod sessions;
 
+pub use board::{column_statuses, visible_task_columns, TaskField, TasksView, TASK_COLUMNS};
 pub use builds_view::{BuildForm, BuildsProbe, BuildsSnapshot, BuildsView, FormField, LogView};
 pub use command::{
     BuildsCommand, Command, Effect, GlobalCommand, HarnessCommand, SessionsCommand, TasksCommand,
@@ -33,10 +32,10 @@ pub use command::{
 pub use harness_view::{Detail, HarnessView, Section};
 pub use metrics_view::MetricsView;
 pub use render_state::RenderState;
-pub use session_finder::{SessionFinderChoice, SessionFinderRow, SessionFinderState};
-pub use sessions_view::{SessionsLayout, SessionsView};
-pub use task_link_picker::{TaskLinkAction, TaskLinkChoice, TaskLinkPickerState, TaskLinkRow};
-pub use tasks_view::{column_statuses, visible_task_columns, TaskField, TasksView, TASK_COLUMNS};
+pub use sessions::{
+    SessionFinderChoice, SessionFinderRow, SessionFinderState, SessionsLayout, SessionsView,
+    TaskLinkAction, TaskLinkChoice, TaskLinkPickerState, TaskLinkRow,
+};
 
 pub fn status_msg_ttl() -> Duration {
     config::get().ui.status_msg_ttl()
