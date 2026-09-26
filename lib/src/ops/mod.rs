@@ -39,12 +39,6 @@ pub enum OpError {
     /// Everything else (I/O, serialization). Maps to
     /// `CliError::Other` (exit 1, kind "other").
     Other(String),
-    /// The op already produced a rich, domain-specific result the caller
-    /// printed as its own `{"ok":false,...}` JSON line. The caller must NOT
-    /// print a second JSON line; it only sets the nonzero exit code and a
-    /// human stderr line. The string is that stderr message. Maps to
-    /// `CliError::Reported`.
-    Reported(String),
 }
 
 impl OpError {
@@ -62,9 +56,7 @@ impl OpError {
 impl std::fmt::Display for OpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            OpError::Usage(m) | OpError::NotFound(m) | OpError::Other(m) | OpError::Reported(m) => {
-                f.write_str(m)
-            }
+            OpError::Usage(m) | OpError::NotFound(m) | OpError::Other(m) => f.write_str(m),
             OpError::Conflict { msg, .. } => f.write_str(msg),
         }
     }
