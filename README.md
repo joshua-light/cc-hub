@@ -530,12 +530,13 @@ the plan, so the plan-first workflow works with one fewer column.
 
 | Key | Action |
 |---|---|
-| `h j k l` / arrows | Navigate the grid |
+| `j k l` / arrows | Navigate the grid (`h` is handoff; `←` goes left) |
 | `i` | Session info popup |
 | `Enter` / `f` | Attach: embedded pane if the session is in a mux, else focus its terminal window. For an inactive session, spawn a new tmux session running `cc-hub-new --resume <id>` |
 | `H` | Toggle visibility of inactive sessions (hidden by default; window is 3 days) |
 | `o` | Open an embedded shell pane in the selected session's cwd |
 | `n` | Spawn a new session with the current default agent in the selected session's cwd |
+| `h` | Mark the selected session for a **handoff** (light-blue border / gutter); `h` on it again drops the mark. The next session you start — `n`, `N`, an agent hotkey, `p`, `M` — opens with the marked session's last reply typed into its input as `<context>…</context>`, unsent: add what to do with it and press Enter. A fresh session that continues from where the old one stopped, without compacting |
 | `A` | Choose the default agent used by subsequent `n` and folder-picker session spawns (for the current run) |
 | `[agents.<id>].hotkey` | User-defined per-agent keys (e.g. `C` → Codex): spawn that agent in the selected session's cwd regardless of the `A` default. Shadows the built-in key it collides with |
 | `N` | Fuzzy model/agent picker → choose a model, use `Tab` to cycle configured coding agents/providers, and spawn in the selected session's cwd |

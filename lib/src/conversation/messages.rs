@@ -28,6 +28,42 @@ pub fn extract_first_user_message(entries: &[Value]) -> Option<String> {
         .find_map(|e| extract_user_text(e, 200))
 }
 
+/// The whole text of the newest assistant entry that said something, untruncated
+/// — what a [`crate::handoff::Handoff`] carries into a fresh session. Entries made
+/// only of tool calls or thinking have no text and are passed over.
+pub fn extract_last_assistant_message(entries: &[Value]) -> Option<String> {
+    entries
+        .iter()
+        .rev()
+        .filter(|e| e.get("type").and_then(|t| t.as_str()) == Some("assistant"))
+        .find_map(|e| full_text(e.get("message")?.get("content")?, &["text"]))
+}
+
+/// Every text block of a message `content` — a bare string, or an array of
+/// typed blocks of which those typed `text_types` count — trimmed and joined
+/// by blank lines. `None` when nothing is left: a turn of only tool calls
+/// says nothing. Shared by the three dialects, which differ only in what
+/// they call a text block.
+pub(crate) fn full_text(content: &Value, text_types: &[&str]) -> Option<String> {
+    let text = match content.as_str() {
+        Some(text) => text.trim().to_string(),
+        None => content
+            .as_array()?
+            .iter()
+            .filter(|b| {
+                b.get("type")
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| text_types.contains(&t))
+            })
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    };
+    Some(text).filter(|t| !t.is_empty())
+}
+
 /// Extract text from a user message entry, handling both string and array content.
 fn extract_user_text(entry: &Value, max_len: usize) -> Option<String> {
     let content = entry.get("message")?.get("content")?;
@@ -235,6 +271,32 @@ mod tests {
             extract_last_user_message(&entries).as_deref(),
             Some("build the thing")
         );
+    }
+
+    /// The reply is the newest text, whole: later tool-only entries are
+    /// passed over, and nothing is cut at a line or a length.
+    #[test]
+    fn last_assistant_message_is_the_newest_text_whole() {
+        let long = format!("first line\n{}", "x".repeat(500));
+        let entries = vec![
+            serde_json::json!({"type": "assistant", "message": {"content": "older"}}),
+            serde_json::json!({"type": "assistant", "message": {"content": [
+                {"type": "thinking", "thinking": "hm"},
+                {"type": "text", "text": long},
+                {"type": "text", "text": " and more "}
+            ]}}),
+            serde_json::json!({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}
+            ]}}),
+            serde_json::json!({"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "t1"}
+            ]}}),
+        ];
+        assert_eq!(
+            extract_last_assistant_message(&entries),
+            Some(format!("{long}\n\nand more"))
+        );
+        assert_eq!(extract_last_assistant_message(&entries[2..]), None);
     }
 
     #[test]

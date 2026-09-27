@@ -27,6 +27,25 @@ pub fn send_prompt(session: &str, text: &str) -> io::Result<()> {
     mux::send_prompt(session, text)
 }
 
+/// How queued text lands in a session's input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// Typed and submitted: a turn the agent answers.
+    Submit,
+    /// Typed and left there: a draft the user finishes and sends
+    /// ([`crate::handoff`]).
+    Draft,
+}
+
+impl Delivery {
+    pub fn deliver(self, session: &str, text: &str) -> io::Result<()> {
+        match self {
+            Delivery::Submit => send_prompt(session, text),
+            Delivery::Draft => mux::paste_buffer(session, text),
+        }
+    }
+}
+
 /// Opens every prompt cc-hub injects on its own behalf rather than the
 /// user's. A pane paste has no channel of its own — whatever we type lands
 /// in the agent's transcript as a user turn — so the marker is what tells

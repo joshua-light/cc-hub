@@ -7,7 +7,7 @@ use crate::ui::common::{
     format_time, format_tokens, format_tool_label, popup_block, priority_color, short_model,
     state_color, state_indicator, task_color, COLD_CACHE_ICON,
 };
-use crate::ui::palette::{CONTEXT_GRAY, ICE_BLUE, MUTED_TEXT, PURPLE, SEP_GRAY};
+use crate::ui::palette::{CONTEXT_GRAY, HANDOFF_BLUE, ICE_BLUE, MUTED_TEXT, PURPLE, SEP_GRAY};
 use crate::ui::popups::wrapped_total_rows;
 use crate::ui::{cell_height, now_ms};
 use ratatui::layout::{Alignment, Rect};
@@ -153,7 +153,11 @@ pub(crate) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
             let is_selected = gi == app.sessions.sel_group && si == app.sessions.sel_in_group;
             let cell_area = Rect::new(x, cy, w, cell_height());
             let badge = app.task_badge(&session.session_id);
-            render_card(frame, cell_area, session, badge.as_ref(), is_selected, now);
+            let marks = CardMarks {
+                selected: is_selected,
+                handoff: app.sessions.hands_off(&session.session_id),
+            };
+            render_card(frame, cell_area, session, badge.as_ref(), marks, now);
         }
     }
 }
@@ -179,14 +183,23 @@ pub(crate) fn starting_frame(now: u64) -> &'static str {
     STARTING_FRAMES[((now / 120) % STARTING_FRAMES.len() as u64) as usize]
 }
 
+/// What the user has done to a session row or card, as opposed to what the
+/// session is doing: the cursor is on it, or `h` marked it for a handoff.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct CardMarks {
+    pub selected: bool,
+    pub handoff: bool,
+}
+
 pub(crate) fn render_card(
     frame: &mut Frame,
     area: Rect,
     session: &SessionInfo,
     badge: Option<&crate::models::TaskBadge>,
-    selected: bool,
+    marks: CardMarks,
     now: u64,
 ) {
+    let CardMarks { selected, handoff } = marks;
     let (indicator, ind_color) = state_indicator(&session.state);
     let indicator = match session.state {
         SessionState::Processing => spinner_frame(now),
@@ -194,7 +207,11 @@ pub(crate) fn render_card(
         _ => indicator,
     };
 
-    let border_color = if selected {
+    // The handoff mark outranks the cursor's white: the double border still
+    // says "selected", while the color says "this one hands off".
+    let border_color = if handoff {
+        HANDOFF_BLUE
+    } else if selected {
         Color::White
     } else if session.needs_attention() || session.state == SessionState::Processing {
         // Question gets its own blue accent so it's visually distinct from
@@ -867,7 +884,7 @@ mod tests {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
-            .draw(|f| super::render_card(f, f.area(), s, None, false, NOW))
+            .draw(|f| super::render_card(f, f.area(), s, None, super::CardMarks::default(), NOW))
             .expect("render");
         terminal.backend().buffer().clone()
     }
@@ -910,7 +927,16 @@ mod tests {
             let backend = TestBackend::new(42, 7);
             let mut terminal = Terminal::new(backend).expect("terminal");
             terminal
-                .draw(|f| super::render_card(f, f.area(), &s, Some(badge), false, NOW))
+                .draw(|f| {
+                    super::render_card(
+                        f,
+                        f.area(),
+                        &s,
+                        Some(badge),
+                        super::CardMarks::default(),
+                        NOW,
+                    )
+                })
                 .expect("render");
             terminal.backend().buffer().clone()
         };

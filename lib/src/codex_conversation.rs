@@ -436,6 +436,18 @@ pub fn extract_first_user_message(entries: &[Value]) -> Option<String> {
         .find_map(|e| displayable_user_text(e, 200))
 }
 
+/// Codex's side of [`crate::conversation::extract_last_assistant_message`]:
+/// the newest assistant `message` response item with text, whole.
+pub fn extract_last_assistant_message(entries: &[Value]) -> Option<String> {
+    entries
+        .iter()
+        .rev()
+        .filter(|e| rec_type(e) == Some("response_item") && payload_type(e) == Some("message"))
+        .filter_map(payload)
+        .filter(|p| p.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+        .find_map(|p| crate::conversation::full_text(p.get("content")?, &["output_text", "text"]))
+}
+
 /// Cumulative `(input, output)` token totals — read straight off the most
 /// recent `token_count` event's `total_token_usage`, which codex maintains as
 /// a running sum for the whole session.
@@ -545,6 +557,19 @@ mod tests {
             "message",
             json!({"role": "assistant", "content": [{"type": "output_text", "text": text}]}),
         )
+    }
+
+    #[test]
+    fn last_assistant_message_skips_user_turns() {
+        let entries = vec![
+            assistant_item("old"),
+            assistant_item("line one\nline two"),
+            user_msg("thanks"),
+        ];
+        assert_eq!(
+            extract_last_assistant_message(&entries).as_deref(),
+            Some("line one\nline two")
+        );
     }
 
     // --- extract_state -------------------------------------------------

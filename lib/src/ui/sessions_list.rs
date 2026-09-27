@@ -28,9 +28,9 @@ use crate::ui::common::{
     COLD_CACHE_ICON, COL_SEP,
 };
 use crate::ui::now_ms;
-use crate::ui::palette::{CONTEXT_GRAY, ICE_BLUE, MUTED_TEXT};
+use crate::ui::palette::{CONTEXT_GRAY, HANDOFF_BLUE, ICE_BLUE, MUTED_TEXT};
 use crate::ui::sessions::{
-    render_group_header, render_no_sessions, spinner_frame, starting_frame, GROUP_GAP,
+    render_group_header, render_no_sessions, spinner_frame, starting_frame, CardMarks, GROUP_GAP,
     GROUP_HEADER_HEIGHT,
 };
 use ratatui::layout::Rect;
@@ -201,17 +201,12 @@ pub(crate) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
                 continue;
             }
             let row_area = Rect::new(area.x, area.y + row_sy as u16, area.width, 1);
-            let selected = gi == app.sessions.sel_group && si == app.sessions.sel_in_group;
+            let marks = CardMarks {
+                selected: gi == app.sessions.sel_group && si == app.sessions.sel_in_group,
+                handoff: app.sessions.hands_off(&session.session_id),
+            };
             let badge = app.task_badge(&session.session_id);
-            render_row(
-                frame,
-                row_area,
-                session,
-                badge.as_ref(),
-                &cols,
-                selected,
-                now,
-            );
+            render_row(frame, row_area, session, badge.as_ref(), &cols, marks, now);
         }
     }
 }
@@ -223,9 +218,10 @@ fn render_row(
     session: &SessionInfo,
     badge: Option<&crate::models::TaskBadge>,
     cols: &ListColumns,
-    selected: bool,
+    marks: CardMarks,
     now: u64,
 ) {
+    let CardMarks { selected, handoff } = marks;
     let width = area.width as usize;
     let (indicator, ind_color) = state_indicator(&session.state);
     let indicator = match session.state {
@@ -369,7 +365,11 @@ fn render_row(
     let used = prefix_w + text.chars().count();
 
     let mut spans: Vec<Span<'static>> = Vec::new();
-    spans.push(if selected {
+    // The gutter bar is the cursor, in white; a handoff mark keeps it lit in
+    // its own color whether or not the cursor is there.
+    spans.push(if handoff {
+        Span::styled("▌", Style::default().fg(HANDOFF_BLUE))
+    } else if selected {
         Span::styled("▌", Style::default().fg(Color::White))
     } else {
         Span::raw(" ")

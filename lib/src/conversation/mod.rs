@@ -23,9 +23,11 @@ pub use io::{
     count_blocks_in_reader, count_blocks_of_type, count_tool_uses, count_tool_uses_in_reader,
     read_jsonl_all, read_jsonl_head, read_jsonl_tail, read_jsonl_tail_for_state,
 };
+pub(crate) use messages::full_text;
 pub use messages::{
-    extract_first_user_message, extract_last_activity, extract_last_user_message, extract_messages,
-    extract_metadata, extract_token_totals, parse_timestamp_ms, AUTOMATION_ROLE,
+    extract_first_user_message, extract_last_activity, extract_last_assistant_message,
+    extract_last_user_message, extract_messages, extract_metadata, extract_token_totals,
+    parse_timestamp_ms, AUTOMATION_ROLE,
 };
 pub(crate) use render::{NO_CONTENT, NO_TEXT_CONTENT, THINKING_MARKER, TOOL_MARKER_PREFIX};
 pub use state::{

@@ -136,6 +136,9 @@ pub enum SessionsCommand {
     StageConfirmClose,
     /// Space — ack the selected session's attention state.
     AckSelected,
+    /// `h` — mark (or unmark) the selected session for a handoff: the next
+    /// new session opens with its last reply drafted ([`crate::handoff`]).
+    ToggleHandoff,
     /// `n` — new agent session in the selected session's cwd.
     SpawnAgentHere,
     /// `[agents.<id>].hotkey` — new session with that specific agent in the
@@ -910,6 +913,10 @@ impl App {
             }
             AckSelected => {
                 self.ack_selected();
+                Vec::new()
+            }
+            ToggleHandoff => {
+                self.toggle_handoff();
                 Vec::new()
             }
             SpawnAgentHere => {
@@ -1911,6 +1918,78 @@ mod tests {
             assert_eq!(spawns[0].resume, None);
             assert_eq!(spawns[0].initial_prompt, None);
             assert!(status(&app).starts_with("started"), "got: {}", status(&app));
+        });
+    }
+
+    /// A Claude transcript whose last reply is `reply`, behind a tool call
+    /// that has no text of its own.
+    fn transcript_replying(dir: &std::path::Path, reply: &str) -> std::path::PathBuf {
+        let path = dir.join("sid-1.jsonl");
+        let lines = [
+            serde_json::json!({"type": "user", "message": {"content": "plan it"}}),
+            serde_json::json!({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": reply}
+            ]}}),
+            serde_json::json!({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "t1", "name": "Read", "input": {}}
+            ]}}),
+        ];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    #[test]
+    fn handoff_drafts_the_marked_reply_into_the_next_new_session() {
+        crate::test_util::with_temp_home(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let mut source = session("sid-1", SessionState::Idle, Some("cc-agent-1"));
+            source.jsonl_path = Some(transcript_replying(dir.path(), "Here is the plan."));
+            let (mut app, _runtime) = app_with(vec![source]);
+
+            app.execute(Command::Sessions(SessionsCommand::ToggleHandoff));
+            assert!(app.sessions.hands_off("sid-1"));
+            app.execute(Command::Sessions(SessionsCommand::SpawnAgentHere));
+
+            assert!(app.sessions.handoff.is_none(), "the spawn takes the mark");
+            let queued = app.pending_dispatch.front().expect("a draft is queued");
+            assert_eq!(queued.tmux, "mock-spawn");
+            assert_eq!(queued.delivery, crate::send::Delivery::Draft);
+            assert_eq!(
+                queued.prompt,
+                "<context>\nHere is the plan.\n</context>\n\n"
+            );
+        });
+    }
+
+    #[test]
+    fn handoff_on_the_marked_session_drops_the_mark() {
+        crate::test_util::with_temp_home(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let mut source = session("sid-1", SessionState::Idle, Some("cc-agent-1"));
+            source.jsonl_path = Some(transcript_replying(dir.path(), "Done."));
+            let (mut app, _runtime) = app_with(vec![source]);
+
+            app.execute(Command::Sessions(SessionsCommand::ToggleHandoff));
+            app.execute(Command::Sessions(SessionsCommand::ToggleHandoff));
+            app.execute(Command::Sessions(SessionsCommand::SpawnAgentHere));
+
+            assert!(app.sessions.handoff.is_none());
+            assert!(app.pending_dispatch.is_empty(), "nothing to draft");
+        });
+    }
+
+    #[test]
+    fn handoff_refuses_a_session_with_no_reply() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _runtime) = app_with(vec![session(
+                "sid-1",
+                SessionState::Idle,
+                Some("cc-agent-1"),
+            )]);
+            app.execute(Command::Sessions(SessionsCommand::ToggleHandoff));
+            assert!(app.sessions.handoff.is_none());
+            assert!(status(&app).contains("no reply"), "got: {}", status(&app));
         });
     }
 

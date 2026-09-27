@@ -343,9 +343,9 @@ pub(crate) fn dispatch_picked_cwd(app: &mut App, cwd: &str) {
     }
 }
 
-/// Run `send::send_prompt` off the synchronous run() loop thread and report
-/// the outcome back over `tx` as a [`ScanMsg::DispatchResult`], drained in the
-/// same channel loop as every other scan message. `send_prompt` forks+execs
+/// Deliver `prompt` (see [`send::Delivery`]) off the synchronous run() loop
+/// thread and report the outcome back over `tx` as a [`ScanMsg::DispatchResult`],
+/// drained in the same channel loop as every other scan message. `send_prompt` forks+execs
 /// tmux twice and sleeps ~80ms; called inline it froze render+input for
 /// 100-160ms during dispatch. On success the status line is `ok_msg`; on
 /// failure it is `"<err_prefix>: <error>"` (and the error is logged), matching
@@ -354,11 +354,12 @@ pub(crate) fn spawn_dispatch(
     tx: mpsc::Sender<ScanMsg>,
     tmux: String,
     prompt: String,
+    delivery: send::Delivery,
     ok_msg: String,
     err_prefix: String,
 ) {
     tokio::spawn(async move {
-        let ok = tokio::task::spawn_blocking(move || send::send_prompt(&tmux, &prompt))
+        let ok = tokio::task::spawn_blocking(move || delivery.deliver(&tmux, &prompt))
             .await
             .unwrap_or_else(|e| Err(io::Error::other(format!("dispatch task panicked: {}", e))))
             .map(|()| ok_msg)
@@ -1237,17 +1238,28 @@ async fn run(terminal: &mut Term, frame_bytes: Arc<AtomicU64>) -> io::Result<()>
         // session reports Idle in the latest scan.
         let t_dispatch = Instant::now();
         match app.poll_pending_dispatch() {
-            app::DispatchAction::Send { tmux, prompt } => {
+            app::DispatchAction::Send {
+                tmux,
+                prompt,
+                delivery,
+            } => {
                 log::info!(
                     "dispatch: pending target [{}] now idle, sending (len={})",
                     tmux,
                     prompt.len()
                 );
+                let ok_msg = match delivery {
+                    send::Delivery::Submit => format!("dispatched queued prompt to [{}]", tmux),
+                    send::Delivery::Draft => {
+                        format!("handoff drafted in [{}] — open it and say what next", tmux)
+                    }
+                };
                 spawn_dispatch(
                     scan_tx_main.clone(),
                     tmux.clone(),
                     prompt,
-                    format!("dispatched queued prompt to [{}]", tmux),
+                    delivery,
+                    ok_msg,
                     "queued dispatch failed".to_string(),
                 );
                 dirty = true;

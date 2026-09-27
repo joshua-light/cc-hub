@@ -6,6 +6,7 @@ use crate::folder_picker::{FolderPicker, PickerMode, Place};
 use crate::live_view::LiveView;
 use crate::metrics::{MetricsAnalysis, SelectableSession};
 use crate::models::{ProjectGroup, SessionDetail, SessionInfo, SessionState, TaskBadge};
+use crate::send::Delivery;
 use crate::session_count::SessionCounts;
 use crate::task_store::{TaskPriority, TaskState, TaskStatus};
 use crate::tmux_pane::TmuxPaneView;
@@ -641,12 +642,19 @@ impl ModelPickerState {
 pub struct PendingDispatch {
     tmux: String,
     prompt: String,
+    delivery: Delivery,
     queued_at: Instant,
 }
 
 pub enum DispatchAction {
-    Send { tmux: String, prompt: String },
-    Timeout { tmux: String },
+    Send {
+        tmux: String,
+        prompt: String,
+        delivery: Delivery,
+    },
+    Timeout {
+        tmux: String,
+    },
     Wait,
 }
 
@@ -2834,9 +2842,20 @@ impl App {
     }
 
     pub fn queue_pending_dispatch(&mut self, tmux: String, prompt: String) {
+        self.queue_delivery(tmux, prompt, Delivery::Submit);
+    }
+
+    /// Like [`Self::queue_pending_dispatch`], but the text is left typed in
+    /// the input rather than submitted — a handoff's draft.
+    pub fn queue_pending_draft(&mut self, tmux: String, draft: String) {
+        self.queue_delivery(tmux, draft, Delivery::Draft);
+    }
+
+    fn queue_delivery(&mut self, tmux: String, prompt: String, delivery: Delivery) {
         self.pending_dispatch.push_back(PendingDispatch {
             tmux,
             prompt,
+            delivery,
             queued_at: Instant::now(),
         });
     }
@@ -2907,6 +2926,7 @@ impl App {
                 return DispatchAction::Send {
                     tmux: pd.tmux,
                     prompt: pd.prompt,
+                    delivery: pd.delivery,
                 };
             }
         }
@@ -3058,8 +3078,47 @@ impl App {
     /// surface its placeholder card immediately, cursor on it — the spawned
     /// agent takes seconds to write a session file the scanner can see, and
     /// until this rebuild the keypress had no visible effect.
+    ///
+    /// This is every fresh session the user starts by hand, so it is also
+    /// where a pending [`crate::handoff::Handoff`] is taken: its draft is
+    /// queued to be typed once the new session is ready.
     pub fn watch_spawn(&mut self, tmux_name: String, agent: String, cwd: String) {
+        if let Some(handoff) = self.sessions.handoff.take() {
+            self.queue_pending_draft(tmux_name.clone(), handoff.draft);
+        }
         self.watch_spawn_titled(tmux_name, agent, cwd, None);
+    }
+
+    /// `h`: mark the selected session for a [`crate::handoff::Handoff`], or
+    /// unmark it when it already is. Marking another session moves the mark.
+    pub fn toggle_handoff(&mut self) {
+        let Some(session) = self.selected_session_info().cloned() else {
+            return;
+        };
+        let label = session
+            .title
+            .clone()
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| crate::models::short_sid(&session.session_id).to_string());
+        if self
+            .sessions
+            .handoff
+            .as_ref()
+            .is_some_and(|h| h.session_id == session.session_id)
+        {
+            self.sessions.handoff = None;
+            self.set_status(format!("handoff from {label} dropped"));
+            return;
+        }
+        match crate::handoff::Handoff::of(&session) {
+            Some(handoff) => {
+                self.sessions.handoff = Some(handoff);
+                self.set_status(format!(
+                    "handoff from {label} — the next new session opens with its last reply"
+                ));
+            }
+            None => self.set_status(format!("{label} has no reply to hand off yet")),
+        }
     }
 
     /// [`Self::watch_spawn`] with a name inherited from a previous session —
@@ -4489,14 +4548,14 @@ mod tests {
         ];
 
         match app.poll_pending_dispatch() {
-            DispatchAction::Send { tmux, prompt } => {
+            DispatchAction::Send { tmux, prompt, .. } => {
                 assert_eq!(tmux, "tmux-a");
                 assert_eq!(prompt, "prompt-a");
             }
             _ => panic!("first queued dispatch should send"),
         }
         match app.poll_pending_dispatch() {
-            DispatchAction::Send { tmux, prompt } => {
+            DispatchAction::Send { tmux, prompt, .. } => {
                 assert_eq!(tmux, "tmux-b");
                 assert_eq!(prompt, "prompt-b");
             }
