@@ -1,6 +1,6 @@
 use super::{payload, payload_type, rec_type, record_timestamp};
 use crate::conversation::render::truncate_plain;
-use crate::conversation::NO_TEXT_CONTENT;
+use crate::conversation::{full_text, NO_TEXT_CONTENT};
 use crate::models::ConversationMessage;
 use serde_json::Value;
 
@@ -82,6 +82,18 @@ pub fn extract_first_user_message(entries: &[Value]) -> Option<String> {
         .find_map(|e| displayable_user_text(e, 200))
 }
 
+/// Codex's side of [`crate::conversation::extract_last_assistant_message`]:
+/// the newest assistant `message` response item with text, whole.
+pub fn extract_last_assistant_message(entries: &[Value]) -> Option<String> {
+    entries
+        .iter()
+        .rev()
+        .filter(|e| rec_type(e) == Some("response_item") && payload_type(e) == Some("message"))
+        .filter_map(payload)
+        .filter(|p| p.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+        .find_map(|p| full_text(p.get("content")?, &["output_text", "text"]))
+}
+
 /// Cumulative `(input, output)` token totals — read straight off the most
 /// recent `token_count` event's `total_token_usage`, which codex maintains as
 /// a running sum for the whole session.
@@ -136,6 +148,19 @@ mod tests {
     use super::*;
     use crate::conversation::codex::test_util::*;
     use serde_json::json;
+
+    #[test]
+    fn last_assistant_message_skips_user_turns() {
+        let entries = vec![
+            assistant_item("old"),
+            assistant_item("line one\nline two"),
+            user_msg("thanks"),
+        ];
+        assert_eq!(
+            extract_last_assistant_message(&entries).as_deref(),
+            Some("line one\nline two")
+        );
+    }
 
     #[test]
     fn token_totals_from_cumulative() {

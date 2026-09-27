@@ -12,7 +12,7 @@ use crate::term::Term;
 use crate::titles::Titles;
 use crate::{logging, workers};
 use cc_hub_lib::app::{self, App, View};
-use cc_hub_lib::config;
+use cc_hub_lib::{config, send};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use std::io;
 use std::sync::atomic::AtomicU64;
@@ -99,17 +99,28 @@ pub(crate) async fn run(terminal: &mut Term, frame_bytes: Arc<AtomicU64>) -> io:
         // session reports Idle in the latest scan.
         let t_dispatch = Instant::now();
         match app.poll_pending_dispatch() {
-            app::DispatchAction::Send { tmux, prompt } => {
+            app::DispatchAction::Send {
+                tmux,
+                prompt,
+                delivery,
+            } => {
                 log::info!(
                     "dispatch: pending target [{}] now idle, sending (len={})",
                     tmux,
                     prompt.len()
                 );
+                let ok_msg = match delivery {
+                    send::Delivery::Submit => format!("dispatched queued prompt to [{}]", tmux),
+                    send::Delivery::Draft => {
+                        format!("handoff drafted in [{}] — open it and say what next", tmux)
+                    }
+                };
                 workers::spawn_dispatch(
                     scan_tx.clone(),
                     tmux.clone(),
                     prompt,
-                    format!("dispatched queued prompt to [{}]", tmux),
+                    delivery,
+                    ok_msg,
                     "queued dispatch failed".to_string(),
                 );
                 redraw.dirty = true;

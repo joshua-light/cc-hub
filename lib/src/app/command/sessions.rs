@@ -25,6 +25,9 @@ pub enum SessionsCommand {
     StageConfirmClose,
     /// Space — ack the selected session's attention state.
     AckSelected,
+    /// `h` — mark (or unmark) the selected session for a handoff: the next
+    /// new session opens with its last reply drafted ([`crate::handoff`]).
+    ToggleHandoff,
     /// `n` — new agent session in the selected session's cwd.
     SpawnAgentHere,
     /// `[agents.<id>].hotkey` — new session with that specific agent in the
@@ -111,6 +114,7 @@ impl App {
             AckSelected => {
                 self.ack_selected();
             }
+            ToggleHandoff => self.toggle_handoff(),
             SpawnAgentHere => {
                 let agent_id = self.default_session_agent_id.clone();
                 self.spawn_agent_here(agent_id);

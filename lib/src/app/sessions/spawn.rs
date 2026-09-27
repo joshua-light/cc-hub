@@ -119,7 +119,14 @@ impl App {
     /// surface its placeholder card immediately, cursor on it — the spawned
     /// agent takes seconds to write a session file the scanner can see, and
     /// until this rebuild the keypress had no visible effect.
+    ///
+    /// This is every fresh session the user starts by hand, so it is also
+    /// where a pending [`crate::handoff::Handoff`] is taken: its draft is
+    /// queued to be typed once the new session is ready.
     pub fn watch_spawn(&mut self, tmux_name: String, agent: String, cwd: String) {
+        if let Some(handoff) = self.sessions.handoff.take() {
+            self.queue_pending_draft(tmux_name.clone(), handoff.draft);
+        }
         self.watch_spawn_titled(tmux_name, agent, cwd, None);
     }
 

@@ -1,6 +1,7 @@
 use super::card::render_card;
 use super::{
-    keep_in_view, render_group_header, render_no_sessions, GROUP_GAP, GROUP_HEADER_HEIGHT,
+    keep_in_view, render_group_header, render_no_sessions, CardMarks, GROUP_GAP,
+    GROUP_HEADER_HEIGHT,
 };
 use crate::app::App;
 use crate::ui::{cell_height, now_ms};
@@ -67,10 +68,10 @@ pub(super) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
                 cell_width
             };
 
-            let is_selected = gi == app.sessions.sel_group && si == app.sessions.sel_in_group;
+            let marks = CardMarks::of(app, gi, si, session);
             let cell_area = Rect::new(x, cy, w, cell_height());
             let badge = app.task_badge(&session.session_id);
-            render_card(frame, cell_area, session, badge.as_ref(), is_selected, now);
+            render_card(frame, cell_area, session, badge.as_ref(), marks, now);
         }
     }
 }

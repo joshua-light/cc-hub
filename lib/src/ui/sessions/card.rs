@@ -1,8 +1,8 @@
 use super::card_body::body_lines;
-use super::{agent_prefix, animated_indicator, badge_color};
+use super::{agent_prefix, animated_indicator, badge_color, CardMarks};
 use crate::models::{first_line_truncated, SessionInfo, SessionState, TaskBadge};
 use crate::ui::common::{priority_color, state_color, COLD_CACHE_ICON};
-use crate::ui::palette::SEP_GRAY;
+use crate::ui::palette::{HANDOFF_BLUE, SEP_GRAY};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -14,10 +14,10 @@ pub(super) fn render_card(
     area: Rect,
     session: &SessionInfo,
     badge: Option<&TaskBadge>,
-    selected: bool,
+    marks: CardMarks,
     now: u64,
 ) {
-    let (border_type, border_color) = border(session, selected);
+    let (border_type, border_color) = border(session, marks);
     let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(border_type)
@@ -44,8 +44,12 @@ pub(super) fn render_card(
 
 /// Border weight and colour: white double when selected, thick in the state
 /// colour when the session needs you, the state colour while processing.
-fn border(session: &SessionInfo, selected: bool) -> (BorderType, Color) {
-    let border_color = if selected {
+/// A handoff mark outranks every colour — the weight still says the rest.
+fn border(session: &SessionInfo, marks: CardMarks) -> (BorderType, Color) {
+    let CardMarks { selected, handoff } = marks;
+    let border_color = if handoff {
+        HANDOFF_BLUE
+    } else if selected {
         Color::White
     } else if session.needs_attention() || session.state == SessionState::Processing {
         // The state colour tells a Question (blue) from a plain wait
@@ -196,7 +200,16 @@ mod tests {
             let backend = TestBackend::new(42, 7);
             let mut terminal = Terminal::new(backend).expect("terminal");
             terminal
-                .draw(|f| super::render_card(f, f.area(), &s, Some(badge), false, NOW))
+                .draw(|f| {
+                    super::render_card(
+                        f,
+                        f.area(),
+                        &s,
+                        Some(badge),
+                        super::CardMarks::default(),
+                        NOW,
+                    )
+                })
                 .expect("render");
             terminal.backend().buffer().clone()
         };

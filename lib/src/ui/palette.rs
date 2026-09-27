@@ -47,6 +47,11 @@ pub(crate) const TAG_SLATE: Color = Color::Rgb(150, 170, 200);
 /// mirrors on the other corner, in a hue no column accent or priority uses.
 pub(crate) const KIND_TEAL: Color = Color::Rgb(120, 200, 190);
 
+/// Light blue for the session marked for a handoff (`h`) — brighter and
+/// cooler than the Question state's `LightBlue`, so the mark reads as the
+/// user's own rather than as a card asking something.
+pub(crate) const HANDOFF_BLUE: Color = Color::Rgb(110, 190, 255);
+
 /// Ice blue for the cold-cache snowflake (session quiet past the prompt-cache
 /// TTL — see [`crate::models::SessionInfo::cache_cold`]).
 pub(crate) const ICE_BLUE: Color = Color::Rgb(130, 190, 220);

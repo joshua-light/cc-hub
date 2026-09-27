@@ -4,6 +4,7 @@
 //! - `scan`: applies scan snapshots; view toggles and acks.
 //! - `groups`: turns a snapshot into ordered, task-clustered groups.
 //! - `spawn`: spawn watchdogs, placeholder cards, boot-time naming.
+//! - `handoff`: mark a session whose last reply the next spawn opens with (`h`).
 //! - `rename`: the rename modal (`r`).
 //! - `model_picker`: model and agent choice for new sessions (`N`, `A`).
 //! - `respawn_picker`: continue a session on another account (`R`).
@@ -11,10 +12,12 @@
 //! - `session_finder`: archive-wide session search (`/`).
 
 use crate::acks::Acks;
+use crate::handoff::Handoff;
 use crate::models::{ProjectGroup, SessionInfo};
 use std::collections::HashSet;
 
 mod groups;
+mod handoff;
 mod model_picker;
 mod rename;
 mod respawn_picker;
@@ -61,6 +64,9 @@ pub struct SessionsView {
     pub layout: SessionsLayout,
     pub show_inactive: bool,
     pub acks: Acks,
+    /// The session marked with `h`, whose last reply the next fresh session
+    /// opens with. At most one; the spawn that takes it clears it.
+    pub handoff: Option<Handoff>,
     /// Latest scan snapshot; drives [`crate::app::App::rebuild_groups`].
     pub(crate) last_sessions: Vec<SessionInfo>,
     /// Session ids seen on the previous scan tick. `None` means the first
@@ -77,9 +83,17 @@ impl SessionsView {
             layout: SessionsLayout::default(),
             show_inactive: false,
             acks: Acks::new(),
+            handoff: None,
             last_sessions: Vec::new(),
             known_session_ids: None,
         }
+    }
+
+    /// Whether `session_id` is the session marked for a handoff.
+    pub fn hands_off(&self, session_id: &str) -> bool {
+        self.handoff
+            .as_ref()
+            .is_some_and(|h| h.session_id == session_id)
     }
 
     pub fn move_right(&mut self) {

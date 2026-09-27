@@ -31,6 +31,23 @@ pub(crate) use detail::render_popup;
 const GROUP_HEADER_HEIGHT: u16 = 1;
 const GROUP_GAP: u16 = 1;
 
+/// What the user has done to a session row or card, as opposed to what the
+/// session is doing: the cursor is on it, or `h` marked it for a handoff.
+#[derive(Clone, Copy, Debug, Default)]
+struct CardMarks {
+    selected: bool,
+    handoff: bool,
+}
+
+impl CardMarks {
+    fn of(app: &App, gi: usize, si: usize, session: &SessionInfo) -> Self {
+        Self {
+            selected: gi == app.sessions.sel_group && si == app.sessions.sel_in_group,
+            handoff: app.sessions.hands_off(&session.session_id),
+        }
+    }
+}
+
 /// Sessions-tab body: dispatch to whichever layout is active. The card grid
 /// is the default; the compact list is the `v`-toggled experiment (see
 /// [`crate::app::SessionsLayout`]).
@@ -175,7 +192,9 @@ mod fixtures {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
-            .draw(|f| super::card::render_card(f, f.area(), s, None, false, NOW))
+            .draw(|f| {
+                super::card::render_card(f, f.area(), s, None, super::CardMarks::default(), NOW)
+            })
             .expect("render");
         terminal.backend().buffer().clone()
     }

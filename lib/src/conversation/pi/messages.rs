@@ -1,6 +1,8 @@
 use super::{content_text, message_role, message_timestamp};
 use crate::conversation::render::truncate_plain;
-use crate::conversation::{NO_CONTENT, NO_TEXT_CONTENT, THINKING_MARKER, TOOL_MARKER_PREFIX};
+use crate::conversation::{
+    full_text, NO_CONTENT, NO_TEXT_CONTENT, THINKING_MARKER, TOOL_MARKER_PREFIX,
+};
 use crate::models::ConversationMessage;
 use serde_json::Value;
 
@@ -17,6 +19,16 @@ pub fn extract_first_user_message(entries: &[Value]) -> Option<String> {
         .iter()
         .find(|e| message_role(e) == Some("user"))
         .and_then(|e| extract_user_text(e, 200))
+}
+
+/// Pi's side of [`crate::conversation::extract_last_assistant_message`]:
+/// the newest assistant message with text, whole.
+pub fn extract_last_assistant_message(entries: &[Value]) -> Option<String> {
+    entries
+        .iter()
+        .rev()
+        .filter(|e| message_role(e) == Some("assistant"))
+        .find_map(|e| full_text(e.get("message")?.get("content")?, &["text"]))
 }
 
 fn extract_user_text(entry: &Value, max_len: usize) -> Option<String> {
@@ -172,6 +184,22 @@ mod tests {
     use super::*;
     use crate::conversation::pi::test_util::*;
     use serde_json::json;
+
+    #[test]
+    fn last_assistant_message_passes_over_tool_calls() {
+        let entries = vec![
+            assistant(
+                "stop",
+                json!([{"type": "text", "text": "line one\nline two"}]),
+            ),
+            assistant("toolUse", json!([tool_call("t1", "bash", json!({}))])),
+            tool_result("t1"),
+        ];
+        assert_eq!(
+            extract_last_assistant_message(&entries).as_deref(),
+            Some("line one\nline two")
+        );
+    }
 
     // --- extract_last_user_message / extract_first_user_message ---
 

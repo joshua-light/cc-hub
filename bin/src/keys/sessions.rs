@@ -25,9 +25,8 @@ pub(super) fn map_sessions_command(
         (View::Grid, KeyCode::Right | KeyCode::Char('l')) if on_sessions => {
             Command::Sessions(S::NavRight)
         }
-        (View::Grid, KeyCode::Left | KeyCode::Char('h')) if on_sessions => {
-            Command::Sessions(S::NavLeft)
-        }
+        (View::Grid, KeyCode::Left) if on_sessions => Command::Sessions(S::NavLeft),
+        (View::Grid, KeyCode::Char('h')) if on_sessions => Command::Sessions(S::ToggleHandoff),
         (View::Grid, KeyCode::Down | KeyCode::Char('j')) if on_sessions => {
             Command::Sessions(S::NavDown)
         }

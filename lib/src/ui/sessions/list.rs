@@ -17,13 +17,13 @@
 
 use super::{
     activity_clock, agent_prefix, animated_indicator, badge_color, context_pct, keep_in_view,
-    render_group_header, render_no_sessions, GROUP_GAP, GROUP_HEADER_HEIGHT,
+    render_group_header, render_no_sessions, CardMarks, GROUP_GAP, GROUP_HEADER_HEIGHT,
 };
 use crate::app::App;
 use crate::models::{first_line_truncated, SessionInfo, SessionState};
 use crate::ui::common::{ctx_color, format_elapsed, selection_stripe, short_model, Cell, COL_SEP};
 use crate::ui::now_ms;
-use crate::ui::palette::{CONTEXT_GRAY, MUTED_TEXT, SELECTED_ROW_BG};
+use crate::ui::palette::{CONTEXT_GRAY, HANDOFF_BLUE, MUTED_TEXT, SELECTED_ROW_BG};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -183,17 +183,9 @@ pub(super) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
                 continue;
             }
             let row_area = Rect::new(area.x, area.y + row_sy as u16, area.width, 1);
-            let selected = gi == app.sessions.sel_group && si == app.sessions.sel_in_group;
+            let marks = CardMarks::of(app, gi, si, session);
             let badge = app.task_badge(&session.session_id);
-            render_row(
-                frame,
-                row_area,
-                session,
-                badge.as_ref(),
-                &cols,
-                selected,
-                now,
-            );
+            render_row(frame, row_area, session, badge.as_ref(), &cols, marks, now);
         }
     }
 }
@@ -204,9 +196,10 @@ fn render_row(
     session: &SessionInfo,
     badge: Option<&crate::models::TaskBadge>,
     cols: &ListColumns,
-    selected: bool,
+    marks: CardMarks,
     now: u64,
 ) {
+    let CardMarks { selected, handoff } = marks;
     let width = area.width as usize;
     let (indicator, ind_color) = animated_indicator(&session.state, now);
 
@@ -323,7 +316,13 @@ fn render_row(
     let used = prefix_w + text.chars().count();
 
     let mut spans: Vec<Span<'static>> = Vec::new();
-    spans.push(selection_stripe(selected));
+    // The gutter stripe is the cursor, in white; a handoff mark keeps it lit
+    // in its own colour whether or not the cursor is there.
+    spans.push(if handoff {
+        Span::styled("▌", Style::default().fg(HANDOFF_BLUE))
+    } else {
+        selection_stripe(selected)
+    });
     spans.push(Span::styled(
         format!("{} ", indicator),
         Style::default().fg(ind_color),

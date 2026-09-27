@@ -146,6 +146,15 @@ tab, or `cc-hub build reserve`/`release`, takes or frees it by hand. A cancel
 runs the recipe's `cancel`, then ends the running step if it still runs 15
 seconds later.
 
+## Handing off to a fresh session
+
+`h` on the Sessions tab marks a session (light-blue border or gutter) and
+takes its last reply. The next session you start — `n`, `N`, an agent
+hotkey, `p`, `M` — opens with that reply typed into its input as
+`<context>…</context>`, unsent. Add what to do with it and press Enter: a
+fresh session that continues where the old one stopped, without compacting.
+`h` on the marked session drops the mark.
+
 ## Moving a session to another account
 
 `R` on the Sessions tab continues a session on another subscription account,

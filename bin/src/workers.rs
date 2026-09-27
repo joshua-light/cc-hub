@@ -256,8 +256,8 @@ pub(crate) fn spawn_metrics(tx: mpsc::Sender<ScanMsg>) {
     });
 }
 
-/// Run `send::send_prompt` off the event-loop thread and report the outcome
-/// over `tx` as a [`ScanMsg::DispatchResult`]. `send_prompt` forks+execs tmux
+/// Deliver `prompt` (see [`send::Delivery`]) off the event-loop thread and
+/// report the outcome over `tx` as a [`ScanMsg::DispatchResult`]. `send_prompt` forks+execs tmux
 /// twice and sleeps ~80ms, which would freeze render and input for
 /// 100-160ms. The status line is `ok_msg` on success and
 /// `"<err_prefix>: <error>"` on failure, which is also logged.
@@ -265,11 +265,12 @@ pub(crate) fn spawn_dispatch(
     tx: mpsc::Sender<ScanMsg>,
     tmux: String,
     prompt: String,
+    delivery: send::Delivery,
     ok_msg: String,
     err_prefix: String,
 ) {
     tokio::spawn(async move {
-        let ok = tokio::task::spawn_blocking(move || send::send_prompt(&tmux, &prompt))
+        let ok = tokio::task::spawn_blocking(move || delivery.deliver(&tmux, &prompt))
             .await
             .unwrap_or_else(|e| Err(io::Error::other(format!("dispatch task panicked: {}", e))))
             .map(|()| ok_msg)

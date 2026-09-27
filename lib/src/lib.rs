@@ -15,6 +15,7 @@ pub mod focus;
 pub mod folder_picker;
 pub mod fuzzy;
 pub mod gh;
+pub mod handoff;
 pub mod harness;
 pub mod link;
 pub mod live_view;

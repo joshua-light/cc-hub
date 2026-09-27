@@ -4,6 +4,7 @@
 use super::App;
 use crate::config;
 use crate::models::SessionState;
+use crate::send::Delivery;
 use std::time::{Duration, Instant};
 
 /// A prompt queued for a freshly-spawned tmux session that isn't yet Idle.
@@ -14,20 +15,38 @@ use std::time::{Duration, Instant};
 pub struct PendingDispatch {
     tmux: String,
     prompt: String,
+    delivery: Delivery,
     queued_at: Instant,
 }
 
 pub enum DispatchAction {
-    Send { tmux: String, prompt: String },
-    Timeout { tmux: String },
+    Send {
+        tmux: String,
+        prompt: String,
+        delivery: Delivery,
+    },
+    Timeout {
+        tmux: String,
+    },
     Wait,
 }
 
 impl App {
     pub fn queue_pending_dispatch(&mut self, tmux: String, prompt: String) {
+        self.queue_delivery(tmux, prompt, Delivery::Submit);
+    }
+
+    /// Like [`Self::queue_pending_dispatch`], but the text is left typed in
+    /// the input rather than submitted — a handoff's draft.
+    pub fn queue_pending_draft(&mut self, tmux: String, draft: String) {
+        self.queue_delivery(tmux, draft, Delivery::Draft);
+    }
+
+    fn queue_delivery(&mut self, tmux: String, prompt: String, delivery: Delivery) {
         self.pending_dispatch.push_back(PendingDispatch {
             tmux,
             prompt,
+            delivery,
             queued_at: Instant::now(),
         });
     }
@@ -87,6 +106,7 @@ impl App {
                 return DispatchAction::Send {
                     tmux: pd.tmux,
                     prompt: pd.prompt,
+                    delivery: pd.delivery,
                 };
             }
         }
@@ -131,14 +151,14 @@ mod tests {
         ];
 
         match app.poll_pending_dispatch() {
-            DispatchAction::Send { tmux, prompt } => {
+            DispatchAction::Send { tmux, prompt, .. } => {
                 assert_eq!(tmux, "tmux-a");
                 assert_eq!(prompt, "prompt-a");
             }
             _ => panic!("first queued dispatch should send"),
         }
         match app.poll_pending_dispatch() {
-            DispatchAction::Send { tmux, prompt } => {
+            DispatchAction::Send { tmux, prompt, .. } => {
                 assert_eq!(tmux, "tmux-b");
                 assert_eq!(prompt, "prompt-b");
             }

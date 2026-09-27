@@ -17,7 +17,8 @@ use serde_json::Value;
 use std::path::Path;
 
 pub use messages::{
-    extract_first_user_message, extract_last_user_message, extract_messages, extract_token_totals,
+    extract_first_user_message, extract_last_assistant_message, extract_last_user_message,
+    extract_messages, extract_token_totals,
 };
 pub use tools::{count_tool_uses_in_reader, extract_current_tool};
 
