@@ -227,10 +227,16 @@ pub fn paste_buffer(session: &str, text: &str) -> io::Result<()> {
     // `-r` suppresses tmux's LF→CR translation; without it every embedded
     // newline arrives at the app as Enter. `-d` deletes the buffer after
     // use so we don't leak per-call buffers in `tmux list-buffers`.
-    run(
-        &["paste-buffer", "-b", &buf_name, "-r", "-d", "-t", session],
-        "paste-buffer",
-    )
+    // `-S` stops tmux 3.6+ from vis(3)-escaping control characters, which
+    // turns our markers into literal `^[[200~` text in the pane. Older tmux
+    // rejects the flag without consuming the buffer, and never sanitized, so
+    // retrying without it is safe.
+    let base = ["paste-buffer", "-b", &buf_name, "-r", "-d", "-t", session];
+    let with_s: Vec<&str> = base.iter().copied().chain(["-S"]).collect();
+    match run(&with_s, "paste-buffer") {
+        Err(e) if e.to_string().contains("unknown flag") => run(&base, "paste-buffer"),
+        result => result,
+    }
 }
 
 /// Wire tmux's `copy-command` (a server option, tmux 3.2+) to the same
