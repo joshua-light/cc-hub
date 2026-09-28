@@ -44,7 +44,7 @@ pub(super) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 // separately *ahead* of this string below so it is never the
                 // first thing clipped.
                 Tab::Tasks => "a/n:add  enter/f:focus agent  v:info  s:assign agent  S:agent in ~  h/l:col  j/k:task  H/L:move  /:filter  1-4:priority  t:tags  T:kind  r:rename  A:attach  p:paste note  x:delete  u:undo  c:clear done  tab:next  q:quit",
-                Tab::Sessions => "enter/f:focus/resume  /:find any  n:new  h:handoff  R:respawn  A:default agent  N:new+model  p:new in…  i:info  r:rename  L:link task  o:shell  M:bookmarks  ←/j/k/l:nav  v:layout  x:close  H:inactive  tab:next  q:quit",
+                Tab::Sessions => "enter/f:focus/resume  /:find any  n:new  h:handoff  R:respawn  A:default agent  N:new+model  p:new in…  i:info  z:ack  r:rename  L:link task  o:shell  M:bookmarks  ←/j/k/l:nav  v:layout  x:close  H:inactive  tab:next  q:quit",
                 Tab::Metrics => "enter:view transcript  j/k:select  r:refresh  tab:next  q:quit",
                 Tab::Agents => agents::hints(app),
                 Tab::Builds => builds::hints(app),
@@ -105,7 +105,7 @@ pub(super) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             View::TaskFilter => "type to filter (text or #tag)  enter:apply  esc:clear",
         };
         // Render the Space chip *first* so the single highest-value verb
-        // (proceed/done on Tasks, ack on Sessions) is never the first thing
+        // (proceed/done on Tasks, hold on Sessions) is never the first thing
         // clipped off the right edge of this one-row, no-wrap status bar.
         let space_verb = match (&app.view, app.current_tab) {
             // Space is status-aware on the Tasks board: it approves a
@@ -114,7 +114,10 @@ pub(super) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 Some(crate::tasks::store::TaskStatus::Planning) => "proceed ",
                 _ => "done ",
             }),
-            (View::Grid, Tab::Sessions) => Some("ack "),
+            (View::Grid, Tab::Sessions) => Some(match app.selected_session_info() {
+                Some(s) if app.sessions.holds.contains(&s.session_id) => "release ",
+                _ => "hold ",
+            }),
             (View::Grid, Tab::Builds) => builds::space_verb(app),
             _ => None,
         };

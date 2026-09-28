@@ -123,6 +123,10 @@ impl App {
             let live_ids: HashSet<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
             self.sessions.acks.retain_existing(&live_ids);
         }
+        if !self.sessions.holds.is_empty() {
+            let live_ids: HashSet<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
+            self.sessions.holds.retain_existing(&live_ids);
+        }
 
         self.last_refresh = Instant::now();
 
@@ -152,6 +156,7 @@ impl App {
         let same_structure = new_groups.len() == self.sessions.groups.len()
             && new_groups.iter().zip(&self.sessions.groups).all(|(n, o)| {
                 n.cwd == o.cwd
+                    && n.held == o.held
                     && n.sessions.len() == o.sessions.len()
                     && n.sessions
                         .iter()

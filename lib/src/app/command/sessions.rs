@@ -23,8 +23,10 @@ pub enum SessionsCommand {
     OpenShellHere,
     /// `x` — stage the close confirmation.
     StageConfirmClose,
-    /// Space — ack the selected session's attention state.
+    /// `z` — ack the selected session's attention state.
     AckSelected,
+    /// Space — put the selected session on hold, or release it.
+    ToggleHold,
     /// `h` — mark (or unmark) the selected session for a handoff: the next
     /// new session opens with its last reply drafted ([`crate::handoff`]).
     ToggleHandoff,
@@ -114,6 +116,7 @@ impl App {
             AckSelected => {
                 self.ack_selected();
             }
+            ToggleHold => self.toggle_hold(),
             ToggleHandoff => self.toggle_handoff(),
             SpawnAgentHere => {
                 let agent_id = self.default_session_agent_id.clone();

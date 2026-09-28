@@ -11,11 +11,7 @@ impl App {
         let Some(session) = self.selected_session_info().cloned() else {
             return;
         };
-        let label = session
-            .title
-            .clone()
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| crate::models::short_sid(&session.session_id).to_string());
+        let label = session.label();
         if self.sessions.hands_off(&session.session_id) {
             self.sessions.handoff = None;
             self.set_status(format!("handoff from {label} dropped"));

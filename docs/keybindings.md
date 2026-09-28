@@ -64,7 +64,8 @@ Sessions. Builds shows once a recipe exists. Agents shows once
 | `L` | Link the session to a task, or unlink it |
 | `o` | Shell pane in this session's folder |
 | `x` | End the session (asks first): kills its tmux session, else closes its window and terminates the agent |
-| `Space` | Acknowledge: mark the session idle |
+| `Space` | Put the session on hold, or release it. Held sessions move to the On hold section below every project, keep their real state, and stop counting toward attention; activity does not release them |
+| `z` | Acknowledge: mark the session idle until its next activity |
 | `m` | Go to Metrics |
 
 `[agents.<id>].hotkey` adds a key that starts that agent in the selected

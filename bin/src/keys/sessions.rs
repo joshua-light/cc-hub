@@ -41,7 +41,8 @@ pub(super) fn map_sessions_command(
         }
         (View::Grid, KeyCode::Char('o')) if on_sessions => Command::Sessions(S::OpenShellHere),
         (View::Grid, KeyCode::Char('x')) if on_sessions => Command::Sessions(S::StageConfirmClose),
-        (View::Grid, KeyCode::Char(' ')) if on_sessions => Command::Sessions(S::AckSelected),
+        (View::Grid, KeyCode::Char(' ')) if on_sessions => Command::Sessions(S::ToggleHold),
+        (View::Grid, KeyCode::Char('z')) if on_sessions => Command::Sessions(S::AckSelected),
         (View::Grid, KeyCode::Char('n')) if on_sessions => Command::Sessions(S::SpawnAgentHere),
         (View::Grid, KeyCode::Char('N')) if on_sessions => Command::Sessions(S::OpenModelPicker),
         (View::Grid, KeyCode::Char('A')) if on_sessions => Command::Sessions(S::OpenAgentPicker),

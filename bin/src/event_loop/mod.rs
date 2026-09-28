@@ -26,10 +26,11 @@ const STALL: Duration = Duration::from_millis(30);
 
 pub(crate) async fn run(terminal: &mut Term, frame_bytes: Arc<AtomicU64>) -> io::Result<()> {
     let mut app = App::new();
-    // Swap in the persisted ack tracker so Space-idled cards survive a
-    // restart. Loaded here, not in App::new(): tests must never touch the
-    // real home, so App::new() constructs a purely in-memory tracker.
+    // Swap in the persisted ack and hold trackers so `z`-idled and held
+    // cards survive a restart. Loaded here, not in App::new(): tests must
+    // never touch the real home, so App::new() constructs in-memory ones.
     app.sessions.acks = cc_hub_lib::acks::Acks::load();
+    app.sessions.holds = cc_hub_lib::holds::Holds::load();
 
     let titles = Titles::new(config::get().title.concurrency);
 

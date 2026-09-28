@@ -1,5 +1,6 @@
 //! Sessions tab: every session grouped under its project, as a card grid
-//! or, toggled with `v`, a compact list.
+//! or, toggled with `v`, a compact list. Held sessions keep their project
+//! groups but sit below the rest, under an On hold header.
 //!
 //! - `grid`: the card grid layout
 //! - `card`: one card's border, title and task badge
@@ -8,12 +9,12 @@
 //! - `detail`: the per-session detail popup
 
 use crate::app::App;
-use crate::models::{SessionInfo, SessionState, TaskBadge};
+use crate::models::{ProjectGroup, SessionInfo, SessionState, TaskBadge};
 use crate::ui::common::{
     context_window_size, spinner_frame, starting_frame, state_indicator, task_color,
     COLD_CACHE_ICON,
 };
-use crate::ui::palette::{ICE_BLUE, SEP_GRAY};
+use crate::ui::palette::{ICE_BLUE, MUTED_TEXT, SEP_GRAY};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -30,13 +31,19 @@ pub(crate) use detail::render_popup;
 
 const GROUP_HEADER_HEIGHT: u16 = 1;
 const GROUP_GAP: u16 = 1;
+const HOLD_HEADER_HEIGHT: u16 = 1;
+/// The pause glyph: titles the On hold section and stands in for the state
+/// glyph of every session in it.
+const HOLD_ICON: &str = "󰏤";
 
 /// What the user has done to a session row or card, as opposed to what the
-/// session is doing: the cursor is on it, or `h` marked it for a handoff.
+/// session is doing: the cursor is on it, `h` marked it for a handoff, or
+/// Space put it on hold.
 #[derive(Clone, Copy, Debug, Default)]
 struct CardMarks {
     selected: bool,
     handoff: bool,
+    held: bool,
 }
 
 impl CardMarks {
@@ -44,6 +51,7 @@ impl CardMarks {
         Self {
             selected: gi == app.sessions.sel_group && si == app.sessions.sel_in_group,
             handoff: app.sessions.hands_off(&session.session_id),
+            held: app.sessions.holds.contains(&session.session_id),
         }
     }
 }
@@ -65,9 +73,66 @@ fn render_no_sessions(frame: &mut Frame, area: Rect) {
     frame.render_widget(empty, area);
 }
 
+/// Rows the On hold header takes above group `gi`: only the first held
+/// group carries it.
+fn hold_header_above(groups: &[ProjectGroup], gi: usize) -> u16 {
+    let opens_hold = groups[gi].held && (gi == 0 || !groups[gi - 1].held);
+    if opens_hold {
+        HOLD_HEADER_HEIGHT
+    } else {
+        0
+    }
+}
+
+/// Group `gi`'s header at content row `g_y`, and the On hold header above
+/// it when the group opens that section. Rows scrolled out of `area` are
+/// skipped. Shared by the grid and list layouts.
+fn render_headers(
+    frame: &mut Frame,
+    area: Rect,
+    groups: &[ProjectGroup],
+    gi: usize,
+    g_y: u16,
+    scroll: u16,
+) {
+    let on_screen = |y: u16| {
+        let sy = y as i32 - scroll as i32;
+        (sy >= 0 && sy < area.height as i32)
+            .then(|| Rect::new(area.x, area.y + sy as u16, area.width, 1))
+    };
+    let above = hold_header_above(groups, gi);
+    if let Some(row) = (above > 0).then(|| on_screen(g_y - above)).flatten() {
+        render_hold_header(frame, row, groups);
+    }
+    if let Some(row) = on_screen(g_y) {
+        render_group_header(frame, row, &groups[gi]);
+    }
+}
+
+/// One-row On hold header: the held count, then a rule to the right edge.
+fn render_hold_header(frame: &mut Frame, area: Rect, groups: &[ProjectGroup]) {
+    let held: usize = groups
+        .iter()
+        .filter(|g| g.held)
+        .map(|g| g.sessions.len())
+        .sum();
+    let title = format!(" {HOLD_ICON} On hold ");
+    let count = format!(" {held} held ");
+    let used = title.chars().count() + count.chars().count();
+    let rule = "─".repeat((area.width as usize).saturating_sub(used));
+    let line = Line::from(vec![
+        Span::styled(
+            title,
+            Style::default().fg(MUTED_TEXT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(count, Style::default().fg(Color::DarkGray)),
+        Span::styled(rule, Style::default().fg(SEP_GRAY)),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
 /// One-row project group header: name, session count, attention count, cwd.
-/// Shared by the grid and list layouts.
-fn render_group_header(frame: &mut Frame, area: Rect, group: &crate::models::ProjectGroup) {
+fn render_group_header(frame: &mut Frame, area: Rect, group: &ProjectGroup) {
     let total = group.sessions.len();
     let attn = group
         .sessions
@@ -115,10 +180,13 @@ fn keep_in_view(scroll: &mut u16, group_top: u16, item_top: u16, item_bottom: u1
     }
 }
 
-/// State glyph and colour, animated: Processing spins, Starting orbits.
-fn animated_indicator(state: &SessionState, now: u64) -> (&'static str, Color) {
+/// State glyph and colour, animated: Processing spins, Starting orbits. A
+/// held session trades the glyph for the pause one but keeps the colour, so
+/// its real state still shows.
+fn animated_indicator(state: &SessionState, marks: CardMarks, now: u64) -> (&'static str, Color) {
     let (indicator, color) = state_indicator(state);
     let indicator = match state {
+        _ if marks.held => HOLD_ICON,
         SessionState::Processing => spinner_frame(now),
         SessionState::Starting => starting_frame(now),
         _ => indicator,

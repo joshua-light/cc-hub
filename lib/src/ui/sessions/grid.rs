@@ -1,6 +1,6 @@
 use super::card::render_card;
 use super::{
-    keep_in_view, render_group_header, render_no_sessions, CardMarks, GROUP_GAP,
+    hold_header_above, keep_in_view, render_headers, render_no_sessions, CardMarks, GROUP_GAP,
     GROUP_HEADER_HEIGHT,
 };
 use crate::app::App;
@@ -20,7 +20,8 @@ pub(super) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
     // Content-space y of each group, before scrolling.
     let mut group_offsets: Vec<u16> = Vec::new();
     let mut y_acc: u16 = 0;
-    for group in &app.sessions.groups {
+    for (gi, group) in app.sessions.groups.iter().enumerate() {
+        y_acc = y_acc.saturating_add(hold_header_above(&app.sessions.groups, gi));
         group_offsets.push(y_acc);
         let rows = group.sessions.len().div_ceil(cols) as u16;
         y_acc = y_acc.saturating_add(GROUP_HEADER_HEIGHT + rows * cell_height() + GROUP_GAP);
@@ -31,7 +32,7 @@ pub(super) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
     let card_y = g_offset + GROUP_HEADER_HEIGHT + card_row * cell_height();
     keep_in_view(
         &mut app.render.grid_scroll,
-        g_offset,
+        g_offset - hold_header_above(&app.sessions.groups, app.sessions.sel_group),
         card_y,
         card_y + cell_height(),
         area.height,
@@ -41,12 +42,7 @@ pub(super) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
     let now = now_ms();
     for (gi, group) in app.sessions.groups.iter().enumerate() {
         let g_y = group_offsets[gi];
-
-        let header_sy = g_y as i32 - scroll as i32;
-        if header_sy >= 0 && header_sy < area.height as i32 {
-            let hy = area.y + header_sy as u16;
-            render_group_header(frame, Rect::new(area.x, hy, area.width, 1), group);
-        }
+        render_headers(frame, area, &app.sessions.groups, gi, g_y, scroll);
 
         for (si, session) in group.sessions.iter().enumerate() {
             let col = (si % cols) as u16;

@@ -16,8 +16,8 @@
 //! skew rows whose cells are blank or whose padding bottoms out at zero.
 
 use super::{
-    activity_clock, agent_prefix, animated_indicator, badge_color, context_pct, keep_in_view,
-    render_group_header, render_no_sessions, CardMarks, GROUP_GAP, GROUP_HEADER_HEIGHT,
+    activity_clock, agent_prefix, animated_indicator, badge_color, context_pct, hold_header_above,
+    keep_in_view, render_headers, render_no_sessions, CardMarks, GROUP_GAP, GROUP_HEADER_HEIGHT,
 };
 use crate::app::App;
 use crate::models::{first_line_truncated, SessionInfo, SessionState};
@@ -125,12 +125,14 @@ pub(super) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    // Content-space y of each group: header, one row per session plus task
+    // Content-space y of each group: the On hold header if the group opens
+    // that section, its own header, one row per session plus task
     // separators, then the gap.
     let mut group_offsets: Vec<u16> = Vec::new();
     let mut row_offsets: Vec<Vec<u16>> = Vec::new();
     let mut y_acc: u16 = 0;
-    for group in &app.sessions.groups {
+    for (gi, group) in app.sessions.groups.iter().enumerate() {
+        y_acc = y_acc.saturating_add(hold_header_above(&app.sessions.groups, gi));
         group_offsets.push(y_acc);
         let offsets = body_row_offsets(group.sessions.iter().map(|s| {
             app.session_task_links
@@ -148,7 +150,7 @@ pub(super) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
         + row_offsets[app.sessions.sel_group][app.sessions.sel_in_group];
     keep_in_view(
         &mut app.render.grid_scroll,
-        g_offset,
+        g_offset - hold_header_above(&app.sessions.groups, app.sessions.sel_group),
         row_y,
         row_y + 1,
         area.height,
@@ -170,12 +172,7 @@ pub(super) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
 
     for (gi, group) in app.sessions.groups.iter().enumerate() {
         let g_y = group_offsets[gi];
-
-        let header_sy = g_y as i32 - scroll as i32;
-        if header_sy >= 0 && header_sy < area.height as i32 {
-            let hy = area.y + header_sy as u16;
-            render_group_header(frame, Rect::new(area.x, hy, area.width, 1), group);
-        }
+        render_headers(frame, area, &app.sessions.groups, gi, g_y, scroll);
 
         for (si, session) in group.sessions.iter().enumerate() {
             let row_sy = (g_y + GROUP_HEADER_HEIGHT + row_offsets[gi][si]) as i32 - scroll as i32;
@@ -199,9 +196,11 @@ fn render_row(
     marks: CardMarks,
     now: u64,
 ) {
-    let CardMarks { selected, handoff } = marks;
+    let CardMarks {
+        selected, handoff, ..
+    } = marks;
     let width = area.width as usize;
-    let (indicator, ind_color) = animated_indicator(&session.state, now);
+    let (indicator, ind_color) = animated_indicator(&session.state, marks, now);
 
     let mut cluster: Vec<Cell> = Vec::new();
     if cols.task_w > 0 {
@@ -407,5 +406,50 @@ mod tests {
     fn no_separators_without_task_links() {
         let offsets = body_row_offsets([None, None, None].into_iter());
         assert_eq!(offsets, vec![0, 1, 2]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn held_groups_sit_under_the_on_hold_header() {
+        use crate::models::ProjectGroup;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        crate::test_util::with_temp_home(|| {
+            let group = |name: &str, held| ProjectGroup {
+                name: name.into(),
+                cwd: format!("/tmp/{name}"),
+                sessions: vec![crate::models::SessionInfo {
+                    session_id: format!("{name}-1"),
+                    ..crate::test_util::session_info()
+                }],
+                held,
+            };
+            let mut app = App::new();
+            app.sessions.groups = vec![group("alpha", false), group("beta", true)];
+            app.sessions.holds.toggle("beta-1");
+
+            let mut terminal = Terminal::new(TestBackend::new(100, 8)).expect("terminal");
+            terminal
+                .draw(|f| render_list(f, f.area(), &mut app))
+                .expect("render");
+            let buf = terminal.backend().buffer();
+            let row = |y: u16| -> String { (0..100).map(|x| buf[(x, y)].symbol()).collect() };
+
+            // alpha's header and row, the gap, then the section header right
+            // above beta's own header.
+            assert!(row(0).contains("alpha"), "{}", row(0));
+            assert!(row(2).trim().is_empty(), "{}", row(2));
+            assert!(
+                row(3).contains("On hold") && row(3).contains("1 held"),
+                "{}",
+                row(3)
+            );
+            assert!(row(4).contains("beta"), "{}", row(4));
+
+            // Only the held session trades its state glyph for the pause.
+            assert!(!row(1).contains(super::super::HOLD_ICON), "{}", row(1));
+            assert!(row(5).contains(super::super::HOLD_ICON), "{}", row(5));
+        });
     }
 }

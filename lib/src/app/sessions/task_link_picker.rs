@@ -176,11 +176,7 @@ impl App {
         if choices.is_empty() {
             return false;
         }
-        let label = session
-            .title
-            .clone()
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| crate::models::short_sid(&session.session_id).to_string());
+        let label = session.label();
         self.task_link_picker = Some(TaskLinkPickerState::new(
             session.session_id.clone(),
             label,

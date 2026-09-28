@@ -1,9 +1,10 @@
 //! The Sessions tab: the grouped session grid, its cursor, and every flow
 //! that starts from a session card.
 //!
-//! - `scan`: applies scan snapshots; view toggles and acks.
+//! - `scan`: applies scan snapshots; view toggles and acks (`z`).
 //! - `groups`: turns a snapshot into ordered, task-clustered groups.
 //! - `spawn`: spawn watchdogs, placeholder cards, boot-time naming.
+//! - `hold`: put a session on hold, parking it in the On hold section (Space).
 //! - `handoff`: mark a session whose last reply the next spawn opens with (`h`).
 //! - `rename`: the rename modal (`r`).
 //! - `model_picker`: model and agent choice for new sessions (`N`, `A`).
@@ -13,11 +14,13 @@
 
 use crate::acks::Acks;
 use crate::handoff::Handoff;
+use crate::holds::Holds;
 use crate::models::{ProjectGroup, SessionInfo};
 use std::collections::HashSet;
 
 mod groups;
 mod handoff;
+mod hold;
 mod model_picker;
 mod rename;
 mod respawn_picker;
@@ -64,6 +67,7 @@ pub struct SessionsView {
     pub layout: SessionsLayout,
     pub show_inactive: bool,
     pub acks: Acks,
+    pub holds: Holds,
     /// The session marked with `h`, whose last reply the next fresh session
     /// opens with. At most one; the spawn that takes it clears it.
     pub handoff: Option<Handoff>,
@@ -83,6 +87,7 @@ impl SessionsView {
             layout: SessionsLayout::default(),
             show_inactive: false,
             acks: Acks::new(),
+            holds: Holds::new(),
             handoff: None,
             last_sessions: Vec::new(),
             known_session_ids: None,
@@ -164,6 +169,19 @@ impl SessionsView {
         }
     }
 
+    /// Pull the cursor back inside the grid after the groups changed under
+    /// it: onto the last group, then onto that group's last card.
+    pub(super) fn clamp_cursor(&mut self) {
+        if self.groups.is_empty() {
+            self.sel_group = 0;
+            self.sel_in_group = 0;
+            return;
+        }
+        self.sel_group = self.sel_group.min(self.groups.len() - 1);
+        let max_in = self.groups[self.sel_group].sessions.len().saturating_sub(1);
+        self.sel_in_group = self.sel_in_group.min(max_in);
+    }
+
     pub fn selected_session_info(&self) -> Option<&SessionInfo> {
         self.groups
             .get(self.sel_group)
@@ -197,9 +215,12 @@ impl SessionsView {
         self.groups.iter().map(|g| g.sessions.len()).sum()
     }
 
+    /// Sessions waiting on the user, held ones aside: a hold is the user
+    /// saying "not now".
     pub fn attention_count(&self) -> usize {
         self.groups
             .iter()
+            .filter(|g| !g.held)
             .flat_map(|g| &g.sessions)
             .filter(|s| s.needs_attention())
             .count()
@@ -223,6 +244,7 @@ mod tests {
             name: name.into(),
             cwd: format!("/tmp/{name}"),
             sessions: (0..n).map(|i| session(&format!("{name}-{i}"))).collect(),
+            held: false,
         }
     }
 
