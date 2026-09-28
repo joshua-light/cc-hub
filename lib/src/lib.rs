@@ -17,6 +17,7 @@ pub mod fuzzy;
 pub mod gh;
 pub mod handoff;
 pub mod harness;
+pub mod holds;
 pub mod link;
 pub mod live_view;
 pub mod metrics;

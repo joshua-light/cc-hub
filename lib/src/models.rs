@@ -164,6 +164,15 @@ pub struct SessionInfo {
 const CACHE_COLD_AFTER_MS: u64 = 60 * 60 * 1000;
 
 impl SessionInfo {
+    /// The title the user gave the session, else its short id: how status
+    /// messages and pickers name it.
+    pub fn label(&self) -> String {
+        self.title
+            .clone()
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| short_sid(&self.session_id).to_string())
+    }
+
     pub fn needs_attention(&self) -> bool {
         matches!(
             self.state,
@@ -250,6 +259,9 @@ pub struct ProjectGroup {
     pub name: String,
     pub cwd: String,
     pub sessions: Vec<SessionInfo>,
+    /// Whether this group sits in the On hold section: its sessions are
+    /// this project's held ones ([`crate::holds::Holds`]).
+    pub held: bool,
 }
 
 #[cfg(test)]

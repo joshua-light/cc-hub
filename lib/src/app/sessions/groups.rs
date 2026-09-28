@@ -1,5 +1,6 @@
 //! Scan snapshot to rendered group list: filtering, liveness bucketing,
-//! task clustering, and re-anchoring the cursor by session id.
+//! task clustering, the On hold section, and re-anchoring the cursor by
+//! session id.
 
 use super::spawn::spawning_placeholder;
 use super::task_link_picker::task_display_title;
@@ -117,15 +118,29 @@ impl App {
         // cursor.
         sessions.sort_by_key(|s| s.state.liveness_rank());
 
-        // Group sessions by cwd. HashMap::entry preserves bucket-relative
-        // order, so each group comes out in the flat list's order.
+        // Held sessions leave their project group for the On hold section,
+        // which is grouped the same way and trails every active group.
+        let (held, active): (Vec<SessionInfo>, Vec<SessionInfo>) = sessions
+            .into_iter()
+            .partition(|s| self.sessions.holds.contains(&s.session_id));
+
+        let mut groups = self.group_by_cwd(active, false);
+        groups.extend(self.group_by_cwd(held, true));
+        groups
+    }
+
+    /// Group `sessions` by cwd, cluster each group by task, and sort the
+    /// groups by name. `held` marks which section they belong to.
+    fn group_by_cwd(&self, sessions: Vec<SessionInfo>, held: bool) -> Vec<ProjectGroup> {
+        // HashMap::entry preserves bucket-relative order, so each group comes
+        // out in the flat list's order.
         let mut group_map: HashMap<String, Vec<SessionInfo>> = HashMap::new();
         for s in sessions {
             group_map.entry(s.cwd.clone()).or_default().push(s);
         }
 
         // Cluster ordering needs each linked task's priority; resolve them
-        // once per rebuild instead of per group. Gone tasks simply stay out
+        // once per call instead of per group. Gone tasks simply stay out
         // of the map and rank last.
         let priorities: HashMap<String, TaskPriority> = self
             .session_task_links
@@ -144,6 +159,7 @@ impl App {
                     name,
                     cwd,
                     sessions: cluster_by_task(sessions, &self.session_task_links, &priorities),
+                    held,
                 }
             })
             .collect();
@@ -211,19 +227,7 @@ impl App {
                 self.sessions.sel_group = gi;
                 self.sessions.sel_in_group = si;
             }
-            None if self.sessions.groups.is_empty() => {
-                self.sessions.sel_group = 0;
-                self.sessions.sel_in_group = 0;
-            }
-            None => {
-                self.sessions.sel_group =
-                    self.sessions.sel_group.min(self.sessions.groups.len() - 1);
-                let max_in = self.sessions.groups[self.sessions.sel_group]
-                    .sessions
-                    .len()
-                    .saturating_sub(1);
-                self.sessions.sel_in_group = self.sessions.sel_in_group.min(max_in);
-            }
+            None => self.sessions.clamp_cursor(),
         }
 
         // Background selection rewrites are the prime suspect whenever "my

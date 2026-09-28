@@ -81,7 +81,8 @@ Single-file modules: `agent` (backend registry: `AgentKind`, `AgentConfig`),
 prompt into a live pane), `respawn` (continue a session on another account),
 `resources` (accounts from `resources.toml`), `usage` (the shared quota
 store), `wake`, `focus`, `live_view`, `folder_picker`, `bookmarks`, `acks`,
-`persist` (atomic writes and locks), `models`, `clipboard`, `fuzzy`, `gh`.
+`holds`, `persist` (atomic writes and locks), `models`, `clipboard`, `fuzzy`,
+`gh`.
 
 In `bin/src`: `cli/` has one file per verb, plus `error` (the JSON error
 contract) and `help`; `keys/` has one file per view; `event_loop/`,
@@ -95,7 +96,7 @@ cover the runtime.
 | Config | `~/.cc-hub/config.toml` | `config` |
 | Task cards | `~/.cc-hub/tasks/<id>/state.json`, `board.json`, `tasks-archive-v2.json` | `tasks` |
 | Session-to-task links | `~/.cc-hub/session-tasks.json` | `tasks::session_links` |
-| Acks, bookmarks | `~/.cc-hub/acks.json`, `bookmarks.json` | `acks`, `bookmarks` |
+| Acks, holds, bookmarks | `~/.cc-hub/acks.json`, `holds.json`, `bookmarks.json` | `acks`, `holds`, `bookmarks` |
 | Usage readings | `~/.cc-hub/usage.json` | `usage` |
 | Persistent agents | `~/.cc-hub/agents/<name>/` | `harness` |
 | Wakes | `~/.cc-hub/wake/<name>` | `wake` |

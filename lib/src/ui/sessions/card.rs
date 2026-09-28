@@ -22,7 +22,7 @@ pub(super) fn render_card(
         .borders(Borders::ALL)
         .border_type(border_type)
         .border_style(Style::default().fg(border_color))
-        .title(card_title(session, now));
+        .title(card_title(session, marks, now));
     if let Some(badge) = badge {
         block = with_task_badge(block, badge, area.width);
     }
@@ -46,7 +46,9 @@ pub(super) fn render_card(
 /// colour when the session needs you, the state colour while processing.
 /// A handoff mark outranks every colour — the weight still says the rest.
 fn border(session: &SessionInfo, marks: CardMarks) -> (BorderType, Color) {
-    let CardMarks { selected, handoff } = marks;
+    let CardMarks {
+        selected, handoff, ..
+    } = marks;
     let border_color = if handoff {
         HANDOFF_BLUE
     } else if selected {
@@ -76,8 +78,8 @@ fn border(session: &SessionInfo, marks: CardMarks) -> (BorderType, Color) {
 /// The top-border title, the card's main skim surface: agent badge, state
 /// glyph, cold-cache mark, then the Haiku title (or `✎ …` while one is
 /// being generated). The project name is left out: the group header shows it.
-fn card_title(session: &SessionInfo, now: u64) -> Span<'static> {
-    let (indicator, ind_color) = animated_indicator(&session.state, now);
+fn card_title(session: &SessionInfo, marks: CardMarks, now: u64) -> Span<'static> {
+    let (indicator, ind_color) = animated_indicator(&session.state, marks, now);
     let agent_badge = agent_prefix(session);
 
     // Every branch keeps a space right after `indicator`: the Nerd Font

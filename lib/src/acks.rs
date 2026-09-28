@@ -1,4 +1,4 @@
-//! Space-to-idle acknowledgements, persisted to `~/.cc-hub/acks.json`; see
+//! `z`-to-idle acknowledgements, persisted to `~/.cc-hub/acks.json`; see
 //! [`Acks`].
 
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ use crate::platform::paths::cc_hub_home;
 /// its real state (WaitingForInput or Processing). Any new activity advances
 /// the watermark and auto-clears the ack.
 ///
-/// Acks persist to `~/.cc-hub/acks.json` (via [`Acks::load`]) so a Space-idled
+/// Acks persist to `~/.cc-hub/acks.json` (via [`Acks::load`]) so a `z`-idled
 /// card stays idle across hub restarts and reboots — `last_activity` is derived
 /// from transcript timestamps, so the stamped watermark stays comparable after
 /// a restart. The file mirrors every mutation; there is no separate flush step.
