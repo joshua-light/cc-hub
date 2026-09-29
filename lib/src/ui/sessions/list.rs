@@ -450,6 +450,11 @@ mod tests {
             // Only the held session trades its state glyph for the pause.
             assert!(!row(1).contains(super::super::HOLD_ICON), "{}", row(1));
             assert!(row(5).contains(super::super::HOLD_ICON), "{}", row(5));
+            let glyph = (0..100)
+                .map(|x| &buf[(x, 5)])
+                .find(|c| c.symbol() == super::super::HOLD_ICON)
+                .expect("pause glyph");
+            assert_eq!(glyph.fg, crate::ui::palette::MUTED_TEXT);
         });
     }
 }

@@ -44,15 +44,20 @@ pub(super) fn render_card(
 
 /// Border weight and colour: white double when selected, thick in the state
 /// colour when the session needs you, the state colour while processing.
-/// A handoff mark outranks every colour — the weight still says the rest.
+/// A handoff mark outranks every colour, and a held session is gray — the
+/// weight still says the rest.
 fn border(session: &SessionInfo, marks: CardMarks) -> (BorderType, Color) {
     let CardMarks {
-        selected, handoff, ..
+        selected,
+        handoff,
+        held,
     } = marks;
     let border_color = if handoff {
         HANDOFF_BLUE
     } else if selected {
         Color::White
+    } else if held {
+        SEP_GRAY
     } else if session.needs_attention() || session.state == SessionState::Processing {
         // The state colour tells a Question (blue) from a plain wait
         // (yellow); a green Processing frame reads as alive, not ambient.
