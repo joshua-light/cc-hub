@@ -181,17 +181,16 @@ fn keep_in_view(scroll: &mut u16, group_top: u16, item_top: u16, item_bottom: u1
 }
 
 /// State glyph and colour, animated: Processing spins, Starting orbits. A
-/// held session trades the glyph for the pause one but keeps the colour, so
-/// its real state still shows.
+/// held session shows the On hold header's pause glyph in its muted gray:
+/// it is parked, whatever its state.
 fn animated_indicator(state: &SessionState, marks: CardMarks, now: u64) -> (&'static str, Color) {
     let (indicator, color) = state_indicator(state);
-    let indicator = match state {
-        _ if marks.held => HOLD_ICON,
-        SessionState::Processing => spinner_frame(now),
-        SessionState::Starting => starting_frame(now),
-        _ => indicator,
-    };
-    (indicator, color)
+    match state {
+        _ if marks.held => (HOLD_ICON, MUTED_TEXT),
+        SessionState::Processing => (spinner_frame(now), color),
+        SessionState::Starting => (starting_frame(now), color),
+        _ => (indicator, color),
+    }
 }
 
 /// `[Codex] ` ahead of a non-Claude session's title. Claude is the ~99%
