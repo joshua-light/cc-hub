@@ -202,30 +202,92 @@ pub(super) fn build_agent_command(
         }
         let mut env = std::process::Command::new("env");
         account.apply(&mut env);
-        let mut prefix = String::from("env");
-        for (key, _) in env.get_envs().filter(|(_, value)| value.is_none()) {
-            prefix.push_str(" -u ");
-            prefix.push_str(&shell_quote(&key.to_string_lossy()));
-        }
-        for (key, value) in env.get_envs() {
-            if let Some(value) = value {
-                prefix.push(' ');
-                prefix.push_str(&shell_quote(&format!(
-                    "{}={}",
-                    key.to_string_lossy(),
-                    value.to_string_lossy()
-                )));
-            }
-        }
-        cmd = format!("{prefix} /bin/sh -c {}", shell_quote(&cmd));
+        let unset: Vec<String> = env
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+        let set: Vec<(String, String)> = env
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|v| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        v.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect();
+        cmd = account_env_prefix(&unset, &set, &cmd);
     }
     Ok(cmd)
 }
 
+/// Scope a subscription account's environment onto `cmd` as plain POSIX shell
+/// syntax: `unset A B; export K='v'; cmd`. The string is parsed by the user's
+/// interactive shell (`$SHELL -ic`, see
+/// [`crate::platform::mux::spawn_detached`]), so `cmd` stays at command
+/// position and rc aliases such as `cc-hub-new` still expand. The earlier
+/// `env -u A ... /bin/sh -c 'cmd'` form re-parsed `cmd` in a bare `/bin/sh`
+/// that reads no rc file: `cc-hub-new: command not found`, and the hub
+/// reported the session as "exited during startup".
+///
+/// `export` rather than a `K='v' cmd` prefix: a prefix scopes to the first
+/// simple command only, so a compound `a && b` would run `b` under the wrong
+/// account. The statements must stay inside the `-ic` shell, after its rc has
+/// run; put in front of `$SHELL`, an rc that exports `CLAUDE_CONFIG_DIR` or
+/// an API key would undo the switch. Needs a POSIX shell: fish has neither
+/// `unset` nor `export`.
+fn account_env_prefix(unset: &[String], set: &[(String, String)], cmd: &str) -> String {
+    let mut out = String::new();
+    if !unset.is_empty() {
+        out.push_str("unset");
+        for key in unset {
+            out.push(' ');
+            out.push_str(key);
+        }
+        out.push_str("; ");
+    }
+    for (key, value) in set {
+        out.push_str("export ");
+        out.push_str(key);
+        out.push('=');
+        out.push_str(&shell_quote(value));
+        out.push_str("; ");
+    }
+    out.push_str(cmd);
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_agent_command, prefix_env, shell_quote};
+    use super::{account_env_prefix, build_agent_command, prefix_env, shell_quote};
     use crate::agent::{AgentConfig, AgentKind};
+
+    /// The account wrapper is plain POSIX statements the interactive shell
+    /// parses itself, so rc aliases (`cc-hub-new`) still resolve: no `/bin/sh
+    /// -c` re-parse, no `env` binary. `export` scopes the whole command, not
+    /// just its first simple command.
+    #[test]
+    fn account_env_prefix_is_posix_statements_before_the_command() {
+        let unset = ["A".to_string(), "B".to_string()];
+        let set = [("K".to_string(), "v w".to_string())];
+        let cmd = "cc-hub-new --resume 'x' && echo done";
+        let out = account_env_prefix(&unset, &set, cmd);
+        assert_eq!(out, format!("unset A B; export K='v w'; {cmd}"));
+        assert!(out.ends_with(&format!("; {cmd}")), "got: {out}");
+        assert!(!out.contains("/bin/sh"), "got: {out}");
+        assert!(!out.contains("env "), "got: {out}");
+        assert_eq!(
+            account_env_prefix(&unset, &[], "cc-hub-new"),
+            "unset A B; cc-hub-new"
+        );
+        assert_eq!(
+            account_env_prefix(&[], &set, "cc-hub-new"),
+            "export K='v w'; cc-hub-new"
+        );
+        assert_eq!(account_env_prefix(&[], &[], "cc-hub-new"), "cc-hub-new");
+    }
 
     #[test]
     fn claude_command_carries_model_flag() {
