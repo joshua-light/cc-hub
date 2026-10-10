@@ -1,55 +1,41 @@
 use crate::config;
-use crate::link::{BoardTaskId, FixLink};
+use crate::link::{BoardTaskId, Chore};
 use crate::ops::OpError;
 use crate::tasks::store::{self, TaskStatus};
 use crate::tasks::PersonalBoard;
 
-/// File a fix as a card on the Tasks board: the standing orders as its text,
-/// `Fix: <title>` as its title, the link's kind, and the brief as its first
-/// note. The card is left in To-Do — it moves to Running through
-/// [`start_card`] once a session actually holds it, so a fix that failed to
-/// start is visible as a card with a brief and nobody on it, not as one that
-/// claims to be running.
-pub fn file_fix(fix: &FixLink) -> Result<BoardTaskId, OpError> {
-    let kind = fix_kind(fix)?;
+/// File a chore as a card on the Tasks board: its standing orders as the
+/// text, its session title as the title, its kind, and its brief as the
+/// first note. The card is left in To-Do — it moves to Running through
+/// [`start_card`] once a session actually holds it, so a chore that failed
+/// to start is visible as a card with a brief and nobody on it, not as one
+/// that claims to be running.
+pub fn file_chore(chore: &dyn Chore) -> Result<BoardTaskId, OpError> {
+    let kind = chore_kind(chore)?;
     let mut board =
         PersonalBoard::load_result().map_err(|e| OpError::Other(format!("load board: {}", e)))?;
     let task_id = board
-        .add(&fix.prompt())
+        .add(&chore.prompt())
         .map_err(|e| OpError::Other(format!("write card: {}", e)))?
-        .expect("a fix prompt is never empty");
+        .expect("a chore prompt is never empty");
     board
         .set_kind(&task_id, kind)
         .map_err(|e| OpError::Other(format!("write kind: {}", e)))?;
-    store::set_task_title(&task_id, &fix.session_title())
+    store::set_task_title(&task_id, &chore.session_title())
         .map_err(|e| OpError::Other(format!("write title: {}", e)))?;
-    crate::ops::task::task_artifact_add_text(&task_id, &fix_brief(fix), "link")?;
+    crate::ops::task::task_artifact_add_text(&task_id, &chore.brief(), "link")?;
     Ok(task_id.parse().expect("the board mints tk- ids"))
 }
 
-/// The kind a fix card is filed under, checked against the board's list so
+/// The kind a chore card is filed under, checked against the board's list so
 /// `--dry-run` refuses a link the browser button got wrong before anything
 /// is filed. `None` is a card without a kind, as the board allows.
-pub(super) fn fix_kind(fix: &FixLink) -> Result<Option<String>, OpError> {
-    fix.kind
-        .as_deref()
+pub(super) fn chore_kind(chore: &dyn Chore) -> Result<Option<String>, OpError> {
+    chore
+        .kind()
         .map(|k| config::get().tasks.known_kind(k))
         .transpose()
-        .map_err(|why| OpError::Usage(format!("fix link kind: {}", why)))
-}
-
-/// The brief a fix card starts with. It is what a task session would have
-/// agreed with the user in the plan gate, written down without asking,
-/// because a review already asked: the comments are the problem, working
-/// them is the solution, and the reviewer is the verification.
-fn fix_brief(fix: &FixLink) -> String {
-    format!(
-        "Brief\n\
-         Problem: {} has review comments waiting on the author.\n\
-         Solution: address them on the pull request's branch — one Bitbucket task per comment, done once its fix is committed and pushed; answer questions, ask when a comment is ambiguous.\n\
-         Verification: the reviewer re-reads the pull request. This task has the one role; no hand-over.",
-        fix.pr
-    )
+        .map_err(|why| OpError::Usage(format!("link kind: {}", why)))
 }
 
 /// The card's session is up: move it to Running. Called after the binding,
@@ -71,7 +57,7 @@ pub fn start_card(task_id: &str) -> Result<(), OpError> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::link::Link;
+    use crate::link::{FixLink, Link};
     use crate::ops::link::target::{board_card, without_a_brief};
 
     fn fix_link(query: &str) -> FixLink {
@@ -89,7 +75,7 @@ mod tests {
     fn a_fix_is_filed_as_a_card_with_its_brief() {
         crate::test_util::with_temp_home(|| {
             let fix = fix_link("&title=Fix%20the%20parser");
-            let id = file_fix(&fix).expect("file");
+            let id = file_chore(&fix).expect("file");
             let card = board_card(id.as_str()).expect("card");
             assert_eq!(card.status, TaskStatus::Backlog);
             assert_eq!(card.title.as_deref(), Some("Fix: Fix the parser"));
@@ -113,7 +99,7 @@ mod tests {
     #[test]
     fn a_filed_fix_starts_into_running() {
         crate::test_util::with_temp_home(|| {
-            let id = file_fix(&fix_link("")).expect("file");
+            let id = file_chore(&fix_link("")).expect("file");
             start_card(id.as_str()).expect("start");
             assert_eq!(
                 board_card(id.as_str()).expect("card").status,
@@ -123,12 +109,12 @@ mod tests {
     }
 
     #[test]
-    fn a_fix_kind_must_be_one_the_board_offers() {
+    fn a_chore_kind_must_be_one_the_board_offers() {
         crate::test_util::with_temp_home(|| {
             // A temp home has no [tasks].kinds, so any kind is unknown.
             assert!(matches!(
-                file_fix(&fix_link("&kind=tps")),
-                Err(OpError::Usage(why)) if why.contains("fix link kind")
+                file_chore(&fix_link("&kind=tps")),
+                Err(OpError::Usage(why)) if why.contains("link kind")
             ));
         });
     }

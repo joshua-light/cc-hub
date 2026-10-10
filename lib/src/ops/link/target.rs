@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use super::fix::fix_kind;
+use super::chore::chore_kind;
 use crate::bookmarks::Bookmarks;
-use crate::link::{Link, PullRequestUrl, ReviewLink, TaskLink};
+use crate::link::{Chore, Link, ReviewLink, TaskLink};
 use crate::ops::OpError;
 use crate::platform::paths::expand_home;
 use crate::sessions::scanner;
@@ -41,10 +41,8 @@ pub fn target(link: &Link, agent: Option<&str>) -> Result<LinkTarget, OpError> {
 
     match link {
         Link::Review(review) => review_target(review, agent_id),
-        Link::Fix(fix) => {
-            fix_kind(fix)?;
-            fix_target(&fix.pr, fix.session_title(), fix.prompt(), agent_id)
-        }
+        Link::Fix(fix) => chore_target(fix, agent_id),
+        Link::MergeTarget(merge) => chore_target(merge, agent_id),
         Link::Task(task) => {
             let card = board_card(task.id.as_str())?;
             let cwd = task
@@ -100,16 +98,12 @@ fn review_target(review: &ReviewLink, agent_id: String) -> Result<LinkTarget, Op
     })
 }
 
-/// Where a fix lands: the local checkout of the repository the URL names,
-/// found among the folders the hub knows. Unlike a review, a fix writes,
+/// Where a chore lands: the local checkout of the repository the URL names,
+/// found among the folders the hub knows. Unlike a review, a chore writes,
 /// commits and pushes, so without a working tree there is nothing to do.
-fn fix_target(
-    pr: &PullRequestUrl,
-    title: String,
-    prompt: String,
-    agent_id: String,
-) -> Result<LinkTarget, OpError> {
-    let repo = pr.repo();
+fn chore_target(chore: &dyn Chore, agent_id: String) -> Result<LinkTarget, OpError> {
+    chore_kind(chore)?;
+    let repo = chore.pr().repo();
     let cwd = folder_named(repo).ok_or_else(|| {
         OpError::NotFound(format!(
             "no known folder named `{}` — bookmark the checkout in cc-hub and retry",
@@ -118,8 +112,8 @@ fn fix_target(
     })?;
     Ok(LinkTarget {
         cwd,
-        title,
-        prompt,
+        title: chore.session_title(),
+        prompt: chore.prompt(),
         agent_id,
     })
 }
@@ -245,6 +239,20 @@ mod tests {
         crate::test_util::with_temp_home(|| {
             let link = link_of(
                 "cc-hub://fix?pr=https://bitbucket.example.com/projects/APP/repos/never-cloned/pull-requests/7",
+            );
+            assert!(matches!(
+                target(&link, Some("claude")),
+                Err(OpError::NotFound(why)) if why.contains("never-cloned")
+            ));
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_merge_target_without_a_checkout_is_refused() {
+        crate::test_util::with_temp_home(|| {
+            let link = link_of(
+                "cc-hub://merge-target?pr=https://bitbucket.example.com/projects/APP/repos/never-cloned/pull-requests/7",
             );
             assert!(matches!(
                 target(&link, Some("claude")),

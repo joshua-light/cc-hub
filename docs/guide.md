@@ -65,7 +65,7 @@ becomes the card's first note.
 ## Deep links
 
 cc-hub owns the `cc-hub://` scheme: a browser button, a script or an agent
-can start work with `cc-hub open <url>`. There are three links.
+can start work with `cc-hub open <url>`. There are four links.
 
 - **review** spawns a session in the local checkout of a pull request's
   repository and asks for a light or full review. cc-hub finds the checkout
@@ -76,6 +76,10 @@ can start work with `cc-hub open <url>`. There are three links.
 - **fix** files a `Fix: <title>` card whose first note is the brief, then
   spawns a session with standing orders to work through the pull request's
   review comments. It skips Planning, because the comments are the plan.
+- **merge-target** is filed and started like a fix, as a `Merge Target:
+  <title>` card, with standing orders to merge the pull request's target
+  branch into its branch: no rebase, no force-push, conflicts resolved
+  keeping both sides' intent, the author asked when one needs a decision.
 - **task** starts a session for an existing card, bound to it, with
   `/task --task <id> …` as its prompt. It never changes the card's status. A
   live session for the card in the same folder gets the prompt instead
@@ -88,8 +92,8 @@ note on the card, because the notes are the next session's brief. A link
 naming another folder without a role starts a new session there and leaves
 the old one running.
 
-With accounts configured in `resources.toml` and no `--agent`, fix links and
-task links whose kind is known (`&kind=`, or an earlier broker worker on the
+With accounts configured in `resources.toml` and no `--agent`, fix and
+merge-target links and task links whose kind is known (`&kind=`, or an earlier broker worker on the
 card) start through the resource broker. They run on an account with room
 and move when it runs out. The broker also treats a change of folder as a
 hand-over ([resource-management.md](resource-management.md)).

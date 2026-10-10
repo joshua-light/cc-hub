@@ -127,6 +127,14 @@ Links:
       whichever account has room. The card reaches Running once its session
       is bound; it never waits in Planning, because the comments are the plan.
 
+  cc-hub://merge-target?pr=<pull request url>[&title=<text>][&kind=<word>]
+      Filed, started and routed exactly like a fix, as a "Merge Target:
+      <title>" card, with the standing orders for bringing the target branch
+      in: switch to the pull request's branch, fetch, merge its target branch
+      into it (no rebase, no force-push), resolve conflicts keeping both
+      sides' intent, ask when one needs the author, check the result builds
+      where it can, push, and note "Pushed: …" on the card.
+
   cc-hub://task?id=<tk-…>[&dir=<path>][&kind=<word>][&role=<word>]
       Spawn a session for one Tasks-board card in <dir> (default: the card's
       own recorded cwd), name it "Task: <card>", open it with "/task --task
