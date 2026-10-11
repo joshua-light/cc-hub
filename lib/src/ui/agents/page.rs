@@ -1,40 +1,33 @@
 use super::sections::{render_artifacts, render_log, render_runs, render_settings};
-use super::status_indicator;
 use super::text::{event_label, wrap_text};
+use super::{dot, mark};
 use crate::app::{App, Section};
 use crate::harness::{AgentSnapshot, AgentStatus};
 use crate::models::first_line_truncated;
-use crate::ui::common::{
-    age, centered_rect, fmt_cost, popup_block, selection_stripe, truncate_line,
-};
-use crate::ui::palette::{DIM_TEXT, FAINT_TEXT, LABEL_GRAY, SELECTED_ROW_BG, SEP_GRAY};
+use crate::ui::common::{age, fmt_cost, selection_stripe, truncate_line, STATE_DOT};
+use crate::ui::palette::{DIM_TEXT, FAINT_TEXT, LABEL_GRAY, MUTED_TEXT, SELECTED_ROW_BG, SEP_GRAY};
+use crate::ui::split::{page_title, Split};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
-pub(crate) fn render_agent_detail(frame: &mut Frame, area: Rect, app: &mut App) {
-    render_agent_detail_at(frame, area, app, crate::harness::now_unix());
-}
-
-fn render_agent_detail_at(frame: &mut Frame, area: Rect, app: &mut App, now: i64) {
+/// The selected agent's page: framed with its name and, on the right, what
+/// wakes it and what it spent today; inside, the headline, the section
+/// strip and the open section.
+pub(super) fn render_page(frame: &mut Frame, split: Split, app: &mut App, now: i64) {
     let Some(agent) = app.harness.agents.get(app.harness.selected) else {
         return;
     };
-    let Some(detail) = app.harness.detail.as_ref() else {
-        return;
-    };
-    let popup = centered_rect(area, 0.9);
-    frame.render_widget(Clear, popup);
+    let detail = &app.harness.detail;
+    let area = split.page;
 
-    let (glyph, color) = status_indicator(agent.status());
-    let block = popup_block(Line::from(Span::styled(
-        format!(" {} {} ", glyph, agent.name),
-        Style::default().fg(color).add_modifier(Modifier::BOLD),
-    )));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let block = split
+        .page_block(page_title(mark(agent, crate::ui::now_ms()), &agent.name))
+        .title(facts(agent).right_aligned());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
     if inner.height < 4 || inner.width < 20 {
         return;
     }
@@ -69,7 +62,34 @@ fn render_agent_detail_at(frame: &mut Frame, area: Rect, app: &mut App, now: i64
     }
 }
 
-/// The top of the detail: what the agent is for, then the one or two
+/// ` poll 5m +2 · $0.31 today `: what wakes the agent, the events waiting
+/// for it, and what it spent today.
+fn facts(agent: &AgentSnapshot) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    if let Ok(spec) = &agent.spec {
+        spans.push(Span::styled(
+            spec.trigger_label(),
+            Style::default().fg(MUTED_TEXT),
+        ));
+    }
+    if agent.inbox_pending > 0 {
+        spans.push(Span::styled(
+            format!(" +{}", agent.inbox_pending),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    let spent = agent.state.today_cost();
+    if spent > 0.0 {
+        spans.push(Span::styled(
+            format!(" · {} today", fmt_cost(spent)),
+            Style::default().fg(DIM_TEXT),
+        ));
+    }
+    spans.push(Span::raw(" "));
+    Line::from(spans)
+}
+
+/// The top of the page: what the agent is for, then the one or two
 /// facts that decide whether you need to do anything.
 fn headline(agent: &AgentSnapshot, now: i64, width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
@@ -91,10 +111,10 @@ fn headline(agent: &AgentSnapshot, now: i64, width: usize) -> Vec<Line<'static>>
     };
 
     let status = agent.status();
-    let (glyph, color) = status_indicator(status);
+    let color = dot(agent).steady();
     let lead = |text: String| {
         Line::from(vec![
-            Span::styled(format!("{} ", glyph), Style::default().fg(color)),
+            Span::styled(format!("{STATE_DOT} "), Style::default().fg(color)),
             Span::styled(
                 text,
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -298,12 +318,19 @@ mod tests {
         crate::test_util::with_temp_home(|| {
             let mut app = App::new();
             app.harness.agents = vec![agent];
-            app.harness.detail = Some(detail);
+            app.harness.detail = detail;
             app.view = View::AgentDetail;
             let backend = TestBackend::new(w, h);
             let mut terminal = Terminal::new(backend).expect("terminal");
             terminal
-                .draw(|f| render_agent_detail_at(f, f.area(), &mut app, NOW))
+                .draw(|f| {
+                    let split = Split {
+                        page: f.area(),
+                        page_focused: true,
+                        ..Split::default()
+                    };
+                    render_page(f, split, &mut app, NOW)
+                })
                 .expect("render");
             out = buffer_to_string(terminal.backend().buffer());
         });

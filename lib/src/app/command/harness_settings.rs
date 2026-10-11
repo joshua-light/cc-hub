@@ -13,7 +13,7 @@ impl App {
         &mut self,
         f: impl FnOnce(Setting, &Spec) -> T,
     ) -> Option<T> {
-        let (Some(agent), Some(d)) = (self.harness.selected(), self.harness.detail.as_ref()) else {
+        let (Some(agent), d) = (self.harness.selected(), &self.harness.detail) else {
             return None;
         };
         let setting = SETTINGS.get(d.setting).copied()?;
@@ -30,26 +30,19 @@ impl App {
 
     /// Open the edit box on the selected setting, pre-filled.
     pub(super) fn harness_edit_setting(&mut self) {
-        let on_settings = self
-            .harness
-            .detail
-            .as_ref()
-            .is_some_and(|d| d.section == Section::Settings);
-        if !on_settings {
+        if self.harness.detail.section != Section::Settings {
             return;
         }
         let Some(raw) = self.harness_unlocked_setting(|setting, spec| setting.raw(spec)) else {
             return;
         };
-        if let Some(d) = self.harness.detail.as_mut() {
-            d.editing = Some(raw);
-        }
+        self.harness.detail.editing = Some(raw);
     }
 
     /// Write `input` to the selected setting. True when it was saved.
     pub(super) fn harness_apply_setting(&mut self, input: &str) -> bool {
         use crate::harness::{self, settings};
-        let (Some(agent), Some(d)) = (self.harness.selected(), self.harness.detail.as_ref()) else {
+        let (Some(agent), d) = (self.harness.selected(), &self.harness.detail) else {
             return false;
         };
         let Some(setting) = settings::SETTINGS.get(d.setting).copied() else {
@@ -162,7 +155,7 @@ mod tests {
             .iter()
             .position(|s| *s == setting)
             .unwrap();
-        app.harness.detail.as_mut().unwrap().setting = i;
+        app.harness.detail.setting = i;
     }
 
     #[test]
@@ -226,7 +219,7 @@ mod tests {
             open_settings_at(&mut app, crate::harness::settings::Setting::RunBudget);
             // Free text: Enter opens the box pre-filled with the value.
             harness(&mut app, HarnessCommand::Activate);
-            let d = app.harness.detail.as_ref().unwrap();
+            let d = &app.harness.detail;
             assert_eq!(d.editing.as_deref(), Some("0.5"));
 
             for _ in 0..3 {
@@ -234,7 +227,7 @@ mod tests {
             }
             harness(&mut app, HarnessCommand::EditChar('x'));
             harness(&mut app, HarnessCommand::EditSubmit);
-            assert!(app.harness.detail.as_ref().unwrap().editing.is_some());
+            assert!(app.harness.detail.editing.is_some());
             assert!(status(&app).contains("dollar amount"), "{}", status(&app));
 
             harness(&mut app, HarnessCommand::EditBackspace);
@@ -242,7 +235,7 @@ mod tests {
                 harness(&mut app, HarnessCommand::EditChar(c));
             }
             harness(&mut app, HarnessCommand::EditSubmit);
-            assert!(app.harness.detail.as_ref().unwrap().editing.is_none());
+            assert!(app.harness.detail.editing.is_none());
             let spec = crate::harness::spec::load(&dir).unwrap();
             assert_eq!(spec.run.max_budget_usd, Some(1.25));
         });

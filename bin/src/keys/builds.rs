@@ -1,21 +1,20 @@
 use cc_hub_lib::app::{App, BuildsCommand as B, Command, View};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-/// Builds-tab, new-build form and build-log key mapping. In the form every
-/// printable key types into a text field, so the form's own keys are the
-/// unprintable ones.
+/// Builds-tab, new-build form and build-log key mapping. The list and the
+/// log share the recipe verbs, so a build can be run or cancelled while its
+/// log has the keyboard. In the form every printable key types into a text
+/// field, so the form's own keys are the unprintable ones.
 pub(super) fn map_builds_command(app: &App, key: &KeyEvent, on_builds: bool) -> Option<Command> {
     let cmd = match (&app.view, key.code) {
         (View::Grid, _) if !on_builds => return None,
-        (View::Grid, KeyCode::Left | KeyCode::Char('h')) => B::NavLeft,
-        (View::Grid, KeyCode::Right | KeyCode::Char('l')) => B::NavRight,
         (View::Grid, KeyCode::Up | KeyCode::Char('k')) => B::NavUp,
         (View::Grid, KeyCode::Down | KeyCode::Char('j')) => B::NavDown,
-        (View::Grid, KeyCode::Char('n')) => B::OpenForm,
-        (View::Grid, KeyCode::Char('r')) => B::Run,
-        (View::Grid, KeyCode::Char('c')) => B::Cancel,
-        (View::Grid, KeyCode::Char(' ')) => B::ToggleHold,
         (View::Grid, KeyCode::Enter | KeyCode::Char('f')) => B::OpenLog,
+        (View::Grid | View::BuildLog, KeyCode::Char('n')) => B::OpenForm,
+        (View::Grid | View::BuildLog, KeyCode::Char('r')) => B::Run,
+        (View::Grid | View::BuildLog, KeyCode::Char('c')) => B::Cancel,
+        (View::Grid | View::BuildLog, KeyCode::Char(' ')) => B::ToggleHold,
 
         (View::BuildForm, KeyCode::Esc) => B::FormCancel,
         (View::BuildForm, KeyCode::Enter) => B::FormSubmit,
@@ -29,7 +28,7 @@ pub(super) fn map_builds_command(app: &App, key: &KeyEvent, on_builds: bool) -> 
         }
         (View::BuildForm, _) => return None,
 
-        (View::BuildLog, KeyCode::Esc | KeyCode::Char('q')) => B::CloseLog,
+        (View::BuildLog, KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('q')) => B::CloseLog,
         (View::BuildLog, KeyCode::Up | KeyCode::Char('k')) => B::LogUp,
         (View::BuildLog, KeyCode::Down | KeyCode::Char('j')) => B::LogDown,
         (View::BuildLog, KeyCode::PageUp) => B::LogPageUp,

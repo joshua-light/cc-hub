@@ -112,8 +112,8 @@ end of its interval, and still decides what counts as an event. The board
 wakes `board` on every status change; a script wakes anything with
 `cc-hub wake <name>`.
 
-Agents report with `cc-hub agent note`. The Agents tab shows the newest note;
-the detail view shows:
+Agents report with `cc-hub agent note`. The Agents tab lists the agents and
+how each last run went; the selected agent's page shows:
 
 - **Runs**: each remembered run, with its transcript.
 - **Artifacts**: the agent's notes; `f` opens a note's `--ref`.
@@ -141,7 +141,7 @@ later step can name the reported commit as `{commit}`. The runner sets
 `CC_HUB_BUILD`, so a script also run by hand can stay quiet when nothing
 listens. `current` prints the commit the recipe's last run left in place.
 When that differs from the last successful build's, something else ran since,
-and the card says `now at <commit>`.
+and the recipe's page says `now at <commit>`.
 
 A recipe with a `resource` claims it through the broker as the guest
 `Builds` and keeps it after the build ends. Builds come in bursts, and

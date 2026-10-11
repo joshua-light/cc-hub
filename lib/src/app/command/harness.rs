@@ -1,6 +1,6 @@
 use super::Effect;
 use crate::agent::AgentKind;
-use crate::app::harness_view::{Detail, Section};
+use crate::app::harness_view::Section;
 use crate::app::App;
 use crate::config;
 use crate::{models, spawn, title};
@@ -10,8 +10,9 @@ use crate::{models, spawn, title};
 pub enum HarnessCommand {
     NavUp,
     NavDown,
-    /// `f`/Enter — the detail view.
+    /// `f`/Enter — the keyboard to the selected agent's page.
     OpenDetail,
+    /// Esc/F1 on the page — the keyboard back to the list.
     CloseDetail,
     /// Tab/`l` and Shift-Tab/`h` in the detail view.
     NextSection,
@@ -48,30 +49,32 @@ impl App {
         use crate::harness;
         use HarnessCommand::*;
         match cmd {
-            NavUp => self.harness.nav(-1),
-            NavDown => self.harness.nav(1),
+            NavUp | NavDown => {
+                let was = self.harness.selected;
+                self.harness.nav(if cmd == NavUp { -1 } else { 1 });
+                if self.harness.selected != was {
+                    self.render.agent_detail_scroll = 0;
+                }
+            }
             OpenDetail => {
                 if self.harness.selected().is_some() {
-                    self.harness.detail = Some(Detail::default());
-                    self.render.agent_detail_scroll = 0;
                     self.view = View::AgentDetail;
                 }
             }
             CloseDetail => {
-                self.harness.detail = None;
+                self.harness.detail.editing = None;
                 self.view = View::Grid;
             }
             NextSection | PrevSection | ShowSection(_) => {
-                if let Some(d) = self.harness.detail.as_mut() {
-                    d.section = match cmd {
-                        NextSection => d.section.step(1),
-                        PrevSection => d.section.step(-1),
-                        ShowSection(s) => s,
-                        _ => d.section,
-                    };
-                    d.editing = None;
-                    self.render.agent_detail_scroll = 0;
-                }
+                let d = &mut self.harness.detail;
+                d.section = match cmd {
+                    NextSection => d.section.step(1),
+                    PrevSection => d.section.step(-1),
+                    ShowSection(s) => s,
+                    _ => d.section,
+                };
+                d.editing = None;
+                self.render.agent_detail_scroll = 0;
             }
             DetailDown => self.harness.detail_nav(1),
             DetailUp => self.harness.detail_nav(-1),
@@ -87,21 +90,14 @@ impl App {
                     buf.pop();
                 }
             }
-            EditCancel => {
-                if let Some(d) = self.harness.detail.as_mut() {
-                    d.editing = None;
-                }
-            }
+            EditCancel => self.harness.detail.editing = None,
             EditSubmit => {
-                let Some(input) = self.harness.detail.as_ref().and_then(|d| d.editing.clone())
-                else {
+                let Some(input) = self.harness.detail.editing.clone() else {
                     return Vec::new();
                 };
                 // A rejected value keeps the box open so it can be fixed.
                 if self.harness_apply_setting(&input) {
-                    if let Some(d) = self.harness.detail.as_mut() {
-                        d.editing = None;
-                    }
+                    self.harness.detail.editing = None;
                 }
             }
             ToggleOn => self.harness_toggle_on(),
@@ -129,13 +125,13 @@ impl App {
     }
 
     fn harness_edit_buffer(&mut self) -> Option<&mut String> {
-        self.harness.detail.as_mut()?.editing.as_mut()
+        self.harness.detail.editing.as_mut()
     }
 
-    /// `f`/Enter inside the detail view, by section.
+    /// `f`/Enter on the page, by section.
     fn harness_activate(&mut self) -> Vec<Effect> {
         use crate::harness::Run;
-        let (Some(agent), Some(d)) = (self.harness.selected(), self.harness.detail.as_ref()) else {
+        let (Some(agent), d) = (self.harness.selected(), &self.harness.detail) else {
             return Vec::new();
         };
         match d.section {
@@ -313,21 +309,20 @@ mod tests {
     use super::*;
     use crate::app::test_support::{app_with_agent, harness, status};
 
+    // `f` gives the page the keyboard and Esc gives it back; the page keeps
+    // the section that was open.
     #[test]
-    fn f_opens_the_agent_and_esc_closes_it() {
+    fn f_focuses_the_page_and_esc_returns_to_the_list() {
         crate::test_util::with_temp_home(|| {
             let (mut app, _rt, _dir) = app_with_agent();
             harness(&mut app, HarnessCommand::OpenDetail);
             assert_eq!(app.view, crate::app::View::AgentDetail);
-            assert_eq!(app.harness.detail.as_ref().unwrap().section, Section::Runs);
+            assert_eq!(app.harness.detail.section, Section::Runs);
             harness(&mut app, HarnessCommand::NextSection);
-            assert_eq!(
-                app.harness.detail.as_ref().unwrap().section,
-                Section::Artifacts
-            );
             harness(&mut app, HarnessCommand::CloseDetail);
             assert_eq!(app.view, crate::app::View::Grid);
-            assert!(app.harness.detail.is_none());
+            harness(&mut app, HarnessCommand::OpenDetail);
+            assert_eq!(app.harness.detail.section, Section::Artifacts);
         });
     }
 
@@ -389,17 +384,21 @@ mod tests {
         });
     }
 
+    // A transcript opened from the page lands back on it; one opened from
+    // the list, on the list.
     #[test]
-    fn closing_a_transcript_lands_back_in_the_agent_detail() {
+    fn closing_a_transcript_lands_where_it_was_opened() {
         crate::test_util::with_temp_home(|| {
-            let (mut app, _rt, _dir) = app_with_agent();
+            let (mut app, _rt, dir) = app_with_agent();
+            let transcript =
+                || crate::live_view::LiveView::new(dir.join("none.jsonl"), AgentKind::Claude);
             harness(&mut app, HarnessCommand::OpenDetail);
-            app.view = crate::app::View::LiveTail;
+            app.enter_live_tail(transcript());
             app.close_live_tail();
             assert_eq!(app.view, crate::app::View::AgentDetail);
 
             harness(&mut app, HarnessCommand::CloseDetail);
-            app.view = crate::app::View::LiveTail;
+            app.enter_live_tail(transcript());
             app.close_live_tail();
             assert_eq!(app.view, crate::app::View::Grid);
         });

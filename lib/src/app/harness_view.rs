@@ -1,6 +1,6 @@
 //! Agents-tab state: the latest on-disk snapshot of every persistent agent,
-//! the selection cursor over the table (one row per agent), and the detail
-//! view's cursors while it is open.
+//! the cursor over the list (one row per agent), and the cursors of the
+//! selected agent's page beside it.
 
 use crate::harness::AgentSnapshot;
 
@@ -13,9 +13,10 @@ pub struct HarnessView {
     pub loaded: bool,
     /// Whether the in-TUI supervisor is running (`[harness] enabled`).
     pub supervisor_on: bool,
-    /// `Some` while the detail view is open, including under a transcript
-    /// or pane opened from it, so closing those lands back in the detail.
-    pub detail: Option<Detail>,
+    /// The selected agent's page: its open section and a cursor in each.
+    /// Kept while the list has the keyboard; moving to another agent
+    /// starts its page over in the same section.
+    pub detail: Detail,
 }
 
 /// The detail view's sections, in strip order.
@@ -88,7 +89,20 @@ impl HarnessView {
             return;
         }
         let max = self.agents.len() as isize - 1;
-        self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
+        self.select((self.selected as isize + delta).clamp(0, max) as usize);
+    }
+
+    /// Put the cursor on agent `i`. Another agent's page starts over, in
+    /// the section that was open.
+    pub fn select(&mut self, i: usize) {
+        if i == self.selected || i >= self.agents.len() {
+            return;
+        }
+        self.selected = i;
+        self.detail = Detail {
+            section: self.detail.section,
+            ..Detail::default()
+        };
     }
 
     /// Move the open section's cursor, clamped to what the section holds.
@@ -97,9 +111,7 @@ impl HarnessView {
             return;
         };
         let (runs, notes, events) = (agent.runs().len(), agent.notes.len(), agent.events.len());
-        let Some(d) = self.detail.as_mut() else {
-            return;
-        };
+        let d = &mut self.detail;
         let (cursor, len) = match d.section {
             Section::Runs => (&mut d.run, runs),
             Section::Artifacts => (&mut d.artifact, notes),

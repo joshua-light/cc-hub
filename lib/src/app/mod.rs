@@ -36,6 +36,7 @@ mod command;
 mod dispatch;
 mod harness_view;
 mod metrics_view;
+mod mouse;
 mod picker_list;
 mod places;
 mod render_state;
@@ -116,6 +117,8 @@ pub struct App {
     pub bookmarks: Bookmarks,
     pub gh_create_input: Option<GhCreateInput>,
     pub current_tab: Tab,
+    /// Where closing the open transcript or pane lands.
+    under_overlay: View,
     pub pending_dispatch: VecDeque<PendingDispatch>,
     /// Last time [`Self::poll_pending_dispatch`] probed the pane (a `tmux
     /// capture-pane` fork+exec). The poll runs every frame (~50ms) while a
@@ -188,6 +191,7 @@ impl App {
             bookmarks: Bookmarks::load(),
             gh_create_input: None,
             current_tab: Tab::Sessions,
+            under_overlay: View::Grid,
             pending_dispatch: VecDeque::new(),
             last_dispatch_probe_at: None,
             spawn_watches: Vec::new(),

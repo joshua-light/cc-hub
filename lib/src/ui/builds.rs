@@ -1,34 +1,33 @@
-//! Builds tab: a card per recipe. A card answers "what did it last run, and
-//! is it running now?": its border carries the recipe, the state of its build,
-//! the resource it holds and its description; inside is the build that
-//! matters now (running, else next to run, else the last to finish), each
-//! thing said once: its commit, its route and time against the route's
-//! usual, its phase or failure, and what comes after it. A recipe's older
-//! builds are its history, not cards.
+//! Builds tab: the recipes down the side, the selected one's page beside
+//! them. The page answers "what did it last run, and is it running now?":
+//! its border carries the recipe, the state of its build, the resource it
+//! holds and its description; inside is the build that matters now
+//! (running, else next to run, else the last to finish), then its log. A
+//! recipe's older builds are its history, not pages. `f` gives the page the
+//! keyboard, to scroll the log.
 
-use crate::app::{App, BuildForm, FormField, LogView};
+use crate::app::{App, BuildForm, FormField, LogView, View};
 use crate::builds::{recipe, short_commit, Build, BuildStatus};
 use crate::models::first_line_truncated;
-use crate::ui::common::{age, centered_fixed, centered_rect, popup_block, spinner_frame};
+use crate::ui::common::{age, centered_fixed, popup_block, Dot};
 use crate::ui::palette::{ACCENT_BLUE, DIM_TEXT, FAINT_TEXT, LABEL_GRAY, MUTED_TEXT, SEP_GRAY};
+use crate::ui::split::{keep_row_in_view, page_title, render_row, SidebarRow, Split};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
+use ratatui::widgets::{Clear, Padding, Paragraph};
 use ratatui::Frame;
 
-/// The narrowest a card gets before the cards stack into fewer columns.
-const CARD_W: u16 = 72;
-/// Four body lines and the border: the build's commit, its time, what it is
-/// doing, and what comes after it.
-const CARD_H: u16 = 6;
+/// The progress bar against the route's usual time, in cells.
 const BAR_W: usize = 10;
 
 pub(crate) fn hints(app: &App) -> &'static str {
     match app.view {
         crate::app::View::BuildForm => "tab/↑↓:field  ←/→:change  type:edit  enter:run  esc:cancel",
-        crate::app::View::BuildLog => "j/k:scroll  PgUp/PgDn:page  G:follow  esc:close",
-        _ => "r:run  n:run with…  c:cancel  enter/f:log  h/j/k/l:nav  tab:next  q:quit",
+        crate::app::View::BuildLog => {
+            "j/k:scroll  PgUp/PgDn:page  G:follow  r:run  n:run with…  c:cancel  esc/F1:list"
+        }
+        _ => "r:run  n:run with…  c:cancel  enter/f:log  j/k:recipe  tab:next  q:quit",
     }
 }
 
@@ -46,13 +45,15 @@ pub(crate) fn space_verb(app: &App) -> Option<&'static str> {
     )
 }
 
-fn status_mark(status: BuildStatus, now_ms: u64) -> (&'static str, Color) {
-    match status {
-        BuildStatus::Queued => ("󰔟", Color::Yellow),
-        BuildStatus::Running => (spinner_frame(now_ms), Color::Green),
-        BuildStatus::Succeeded => ("✓", Color::Green),
-        BuildStatus::Failed => ("✗", Color::Red),
-        BuildStatus::Cancelled => ("⊘", LABEL_GRAY),
+/// A recipe's dot, in the palette sessions use: white while its build
+/// runs, red when the build it shows failed, dark gray otherwise — queued,
+/// done, cancelled or never run. Whether the last one worked is the row's
+/// `✓`/`✗` to say.
+fn build_dot(shown: Option<&Build>) -> Dot {
+    match shown.map(|b| b.status) {
+        Some(BuildStatus::Running) => Dot::Working,
+        Some(BuildStatus::Failed) => Dot::Failed,
+        _ => Dot::Resting,
     }
 }
 
@@ -73,6 +74,7 @@ fn text(s: impl Into<String>, width: usize, style: Style) -> Span<'static> {
 }
 
 pub(crate) fn render_builds_body(frame: &mut Frame, area: Rect, app: &mut App) {
+    app.render.split = Default::default();
     if area.height < 2 || area.width < 20 {
         return;
     }
@@ -88,91 +90,94 @@ pub(crate) fn render_builds_body(frame: &mut Frame, area: Rect, app: &mut App) {
         );
         return;
     }
-    let body = Rect::new(
-        area.x,
-        area.y + 1,
-        area.width,
-        area.height.saturating_sub(1),
-    );
 
-    let cols = (body.width / CARD_W).max(1);
-    app.render.builds_cols = cols;
-    let rows_visible = (body.height / CARD_H).max(1);
-    let selected_row = app.builds.selected as u16 / cols;
-    if selected_row < app.render.builds_scroll {
-        app.render.builds_scroll = selected_row;
-    } else if selected_row >= app.render.builds_scroll + rows_visible {
-        app.render.builds_scroll = selected_row + 1 - rows_visible;
-    }
-
-    let cell_w = body.width / cols;
     let now = crate::persist::now_unix_secs();
     let now_ms = crate::ui::now_ms();
-    for (i, name) in app.builds.recipes.iter().enumerate() {
-        let (row, col) = (i as u16 / cols, i as u16 % cols);
-        if row < app.render.builds_scroll || row >= app.render.builds_scroll + rows_visible {
-            continue;
-        }
-        let y = body.y + (row - app.render.builds_scroll) * CARD_H;
-        if y + CARD_H > body.bottom() {
-            continue;
-        }
-        let x = body.x + col * cell_w;
-        let w = if col == cols - 1 {
-            body.right() - x
-        } else {
-            cell_w
-        };
-        let selected = i == app.builds.selected;
-        render_card(
+    let split = Split::of(area, app.view == View::BuildLog);
+    app.render.split.page = split.page;
+    render_list(frame, split.sidebar, app, now, now_ms);
+    if !split.page.is_empty() {
+        render_page(frame, split, app, now);
+    }
+    split.dim_unfocused(frame);
+}
+
+fn render_list(frame: &mut Frame, area: Rect, app: &mut App, now: i64, now_ms: u64) {
+    app.render.split.sidebar = area;
+    keep_row_in_view(
+        &mut app.render.builds_scroll,
+        app.builds.selected,
+        area.height,
+    );
+    let first = app.render.builds_scroll as usize;
+    let shown = app
+        .builds
+        .recipes
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(area.height as usize);
+    for (i, name) in shown {
+        let y = area.y + (i - first) as u16;
+        let row = sidebar_row(app, name, now, now_ms);
+        render_row(
             frame,
-            Rect::new(x, y, w, CARD_H),
-            app,
-            name,
-            selected,
-            now,
-            now_ms,
+            Rect::new(area.x, y, area.width, 1),
+            row,
+            i == app.builds.selected,
         );
+    }
+    let end = app.builds.recipes.len().min(first + area.height as usize);
+    app.render.split.rows = (first..end).map(|i| Some((0, i))).collect();
+}
+
+/// The state dot, the recipe in white as a session's name is, and at the
+/// far end how long its build has run, or how it went and how long ago.
+fn sidebar_row(app: &App, name: &str, now: i64, now_ms: u64) -> SidebarRow {
+    let shown = app.builds.shown(name);
+    SidebarRow {
+        mark: build_dot(shown).span(now_ms),
+        name: name.to_string(),
+        name_style: Style::default().fg(Color::White),
+        aside: shown.map_or(Span::raw(""), |b| last_build(b, now)),
     }
 }
 
-fn render_card(
-    frame: &mut Frame,
-    area: Rect,
-    app: &App,
-    name: &str,
-    selected: bool,
-    now: i64,
-    now_ms: u64,
-) {
+/// `▸ 3m` while it runs, `queued`, else `✓ 12m`, `✗ 3d` or `⊘ 1h` — the
+/// same marks the Agents list gives a run.
+fn last_build(build: &Build, now: i64) -> Span<'static> {
+    let ago = |mark: &str| match build.finished_at {
+        Some(at) => format!("{mark} {}", age(now, at)),
+        None => mark.to_string(),
+    };
+    match build.status {
+        BuildStatus::Running => Span::styled(
+            format!("▸ {}", duration(build.elapsed(now).unwrap_or(0))),
+            Style::default().fg(Color::Green),
+        ),
+        BuildStatus::Queued => Span::styled("queued", Style::default().fg(DIM_TEXT)),
+        BuildStatus::Succeeded => Span::styled(ago("✓"), Style::default().fg(DIM_TEXT)),
+        BuildStatus::Failed => Span::styled(ago("✗"), Style::default().fg(Color::Red)),
+        BuildStatus::Cancelled => Span::styled(ago("⊘"), Style::default().fg(DIM_TEXT)),
+    }
+}
+
+/// The selected recipe's page: framed with its name, its resource and its
+/// description; inside, the build that matters now, each thing said once —
+/// its commit, its route and time against the route's usual, its phase or
+/// failure, and what comes after it — then that build's log, following its
+/// end.
+fn render_page(frame: &mut Frame, split: Split, app: &App, now: i64) {
+    let Some(name) = app.builds.selected_recipe() else {
+        return;
+    };
     let recipe = recipe::named(name);
     let shown = app.builds.shown(name);
-    let width = area.width.saturating_sub(4) as usize;
+    let width = split.page.width.saturating_sub(4) as usize;
 
-    let (mark, color) = match shown {
-        Some(b) => status_mark(b.status, now_ms),
-        None => ("○", DIM_TEXT),
-    };
-    let border = if selected {
-        Color::White
-    } else if shown.is_some_and(|b| b.status == BuildStatus::Running) {
-        Color::Green
-    } else {
-        SEP_GRAY
-    };
-    let mut block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(if selected {
-            BorderType::Double
-        } else {
-            BorderType::Rounded
-        })
-        .border_style(Style::default().fg(border))
-        .padding(Padding::horizontal(1))
-        .title(Span::styled(
-            format!(" {} {} ", mark, name),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ));
+    let mut block = split
+        .page_block(page_title(build_dot(shown).span(crate::ui::now_ms()), name))
+        .padding(Padding::horizontal(1));
     if let Some(resource) = recipe.and_then(|r| r.resource.as_deref()) {
         block = block.title(hold_title(app, resource, now));
     }
@@ -183,17 +188,26 @@ fn render_card(
         block = block.title_bottom(Span::styled(
             format!(
                 " {} ",
-                first_line_truncated(description, width.saturating_sub(2))
+                first_line_truncated(description, width.saturating_sub(24))
             ),
             Style::default().fg(DIM_TEXT),
         ));
     }
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    if let Some(log) = app.builds.log.as_ref() {
+        let follow = match log.back {
+            0 => " following ".to_string(),
+            n => format!(" {} lines up · G follows ", n),
+        };
+        block = block.title_bottom(
+            Line::from(Span::styled(follow, Style::default().fg(DIM_TEXT))).right_aligned(),
+        );
+    }
+    let inner = block.inner(split.page);
+    frame.render_widget(block, split.page);
 
     let mut lines = match shown {
         Some(build) => {
-            let mut lines = vec![commit_line(build, color, width), time_line(app, build, now)];
+            let mut lines = vec![commit_line(build, width), time_line(app, build, now)];
             lines.extend(say_line(build, width));
             lines
         }
@@ -204,7 +218,34 @@ fn render_card(
         ))],
     };
     lines.extend(after_line(app, name, shown, now, width));
-    frame.render_widget(Paragraph::new(lines), inner);
+    let head_h = (lines.len() as u16).min(inner.height);
+    frame.render_widget(
+        Paragraph::new(lines),
+        Rect::new(inner.x, inner.y, inner.width, head_h),
+    );
+
+    let Some(log) = app.builds.log.as_ref() else {
+        return;
+    };
+    // A blank row, the rule, then the log to the bottom.
+    let top = head_h + 1;
+    if inner.height < top + 2 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            "─".repeat(inner.width as usize),
+            Style::default().fg(SEP_GRAY),
+        )),
+        Rect::new(inner.x, inner.y + top, inner.width, 1),
+    );
+    let body = Rect::new(
+        inner.x,
+        inner.y + top + 1,
+        inner.width,
+        inner.height - top - 1,
+    );
+    frame.render_widget(Paragraph::new(log_lines(log, body)), body);
 }
 
 /// The top border's right end: `󰌾 build-box · 12m`, or who is in the way.
@@ -230,8 +271,9 @@ fn hold_title(app: &App, resource: &str, now: i64) -> Line<'static> {
 }
 
 /// `1a2b3c4d5e6 · <subject>`, after the ref when one was pinned; the ref or
-/// the working tree until the recipe says what it built.
-fn commit_line(build: &Build, color: Color, width: usize) -> Line<'static> {
+/// the working tree until the recipe says what it built. White, as a title
+/// is: the dot in the frame says how it went.
+fn commit_line(build: &Build, width: usize) -> Line<'static> {
     let parts: Vec<&str> = [
         build.r#ref.as_deref(),
         build.commit.as_deref().map(short_commit),
@@ -247,7 +289,9 @@ fn commit_line(build: &Build, color: Color, width: usize) -> Line<'static> {
     Line::from(text(
         s,
         width,
-        Style::default().fg(color).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
     ))
 }
 
@@ -481,34 +525,6 @@ fn tilde(path: &str) -> String {
 
 // ---- the log ----------------------------------------------------------------
 
-pub(crate) fn render_build_log(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(log) = app.builds.log.as_ref() else {
-        return;
-    };
-    let build = app.builds.builds.iter().find(|b| b.id == log.id);
-    let popup = centered_rect(area, 0.92);
-    frame.render_widget(Clear, popup);
-    let title = match build {
-        Some(b) => format!(" {} · {} ", b.target(), b.status.label()),
-        None => format!(" {} ", log.id),
-    };
-    let follow = if log.back == 0 {
-        " following ".to_string()
-    } else {
-        format!(" {} lines up · G follows ", log.back)
-    };
-    let block = popup_block(Span::styled(
-        title,
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    ))
-    .title_bottom(Line::from(Span::styled(follow, Style::default().fg(DIM_TEXT))).right_aligned());
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-    frame.render_widget(Paragraph::new(log_lines(log, inner)), inner);
-}
-
 fn log_lines(log: &LogView, area: Rect) -> Vec<Line<'static>> {
     if log.lines.is_empty() {
         return vec![Line::from(Span::styled(
@@ -546,5 +562,64 @@ mod tests {
         assert_eq!(duration(120), "2m");
         assert_eq!(duration(200), "3m 20s");
         assert_eq!(duration(3900), "1h 5m");
+    }
+}
+
+// `App::new()` loads from `$HOME`, which only unix tests can redirect.
+#[cfg(all(test, unix))]
+mod page_tests {
+    use super::*;
+    use crate::app::BuildsSnapshot;
+    use crate::ui::common::buffer_to_string;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn render(app: &mut App, w: u16, h: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+        terminal
+            .draw(|f| render_builds_body(f, f.area(), app))
+            .expect("render");
+        buffer_to_string(terminal.backend().buffer())
+    }
+
+    // The recipes go down the side; the selected one's page beside them
+    // says what it last ran.
+    #[test]
+    fn the_page_beside_the_list_is_the_selected_recipe() {
+        crate::test_util::with_temp_home(|| {
+            let mut app = App::new();
+            let mut done = Build::new("build-server", "/tmp", None, None);
+            done.status = BuildStatus::Failed;
+            done.error = Some("compiler said no".into());
+            app.builds.update(BuildsSnapshot {
+                recipes: vec!["build-server".into(), "build-client".into()],
+                builds: vec![done],
+                ..Default::default()
+            });
+            let out = render(&mut app, 120, 16);
+            let rows: Vec<&str> = out.lines().collect();
+            assert!(
+                rows[0]
+                    .chars()
+                    .take(32)
+                    .collect::<String>()
+                    .contains("● build-server"),
+                "{out}"
+            );
+            assert!(
+                rows[1]
+                    .chars()
+                    .take(32)
+                    .collect::<String>()
+                    .contains("● build-client"),
+                "{out}"
+            );
+            assert!(out.contains("compiler said no"), "{out}");
+            assert_eq!(app.render.split.rows, vec![Some((0, 0)), Some((0, 1))]);
+
+            for (w, h) in [(30, 6), (60, 4), (120, 3)] {
+                let _ = render(&mut app, w, h);
+            }
+        });
     }
 }

@@ -19,49 +19,25 @@ use crate::ui::now_ms;
 use crate::ui::palette::{
     DIM_TEXT, HANDOFF_ROW_BG, SELECTED_HANDOFF_ROW_BG, SELECTED_ROW_BG, SEP_GRAY,
 };
+use crate::ui::split::Split;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use tui_term::widget::{Cursor, PseudoTerminal};
 
-/// The sidebar takes a quarter of the width, within these bounds.
-const SIDEBAR_MIN: u16 = 32;
-const SIDEBAR_MAX: u16 = 48;
-/// Narrower than this, the dock isn't worth drawing: the sidebar takes it
-/// all.
-const DOCK_MIN: u16 = 40;
 /// The task header's mark, the same one the list and the cards use.
 const TASK_ICON: &str = "󰢨";
 
 pub(super) fn render_split(frame: &mut Frame, area: Rect, app: &mut App) {
-    let sidebar_w = (area.width / 4).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
-    if area.width < sidebar_w + 1 + DOCK_MIN {
-        app.render.split.dock = Rect::default();
-        render_sidebar(frame, area, app);
-        return;
+    let split = Split::of(area, app.view == View::Dock);
+    app.render.split.page = split.page;
+    render_sidebar(frame, split.sidebar, app);
+    if !split.page.is_empty() {
+        render_dock(frame, split, app);
     }
-    let sidebar = Rect::new(area.x, area.y, sidebar_w, area.height);
-    let dock = Rect::new(
-        area.x + sidebar_w + 1,
-        area.y,
-        area.width - sidebar_w - 1,
-        area.height,
-    );
-    app.render.split.dock = dock;
-    render_sidebar(frame, sidebar, app);
-    render_dock(frame, dock, app);
-    // The side without the keyboard steps back, as an editor's inactive
-    // pane does, so where typing goes reads at a glance.
-    let unfocused = if app.view == View::Dock {
-        sidebar
-    } else {
-        dock
-    };
-    frame
-        .buffer_mut()
-        .set_style(unfocused, Style::default().add_modifier(Modifier::DIM));
+    split.dim_unfocused(frame);
 }
 
 /// One sidebar row, top to bottom.
@@ -260,15 +236,12 @@ fn row_background(marks: CardMarks) -> Option<Color> {
 /// The dock: a rounded frame titled with the selected session, around its
 /// live pane — or, when there is no pane to show, a word on why. The frame
 /// lights up while the keyboard is inside.
-fn render_dock(frame: &mut Frame, area: Rect, app: &mut App) {
-    let focused = app.view == View::Dock;
+fn render_dock(frame: &mut Frame, split: Split, app: &mut App) {
+    let (area, focused) = (split.page, split.page_focused);
     let session = app.selected_session_info().cloned();
     let now = now_ms();
 
-    let mut block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(if focused { Color::White } else { SEP_GRAY }));
+    let mut block = split.page_block(Line::default());
     if let Some(s) = session.as_ref() {
         let marks = CardMarks {
             held: app.sessions.holds.contains(&s.session_id),
