@@ -22,13 +22,12 @@ pub(super) fn render_task_card(
     sessions_by_tmux: &HashMap<&str, &SessionInfo>,
     now_secs: u64,
 ) {
-    let (border_type, border_style) = if selected {
-        (BorderType::Double, Style::default().fg(accent))
+    // The selected card is told by colour alone: its border takes the
+    // column's accent, in the same rounded line as the rest.
+    let border_style = if selected {
+        Style::default().fg(accent)
     } else {
-        (
-            BorderType::Rounded,
-            Style::default().fg(Color::Rgb(60, 60, 80)),
-        )
+        Style::default().fg(Color::Rgb(60, 60, 80))
     };
     // Priority badge rides the top-right of the border (`P1`–`P4`): black
     // text on a color-filled chip, prominent without stealing a text row. It
@@ -43,7 +42,7 @@ pub(super) fn render_task_card(
     .alignment(Alignment::Right);
     let mut block = Block::default()
         .borders(Borders::ALL)
-        .border_type(border_type)
+        .border_type(BorderType::Rounded)
         .border_style(border_style)
         .title(priority_badge);
     // The kind chip and the tags ride the top-left of the border, mirroring

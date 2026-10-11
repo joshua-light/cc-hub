@@ -49,15 +49,15 @@ pub(super) fn render_task_column(
     };
     let hidden_below = count.saturating_sub(scroll_top.saturating_add(max_cards));
 
-    let (border_type, border_style, title_style) = if col_focused {
+    // The focused column is told by colour alone: its border takes the
+    // column's accent, in the same rounded line as the rest.
+    let (border_style, title_style) = if col_focused {
         (
-            BorderType::Double,
             Style::default().fg(accent),
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         )
     } else {
         (
-            BorderType::Rounded,
             Style::default().fg(Color::Rgb(60, 60, 80)),
             Style::default().fg(LABEL_GRAY),
         )
@@ -81,7 +81,7 @@ pub(super) fn render_task_column(
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(border_type)
+        .border_type(BorderType::Rounded)
         .border_style(border_style)
         .title(Line::from(title_spans));
     frame.render_widget(block, area);
