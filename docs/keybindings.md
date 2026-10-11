@@ -127,6 +127,7 @@ Every key goes to the pane, except:
 | Key | Action |
 |---|---|
 | `F1` | Close the pane; in the split layout, give the keyboard back to the list |
+| Click | In the split layout: on a sidebar row, give the keyboard to the list with the cursor on that session; on the dock, type into its pane |
 | `Ctrl+Shift+V` | Paste the host clipboard |
 
 ## Popups

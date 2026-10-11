@@ -1,8 +1,6 @@
 //! Header bands: the title bar and the tab strip.
 
 use crate::app::{visible_tabs, App};
-use crate::models::SessionState;
-use crate::ui::common::{state_color, STATE_DOT};
 use crate::ui::palette::{ACCENT_BLUE, SEP_GRAY};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -10,56 +8,62 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-/// Background of the tab-strip band.
-const BAND_BG: Color = Color::Rgb(20, 20, 28);
+/// Tab names at rest; the active one is white.
+const TAB_GRAY: Color = Color::Rgb(120, 120, 140);
+/// The key hint after the last tab.
+const HINT_GRAY: Color = Color::Rgb(80, 80, 95);
 
+/// The tab strip, on the terminal's own background: ` icon Label ` per tab,
+/// over a hairline rule the width of the screen.
+/// The active tab is white and stands on a heavy accent stretch of that
+/// rule; the rest are gray.
 pub(super) fn render_tab_strip(frame: &mut Frame, area: Rect, app: &App) {
-    if area.height == 0 {
+    if area.height < 2 {
         return;
     }
-    let bg = Style::default().bg(BAND_BG);
+    let tabs_y = area.y + area.height - 2;
+    let rule_y = area.y + area.height - 1;
 
-    // Paint the full band (top padding + tabs row + bottom padding) so the
-    // background colour reads as a continuous header strip.
-    frame.render_widget(Paragraph::new("").style(bg), area);
-
-    let tabs = visible_tabs();
-    let mut spans: Vec<Span<'static>> = vec![Span::styled("  ", bg)];
-    for (i, tab) in tabs.iter().enumerate() {
-        let is_active = *tab == app.current_tab;
-        let (fg, bgc, modi) = if is_active {
-            (Color::Black, ACCENT_BLUE, Modifier::BOLD)
+    let mut names: Vec<Span<'static>> = vec![Span::raw("  ")];
+    let mut rule: Vec<Span<'static>> = vec![Span::styled("──", Style::default().fg(SEP_GRAY))];
+    for tab in visible_tabs() {
+        let active = tab == app.current_tab;
+        let name = format!(" {} {} ", tab.icon(), tab.label());
+        let width = name.chars().count();
+        let (name_style, rule_span) = if active {
+            (
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+                Span::styled("━".repeat(width), Style::default().fg(ACCENT_BLUE)),
+            )
         } else {
             (
-                Color::Rgb(170, 170, 190),
-                Color::Rgb(40, 40, 52),
-                Modifier::empty(),
+                Style::default().fg(TAB_GRAY),
+                Span::styled("─".repeat(width), Style::default().fg(SEP_GRAY)),
             )
         };
-        spans.push(Span::styled(
-            format!(" {} ", tab.label()),
-            Style::default().fg(fg).bg(bgc).add_modifier(modi),
-        ));
-        if i + 1 < tabs.len() {
-            spans.push(Span::styled(" ", bg));
-        }
+        names.push(Span::styled(name, name_style));
+        rule.push(rule_span);
     }
-    spans.push(Span::styled(
+    names.push(Span::styled(
         "   ⇥/K next · ⇧⇥/J prev tab",
-        Style::default().fg(Color::Rgb(80, 80, 95)).bg(BAND_BG),
+        Style::default().fg(HINT_GRAY),
+    ));
+    let drawn: usize = rule.iter().map(|s| s.content.chars().count()).sum();
+    rule.push(Span::styled(
+        "─".repeat((area.width as usize).saturating_sub(drawn)),
+        Style::default().fg(SEP_GRAY),
     ));
 
-    // Tabs go on the visual middle row (or first row if the band is shorter).
-    let row_y = area.y + area.height / 2;
-    let row_area = Rect::new(area.x, row_y, area.width, 1);
-    frame.render_widget(Paragraph::new(Line::from(spans)).style(bg), row_area);
+    let row = |y| Rect::new(area.x, y, area.width, 1);
+    frame.render_widget(Paragraph::new(Line::from(names)), row(tabs_y));
+    frame.render_widget(Paragraph::new(Line::from(rule)), row(rule_y));
 }
 
 pub(super) fn render_title_bar(frame: &mut Frame, area: Rect, app: &App) {
-    let total = app.session_count();
-    let attention = app.attention_count();
-
-    let mut left_spans = vec![
+    // Who is waiting on you is the tabs' to say; the bar names the app.
+    let left_spans = vec![
         Span::styled(
             " 󰚩 cc-hub ",
             Style::default()
@@ -67,21 +71,12 @@ pub(super) fn render_title_bar(frame: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{} sessions", total),
+            concat!("v", env!("CARGO_PKG_VERSION")),
             Style::default().fg(Color::DarkGray),
         ),
     ];
 
-    if attention > 0 {
-        left_spans.push(Span::styled(
-            format!("  {STATE_DOT} {attention} need attention"),
-            Style::default()
-                .fg(state_color(&SessionState::WaitingForInput))
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-
-    let bg = Style::default().bg(Color::Rgb(30, 30, 40)).fg(Color::White);
+    let bg = Style::default().fg(Color::White);
     let left_line = Line::from(left_spans);
 
     let mut right_spans = build_session_count_spans(&app.session_counts);
@@ -130,4 +125,35 @@ fn build_session_count_spans(c: &crate::sessions::count::SessionCounts) -> Vec<S
         Span::styled("this wk ", label_style),
         Span::styled(c.week.to_string(), num_style),
     ]
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::app::Tab;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    // The active tab stands on the heavy stretch of the rule, exactly as
+    // wide as its name; the band itself paints no background.
+    #[test]
+    fn the_active_tab_stands_on_the_accent_rule() {
+        crate::test_util::with_temp_home(|| {
+            let mut app = App::new();
+            app.current_tab = Tab::Sessions;
+            let mut terminal = Terminal::new(TestBackend::new(100, 3)).expect("terminal");
+            terminal
+                .draw(|f| render_tab_strip(f, f.area(), &app))
+                .expect("render");
+            let buf = terminal.backend().buffer();
+            let row = |y: u16| -> String { (0..100).map(|x| buf[(x, y)].symbol()).collect() };
+            let (names, rule) = (row(1), row(2));
+
+            let start = names.find(" 󰆍 Sessions ").expect("sessions tab");
+            let col = names[..start].chars().count();
+            let heavy: String = rule.chars().skip(col).take_while(|c| *c == '━').collect();
+            assert_eq!(heavy.chars().count(), " 󰆍 Sessions ".chars().count());
+            assert!((0..100).all(|x| buf[(x, 1)].bg == Color::Reset));
+        });
+    }
 }

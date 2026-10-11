@@ -2,11 +2,12 @@
 //! generic popups any tab can open (session detail, live tail, tmux pane,
 //! close confirmation).
 
-use super::{App, Command, SessionsCommand};
+use super::{App, Command, SessionsCommand, SessionsLayout};
 use crate::config;
 use crate::live_view::LiveView;
 use crate::tmux_pane::TmuxPaneView;
-use crossterm::event::{MouseEvent, MouseEventKind};
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Position;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum View {
@@ -81,6 +82,18 @@ impl Tab {
             Tab::Builds => "Builds",
             Tab::Agents => "Agents",
             Tab::Metrics => "Metrics",
+        }
+    }
+
+    /// The Nerd Font mark ahead of the label. Tasks takes the mark task
+    /// headers and badges already carry.
+    pub fn icon(&self) -> &'static str {
+        match self {
+            Tab::Tasks => "󰢨",
+            Tab::Sessions => "󰆍",
+            Tab::Builds => "󰣪",
+            Tab::Agents => "󱙺",
+            Tab::Metrics => "󰄨",
         }
     }
 }
@@ -179,14 +192,19 @@ impl App {
     }
 
     /// Whether the hub wants the terminal's mouse: while a pane is on screen
-    /// to take it. Without capture the terminal turns the wheel into arrow
-    /// keys, and over the dock those would move the list's cursor.
+    /// to take it, or the split layout is, so a click can move the focus.
+    /// Without capture the terminal turns the wheel into arrow keys, and
+    /// over the dock those would move the list's cursor.
     pub fn wants_mouse(&self) -> bool {
         match self.view {
             View::TmuxPane | View::Dock => true,
-            View::Grid => self.sessions.dock.pane().is_some(),
+            View::Grid => self.split_on_screen() || self.sessions.dock.pane().is_some(),
             _ => false,
         }
+    }
+
+    fn split_on_screen(&self) -> bool {
+        self.current_tab == Tab::Sessions && self.sessions.layout == SessionsLayout::Split
     }
 
     /// Route a captured mouse event. A focused pane takes every event. With
@@ -194,6 +212,9 @@ impl App {
     /// it, so it scrolls without being focused, and the wheel anywhere else
     /// moves the cursor as the terminal's arrow keys did.
     pub fn mouse(&mut self, ev: MouseEvent) {
+        if self.click_moves_focus(ev) {
+            return;
+        }
         if let Some(pane) = self.focused_pane() {
             pane.send_mouse(ev);
             return;
@@ -212,6 +233,31 @@ impl App {
                 self.execute(Command::Sessions(nav));
             }
         }
+    }
+
+    /// A left click in the split layout puts the keyboard where it lands: on
+    /// the sidebar, the list takes it, with the cursor on the session
+    /// clicked; on the dock, its pane does. The click that moves the focus
+    /// goes no further; one inside the pane that already has it does.
+    fn click_moves_focus(&mut self, ev: MouseEvent) -> bool {
+        let clicked = ev.kind == MouseEventKind::Down(MouseButton::Left);
+        if !clicked || !self.split_on_screen() || !matches!(self.view, View::Grid | View::Dock) {
+            return false;
+        }
+        let at = Position::new(ev.column, ev.row);
+        let split = &self.render.split;
+        if split.sidebar.contains(at) {
+            if let Some((group, index)) = split.session_at(ev.column, ev.row) {
+                self.sessions.sel_group = group;
+                self.sessions.sel_in_group = index;
+            }
+            self.leave_dock();
+            return true;
+        }
+        if self.view == View::Grid && split.dock.contains(at) {
+            return self.focus_dock();
+        }
+        false
     }
 
     /// F1 in a pane: close the popup, or hand the dock's keyboard back to
@@ -303,8 +349,34 @@ mod tests {
         }
     }
 
-    // With no pane on screen the terminal keeps the mouse, and a wheel that
-    // does arrive over the list moves the cursor, as its arrow keys would.
+    fn click(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Two sessions in the sidebar, rows 1 and 2 under the project's header,
+    /// and the dock to the right of column 32.
+    fn split_app() -> App {
+        let mut app = App::new();
+        app.update_sessions(vec![
+            fake_session("cchub-a", SessionState::Idle),
+            fake_session("cchub-b", SessionState::Idle),
+        ]);
+        app.render.split = crate::app::SplitAreas {
+            sidebar: ratatui::layout::Rect::new(0, 0, 32, 10),
+            dock: ratatui::layout::Rect::new(33, 0, 80, 10),
+            rows: vec![None, Some((0, 0)), Some((0, 1))],
+        };
+        app
+    }
+
+    // Away from Split, with no pane on screen, the terminal keeps the mouse;
+    // a wheel that does arrive over the list moves the cursor, as its arrow
+    // keys would.
     #[test]
     fn the_wheel_over_the_list_moves_the_cursor() {
         let mut app = App::new();
@@ -312,12 +384,45 @@ mod tests {
             fake_session("cchub-a", SessionState::Idle),
             fake_session("cchub-b", SessionState::Idle),
         ]);
+        app.sessions.layout = SessionsLayout::List;
         assert!(!app.wants_mouse());
 
         app.mouse(wheel(MouseEventKind::ScrollDown));
         assert_eq!(app.sessions.sel_in_group, 1);
         app.mouse(wheel(MouseEventKind::ScrollUp));
         assert_eq!(app.sessions.sel_in_group, 0);
+    }
+
+    // Split takes the mouse even with no pane in the dock, so a click on
+    // another session still lands.
+    #[test]
+    fn split_takes_the_mouse_without_a_pane() {
+        assert!(split_app().wants_mouse());
+    }
+
+    // A click on a sidebar row moves the cursor there and the keyboard back
+    // to the list; a click on a header only does the latter.
+    #[test]
+    fn a_click_on_the_sidebar_focuses_the_list_on_that_session() {
+        let mut app = split_app();
+        app.view = View::Dock;
+
+        app.mouse(click(3, 2));
+        assert_eq!(app.view, View::Grid);
+        assert_eq!(app.sessions.sel_in_group, 1);
+
+        app.view = View::Dock;
+        app.mouse(click(3, 0));
+        assert_eq!(app.view, View::Grid);
+        assert_eq!(app.sessions.sel_in_group, 1);
+    }
+
+    #[test]
+    fn a_click_on_the_dock_focuses_it() {
+        let mut app = split_app();
+
+        app.mouse(click(50, 5));
+        assert_eq!(app.view, View::Dock);
     }
 
     // A popup over the list keeps the wheel off the cursor.

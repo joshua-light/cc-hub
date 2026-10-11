@@ -1,3 +1,5 @@
+use ratatui::layout::{Position, Rect};
+
 /// Layout state computed (and clamp-written) by `ui/` during draw.
 ///
 /// `ui/` is the only writer during render; `App` nav methods may read and
@@ -13,7 +15,7 @@
 ///   [`Self::grid_scroll`] through `sessions::keep_in_view` (one writer per
 ///   layout); `ui/sessions/detail.rs` clamps [`Self::popup_scroll`].
 /// - `ui/builds.rs` writes [`Self::builds_cols`] and [`Self::builds_scroll`].
-/// - `ui/sessions/split.rs` writes [`Self::dock_size`].
+/// - `ui/sessions/split.rs` writes [`Self::dock_size`] and [`Self::split`].
 /// - `ui/metrics/mod.rs` writes [`Self::metrics_view_height`],
 ///   [`Self::metrics_row_lines`], and [`Self::metrics_scroll`].
 pub struct RenderState {
@@ -53,6 +55,29 @@ pub struct RenderState {
     /// `(rows, cols)` inside the split layout's dock, written by
     /// `ui/sessions/split.rs`: the size the next attach starts at.
     pub dock_size: (u16, u16),
+    /// Where the split layout last drew its two sides, so a click can tell
+    /// which one it landed on.
+    pub split: SplitAreas,
+}
+
+/// The split layout as last drawn: the sidebar, the dock beside it (empty
+/// when the screen is too narrow for one), and the session each visible
+/// sidebar row shows, top to bottom — `None` for headers and gaps.
+#[derive(Default)]
+pub struct SplitAreas {
+    pub sidebar: Rect,
+    pub dock: Rect,
+    pub rows: Vec<Option<(usize, usize)>>,
+}
+
+impl SplitAreas {
+    /// The `(group, index)` of the session drawn at screen cell `(x, y)`.
+    pub fn session_at(&self, x: u16, y: u16) -> Option<(usize, usize)> {
+        if !self.sidebar.contains(Position::new(x, y)) {
+            return None;
+        }
+        *self.rows.get(usize::from(y - self.sidebar.y))?
+    }
 }
 
 impl Default for RenderState {
@@ -70,6 +95,7 @@ impl Default for RenderState {
             builds_cols: 1,
             builds_scroll: 0,
             dock_size: (30, 100),
+            split: SplitAreas::default(),
         }
     }
 }

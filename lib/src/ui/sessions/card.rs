@@ -128,7 +128,7 @@ fn with_task_badge<'a>(mut block: Block<'a>, badge: &TaskBadge, width: u16) -> B
     let color = badge_color(badge);
     let prio_w = badge.priority.map_or(0, |p| p.label().chars().count() + 2);
     let label = format!(
-        " 󰓹 {} ",
+        " 󰢨 {} ",
         first_line_truncated(
             &badge.title,
             (width as usize).saturating_sub(7 + prio_w).max(4)

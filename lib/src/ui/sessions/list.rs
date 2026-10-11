@@ -209,7 +209,7 @@ fn render_row(
     if cols.task_w > 0 {
         let (text, style) = match badge {
             Some(b) => (
-                format!("󰓹 {}", first_line_truncated(&b.title, cols.task_w - 2)),
+                format!("󰢨 {}", first_line_truncated(&b.title, cols.task_w - 2)),
                 Style::default().fg(badge_color(b)),
             ),
             None => (String::new(), Style::default()),
