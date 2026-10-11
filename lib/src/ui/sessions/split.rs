@@ -33,11 +33,12 @@ const SIDEBAR_MAX: u16 = 48;
 /// all.
 const DOCK_MIN: u16 = 40;
 /// The task header's mark, the same one the list and the cards use.
-const TASK_ICON: &str = "󰓹";
+const TASK_ICON: &str = "󰢨";
 
 pub(super) fn render_split(frame: &mut Frame, area: Rect, app: &mut App) {
     let sidebar_w = (area.width / 4).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
     if area.width < sidebar_w + 1 + DOCK_MIN {
+        app.render.split.dock = Rect::default();
         render_sidebar(frame, area, app);
         return;
     }
@@ -48,6 +49,7 @@ pub(super) fn render_split(frame: &mut Frame, area: Rect, app: &mut App) {
         area.width - sidebar_w - 1,
         area.height,
     );
+    app.render.split.dock = dock;
     render_sidebar(frame, sidebar, app);
     render_dock(frame, dock, app);
     // The side without the keyboard steps back, as an editor's inactive
@@ -113,6 +115,8 @@ fn rows(app: &App) -> Vec<Row<'_>> {
 }
 
 fn render_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
+    app.render.split.sidebar = area;
+    app.render.split.rows.clear();
     if app.sessions.groups.is_empty() {
         render_no_sessions(frame, area);
         return;
@@ -165,8 +169,18 @@ fn render_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
             Row::Gap => {}
         }
     }
+    let hits = rows
+        .iter()
+        .skip(scroll as usize)
+        .take(area.height as usize)
+        .map(|r| match r {
+            Row::Session { group, index, .. } => Some((*group, *index)),
+            _ => None,
+        })
+        .collect();
     drop(rows);
     app.render.grid_scroll = scroll;
+    app.render.split.rows = hits;
 }
 
 /// ` 󰉋 name ──────`: the project's name, then a rule to the edge that
@@ -188,7 +202,7 @@ fn render_project_header(frame: &mut Frame, area: Rect, group: &ProjectGroup) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// ` 󰓹 task title`, in the task's identity colour (gray once it is done).
+/// ` 󰢨 task title`, in the task's identity colour (gray once it is done).
 fn render_task_header(frame: &mut Frame, area: Rect, badge: &TaskBadge) {
     let title = badge.title.lines().next().unwrap_or("");
     let title = first_line_truncated(title, (area.width as usize).saturating_sub(4));
@@ -555,7 +569,7 @@ mod tests {
                 rows,
                 vec![
                     header("alpha").as_str(),
-                    " 󰓹 Ship it",
+                    " 󰢨 Ship it",
                     "   ● Plan",
                     "   ● Build",
                     " ● Loose",
