@@ -8,10 +8,11 @@
 //! `role` is a hand-over: it starts a fresh session and closes the card's old
 //! one in that directory after this command has reported. With accounts
 //! configured the broker also treats a change of directory as a hand-over
-//! and stops the old worker itself. A fix link files a board card first and is
-//! then worked like a task link's card: through the broker when accounts are
-//! configured, so the fix runs on whichever subscription has room, and the
-//! card moves to Running once its worker is bound. It is also handy by hand:
+//! and stops the old worker itself. A chore link — a fix or a merge of the
+//! target branch — files a board card first and is then worked like a task
+//! link's card: through the broker when accounts are configured, so the chore
+//! runs on whichever subscription has room, and the card moves to Running
+//! once its worker is bound. It is also handy by hand:
 //! `cc-hub open 'cc-hub://review?depth=light&pr=…' --dry-run` shows where a
 //! link would land without spawning anything.
 
@@ -57,15 +58,15 @@ pub(crate) fn open(args: &[String]) -> Result<(), CliError> {
     };
 
     if f.agent.is_none() && !cc_hub_lib::resources::accounts().is_empty() {
-        if let Link::Fix(fix) = &link {
+        if let Some(chore) = link.chore() {
             let target = ops::link::target(&link, None)?;
-            let card = ops::link::file_fix(fix)?;
+            let card = ops::link::file_chore(chore)?;
             let started = broker_start(
                 card.to_string(),
-                fix.kind.clone().unwrap_or_else(|| "basic".into()),
+                chore.kind().unwrap_or("basic").into(),
                 "implementation".into(),
                 target.cwd.to_string_lossy().into(),
-                fix.prompt_for(&card),
+                chore.prompt_for(&card),
                 target.title,
             );
             if started.is_ok() {

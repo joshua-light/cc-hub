@@ -1,12 +1,11 @@
+use super::chore::Chore;
 use super::pull_request::{pull_request_titled, PullRequestUrl};
-use super::task::BoardTaskId;
 
 /// `cc-hub://fix?pr=<url>[&title=<text>][&kind=<word>]`: address the review
 /// comments of a pull request in a fresh agent session, filed as a card on
 /// the Tasks board. `title` is the pull request's own title, as on a review
-/// link; it names the session and the card. `kind` is the deliverable kind
-/// the card is filed under — one of the board's configured kinds — and the
-/// key the resource broker routes the session's account by.
+/// link; it names the session and the card. `kind` is the card's kind (see
+/// [`Chore::kind`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FixLink {
     pub pr: PullRequestUrl,
@@ -14,12 +13,24 @@ pub struct FixLink {
     pub kind: Option<String>,
 }
 
-impl FixLink {
-    /// The opening prompt of the fix session: the standing orders for
-    /// working through a review, and the pull request they apply to. The
-    /// comments are tracked as Bitbucket tasks so the reviewer can see what
-    /// was addressed and what was answered.
-    pub fn prompt(&self) -> String {
+impl Chore for FixLink {
+    fn pr(&self) -> &PullRequestUrl {
+        &self.pr
+    }
+
+    fn kind(&self) -> Option<&str> {
+        self.kind.as_deref()
+    }
+
+    /// `Fix: <title>`, or `Fix: <repo>#<n>` when the link carried no title.
+    fn session_title(&self) -> String {
+        pull_request_titled("Fix", &self.pr, self.title.as_deref())
+    }
+
+    /// The standing orders for working through a review. The comments are
+    /// tracked as Bitbucket tasks so the reviewer can see what was addressed
+    /// and what was answered.
+    fn prompt(&self) -> String {
         format!(
             "Switch to the branch of this PR and address all the comments in it: {} \
              Mark each comment as a task; once the fix is committed and pushed, mark that task as done. \
@@ -31,30 +42,28 @@ impl FixLink {
         )
     }
 
-    /// The opening prompt once the fix is filed as board card `card`: the
-    /// standing orders, then where the outcome is written. The card is the
-    /// user's view of the work, so the session closes it out with one note.
-    pub fn prompt_for(&self, card: &BoardTaskId) -> String {
+    /// A review already asked, so the brief writes itself: the comments are
+    /// the problem, working them is the solution, and the reviewer is the
+    /// verification.
+    fn brief(&self) -> String {
         format!(
-            "{}\n\nThis work is card {} on the Tasks board. \
-             When every comment is handled and pushed, write one note on it: \
-             cc-hub board note --task {} --text \"Pushed: <what changed, one line>\"",
-            self.prompt(),
-            card,
-            card
+            "Brief\n\
+             Problem: {} has review comments waiting on the author.\n\
+             Solution: address them on the pull request's branch — one Bitbucket task per comment, done once its fix is committed and pushed; answer questions, ask when a comment is ambiguous.\n\
+             Verification: the reviewer re-reads the pull request. This task has the one role; no hand-over.",
+            self.pr
         )
     }
 
-    /// The name the session is born with: `Fix: <title>`, or `Fix: <repo>#<n>`
-    /// when the link carried no title.
-    pub fn session_title(&self) -> String {
-        pull_request_titled("Fix", &self.pr, self.title.as_deref())
+    fn done_when(&self) -> &'static str {
+        "every comment is handled and pushed"
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::link::task::BoardTaskId;
     use crate::link::tests::PR;
     use crate::link::{Link, LinkError};
 

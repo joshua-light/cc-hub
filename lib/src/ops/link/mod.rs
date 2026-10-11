@@ -4,11 +4,12 @@
 //! found by name among bookmarks and scanned session cwds. Without one it
 //! runs from the home directory, and its prompt says there is no working tree.
 //!
-//! A fix writes and pushes, so it needs a checkout. It is filed as a board
-//! card ([`file_fix`]) with its brief as the first note. The comments are the
-//! brief, so the card skips Planning and moves to Running once its session is
-//! bound ([`start_card`]). The card also gives the resource broker something
-//! to hold a worker against.
+//! A chore — a fix or a merge of the target branch — writes and pushes, so
+//! it needs a checkout. It is filed as a board card ([`file_chore`]) with its
+//! brief as the first note. The pull request already says what to do, so the
+//! card skips Planning and moves to Running once its session is bound
+//! ([`start_card`]). The card also gives the resource broker something to
+//! hold a worker against.
 //!
 //! A task link starts a session in the directory it names, bound and linked
 //! to the card so the Sessions grid shows its badge. A card has at most one
@@ -22,12 +23,12 @@
 //! are named once a scan finds them.
 //!
 //! - `target`: resolve a link to its [`LinkTarget`] without side effects.
-//! - `fix`: file a fix link as a board card and start it.
+//! - `chore`: file a chore link as a board card and start it.
 
-mod fix;
+mod chore;
 mod target;
 
-pub use fix::{file_fix, start_card};
+pub use chore::{file_chore, start_card};
 pub use target::{session_to_supersede, target, LinkTarget};
 
 use std::path::Path;
@@ -59,7 +60,7 @@ pub struct Opened {
     pub session_id: Option<String>,
     pub prompt_status: PromptStatus,
     /// The board card the session is bound to: the link's own for a task,
-    /// the one [`file_fix`] minted for a fix, none for a review.
+    /// the one [`file_chore`] minted for a chore, none for a review.
     pub task_id: Option<String>,
     /// The card already had a live session where the link pointed, and the
     /// prompt went there instead of to a new one.
@@ -129,15 +130,15 @@ pub fn open(link: &Link, opts: OpenOpts) -> Result<Opened, OpError> {
         }
     }
 
-    // The card the session will be bound to. A fix mints its own here, and
+    // The card the session will be bound to. A chore mints its own here, and
     // from then on is worked exactly like a task link's card.
-    let filed = match link {
-        Link::Fix(fix) => {
-            let card = file_fix(fix)?;
-            target.prompt = fix.prompt_for(&card);
+    let filed = match link.chore() {
+        Some(chore) => {
+            let card = file_chore(chore)?;
+            target.prompt = chore.prompt_for(&card);
             Some(card)
         }
-        _ => None,
+        None => None,
     };
     let card_id = match link {
         Link::Task(task) => Some(task.id.as_str()),

@@ -5,6 +5,7 @@
 //! ```text
 //! cc-hub://review?depth=light&pr=https%3A%2F%2Fbitbucket.example.com%2Fprojects%2FAPP%2Frepos%2Fsample-project%2Fpull-requests%2F11280
 //! cc-hub://fix?pr=https%3A%2F%2Fbitbucket.example.com%2Fprojects%2FAPP%2Frepos%2Fsample-project%2Fpull-requests%2F11280&kind=tps
+//! cc-hub://merge-target?pr=https%3A%2F%2Fbitbucket.example.com%2Fprojects%2FAPP%2Frepos%2Fsample-project%2Fpull-requests%2F11280&kind=tps
 //! cc-hub://task?id=tk-1788509616255974000&dir=%2FUsers%2Fme%2Fgit%2Fself%2Fcc-hub
 //! ```
 //!
@@ -13,17 +14,25 @@
 //!
 //! - `review`: [`ReviewLink`], review a pull request.
 //! - `fix`: [`FixLink`], work through a pull request's review comments.
+//! - `merge-target`: [`MergeTargetLink`], merge a pull request's target
+//!   branch into its source branch.
+//! - `chore`: [`Chore`], what a fix and a merge share — work on a pull
+//!   request's branch, filed as a board card.
 //! - `task`: [`TaskLink`], hand a Tasks-board card to a session.
 //! - `pull_request`: [`PullRequestUrl`], the repo and number a PR URL names.
 //! - `query`: the percent-decoded `key=value` tail.
 
+mod chore;
 mod fix;
+mod merge_target;
 mod pull_request;
 mod query;
 mod review;
 mod task;
 
+pub use chore::Chore;
 pub use fix::FixLink;
+pub use merge_target::MergeTargetLink;
 pub use pull_request::PullRequestUrl;
 pub use review::{PostThreshold, ReviewDepth, ReviewLink};
 pub use task::{BoardTaskId, TaskLink};
@@ -41,6 +50,7 @@ pub const SCHEME: &str = "cc-hub";
 pub enum Link {
     Review(ReviewLink),
     Fix(FixLink),
+    MergeTarget(MergeTargetLink),
     Task(TaskLink),
 }
 
@@ -50,7 +60,17 @@ impl Link {
         match self {
             Link::Review(_) => "review",
             Link::Fix(_) => "fix",
+            Link::MergeTarget(_) => "merge-target",
             Link::Task(_) => "task",
+        }
+    }
+
+    /// The chore this link files as a board card, if it is one.
+    pub fn chore(&self) -> Option<&dyn Chore> {
+        match self {
+            Link::Fix(fix) => Some(fix),
+            Link::MergeTarget(merge) => Some(merge),
+            Link::Review(_) | Link::Task(_) => None,
         }
     }
 }
@@ -80,6 +100,11 @@ impl FromStr for Link {
                     .transpose()?,
             })),
             "fix" => Ok(Link::Fix(FixLink {
+                pr: query.required("pr")?.parse()?,
+                title: query.optional("title").map(str::to_string),
+                kind: query.optional("kind").map(str::to_string),
+            })),
+            "merge-target" => Ok(Link::MergeTarget(MergeTargetLink {
                 pr: query.required("pr")?.parse()?,
                 title: query.optional("title").map(str::to_string),
                 kind: query.optional("kind").map(str::to_string),
@@ -123,7 +148,11 @@ impl fmt::Display for LinkError {
         match self {
             LinkError::NotCcHub(s) => write!(f, "not a {}:// link: {}", SCHEME, s),
             LinkError::UnknownKind(k) => {
-                write!(f, "unknown link kind: {} (try `review`, `fix` or `task`)", k)
+                write!(
+                    f,
+                    "unknown link kind: {} (try `review`, `fix`, `merge-target` or `task`)",
+                    k
+                )
             }
             LinkError::MissingParam(p) => write!(f, "missing `{}` parameter", p),
             LinkError::BadDepth(d) => write!(f, "depth must be `light` or `full`, got: {}", d),
