@@ -50,6 +50,16 @@ pub(super) fn render_split(frame: &mut Frame, area: Rect, app: &mut App) {
     );
     render_sidebar(frame, sidebar, app);
     render_dock(frame, dock, app);
+    // The side without the keyboard steps back, as an editor's inactive
+    // pane does, so where typing goes reads at a glance.
+    let unfocused = if app.view == View::Dock {
+        sidebar
+    } else {
+        dock
+    };
+    frame
+        .buffer_mut()
+        .set_style(unfocused, Style::default().add_modifier(Modifier::DIM));
 }
 
 /// One sidebar row, top to bottom.
@@ -63,9 +73,9 @@ enum Row<'a> {
         group: usize,
         index: usize,
         session: &'a SessionInfo,
-        /// The task the session sits under, if any: its rows indent behind
-        /// a guide in the task's colour.
-        task: Option<Color>,
+        /// Whether the session sits under a task header: its row indents
+        /// one step so the dot lines up with the task's title.
+        under_task: bool,
     },
     Gap,
 }
@@ -84,17 +94,17 @@ fn rows(app: &App) -> Vec<Row<'_>> {
         let mut open_task: Option<String> = None;
         for (si, session) in group.sessions.iter().enumerate() {
             let badge = app.task_badge(&session.session_id);
-            let task = badge.as_ref().map(badge_color);
             let task_id = badge.as_ref().map(|b| b.task_id.clone());
             if task_id.is_some() && task_id != open_task {
                 rows.extend(badge.map(Row::Task));
             }
+            let under_task = task_id.is_some();
             open_task = task_id;
             rows.push(Row::Session {
                 group: gi,
                 index: si,
                 session,
-                task,
+                under_task,
             });
         }
         rows.push(Row::Gap);
@@ -147,10 +157,10 @@ fn render_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
                 group,
                 index,
                 session,
-                task,
+                under_task,
             } => {
                 let marks = CardMarks::of(app, *group, *index, session);
-                render_session(frame, line, session, *task, marks, now);
+                render_session(frame, line, session, *under_task, marks, now);
             }
             Row::Gap => {}
         }
@@ -189,29 +199,30 @@ fn render_task_header(frame: &mut Frame, area: Rect, badge: &TaskBadge) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// ` ● title…`, or ` │ ● title…` under a task: the task's guide, the state
-/// dot, and the title. The cursor and the handoff mark are the row's
+/// ` ● title…`, or `   ● title…` under a task: the indent, the state dot,
+/// and the title. The cursor and the handoff mark are the row's
 /// background, see [`row_background`].
 fn render_session(
     frame: &mut Frame,
     area: Rect,
     session: &SessionInfo,
-    task: Option<Color>,
+    under_task: bool,
     marks: CardMarks,
     now: u64,
 ) {
     let dot = dot_color(&session.state, marks, now);
-    let mut spans = vec![Span::raw(" ")];
-    if let Some(color) = task {
-        spans.push(Span::styled("│ ", Style::default().fg(color)));
-    }
+    let indent = if under_task { "   " } else { " " };
+    let mut spans = vec![Span::raw(indent)];
     spans.push(Span::styled(
         format!("{STATE_DOT} "),
         Style::default().fg(dot),
     ));
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let (title, title_style) = row_title(session, marks.selected);
-    let title = first_line_truncated(&title, (area.width as usize).saturating_sub(used + 1));
+    let (title, title_style) = row_title(
+        session,
+        marks,
+        (area.width as usize).saturating_sub(used + 1),
+    );
     spans.push(Span::styled(title, title_style));
 
     let mut row = Paragraph::new(Line::from(spans));
@@ -293,11 +304,11 @@ fn render_dock(frame: &mut Frame, area: Rect, app: &mut App) {
 /// ` ● title ` in the session's own colours.
 fn dock_title(session: &SessionInfo, marks: CardMarks, now: u64) -> Line<'static> {
     let dot = dot_color(&session.state, marks, now);
-    let (title, _) = row_title(session, false);
+    let (title, _) = row_title(session, marks, 60);
     Line::from(vec![
         Span::styled(format!(" {STATE_DOT} "), Style::default().fg(dot)),
         Span::styled(
-            format!("{} ", first_line_truncated(&title, 60)),
+            format!("{title} "),
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
@@ -545,8 +556,8 @@ mod tests {
                 vec![
                     header("alpha").as_str(),
                     " 󰓹 Ship it",
-                    " │ ● Plan",
-                    " │ ● Build",
+                    "   ● Plan",
+                    "   ● Build",
                     " ● Loose",
                     "",
                     header("beta").as_str(),
@@ -567,6 +578,54 @@ mod tests {
             });
             let rows = render(&mut app, 60, 6);
             assert!(rows.iter().all(|r| !r.contains("╭")), "{rows:#?}");
+        });
+    }
+
+    // Only the side with the keyboard is drawn at full strength: the dock
+    // dims while the list has it, and the list dims while the dock has it.
+    #[test]
+    fn the_side_without_the_keyboard_is_dimmed() {
+        crate::test_util::with_temp_home(|| {
+            let mut app = app_with(SessionInfo {
+                session_id: "a-1".into(),
+                title: Some("Fix auth".into()),
+                tmux_session: None,
+                ..crate::test_util::session_info()
+            });
+            let dimmed = |app: &mut App| {
+                let mut terminal = Terminal::new(TestBackend::new(120, 6)).expect("terminal");
+                terminal
+                    .draw(|f| render_split(f, f.area(), app))
+                    .expect("render");
+                let buf = terminal.backend().buffer();
+                let dim = |x: u16| buf[(x, 1)].modifier.contains(Modifier::DIM);
+                (dim(3), dim(40))
+            };
+
+            assert_eq!(dimmed(&mut app), (false, true));
+            app.view = View::Dock;
+            assert_eq!(dimmed(&mut app), (true, false));
+        });
+    }
+
+    // `r` types the new name into the row itself, cursor last; the dock
+    // keeps the old name until Enter.
+    #[test]
+    fn a_rename_is_typed_into_the_row() {
+        crate::test_util::with_temp_home(|| {
+            let mut app = app_with(SessionInfo {
+                session_id: "a-1".into(),
+                title: Some("Fix auth".into()),
+                tmux_session: None,
+                ..crate::test_util::session_info()
+            });
+            assert!(app.enter_rename_session());
+            app.rename_buffer = "Fix login".into();
+            let rows = render(&mut app, 120, 10);
+
+            let sidebar: String = rows[1].chars().take(32).collect();
+            assert_eq!(sidebar.trim_end(), " ● Fix login▎");
+            assert!(rows[0].contains("Fix auth"), "{}", rows[0]);
         });
     }
 }

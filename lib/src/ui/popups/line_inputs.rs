@@ -1,4 +1,4 @@
-//! Single-line editors: task attachment, task tags, session rename.
+//! Single-line editors: task attachment and task tags.
 
 use super::widgets::{key_footer, render_line_input, wrapped_rows};
 use crate::app::App;
@@ -67,29 +67,5 @@ pub(crate) fn render_task_tags(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled("  # ", Style::default().fg(Color::Cyan)),
         input_line,
         key_footer("save", None),
-    );
-}
-
-pub(crate) fn render_rename_session(frame: &mut Frame, area: Rect, app: &App) {
-    let mut input_line = app.rename_buffer.clone();
-    input_line.push(CURSOR);
-
-    let desired_w = 70u16.min(area.width);
-    let desired_h = 9u16.min(area.height);
-    let popup = centered_fixed(area, desired_w, desired_h);
-
-    let subtitle = match app.rename_original_title() {
-        Some(t) if !t.is_empty() => format!(" was “{}” ", t),
-        _ => " untitled ".to_string(),
-    };
-
-    render_line_input(
-        frame,
-        popup,
-        " Rename session ",
-        &subtitle,
-        Span::styled("  ", Style::default().fg(Color::DarkGray)),
-        input_line,
-        key_footer("rename", None),
     );
 }

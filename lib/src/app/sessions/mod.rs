@@ -7,7 +7,7 @@
 //! - `spawn`: spawn watchdogs, placeholder cards, boot-time naming.
 //! - `hold`: put a session on hold, parking it in the On hold section (Space).
 //! - `handoff`: mark a session whose last reply the next spawn opens with (`h`).
-//! - `rename`: the rename modal (`r`).
+//! - `rename`: the inline rename (`r`).
 //! - `model_picker`: model and agent choice for new sessions (`N`, `A`).
 //! - `respawn_picker`: continue a session on another account (`R`).
 //! - `task_link_picker`: link a session to a board task (`L`).

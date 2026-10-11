@@ -290,8 +290,7 @@ fn render_row(
     let agent_badge = agent_prefix(session);
     let prefix_w = agent_badge.chars().count();
 
-    let (text, text_style) = row_title(session, selected);
-    let text = first_line_truncated(&text, title_budget.saturating_sub(prefix_w));
+    let (text, text_style) = row_title(session, marks, title_budget.saturating_sub(prefix_w));
     let used = prefix_w + text.chars().count();
 
     let mut spans: Vec<Span<'static>> = Vec::new();

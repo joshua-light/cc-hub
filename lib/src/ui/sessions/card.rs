@@ -1,5 +1,5 @@
 use super::card_body::body_lines;
-use super::{agent_prefix, badge_color, dot_color, CardMarks};
+use super::{agent_prefix, badge_color, dot_color, draft_text, CardMarks};
 use crate::models::{first_line_truncated, SessionInfo, SessionState, TaskBadge};
 use crate::ui::common::{priority_color, state_color, COLD_CACHE_ICON, STATE_DOT};
 use crate::ui::palette::{HANDOFF_BLUE, SEP_GRAY};
@@ -22,7 +22,7 @@ pub(super) fn render_card(
         .borders(Borders::ALL)
         .border_type(border_type)
         .border_style(Style::default().fg(border_color))
-        .title(card_title(session, marks, now));
+        .title(card_title(session, marks, area.width, now));
     if let Some(badge) = badge {
         block = with_task_badge(block, badge, area.width);
     }
@@ -51,6 +51,7 @@ fn border(session: &SessionInfo, marks: CardMarks) -> (BorderType, Color) {
         selected,
         handoff,
         held,
+        ..
     } = marks;
     let border_color = if handoff {
         HANDOFF_BLUE
@@ -81,10 +82,10 @@ fn border(session: &SessionInfo, marks: CardMarks) -> (BorderType, Color) {
 
 /// The top-border title, the card's main skim surface: agent badge, state
 /// dot, cold-cache mark, then the Haiku title (or `✎ …` while one is
-/// being generated). Only the dot takes the state's colour; the words stay
+/// being generated, or the name being typed while a rename is open). Only the dot takes the state's colour; the words stay
 /// white, bold only on the selected card. The project name is left out:
 /// the group header shows it.
-fn card_title(session: &SessionInfo, marks: CardMarks, now: u64) -> Line<'static> {
+fn card_title(session: &SessionInfo, marks: CardMarks, width: u16, now: u64) -> Line<'static> {
     let dot = dot_color(&session.state, marks, now);
     let mut words = Style::default().fg(Color::White);
     if marks.selected {
@@ -100,13 +101,19 @@ fn card_title(session: &SessionInfo, marks: CardMarks, now: u64) -> Line<'static
     };
     // Every branch keeps a space right after the dot, so a bare title (no
     // text yet) still leaves a cell between the dot and the border.
-    let title = match session.title.as_deref() {
-        Some(t) if !t.is_empty() => format!(" {cold_mark}{t}"),
+    let prefix = agent_prefix(session);
+    let title = match (marks.draft, session.title.as_deref()) {
+        (Some(draft), _) => {
+            // Both corners, the dot and the space after it are taken.
+            let room = (width as usize).saturating_sub(prefix.chars().count() + 4);
+            format!(" {}", draft_text(draft, room))
+        }
+        (None, Some(t)) if !t.is_empty() => format!(" {cold_mark}{t}"),
         _ if session.titling => format!(" {cold_mark}✎ …"),
         _ => format!(" {cold_mark}"),
     };
     Line::from(vec![
-        Span::styled(agent_prefix(session), words),
+        Span::styled(prefix, words),
         Span::styled(STATE_DOT, Style::default().fg(dot)),
         Span::styled(title, words),
     ])

@@ -1,13 +1,13 @@
-//! The rename modal (`r`), including names typed for a session still
-//! booting behind a spawn placeholder, and the names it wrote that no scan
-//! has read back yet.
+//! The inline rename (`r`): the name is typed in the session's own title
+//! slot, including for a session still booting behind a spawn placeholder,
+//! and the names it wrote that no scan has read back yet.
 
 use super::spawn::{is_codex_process_only, spawning_session_id, spawning_tmux_of};
 use crate::app::{App, View};
 use crate::models::SessionInfo;
 use std::collections::HashMap;
 
-/// Outcome of committing the rename modal, so the command layer knows where
+/// Outcome of committing the rename, so the command layer knows where
 /// the typed title needs to go without re-deriving it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenameSubmit {
@@ -54,8 +54,7 @@ impl UnscannedTitles {
 }
 
 impl App {
-    /// Open the rename-title modal for the currently selected session,
-    /// prefilling the edit buffer with its existing title. Returns `false`
+    /// Open the inline rename on the currently selected session, prefilling the edit buffer with its existing title. Returns `false`
     /// (and changes nothing) when no session is selected.
     pub fn enter_rename_session(&mut self) -> bool {
         let Some(session) = self.selected_session_info() else {
@@ -90,27 +89,24 @@ impl App {
         self.view = View::Grid;
     }
 
-    /// Title currently being edited, for the modal's "was X" subtitle.
-    pub fn rename_original_title(&self) -> Option<&str> {
-        let sid = self.rename_target.as_deref()?;
-        // A spawn placeholder's "starting…" label isn't a real prior title —
-        // report it as untitled so the boot-time prompt doesn't claim the
-        // session "was starting…".
-        if spawning_tmux_of(sid).is_some() {
+    /// The name being typed for `session`, while the rename is open on it.
+    /// A name typed at boot targets the spawn placeholder, and follows the
+    /// session that replaces it by the tmux name they share.
+    pub fn rename_draft(&self, session: &SessionInfo) -> Option<&str> {
+        if self.view != View::RenameSession {
             return None;
         }
-        self.sessions
-            .groups
-            .iter()
-            .flat_map(|g| g.sessions.iter())
-            .find(|s| s.session_id == sid)
-            .and_then(|s| s.title.as_deref())
+        let target = self.rename_target.as_deref()?;
+        let is_target = target == session.session_id
+            || spawning_tmux_of(target)
+                .is_some_and(|tmux| session.tmux_session.as_deref() == Some(tmux));
+        is_target.then_some(self.rename_buffer.as_str())
     }
 
     /// Commit the rename: apply the trimmed buffer to the in-memory session
     /// for instant feedback and hand the caller a [`RenameSubmit`] telling it
     /// where the title needs to go. An empty title is [`RenameSubmit::Cancelled`];
-    /// either way the modal closes.
+    /// either way the rename closes.
     ///
     /// A boot-time prompt targets a spawn placeholder whose synthetic id can't
     /// be persisted against, so it routes by the spawning tmux name: if the
@@ -316,6 +312,27 @@ mod tests {
         // Idempotent whether or not watch_spawn already auto-opened it.
         assert!(app.enter_rename_session());
         assert_eq!(app.rename_buffer, "");
+    }
+
+    // The draft is drawn on the row being renamed: a boot-time name follows
+    // the placeholder to the real session that replaces it, and no other row
+    // shows it.
+    #[test]
+    fn the_draft_follows_the_placeholder_to_the_real_session() {
+        let mut app = App::new();
+        let tmux = "cchub-w-draft";
+        app.watch_spawn(tmux.into(), "claude".into(), "/tmp".into());
+        assert!(app.enter_rename_session());
+        app.rename_buffer = "Perf".into();
+
+        let mut real = fake_session("real-id", SessionState::Idle);
+        real.tmux_session = Some(tmux.into());
+        let other = fake_session("other", SessionState::Idle);
+        assert_eq!(app.rename_draft(&real), Some("Perf"));
+        assert_eq!(app.rename_draft(&other), None);
+
+        app.close_rename_session();
+        assert_eq!(app.rename_draft(&real), None);
     }
 
     #[test]
