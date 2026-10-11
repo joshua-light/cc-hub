@@ -10,7 +10,7 @@ use osc52::Osc52Scanner;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 
 mod encode;
 mod osc52;
@@ -31,7 +31,12 @@ pub struct TmuxPaneView {
     master: Box<dyn MasterPty + Send>,
     // Shared so the reader thread can auto-reply to psmux's DSR query.
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// The attach client. `None` only once Drop has handed it to the
+    /// thread that ends it.
+    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    /// The client's terminal as tmux names it (`/dev/ttys012`), which is
+    /// what `switch-client -c` addresses. `None` where the pty has no name.
+    tty: Option<String>,
     exited: Arc<AtomicBool>,
     /// Set by the reader thread whenever the screen took new bytes, cleared
     /// by [`Self::take_fresh`]: what lets a pane that is merely on screen
@@ -48,7 +53,11 @@ impl TmuxPaneView {
         // Redundant with the spawn-time enable for cc-hub-created sessions,
         // but needed for sessions that predate that code path.
         crate::send::enable_session_mouse(session_name);
-        crate::platform::mux::configure_clipboard();
+        // Server-wide options: once per hub is enough. A tmux server that
+        // restarts under the hub gets them again from the next session the
+        // hub spawns (`mux::spawn_detached`).
+        static CLIPBOARD: Once = Once::new();
+        CLIPBOARD.call_once(crate::platform::mux::configure_clipboard);
 
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -91,6 +100,10 @@ impl TmuxPaneView {
             .take_writer()
             .map_err(|e| std::io::Error::other(format!("take writer: {}", e)))?;
 
+        let tty = pair
+            .master
+            .tty_name()
+            .map(|p| p.to_string_lossy().into_owned());
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
         let exited = Arc::new(AtomicBool::new(false));
         let fresh = Arc::new(AtomicBool::new(false));
@@ -154,7 +167,8 @@ impl TmuxPaneView {
             viewport_origin: (0, 0),
             master: pair.master,
             writer,
-            child,
+            child: Some(child),
+            tty,
             exited,
             fresh,
             owns_session: false,
@@ -187,6 +201,26 @@ impl TmuxPaneView {
                 Err(e)
             }
         }
+    }
+
+    /// Move this client onto `session` (`tmux switch-client`): tmux
+    /// repaints the new session into the same pty, so there is no client to
+    /// end and none to start. Fails when the client can't be addressed (no
+    /// tty name, e.g. under psmux), when tmux refuses, or for an owned pane,
+    /// whose session is tied to this client; the caller attaches anew.
+    pub fn switch_to(&mut self, session: &str) -> std::io::Result<()> {
+        if self.session_name == session {
+            return Ok(());
+        }
+        if self.owns_session {
+            return Err(std::io::Error::other("an owned pane stays on its session"));
+        }
+        let Some(tty) = self.tty.as_deref() else {
+            return Err(std::io::Error::other("attach client has no tty name"));
+        };
+        crate::platform::mux::switch_client(tty, session)?;
+        self.session_name = session.to_string();
+        Ok(())
     }
 
     pub fn is_exited(&self) -> bool {
@@ -300,7 +334,15 @@ impl TmuxPaneView {
 
 impl Drop for TmuxPaneView {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        // `kill` sends SIGHUP and then waits up to 200ms for the client to
+        // exit, in 50ms sleeps. Off the caller's thread: the dock drops a
+        // pane whenever the cursor leaves its session.
+        if let Some(mut child) = self.child.take() {
+            std::thread::spawn(move || {
+                let _ = child.kill();
+                let _ = child.wait();
+            });
+        }
         if self.owns_session {
             if let Err(e) = crate::send::kill_tmux_session(&self.session_name) {
                 warn!(

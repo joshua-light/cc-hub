@@ -193,3 +193,64 @@ fn embedded_pane_captures_osc52_copy() {
         joined
     );
 }
+
+/// The dock's one client moves between sessions: after `switch_to` tmux
+/// lists it on the new session, not the old one, and its screen is the new
+/// session's.
+#[test]
+fn embedded_pane_switches_sessions() {
+    use cc_hub_lib::tmux_pane::TmuxPaneView;
+
+    if !tmux_available() {
+        eprintln!("embedded_pane_switches_sessions: tmux not on PATH, skipping");
+        return;
+    }
+    let from = format!("cchub-pane-from-{}", std::process::id());
+    let to = format!("cchub-pane-to-{}", std::process::id());
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".into());
+    mux::spawn_detached(&from, &cwd, None).expect("spawn_detached from");
+    let _from_guard = SessionGuard(from.clone());
+    mux::spawn_detached(&to, &cwd, None).expect("spawn_detached to");
+    let _to_guard = SessionGuard(to.clone());
+    thread::sleep(Duration::from_millis(1500));
+
+    let clients = |session: &str| -> Vec<String> {
+        let out = std::process::Command::new("tmux")
+            .args(["list-clients", "-t", session, "-F", "#{client_tty}"])
+            .output()
+            .expect("list-clients");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+
+    let mut pane = TmuxPaneView::spawn(&from, 24, 80).expect("spawn pane");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while clients(&from).is_empty() {
+        assert!(Instant::now() < deadline, "attach client never registered");
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    pane.switch_to(&to).expect("switch_to");
+    assert_eq!(pane.session_name, to);
+    assert_eq!(clients(&to).len(), 1, "the client is on the new session");
+    assert!(clients(&from).is_empty(), "and no longer on the old one");
+
+    let marker = "switched-pane-ok";
+    mux::send_prompt(&to, &format!("echo {marker}")).expect("send_prompt");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let shown = pane.parser.lock().unwrap().screen().contents();
+        if shown.matches(marker).count() >= 2 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the pane never showed the new session: {shown:?}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+}
