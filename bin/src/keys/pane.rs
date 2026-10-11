@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub(super) fn handle(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::F(1) => {
-            app.close_tmux_pane();
+            app.release_pane();
         }
         KeyCode::Char(c)
             if (c == 'v' || c == 'V')
@@ -14,7 +14,7 @@ pub(super) fn handle(app: &mut App, key: KeyEvent) {
         {
             let status = match cc_hub_lib::clipboard::paste() {
                 Ok(text) if text.is_empty() => Some("clipboard empty".to_string()),
-                Ok(text) => match app.tmux_pane.as_ref() {
+                Ok(text) => match app.focused_pane() {
                     Some(pane) => pane
                         .paste_text(&text)
                         .err()
@@ -28,7 +28,7 @@ pub(super) fn handle(app: &mut App, key: KeyEvent) {
             }
         }
         _ => {
-            if let Some(pane) = app.tmux_pane.as_mut() {
+            if let Some(pane) = app.focused_pane() {
                 pane.send_key(key);
             }
         }

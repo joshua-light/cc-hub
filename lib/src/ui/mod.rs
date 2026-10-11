@@ -99,6 +99,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         View::AgentDetail => agents::render_agent_detail(frame, frame.area(), app),
         View::BuildForm => builds::render_build_form(frame, frame.area(), app),
         View::BuildLog => builds::render_build_log(frame, frame.area(), app),
-        View::Grid => {}
+        // The dock is drawn inside the Sessions body: focusing it moves
+        // the keyboard, not the picture.
+        View::Grid | View::Dock => {}
     }
 }

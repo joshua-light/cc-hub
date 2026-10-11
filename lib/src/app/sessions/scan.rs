@@ -15,10 +15,7 @@ impl App {
     }
 
     pub fn toggle_sessions_layout(&mut self) {
-        self.sessions.layout = match self.sessions.layout {
-            SessionsLayout::Grid => SessionsLayout::List,
-            SessionsLayout::List => SessionsLayout::Grid,
-        };
+        self.sessions.layout = self.sessions.layout.next();
         // The two layouts measure content height differently, so a
         // carried-over offset can strand the viewport past the content;
         // the renderer re-clamps onto the selection from zero next frame.
@@ -30,7 +27,7 @@ impl App {
     pub(crate) fn sessions_nav_cols(&self) -> u16 {
         match self.sessions.layout {
             SessionsLayout::Grid => self.render.grid_cols,
-            SessionsLayout::List => 1,
+            SessionsLayout::Split | SessionsLayout::List => 1,
         }
     }
 
@@ -282,17 +279,19 @@ mod tests {
     #[test]
     fn toggle_sessions_layout_cycles_and_resets_scroll() {
         let mut app = App::new();
-        // The app opens on the compact table, not the card wall.
-        assert_eq!(app.sessions.layout, SessionsLayout::List);
+        // The app opens on the list with the docked pane beside it.
+        assert_eq!(app.sessions.layout, SessionsLayout::Split);
         app.render.grid_scroll = 7;
         app.toggle_sessions_layout();
-        assert_eq!(app.sessions.layout, SessionsLayout::Grid);
+        assert_eq!(app.sessions.layout, SessionsLayout::List);
         assert_eq!(
             app.render.grid_scroll, 0,
             "a carried-over offset can strand the other layout's viewport"
         );
         app.toggle_sessions_layout();
-        assert_eq!(app.sessions.layout, SessionsLayout::List);
+        assert_eq!(app.sessions.layout, SessionsLayout::Grid);
+        app.toggle_sessions_layout();
+        assert_eq!(app.sessions.layout, SessionsLayout::Split);
     }
 
     #[test]

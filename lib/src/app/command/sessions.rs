@@ -71,11 +71,11 @@ impl App {
             // the group (a jump that reads as random on a linear list).
             NavRight => match self.sessions.layout {
                 SessionsLayout::Grid => self.sessions.move_right(),
-                SessionsLayout::List => self.sessions.move_down(1),
+                SessionsLayout::Split | SessionsLayout::List => self.sessions.move_down(1),
             },
             NavLeft => match self.sessions.layout {
                 SessionsLayout::Grid => self.sessions.move_left(),
-                SessionsLayout::List => self.sessions.move_up(1),
+                SessionsLayout::Split | SessionsLayout::List => self.sessions.move_up(1),
             },
             NavDown => {
                 let cols = self.sessions_nav_cols();
@@ -179,8 +179,9 @@ impl App {
         Vec::new()
     }
 
-    /// `f`/Enter: resume an inactive session in place (runtime spawn), attach
-    /// a live tmux session (pane effect), or focus the hosting OS window.
+    /// `f`/Enter: resume an inactive session in place (runtime spawn), type
+    /// into a live tmux session (the docked pane in the split layout, the
+    /// pane popup elsewhere), or focus the hosting OS window.
     fn focus_selected_session(&mut self) -> Vec<Effect> {
         let Some(session) = self.selected_session_info().cloned() else {
             return Vec::new();
@@ -244,6 +245,8 @@ impl App {
                 None => "resume failed: missing session transcript".to_string(),
             };
             self.set_status(status);
+            Vec::new()
+        } else if self.focus_dock() {
             Vec::new()
         } else if let Some(tmux) = session.tmux_session.clone() {
             vec![Effect::OpenTmuxPane { tmux, owned: false }]
@@ -371,13 +374,29 @@ mod tests {
     }
 
     #[test]
-    fn focus_live_tmux_session_opens_pane() {
+    fn focus_live_tmux_session_types_into_the_dock() {
         crate::test_util::with_temp_home(|| {
             let (mut app, _rt) = app_with(vec![session(
                 "sid-1",
                 SessionState::Processing,
                 Some("cc-agent-1"),
             )]);
+            let effects = app.execute(Command::Sessions(SessionsCommand::FocusSelected));
+            assert!(effects.is_empty(), "{effects:?}");
+            assert_eq!(app.view, crate::app::View::Dock);
+            assert!(app.sessions.dock.attaching());
+        });
+    }
+
+    #[test]
+    fn focus_live_tmux_session_opens_pane_outside_the_split() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt) = app_with(vec![session(
+                "sid-1",
+                SessionState::Processing,
+                Some("cc-agent-1"),
+            )]);
+            app.sessions.layout = crate::app::SessionsLayout::List;
             let effects = app.execute(Command::Sessions(SessionsCommand::FocusSelected));
             assert_eq!(
                 effects,

@@ -43,8 +43,8 @@ pub(crate) async fn run(terminal: &mut Term, frame_bytes: Arc<AtomicU64>) -> io:
     workers::spawn_session_scanner(scan_tx.clone(), detail_rx);
     workers::spawn_task_stats(scan_tx.clone());
 
-    // Capture only while the embedded tmux pane is visible so the host
-    // terminal's native wheel scroll keeps working elsewhere.
+    // Capture only while the keyboard is in an embedded tmux pane so the
+    // host terminal's native wheel scroll keeps working elsewhere.
     let mut mouse_captured = false;
     let mut redraw = render::Redraw::new();
     let mut last_sys_log = Instant::now();
@@ -63,7 +63,11 @@ pub(crate) async fn run(terminal: &mut Term, frame_bytes: Arc<AtomicU64>) -> io:
             redraw.dirty = true;
         }
 
-        let want_mouse = app.view == View::TmuxPane;
+        if app.follow_dock() {
+            redraw.dirty = true;
+        }
+
+        let want_mouse = matches!(app.view, View::TmuxPane | View::Dock);
         if want_mouse != mouse_captured {
             let backend = terminal.backend_mut();
             let res = if want_mouse {

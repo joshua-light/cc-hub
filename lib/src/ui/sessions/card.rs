@@ -1,7 +1,7 @@
 use super::card_body::body_lines;
-use super::{agent_prefix, animated_indicator, badge_color, CardMarks};
+use super::{agent_prefix, badge_color, dot_color, CardMarks};
 use crate::models::{first_line_truncated, SessionInfo, SessionState, TaskBadge};
-use crate::ui::common::{priority_color, state_color, COLD_CACHE_ICON};
+use crate::ui::common::{priority_color, state_color, COLD_CACHE_ICON, STATE_DOT};
 use crate::ui::palette::{HANDOFF_BLUE, SEP_GRAY};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -43,9 +43,9 @@ pub(super) fn render_card(
 }
 
 /// Border weight and colour: white double when selected, thick in the state
-/// colour when the session needs you, the state colour while processing.
-/// A handoff mark outranks every colour, and a held session is gray — the
-/// weight still says the rest.
+/// colour when the session needs you. A handoff mark outranks every colour,
+/// and a held session is gray — the weight still says the rest. A working
+/// session keeps the quiet border: its blinking dot already says so.
 fn border(session: &SessionInfo, marks: CardMarks) -> (BorderType, Color) {
     let CardMarks {
         selected,
@@ -58,9 +58,9 @@ fn border(session: &SessionInfo, marks: CardMarks) -> (BorderType, Color) {
         Color::White
     } else if held {
         SEP_GRAY
-    } else if session.needs_attention() || session.state == SessionState::Processing {
+    } else if session.needs_attention() {
         // The state colour tells a Question (blue) from a plain wait
-        // (yellow); a green Processing frame reads as alive, not ambient.
+        // (green).
         state_color(&session.state)
     } else {
         SEP_GRAY
@@ -70,7 +70,7 @@ fn border(session: &SessionInfo, marks: CardMarks) -> (BorderType, Color) {
         BorderType::Double
     } else if session.needs_attention() {
         // Weight plus the chip title make "needs you" categorical, not a hue
-        // shift: Processing shares the coloured border but not the weight.
+        // shift.
         BorderType::Thick
     } else if session.state == SessionState::Inactive {
         BorderType::LightDoubleDashed
@@ -81,15 +81,14 @@ fn border(session: &SessionInfo, marks: CardMarks) -> (BorderType, Color) {
 }
 
 /// The top-border title, the card's main skim surface: agent badge, state
-/// glyph, cold-cache mark, then the Haiku title (or `✎ …` while one is
+/// dot, cold-cache mark, then the Haiku title (or `✎ …` while one is
 /// being generated). The project name is left out: the group header shows it.
 fn card_title(session: &SessionInfo, marks: CardMarks, now: u64) -> Span<'static> {
-    let (indicator, ind_color) = animated_indicator(&session.state, marks, now);
+    let dot = dot_color(&session.state, marks, now);
     let agent_badge = agent_prefix(session);
 
-    // Every branch keeps a space right after `indicator`: the Nerd Font
-    // glyph renders two columns but measures one, so without a trailing cell
-    // its second column collides with the border (the bare `󰂞` case).
+    // Every branch keeps a space right after the dot, so a bare title (no
+    // text yet) still leaves a cell between the dot and the border.
     //
     // The snowflake marks a cold prompt cache (restarting beats resuming).
     // Here it takes the title's colour; the ice-blue one is the footer clock.
@@ -100,10 +99,10 @@ fn card_title(session: &SessionInfo, marks: CardMarks, now: u64) -> Span<'static
     };
     let title = match session.title.as_deref() {
         Some(t) if !t.is_empty() => {
-            format!("{}{} {}{}", agent_badge, indicator, cold_mark, t)
+            format!("{agent_badge}{STATE_DOT} {cold_mark}{t}")
         }
-        _ if session.titling => format!("{}{} {}✎ …", agent_badge, indicator, cold_mark),
-        _ => format!("{}{} {}", agent_badge, indicator, cold_mark),
+        _ if session.titling => format!("{agent_badge}{STATE_DOT} {cold_mark}✎ …"),
+        _ => format!("{agent_badge}{STATE_DOT} {cold_mark}"),
     };
     // Attention cards get a filled chip (black on the state colour).
     // Background fill is reserved for "needs you", so it can't be mistaken
@@ -118,14 +117,11 @@ fn card_title(session: &SessionInfo, marks: CardMarks, now: u64) -> Span<'static
             chip,
             Style::default()
                 .fg(Color::Black)
-                .bg(ind_color)
+                .bg(dot)
                 .add_modifier(Modifier::BOLD),
         )
     } else {
-        (
-            title,
-            Style::default().fg(ind_color).add_modifier(Modifier::BOLD),
-        )
+        (title, Style::default().fg(dot).add_modifier(Modifier::BOLD))
     };
     Span::styled(title, title_style)
 }
@@ -279,7 +275,7 @@ mod tests {
         let fx = (0..buf.area().width)
             .find(|&x| buf[(x, 0)].symbol() == "F")
             .expect("title text on border row");
-        assert_eq!(buf[(fx, 0)].style().bg, Some(Color::Yellow));
+        assert_eq!(buf[(fx, 0)].style().bg, Some(Color::Green));
 
         // Processing keeps a plain (no-fill) title — bg is exclusive to
         // "needs you".
@@ -288,11 +284,11 @@ mod tests {
         let fx = (0..buf.area().width)
             .find(|&x| buf[(x, 0)].symbol() == "F")
             .expect("title text on border row");
-        assert_ne!(buf[(fx, 0)].style().bg, Some(Color::Yellow));
+        assert_ne!(buf[(fx, 0)].style().bg, Some(Color::Green));
     }
 
     #[test]
-    fn processing_card_animates_spinner_and_shows_tool() {
+    fn processing_card_blinks_its_dot_and_shows_tool() {
         let mut s = fake_session();
         s.state = SessionState::Processing;
         s.current_tool = Some(crate::conversation::CurrentTool {
@@ -300,12 +296,11 @@ mod tests {
             hint: Some("cargo test".into()),
         });
         let buf = render(&s, 42, 7);
-        let title = row(&buf, 0);
-        assert!(
-            title.contains(crate::ui::common::spinner_frame(NOW)),
-            "spinner missing from title:\n{}",
-            title
-        );
+        let dot = (0..buf.area().width)
+            .map(|x| &buf[(x, 0)])
+            .find(|c| c.symbol() == crate::ui::common::STATE_DOT)
+            .expect("state dot in title");
+        assert_eq!(dot.fg, crate::ui::common::working_blink(NOW));
         let plain = buffer_to_string(&buf);
         assert!(plain.contains("Bash: cargo test"), "tool line:\n{}", plain);
     }

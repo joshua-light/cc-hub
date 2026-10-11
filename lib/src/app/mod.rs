@@ -59,7 +59,7 @@ pub use picker_list::PickerRow;
 pub use places::GhCreateInput;
 pub use render_state::RenderState;
 pub use sessions::{
-    AgentPickerState, ModelPickerChoice, ModelPickerState, RenameSubmit, RespawnChoice,
+    AgentPickerState, Dock, ModelPickerChoice, ModelPickerState, RenameSubmit, RespawnChoice,
     RespawnPickerState, SessionFinderChoice, SessionFinderState, SessionsLayout, SessionsView,
     TaskLinkAction, TaskLinkChoice, TaskLinkPickerState,
 };

@@ -1,6 +1,8 @@
 //! Header bands: the title bar and the tab strip.
 
 use crate::app::{visible_tabs, App};
+use crate::models::SessionState;
+use crate::ui::common::{state_color, STATE_DOT};
 use crate::ui::palette::{ACCENT_BLUE, SEP_GRAY};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -72,9 +74,9 @@ pub(super) fn render_title_bar(frame: &mut Frame, area: Rect, app: &App) {
 
     if attention > 0 {
         left_spans.push(Span::styled(
-            format!("  󰂞 {} need attention", attention),
+            format!("  {STATE_DOT} {attention} need attention"),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(state_color(&SessionState::WaitingForInput))
                 .add_modifier(Modifier::BOLD),
         ));
     }

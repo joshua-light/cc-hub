@@ -2,7 +2,7 @@ use crate::app::App;
 use crate::models::SessionDetail;
 use crate::ui::common::{
     centered_rect, format_datetime, format_time, format_tokens, popup_block, scroll_position,
-    short_model, state_color, state_indicator, wrapped_total_rows,
+    short_model, state_color, wrapped_total_rows, STATE_DOT,
 };
 use crate::ui::palette::MUTED_TEXT;
 use ratatui::layout::Rect;
@@ -122,10 +122,9 @@ fn build_popup_content(detail: &SessionDetail, width: u16) -> Vec<Line<'static>>
     }
     lines.push(Line::from(meta_spans));
 
-    let (state_icon, _) = state_indicator(&session.state);
     let sc = state_color(&session.state);
     lines.push(Line::from(vec![
-        Span::styled(format!("{} ", state_icon), Style::default().fg(sc)),
+        Span::styled(format!("{STATE_DOT} "), Style::default().fg(sc)),
         Span::styled("State:   ", Style::default().fg(Color::DarkGray)),
         Span::styled(format!("{}", session.state), Style::default().fg(sc)),
         Span::styled("   󰥔 Started: ", Style::default().fg(Color::DarkGray)),

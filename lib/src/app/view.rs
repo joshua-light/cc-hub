@@ -15,6 +15,9 @@ pub enum View {
     ConfirmClose,
     RenameSession,
     TmuxPane,
+    /// Keys go to the split layout's docked pane (Enter on the Sessions
+    /// tab); F1 hands them back to the list.
+    Dock,
     FolderPicker,
     /// Model list for `N` on the Sessions tab: pick which Claude model the
     /// new session starts with.
@@ -163,6 +166,25 @@ impl App {
     pub fn close_tmux_pane(&mut self) {
         self.tmux_pane = None;
         self.view = self.view_under_overlay();
+    }
+
+    /// The pane the keyboard types into: the popup's, or the dock's.
+    pub fn focused_pane(&mut self) -> Option<&mut TmuxPaneView> {
+        match self.view {
+            View::TmuxPane => self.tmux_pane.as_mut(),
+            View::Dock => self.sessions.dock.pane_mut(),
+            _ => None,
+        }
+    }
+
+    /// F1 in a pane: close the popup, or hand the dock's keyboard back to
+    /// the list — its pane stays on screen.
+    pub fn release_pane(&mut self) {
+        match self.view {
+            View::TmuxPane => self.close_tmux_pane(),
+            View::Dock => self.leave_dock(),
+            _ => {}
+        }
     }
 
     pub fn enter_confirm_close(&mut self) {

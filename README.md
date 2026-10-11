@@ -9,7 +9,10 @@ task board that hands tasks to agents.
 
 - **Tasks**: a kanban board (To-Do, In Progress, Review, Done). Hand a card to
   an agent, approve its plan, attach to its session.
-- **Sessions**: every agent session as a card. Spawn, attach, resume, rename,
+- **Sessions**: every agent session in a list, the selected one's tmux pane
+  live beside it. A dot shows each session's state: blinking white while it
+  works, green when it is done and waits for you, blue when it asks a
+  question, gray when it idles or is on hold. Spawn, attach, resume, rename,
   link to a task, or continue on another account.
 - **Builds**: one card per build recipe; run and cancel its steps. Shown once
   `config.toml` has a recipe.

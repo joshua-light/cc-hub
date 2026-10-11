@@ -48,9 +48,9 @@ Sessions. Builds shows once a recipe exists. Agents shows once
 | Key | Action |
 |---|---|
 | `j` `k` `l` / arrows | Move (`h` is handoff; `←` moves left) |
-| `Enter` / `f` | Attach the session's pane, focus its window, or resume an inactive session |
+| `Enter` / `f` | Type into the session's pane (docked in the split layout, a popup elsewhere), focus its window, or resume an inactive session |
 | `i` | Session info |
-| `v` | Switch between card grid and compact list |
+| `v` | Cycle the layout: split (list beside the selected session's live pane), full-width list, card grid |
 | `H` | Show or hide inactive sessions |
 | `/` | Find any session on disk, however old, and reopen it |
 | `n` | New session with the default agent, in this session's folder |
@@ -126,7 +126,7 @@ Every key goes to the pane, except:
 
 | Key | Action |
 |---|---|
-| `F1` | Close the pane |
+| `F1` | Close the pane; in the split layout, give the keyboard back to the list |
 | `Ctrl+Shift+V` | Paste the host clipboard |
 
 ## Popups
