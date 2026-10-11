@@ -76,7 +76,7 @@ session's folder. It overrides a built-in key it collides with.
 | Key | Action |
 |---|---|
 | `h` `j` `k` `l` / arrows | Move between recipes |
-| `r` | Run the recipe on its checkout as it is now, on the route the recipe picks |
+| `r` | Run the recipe on its checkout at the recipe's `ref` (else as it is now), on the route the recipe picks |
 | `n` | Run with a checkout, ref or route of your own (seeded from the last build) |
 | `c` | Cancel the recipe's running and queued builds |
 | `Enter` / `f` | Build output |

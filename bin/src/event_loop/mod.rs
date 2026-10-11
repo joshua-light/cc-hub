@@ -67,7 +67,7 @@ pub(crate) async fn run(terminal: &mut Term, frame_bytes: Arc<AtomicU64>) -> io:
             redraw.dirty = true;
         }
 
-        let want_mouse = matches!(app.view, View::TmuxPane | View::Dock);
+        let want_mouse = app.wants_mouse();
         if want_mouse != mouse_captured {
             let backend = terminal.backend_mut();
             let res = if want_mouse {

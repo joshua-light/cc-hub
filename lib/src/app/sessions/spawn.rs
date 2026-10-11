@@ -225,12 +225,13 @@ impl App {
                 continue;
             }
             self.pending_spawn_names.remove(tmux);
-            if let Err(e) = crate::title::persist_title(&s.session_id, &title) {
-                log::warn!(
+            match crate::title::persist_title(&s.session_id, &title) {
+                Ok(()) => self.sessions.unscanned_titles.insert(&s.session_id, &title),
+                Err(e) => log::warn!(
                     "rename: deferred persist failed for {}: {}",
                     s.session_id,
                     e
-                );
+                ),
             }
             s.title = Some(title);
             s.titling = false;

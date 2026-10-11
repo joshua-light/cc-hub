@@ -1,8 +1,11 @@
 //! The rename modal (`r`), including names typed for a session still
-//! booting behind a spawn placeholder.
+//! booting behind a spawn placeholder, and the names it wrote that no scan
+//! has read back yet.
 
 use super::spawn::{is_codex_process_only, spawning_session_id, spawning_tmux_of};
 use crate::app::{App, View};
+use crate::models::SessionInfo;
+use std::collections::HashMap;
 
 /// Outcome of committing the rename modal, so the command layer knows where
 /// the typed title needs to go without re-deriving it.
@@ -17,6 +20,37 @@ pub enum RenameSubmit {
     Deferred { title: String },
     /// Empty title — treated as a cancel.
     Cancelled,
+}
+
+/// Names this hub wrote to the title file that no scan has read back yet.
+/// A scan reads the file when it starts and lands when it ends, and the
+/// liveness pass re-sends the last full scan until the next one, so a
+/// snapshot taken before a rename can arrive after it — without these, it
+/// would put the old name back on the card.
+#[derive(Default)]
+pub(crate) struct UnscannedTitles(HashMap<String, String>);
+
+impl UnscannedTitles {
+    pub(crate) fn insert(&mut self, sid: &str, title: &str) {
+        self.0.insert(sid.to_string(), title.to_string());
+    }
+
+    /// Put each name on its session in `sessions`. A name the snapshot
+    /// already carries has been read back and is forgotten, as is one whose
+    /// session the snapshot no longer has.
+    pub(crate) fn stamp(&mut self, sessions: &mut [SessionInfo]) {
+        self.0.retain(|sid, title| {
+            let Some(session) = sessions.iter_mut().find(|s| s.session_id == *sid) else {
+                return false;
+            };
+            if session.title.as_deref() == Some(title.as_str()) {
+                return false;
+            }
+            session.title = Some(title.clone());
+            session.titling = false;
+            true
+        });
+    }
 }
 
 impl App {
@@ -306,5 +340,30 @@ mod tests {
                 title: "manual name".into()
             }
         );
+    }
+
+    // A boot-time name adopted on one scan survives the next, which read the
+    // title file before the adoption wrote it.
+    #[test]
+    fn adopted_boot_time_name_survives_a_scan_that_predates_it() {
+        crate::test_util::with_temp_home(|| {
+            let mut app = App::new();
+            let tmux = "cchub-w-race";
+            app.watch_spawn(tmux.into(), "claude".into(), "/tmp".into());
+            app.pending_spawn_names.insert(tmux.into(), None);
+            app.rename_target = Some(spawning_session_id(tmux));
+            app.rename_buffer = "Performance".into();
+            app.submit_session_rename();
+            let landed = fake_session(tmux, SessionState::Idle);
+
+            app.update_sessions(vec![landed.clone()]);
+            app.update_sessions(vec![landed]);
+
+            assert_eq!(crate::title::load()[tmux], "Performance");
+            assert_eq!(
+                app.sessions.last_sessions[0].title.as_deref(),
+                Some("Performance")
+            );
+        });
     }
 }

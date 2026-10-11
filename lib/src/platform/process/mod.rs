@@ -30,7 +30,7 @@ pub use linux::{command_line, current_dir, list_pids, open_codex_rollouts, Proce
 #[cfg(target_os = "macos")]
 pub use macos::{command_line, current_dir, list_pids, open_codex_rollouts, Process};
 #[cfg(target_os = "windows")]
-pub use windows::{list_pids, terminate, Process};
+pub use windows::{list_pids, terminate, terminate_group, Process};
 
 pub trait ProcessInfo {
     fn parent_pid(pid: u32) -> Option<u32>;
@@ -118,6 +118,16 @@ pub fn terminate(pid: u32) -> bool {
         return false;
     }
     unsafe { libc::kill(pid as i32, libc::SIGTERM) == 0 }
+}
+
+/// Ask a whole process group to terminate: a leader started with its own
+/// group, and everything it started that did not leave it.
+#[cfg(unix)]
+pub fn terminate_group(pgid: u32) -> bool {
+    if pgid <= 1 || pgid == std::process::id() {
+        return false;
+    }
+    unsafe { libc::killpg(pgid as i32, libc::SIGTERM) == 0 }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

@@ -163,7 +163,10 @@ impl App {
             }
             SubmitRename => match self.submit_session_rename() {
                 RenameSubmit::Persist { sid, title } => match title::persist_title(&sid, &title) {
-                    Ok(()) => self.set_status(format!("renamed to “{}”", title)),
+                    Ok(()) => {
+                        self.sessions.unscanned_titles.insert(&sid, &title);
+                        self.set_status(format!("renamed to “{}”", title));
+                    }
                     Err(e) => {
                         log::warn!("rename: persist failed for {}: {}", sid, e);
                         self.set_status(format!("rename failed: {}", e));
@@ -288,7 +291,7 @@ mod tests {
     use super::*;
     use crate::app::test_support::{app_with, session, status};
     use crate::app::Command;
-    use crate::models::SessionState;
+    use crate::models::{SessionInfo, SessionState};
 
     #[test]
     fn focus_inactive_claude_resumes_by_session_id() {
@@ -495,6 +498,35 @@ mod tests {
             assert_eq!(spawns.len(), 1);
             assert_eq!(spawns[0].agent_id, "pi-codex");
             assert_eq!(spawns[0].cwd, "/tmp/proj");
+        });
+    }
+
+    // A scan that read the title file before a rename can land after it: the
+    // name stays on the card until a scan carries it back, and only until.
+    #[test]
+    fn rename_survives_a_scan_that_predates_it() {
+        crate::test_util::with_temp_home(|| {
+            let stale = session("sid-1", SessionState::Idle, Some("cchub-1"));
+            let (mut app, _rt) = app_with(vec![stale.clone()]);
+            app.execute(Command::Sessions(SessionsCommand::OpenRenameSession));
+            app.rename_buffer = "Performance".into();
+            app.execute(Command::Sessions(SessionsCommand::SubmitRename));
+            let title = |app: &crate::app::App| app.sessions.last_sessions[0].title.clone();
+
+            app.update_sessions(vec![stale.clone()]);
+            assert_eq!(title(&app).as_deref(), Some("Performance"));
+
+            let read_back = SessionInfo {
+                title: Some("Performance".into()),
+                ..stale.clone()
+            };
+            app.update_sessions(vec![read_back]);
+            let renamed_elsewhere = SessionInfo {
+                title: Some("Elsewhere".into()),
+                ..stale
+            };
+            app.update_sessions(vec![renamed_elsewhere]);
+            assert_eq!(title(&app).as_deref(), Some("Elsewhere"));
         });
     }
 

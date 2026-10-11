@@ -90,6 +90,11 @@ pub fn terminate(pid: u32) -> bool {
     }
 }
 
+/// Windows has no process groups to signal; a step started there ends alone.
+pub fn terminate_group(pid: u32) -> bool {
+    terminate(pid)
+}
+
 pub fn list_pids() -> Vec<u32> {
     let mut out = Vec::new();
     with_entries(|e| {

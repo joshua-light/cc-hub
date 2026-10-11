@@ -59,3 +59,11 @@ pub(crate) const ICE_BLUE: Color = Color::Rgb(130, 190, 220);
 /// Background of the selected row in one-line lists (sessions list, agents
 /// table and detail lists).
 pub(crate) const SELECTED_ROW_BG: Color = Color::Rgb(40, 40, 52);
+
+/// Background of a row marked for a handoff (`h`) — [`HANDOFF_BLUE`] sunk
+/// into the dark, so the mark tints the whole row without outshouting it.
+pub(crate) const HANDOFF_ROW_BG: Color = Color::Rgb(22, 44, 68);
+
+/// Background of the handoff row under the cursor: the same blue, lifted as
+/// far as [`SELECTED_ROW_BG`] lifts a plain row.
+pub(crate) const SELECTED_HANDOFF_ROW_BG: Color = Color::Rgb(34, 64, 98);

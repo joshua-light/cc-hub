@@ -3,8 +3,10 @@ use super::scratch_cwd;
 use crate::config;
 use log::{debug, warn};
 use std::fs;
+use std::io::Read;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -49,17 +51,29 @@ pub(crate) fn detach_from_tty(_cmd: &mut Command) {}
 /// [`request_shutdown`]. `None` on spawn failure, timeout or shutdown. The
 /// caller configures stdio. Shared with the persistent-agent harness, which
 /// drives the same spawn command in `-p` mode.
+///
+/// The pipes are drained while the child runs: a child that outgrows the
+/// 64KB pipe buffer blocks on its write and never exits, so reading only
+/// after exit would kill it at the timeout with all its output unread.
 pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
     detach_from_tty(&mut cmd);
     let mut child: Child = cmd
         .spawn()
         .map_err(|e| warn!("title: spawn failed: {}", e))
         .ok()?;
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
 
     let deadline = std::time::Instant::now() + timeout;
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => {
+                return Some(Output {
+                    status,
+                    stdout: stdout.join().unwrap_or_default(),
+                    stderr: stderr.join().unwrap_or_default(),
+                })
+            }
             Ok(None) => {
                 if shutting_down() {
                     debug!("title: shutdown signal, killing subprocess");
@@ -83,7 +97,18 @@ pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
             }
         }
     }
-    child.wait_with_output().ok()
+}
+
+/// Read a child's pipe to its end on a thread of its own; empty when the
+/// caller did not pipe that stream.
+fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut bytes);
+        }
+        bytes
+    })
 }
 
 /// Run `<spawn.command> --model <model> -p <prompt>` in the scratch cwd

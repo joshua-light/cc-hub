@@ -31,6 +31,10 @@ pub struct Recipe {
     pub description: String,
     /// The checkout a new build starts in.
     pub checkout: Option<String>,
+    /// What a build that names no ref of its own builds, read when it starts:
+    /// `HEAD` builds the last commit. Without one, such a build takes the
+    /// working tree.
+    pub r#ref: Option<String>,
     /// The resource (`~/.cc-hub/resources.toml`) a run needs. Held from the
     /// first run until it is released by hand.
     pub resource: Option<String>,
@@ -154,6 +158,13 @@ mod tests {
             expand(&template, values),
             argv(&["ssh", "buildbox", "restart 1a2b3c4"])
         );
+    }
+
+    #[test]
+    fn a_recipe_may_name_the_ref_it_builds() {
+        let recipe: Recipe = toml::from_str(r#"ref = "HEAD""#).unwrap();
+        assert_eq!(recipe.r#ref.as_deref(), Some("HEAD"));
+        assert_eq!(Recipe::default().r#ref, None);
     }
 
     #[test]

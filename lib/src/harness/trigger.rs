@@ -283,6 +283,20 @@ mod tests {
         assert_eq!(render_prompt(&s, None), "Do it.");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn poll_outgrowing_the_pipe_buffer_is_delivered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = run_poll(
+            "head -c 200000 /dev/zero | tr '\\0' x",
+            tmp.path(),
+            Duration::from_secs(10),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(out.len(), 200_000);
+    }
+
     #[test]
     fn digest_is_stable() {
         assert_eq!(digest("abc"), digest("abc"));

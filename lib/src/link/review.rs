@@ -46,10 +46,10 @@ impl ReviewLink {
         )
     }
 
-    /// The name the session is born with: `PR: <title>`, or `PR: <repo>#<n>`
-    /// when the link carried no title.
+    /// The name the session is born with: `Review: <title>`, or
+    /// `Review: <repo>#<n>` when the link carried no title.
     pub fn session_title(&self) -> String {
-        pull_request_titled("PR", &self.pr, self.title.as_deref())
+        pull_request_titled("Review", &self.pr, self.title.as_deref())
     }
 }
 
@@ -208,19 +208,22 @@ mod tests {
             panic!("expected a review link")
         };
         assert_eq!(r.title.as_deref(), Some("APP-15883 Fix  the\nflaky test"));
-        assert_eq!(r.session_title(), "PR: APP-15883 Fix the flaky test");
+        assert_eq!(r.session_title(), "Review: APP-15883 Fix the flaky test");
     }
 
     #[test]
     fn session_title_falls_back_to_repo_and_number() {
-        assert_eq!(review("light").session_title(), "PR: sample-project#11280");
+        assert_eq!(
+            review("light").session_title(),
+            "Review: sample-project#11280"
+        );
         let r: Link = format!("cc-hub://review?depth=light&pr={}&title=%20%20", PR)
             .parse()
             .unwrap();
         let Link::Review(r) = r else {
             panic!("expected a review link")
         };
-        assert_eq!(r.session_title(), "PR: sample-project#11280");
+        assert_eq!(r.session_title(), "Review: sample-project#11280");
     }
 
     #[test]
@@ -233,7 +236,7 @@ mod tests {
             panic!("expected a review link")
         };
         let title = r.session_title();
-        assert!(title.starts_with("PR: xxx"));
+        assert!(title.starts_with("Review: xxx"));
         assert!(title.ends_with('…'));
         assert_eq!(title.chars().count(), 61);
     }

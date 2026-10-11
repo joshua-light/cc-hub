@@ -7,7 +7,7 @@ use crate::config;
 
 /// State behind [`View::TaskKindPicker`]: the card being classified and the
 /// kinds on offer. `kinds` is `[tasks].kinds` verbatim — declaration order is
-/// the user's order — preceded by the "router decides" row, so index 0 always
+/// the user's order — preceded by the "manual" row, so index 0 always
 /// means [`None`].
 #[derive(Clone, Debug)]
 pub struct TaskKindPickerState {
@@ -75,7 +75,7 @@ impl App {
     }
 
     /// Commit the pick: the highlighted kind lands on the card (the clear row
-    /// gives it back to the router). Returns false when nothing was open.
+    /// makes it manual, so the router skips it). Returns false when nothing was open.
     pub fn confirm_task_kind(&mut self) -> bool {
         let Some(picker) = self.task_kind_picker.take() else {
             self.view = View::Grid;
@@ -96,7 +96,7 @@ impl App {
                 "kind: {} — the router places this card without asking",
                 kind
             ),
-            None => "kind cleared — the router classifies this card".into(),
+            None => "kind cleared — manual card, the runner skips it".into(),
         });
         true
     }

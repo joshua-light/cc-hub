@@ -129,6 +129,11 @@ impl App {
 
         let spawn_watch_fired = self.check_spawn_watches(&sessions, Instant::now());
 
+        // Names written since this snapshot read the title file go back on
+        // first: stamped after the adoption below, a name adopted this tick
+        // would count as read back and be forgotten at once.
+        self.sessions.unscanned_titles.stamp(&mut sessions);
+
         // Carry any name typed while a session was still booting onto the real
         // card the scanner has now produced — before grouping, so the title is
         // in place the first frame the real session renders.

@@ -127,18 +127,36 @@ pub fn for_agent(id: &str) -> Option<Account> {
     accounts().remove(name)
 }
 
-/// The kind of the broker worker on `task`, from the broker's `state.json`.
-/// Stopped and blocked workers don't count.
-pub fn task_kind(task: &str) -> Option<String> {
-    let directory = std::env::var_os("CC_HUB_RESOURCE_DIR")
+/// The broker's live workers, from its `state.json`. Stopped and blocked
+/// workers don't count. Empty when there is no broker.
+fn live_workers() -> Vec<serde_json::Value> {
+    let Some(directory) = std::env::var_os("CC_HUB_RESOURCE_DIR")
         .map(PathBuf::from)
-        .or_else(|| crate::platform::paths::cc_hub_home().map(|h| h.join("resources")))?;
-    let value: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(directory.join("state.json")).ok()?).ok()?;
-    value["workers"].as_object()?.values().find(|w| {
-        w["task"].as_str() == Some(task)
-            && !matches!(w["status"].as_str(), Some("stopped") | Some("blocked"))
-    })?["kind"]
+        .or_else(|| crate::platform::paths::cc_hub_home().map(|h| h.join("resources")))
+    else {
+        return Vec::new();
+    };
+    let Some(mut value) = std::fs::read_to_string(directory.join("state.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    else {
+        return Vec::new();
+    };
+    match value["workers"].take() {
+        serde_json::Value::Object(workers) => workers
+            .into_iter()
+            .map(|(_, w)| w)
+            .filter(|w| !matches!(w["status"].as_str(), Some("stopped") | Some("blocked")))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The kind of the live broker worker on `task`.
+pub fn task_kind(task: &str) -> Option<String> {
+    live_workers()
+        .into_iter()
+        .find(|w| w["task"].as_str() == Some(task))?["kind"]
         .as_str()
         .map(str::to_string)
 }
@@ -226,6 +244,29 @@ pub fn label_sessions(sessions: &mut [crate::models::SessionInfo]) {
     }
 }
 
+/// Give each nameless session a live broker worker hosts the name that
+/// worker's session is born with. The broker names a Claude session before
+/// launch, but a Codex one mints its own id and is named only once its first
+/// tool call reports it; until then this is what keeps the hub from asking
+/// the user for a name. Nothing is written: `bind` persists the same name,
+/// and a rename the user makes meanwhile is a title the session already has.
+pub fn name_worker_sessions(sessions: &mut [crate::models::SessionInfo]) {
+    if sessions.iter().all(|s| s.title.is_some()) {
+        return;
+    }
+    let workers = live_workers();
+    for session in sessions.iter_mut().filter(|s| s.title.is_none()) {
+        let Some(tmux) = session.tmux_session.as_deref() else {
+            continue;
+        };
+        if let Some(worker) = workers.iter().find(|w| w["tmux"].as_str() == Some(tmux)) {
+            if let Some(task) = worker["task"].as_str() {
+                session.title = session_title(task, worker["title"].as_str());
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +297,41 @@ mod tests {
             let worker = serde_json::json!({"session_id": "sid-w", "task": filed, "title": null});
             name_session(&worker).unwrap();
             assert_eq!(crate::title::load()["sid-w"], "Polish: The PR");
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_nameless_session_takes_its_workers_name_before_the_broker_writes_it() {
+        crate::test_util::with_temp_home(|| {
+            let mut board = crate::tasks::PersonalBoard::load_result().unwrap();
+            let task = board.add("retro").unwrap().unwrap();
+            let state = serde_json::json!({"workers": {
+                "a": {"task": task, "tmux": "cchr-a-1", "title": "Task: Retro", "status": "starting"},
+                "b": {"task": task, "tmux": "cchr-b-1", "title": "Task: Old", "status": "blocked"},
+            }});
+            let directory = crate::platform::paths::cc_hub_home()
+                .unwrap()
+                .join("resources");
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("state.json"), state.to_string()).unwrap();
+            let hosted = |tmux: &str, title: Option<&str>| crate::models::SessionInfo {
+                tmux_session: Some(tmux.into()),
+                title: title.map(str::to_string),
+                ..crate::test_util::session_info()
+            };
+            let mut sessions = [
+                hosted("cchr-a-1", None),
+                hosted("cchr-a-1", Some("Renamed")),
+                hosted("cchr-b-1", None),
+                hosted("cchub-1-2", None),
+            ];
+
+            name_worker_sessions(&mut sessions);
+
+            let titles: Vec<_> = sessions.iter().map(|s| s.title.as_deref()).collect();
+            assert_eq!(titles, [Some("Task: Retro"), Some("Renamed"), None, None]);
+            assert!(crate::title::load().is_empty());
         });
     }
 

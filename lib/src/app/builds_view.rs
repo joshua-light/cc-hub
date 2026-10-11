@@ -142,7 +142,7 @@ impl BuildsView {
 pub struct BuildForm {
     pub recipe: String,
     pub cwd: String,
-    /// Empty is the working tree.
+    /// Empty is the recipe's ref, else the working tree.
     pub r#ref: String,
     /// `None` lets the recipe choose.
     pub route: Option<String>,

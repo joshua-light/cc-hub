@@ -142,6 +142,7 @@ values. An argument that is only a placeholder with no value is dropped.
 |---|---|---|
 | `description` | `""` | Shown on the recipe's card. |
 | `checkout` | none | Folder a new build starts in. |
+| `ref` | none | What a build that names no ref builds, read when it starts: `"HEAD"` builds the last commit. Without it, such a build takes the working tree. |
 | `resource` | none | A `resources.toml` resource the builds need. Claimed before the first build and held until released. |
 | `routes` | `[]` | Routes a build may ask for. With none asked for, the recipe picks. |
 | `run` | `[]` | The steps, each an argv, run in order. The build succeeds when every step exits 0 and stops at the first that does not. Any step reports progress with `cc-hub: commit <sha>`, `cc-hub: route <name>` and `cc-hub: phase <text>` lines; a later step can use the reported `{commit}`. |

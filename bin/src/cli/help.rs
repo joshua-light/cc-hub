@@ -105,9 +105,9 @@ Usage:
 Links:
   cc-hub://review?depth=<light|full>&pr=<pull request url>[&title=<text>]
       Spawn a session in the local checkout of the pull request's repository,
-      name it "PR: <title>" (or "PR: <repo>#<n>"), and open it with "Let's do
-      <depth> review of this PR: <url>". The checkout is found by repo name
-      among bookmarks and the cwds of known sessions;
+      name it "Review: <title>" (or "Review: <repo>#<n>"), and open it with
+      "Let's do <depth> review of this PR: <url>". The checkout is found by
+      repo name among bookmarks and the cwds of known sessions;
       without one the review runs from home, off the pull request alone.
       An optional &post=<1-100> lets the review post findings it is at least
       that confident about without asking.
@@ -234,11 +234,13 @@ Usage:
 A build is one run of a recipe: its steps, in order, until one fails.
 
 `run` is `r` on the tab: the recipe's checkout (its last build's, else its
-own) as the working tree is now, on the route the recipe picks.
+own) at the recipe's `ref`, on the route the recipe picks. A recipe without a
+`ref` takes the working tree as it is now.
 
 `start` is `n`: a run with a checkout, ref or route of your own. Without
-`--ref` it takes the working tree of `--cwd` (default: here) as it stands when
-the build starts. Without `--route` the recipe picks one.
+`--ref` it takes the recipe's `ref`, else the working tree of `--cwd`
+(default: here), as it stands when the build starts. Without `--route` the
+recipe picks one.
 
 Both return at once; `--wait` returns when the build has finished, exiting
 non-zero unless it succeeded. `--recipe` may be left out when only one recipe

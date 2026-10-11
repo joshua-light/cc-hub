@@ -14,9 +14,11 @@ use super::{
 };
 use crate::app::{App, Dock, View};
 use crate::models::{first_line_truncated, ProjectGroup, SessionInfo, SessionState, TaskBadge};
-use crate::ui::common::{selection_stripe, short_model, STATE_DOT};
+use crate::ui::common::{short_model, STATE_DOT};
 use crate::ui::now_ms;
-use crate::ui::palette::{DIM_TEXT, HANDOFF_BLUE, SELECTED_ROW_BG, SEP_GRAY};
+use crate::ui::palette::{
+    DIM_TEXT, HANDOFF_ROW_BG, SELECTED_HANDOFF_ROW_BG, SELECTED_ROW_BG, SEP_GRAY,
+};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -187,8 +189,9 @@ fn render_task_header(frame: &mut Frame, area: Rect, badge: &TaskBadge) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// `▌● title…`, or `▌│ ● title…` under a task: the cursor stripe, the
-/// task's guide, the state dot, and the title.
+/// ` ● title…`, or ` │ ● title…` under a task: the task's guide, the state
+/// dot, and the title. The cursor and the handoff mark are the row's
+/// background, see [`row_background`].
 fn render_session(
     frame: &mut Frame,
     area: Rect,
@@ -198,11 +201,7 @@ fn render_session(
     now: u64,
 ) {
     let dot = dot_color(&session.state, marks, now);
-    let mut spans = vec![if marks.handoff {
-        Span::styled("▌", Style::default().fg(HANDOFF_BLUE))
-    } else {
-        selection_stripe(marks.selected)
-    }];
+    let mut spans = vec![Span::raw(" ")];
     if let Some(color) = task {
         spans.push(Span::styled("│ ", Style::default().fg(color)));
     }
@@ -216,10 +215,21 @@ fn render_session(
     spans.push(Span::styled(title, title_style));
 
     let mut row = Paragraph::new(Line::from(spans));
-    if marks.selected {
-        row = row.style(Style::default().bg(SELECTED_ROW_BG));
+    if let Some(bg) = row_background(marks) {
+        row = row.style(Style::default().bg(bg));
     }
     frame.render_widget(row, area);
+}
+
+/// A session row's background: blue for the handoff mark, lifted under the
+/// cursor; gray for the cursor alone; none otherwise.
+fn row_background(marks: CardMarks) -> Option<Color> {
+    match (marks.selected, marks.handoff) {
+        (true, true) => Some(SELECTED_HANDOFF_ROW_BG),
+        (false, true) => Some(HANDOFF_ROW_BG),
+        (true, false) => Some(SELECTED_ROW_BG),
+        (false, false) => None,
+    }
 }
 
 /// The dock: a rounded frame titled with the selected session, around its
@@ -444,6 +454,41 @@ mod tests {
     }
 
     #[test]
+    fn the_handoff_mark_is_the_rows_background() {
+        crate::test_util::with_temp_home(|| {
+            let session = |id: &str, title: &str| SessionInfo {
+                session_id: id.into(),
+                title: Some(title.into()),
+                tmux_session: None,
+                ..crate::test_util::session_info()
+            };
+            let mut app = App::new();
+            app.sessions.groups = vec![ProjectGroup {
+                name: "alpha".into(),
+                cwd: "/tmp/alpha".into(),
+                sessions: vec![session("a-1", "Picked"), session("a-2", "Marked")],
+                held: false,
+            }];
+            app.sessions.handoff = Some(crate::handoff::Handoff {
+                session_id: "a-2".into(),
+                draft: String::new(),
+            });
+            let mut terminal = Terminal::new(TestBackend::new(120, 6)).expect("terminal");
+            let mut bg = |app: &mut App, y: u16| {
+                terminal
+                    .draw(|f| render_split(f, f.area(), app))
+                    .expect("render");
+                terminal.backend().buffer()[(0, y)].bg
+            };
+            assert_eq!(bg(&mut app, 1), SELECTED_ROW_BG);
+            assert_eq!(bg(&mut app, 2), HANDOFF_ROW_BG);
+            app.sessions.sel_in_group = 1;
+            assert_eq!(bg(&mut app, 1), Color::Reset);
+            assert_eq!(bg(&mut app, 2), SELECTED_HANDOFF_ROW_BG);
+        });
+    }
+
+    #[test]
     fn task_sessions_gather_under_their_task() {
         crate::test_util::with_temp_home(|| {
             let session = |id: &str, title: &str| SessionInfo {
@@ -500,7 +545,7 @@ mod tests {
                 vec![
                     header("alpha").as_str(),
                     " 󰓹 Ship it",
-                    "▌│ ● Plan",
+                    " │ ● Plan",
                     " │ ● Build",
                     " ● Loose",
                     "",

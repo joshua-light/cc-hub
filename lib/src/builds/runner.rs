@@ -5,8 +5,9 @@
 //! first. Then it waits for the recipe's [`hold`] and runs the
 //! recipe's steps in order, writing every line they print to `output.log` and
 //! folding [`Report`]s into the record. The first step to fail ends the build.
-//! When asked to cancel it runs the recipe's own cancel and ends the step if
-//! that did not.
+//! When asked to cancel it runs the recipe's own cancel and ends the step's
+//! process group if that did not. Once the step is gone it runs the cancel
+//! again: the first may have come before the step had anything to stop.
 
 use super::recipe::{self, Recipe, Values};
 use super::{append_output, hold, load, update, Build, BuildStatus, Report};
@@ -76,6 +77,7 @@ fn drive(id: &str) -> io::Result<BuildStatus> {
         };
         exit = status.code();
         if load(id)?.cancel {
+            cancel(id, recipe, &build)?;
             return end(id, BuildStatus::Cancelled, exit, None);
         }
         if !status.success() {
@@ -127,17 +129,15 @@ fn follow(
             None if load(id)?.cancel => {
                 cancelled_at = Some(Instant::now());
                 append_output(id, "cc-hub: cancelling")?;
-                if !recipe.cancel.is_empty() {
-                    let argv = recipe::expand(&recipe.cancel, Values::of(build));
-                    let (mut cancel, said) = stream(id, &argv, &build.cwd)?;
-                    for line in said {
-                        append_output(id, &line)?;
-                    }
-                    cancel.wait()?;
-                }
+                cancel(id, recipe, build)?;
             }
             Some(at) if at.elapsed() > CANCEL_GRACE => {
-                crate::platform::process::terminate(child.id());
+                crate::platform::process::terminate_group(child.id());
+                // Something that left the group may still hold the output
+                // open; the step is over once its leader is.
+                if child.try_wait()?.is_some() {
+                    break;
+                }
             }
             _ => {}
         }
@@ -145,7 +145,22 @@ fn follow(
     Ok((child.wait()?, last))
 }
 
-/// `argv` started in `cwd`, its stdout and stderr as one stream of lines.
+/// Run the recipe's cancel, if it has one, to the end.
+fn cancel(id: &str, recipe: &Recipe, build: &Build) -> io::Result<()> {
+    if recipe.cancel.is_empty() {
+        return Ok(());
+    }
+    let argv = recipe::expand(&recipe.cancel, Values::of(build));
+    let (mut cancel, said) = stream(id, &argv, &build.cwd)?;
+    for line in said {
+        append_output(id, &line)?;
+    }
+    cancel.wait()?;
+    Ok(())
+}
+
+/// `argv` started in `cwd`, in a process group of its own, its stdout and
+/// stderr as one stream of lines.
 fn stream(id: &str, argv: &[String], cwd: &str) -> io::Result<(Child, Receiver<String>)> {
     if argv.is_empty() {
         return Err(io::Error::other("the recipe gives no command"));
@@ -158,6 +173,8 @@ fn stream(id: &str, argv: &[String], cwd: &str) -> io::Result<(Child, Receiver<S
         .stdin(std::process::Stdio::null())
         .stdout(writer.try_clone()?)
         .stderr(writer);
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let child = command.spawn()?;
     // The command holds the pipe's write end; while it lives the reader
     // never sees the end of the stream.

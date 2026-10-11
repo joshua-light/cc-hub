@@ -151,7 +151,7 @@ pub(crate) fn render_respawn_picker(frame: &mut Frame, area: Rect, app: &App) {
 
 /// `T` on a focused board card: the list of deliverable kinds the card can be
 /// given. Same chrome and interaction as the agent picker; the first row is
-/// the empty pick, which hands the classification back to the task router.
+/// the empty pick, which makes the card manual: the task router skips it.
 pub(crate) fn render_task_kind_picker(frame: &mut Frame, area: Rect, app: &App) {
     let Some(picker) = app.task_kind_picker.as_ref() else {
         return;
@@ -188,7 +188,7 @@ pub(crate) fn render_task_kind_picker(frame: &mut Frame, area: Rect, app: &App) 
             };
             let label = match picker.kinds.get(i.wrapping_sub(1)) {
                 Some(kind) => kind.as_str(),
-                None => "(none — let the router classify)",
+                None => "(none — manual, the runner skips it)",
             };
             Line::from(Span::styled(
                 format!("{} {}", if selected { "▶" } else { " " }, label),

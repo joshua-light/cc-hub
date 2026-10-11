@@ -2,10 +2,11 @@
 //! generic popups any tab can open (session detail, live tail, tmux pane,
 //! close confirmation).
 
-use super::App;
+use super::{App, Command, SessionsCommand};
 use crate::config;
 use crate::live_view::LiveView;
 use crate::tmux_pane::TmuxPaneView;
+use crossterm::event::{MouseEvent, MouseEventKind};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum View {
@@ -177,6 +178,42 @@ impl App {
         }
     }
 
+    /// Whether the hub wants the terminal's mouse: while a pane is on screen
+    /// to take it. Without capture the terminal turns the wheel into arrow
+    /// keys, and over the dock those would move the list's cursor.
+    pub fn wants_mouse(&self) -> bool {
+        match self.view {
+            View::TmuxPane | View::Dock => true,
+            View::Grid => self.sessions.dock.pane().is_some(),
+            _ => false,
+        }
+    }
+
+    /// Route a captured mouse event. A focused pane takes every event. With
+    /// the keyboard on the list, the dock's pane still takes the wheel over
+    /// it, so it scrolls without being focused, and the wheel anywhere else
+    /// moves the cursor as the terminal's arrow keys did.
+    pub fn mouse(&mut self, ev: MouseEvent) {
+        if let Some(pane) = self.focused_pane() {
+            pane.send_mouse(ev);
+            return;
+        }
+        if self.view != View::Grid {
+            return;
+        }
+        let nav = match ev.kind {
+            MouseEventKind::ScrollUp => SessionsCommand::NavUp,
+            MouseEventKind::ScrollDown => SessionsCommand::NavDown,
+            _ => return,
+        };
+        match self.sessions.dock.pane_mut() {
+            Some(pane) if pane.covers(ev.column, ev.row) => pane.send_mouse(ev),
+            _ => {
+                self.execute(Command::Sessions(nav));
+            }
+        }
+    }
+
     /// F1 in a pane: close the popup, or hand the dock's keyboard back to
     /// the list — its pane stays on screen.
     pub fn release_pane(&mut self) {
@@ -247,5 +284,54 @@ impl App {
         } else {
             View::Grid
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::app::test_support::fake_session;
+    use crate::models::SessionState;
+    use crossterm::event::KeyModifiers;
+
+    fn wheel(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    // With no pane on screen the terminal keeps the mouse, and a wheel that
+    // does arrive over the list moves the cursor, as its arrow keys would.
+    #[test]
+    fn the_wheel_over_the_list_moves_the_cursor() {
+        let mut app = App::new();
+        app.update_sessions(vec![
+            fake_session("cchub-a", SessionState::Idle),
+            fake_session("cchub-b", SessionState::Idle),
+        ]);
+        assert!(!app.wants_mouse());
+
+        app.mouse(wheel(MouseEventKind::ScrollDown));
+        assert_eq!(app.sessions.sel_in_group, 1);
+        app.mouse(wheel(MouseEventKind::ScrollUp));
+        assert_eq!(app.sessions.sel_in_group, 0);
+    }
+
+    // A popup over the list keeps the wheel off the cursor.
+    #[test]
+    fn the_wheel_leaves_the_cursor_alone_under_a_popup() {
+        let mut app = App::new();
+        app.update_sessions(vec![
+            fake_session("cchub-a", SessionState::Idle),
+            fake_session("cchub-b", SessionState::Idle),
+        ]);
+        app.view = View::RenameSession;
+
+        app.mouse(wheel(MouseEventKind::ScrollDown));
+        assert_eq!(app.sessions.sel_in_group, 0);
+        assert!(!app.wants_mouse());
     }
 }

@@ -41,11 +41,7 @@ pub(super) async fn drain_input(
             r.dirty = true;
             r.last_input_at = Some(Instant::now());
             match evt {
-                Event::Mouse(m) => {
-                    if let Some(pane) = app.focused_pane() {
-                        pane.send_mouse(m);
-                    }
-                }
+                Event::Mouse(m) => app.mouse(m),
                 Event::Paste(text) => {
                     if matches!(app.view, View::TmuxPane | View::Dock) {
                         if let Some(pane) = app.focused_pane() {

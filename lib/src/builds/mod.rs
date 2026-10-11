@@ -117,9 +117,10 @@ impl Build {
         }
     }
 
-    /// This build's checkout as it is now: the same checkout, but the working
-    /// tree rather than the ref, and whatever route the recipe picks for what
-    /// changed. A pinned ref or route is asked for, not run again.
+    /// This build's checkout as it is now: the same checkout, but the recipe's
+    /// ref or the working tree rather than this build's ref, and whatever route
+    /// the recipe picks for what changed. A pinned ref or route is asked for,
+    /// not run again.
     pub fn again(&self) -> Build {
         Build::new(&self.recipe, &self.cwd, None, None)
     }
@@ -338,7 +339,8 @@ pub fn typical(builds: &[Build], recipe: &str, route: &str) -> Option<i64> {
 
 // ---- asking for things ------------------------------------------------------
 
-/// Queue a build and start its runner.
+/// Queue a build and start its runner. A build that names no ref takes the
+/// recipe's.
 pub fn start(build: Build) -> io::Result<Build> {
     let recipe = recipe::named(&build.recipe)
         .ok_or_else(|| io::Error::other(format!("no recipe named {:?}", build.recipe)))?;
@@ -352,6 +354,10 @@ pub fn start(build: Build) -> io::Result<Build> {
             )));
         }
     }
+    let build = Build {
+        r#ref: build.r#ref.or_else(|| recipe.r#ref.clone()),
+        ..build
+    };
     create(&build)?;
     prune(&build.recipe);
     if let Err(e) = detach(&["build", "_run", &build.id]) {
@@ -364,7 +370,8 @@ pub fn start(build: Build) -> io::Result<Build> {
 }
 
 /// Run a recipe as it stands: the checkout of its last build
-/// ([`Build::again`]), else the recipe's own, as the working tree is now.
+/// ([`Build::again`]), else the recipe's own, at the recipe's ref, else as the
+/// working tree is now.
 pub fn run(name: &str) -> io::Result<Build> {
     let build = match all().into_iter().find(|b| b.recipe == name) {
         Some(last) => last.again(),

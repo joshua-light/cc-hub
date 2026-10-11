@@ -224,19 +224,27 @@ impl TmuxPaneView {
         self.viewport_origin = (col, row);
     }
 
+    /// The pane-local cell under screen cell `(column, row)`, `None` outside
+    /// the pane's current viewport.
+    fn cell_at(&self, column: u16, row: u16) -> Option<(u16, u16)> {
+        let (ox, oy) = self.viewport_origin;
+        let x = column.checked_sub(ox)?;
+        let y = row.checked_sub(oy)?;
+        (x < self.cols && y < self.rows).then_some((x, y))
+    }
+
+    /// Whether screen cell `(column, row)` falls inside the pane.
+    pub fn covers(&self, column: u16, row: u16) -> bool {
+        self.cell_at(column, row).is_some()
+    }
+
     /// Encode `ev` as an SGR mouse report (`CSI < b ; x ; y M/m`) and write
     /// it to the pty. Events that land outside the pane's current viewport
     /// are dropped.
     pub fn send_mouse(&mut self, ev: MouseEvent) {
-        let (ox, oy) = self.viewport_origin;
-        if ev.column < ox || ev.row < oy {
+        let Some((x, y)) = self.cell_at(ev.column, ev.row) else {
             return;
-        }
-        let x = ev.column - ox;
-        let y = ev.row - oy;
-        if x >= self.cols || y >= self.rows {
-            return;
-        }
+        };
 
         let Some((mut b, release)) = mouse_button_code(ev.kind) else {
             return;

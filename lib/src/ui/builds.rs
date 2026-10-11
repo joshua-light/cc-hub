@@ -425,7 +425,9 @@ fn field_line(form: &BuildForm, field: FormField, width: usize) -> Line<'static>
         FormField::Recipe => form.recipe.clone(),
         FormField::Checkout if focused => form.cwd.clone(),
         FormField::Checkout => tilde(&form.cwd),
-        FormField::Ref if form.r#ref.is_empty() && !focused => "working tree".into(),
+        FormField::Ref if form.r#ref.is_empty() && !focused => recipe::named(&form.recipe)
+            .and_then(|r| r.r#ref.clone())
+            .unwrap_or_else(|| "working tree".into()),
         FormField::Ref => form.r#ref.clone(),
         FormField::Route => form.route.clone().unwrap_or_else(|| "auto".into()),
     };

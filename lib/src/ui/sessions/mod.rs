@@ -108,18 +108,22 @@ fn render_headers(
     }
 }
 
-/// One-row On hold header: the held count, then a rule to the right edge.
+/// One-row On hold header: the held sessions' dot, the held count, then a
+/// rule to the right edge.
 fn render_hold_header(frame: &mut Frame, area: Rect, groups: &[ProjectGroup]) {
     let held: usize = groups
         .iter()
         .filter(|g| g.held)
         .map(|g| g.sessions.len())
         .sum();
-    let title = format!(" {STATE_DOT} On hold ");
+    let dot = format!(" {STATE_DOT}");
+    let title = " On hold ";
     let count = format!(" {held} held ");
-    let used = title.chars().count() + count.chars().count();
+    let used = dot.chars().count() + title.chars().count() + count.chars().count();
     let rule = "─".repeat((area.width as usize).saturating_sub(used));
     let line = Line::from(vec![
+        // The colour every held session's dot takes, see `dot_color`.
+        Span::styled(dot, Style::default().fg(state_color(&SessionState::Idle))),
         Span::styled(
             title,
             Style::default().fg(MUTED_TEXT).add_modifier(Modifier::BOLD),

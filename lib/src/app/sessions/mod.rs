@@ -34,6 +34,7 @@ mod task_link_picker;
 pub use dock::Dock;
 pub use model_picker::{AgentPickerState, ModelPickerChoice, ModelPickerState};
 pub use rename::RenameSubmit;
+use rename::UnscannedTitles;
 pub use respawn_picker::{RespawnChoice, RespawnPickerState};
 pub use session_finder::{SessionFinderChoice, SessionFinderState};
 pub(super) use spawn::SpawnWatch;
@@ -84,6 +85,7 @@ pub struct SessionsView {
     pub show_inactive: bool,
     pub acks: Acks,
     pub holds: Holds,
+    pub(crate) unscanned_titles: UnscannedTitles,
     /// The session marked with `h`, whose last reply the next fresh session
     /// opens with. At most one; the spawn that takes it clears it.
     pub handoff: Option<Handoff>,
@@ -105,6 +107,7 @@ impl SessionsView {
             show_inactive: false,
             acks: Acks::new(),
             holds: Holds::new(),
+            unscanned_titles: UnscannedTitles::default(),
             handoff: None,
             last_sessions: Vec::new(),
             known_session_ids: None,

@@ -70,6 +70,7 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
     crate::conversation::tool_count::retain_cached(&live_paths);
 
     crate::resources::label_sessions(&mut sessions);
+    crate::resources::name_worker_sessions(&mut sessions);
     sort_stable(&mut sessions);
     sessions
 }

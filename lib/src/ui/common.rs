@@ -204,24 +204,24 @@ pub(crate) const STATE_DOT: &str = "●";
 
 /// White while the session works (the renderers blink it, see
 /// [`working_blink`]), green once it is done and waiting for you, blue
-/// when it asks a question, gray while it idles.
+/// when it asks a question, dark gray while it rests.
 pub(crate) fn state_color(state: &SessionState) -> Color {
     match state {
         SessionState::Starting | SessionState::Processing => Color::White,
         SessionState::WaitingForInput => Color::Green,
         SessionState::Question => Color::LightBlue,
-        SessionState::Idle => DOT_IDLE,
-        SessionState::Inactive => GRAY_80,
+        SessionState::Idle | SessionState::Inactive => GRAY_80,
     }
 }
 
-/// A working dot's colour at `now`: white and dim in turn, half a second
-/// each. The draw loop's clock tick repaints at that rate.
+/// A working dot's colour at `now`: white and light gray in turn, half a
+/// second each — both brighter than a resting dot. The draw loop's clock
+/// tick repaints at that rate.
 pub(crate) fn working_blink(now: u64) -> Color {
     if (now / 500).is_multiple_of(2) {
         Color::White
     } else {
-        GRAY_80
+        DOT_IDLE
     }
 }
 
