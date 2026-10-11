@@ -69,8 +69,7 @@ fn border(session: &SessionInfo, marks: CardMarks) -> (BorderType, Color) {
     let border_type = if selected {
         BorderType::Double
     } else if session.needs_attention() {
-        // Weight plus the chip title make "needs you" categorical, not a hue
-        // shift.
+        // Weight makes "needs you" categorical, not a hue shift.
         BorderType::Thick
     } else if session.state == SessionState::Inactive {
         BorderType::LightDoubleDashed
@@ -82,14 +81,14 @@ fn border(session: &SessionInfo, marks: CardMarks) -> (BorderType, Color) {
 
 /// The top-border title, the card's main skim surface: agent badge, state
 /// dot, cold-cache mark, then the Haiku title (or `✎ …` while one is
-/// being generated). The project name is left out: the group header shows it.
-fn card_title(session: &SessionInfo, marks: CardMarks, now: u64) -> Span<'static> {
+/// being generated). Only the dot takes the state's colour; the words stay
+/// white. The project name is left out: the group header shows it.
+fn card_title(session: &SessionInfo, marks: CardMarks, now: u64) -> Line<'static> {
     let dot = dot_color(&session.state, marks, now);
-    let agent_badge = agent_prefix(session);
+    let words = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
 
-    // Every branch keeps a space right after the dot, so a bare title (no
-    // text yet) still leaves a cell between the dot and the border.
-    //
     // The snowflake marks a cold prompt cache (restarting beats resuming).
     // Here it takes the title's colour; the ice-blue one is the footer clock.
     let cold_mark = if session.cache_cold(now) {
@@ -97,33 +96,18 @@ fn card_title(session: &SessionInfo, marks: CardMarks, now: u64) -> Span<'static
     } else {
         String::new()
     };
+    // Every branch keeps a space right after the dot, so a bare title (no
+    // text yet) still leaves a cell between the dot and the border.
     let title = match session.title.as_deref() {
-        Some(t) if !t.is_empty() => {
-            format!("{agent_badge}{STATE_DOT} {cold_mark}{t}")
-        }
-        _ if session.titling => format!("{agent_badge}{STATE_DOT} {cold_mark}✎ …"),
-        _ => format!("{agent_badge}{STATE_DOT} {cold_mark}"),
+        Some(t) if !t.is_empty() => format!(" {cold_mark}{t}"),
+        _ if session.titling => format!(" {cold_mark}✎ …"),
+        _ => format!(" {cold_mark}"),
     };
-    // Attention cards get a filled chip (black on the state colour).
-    // Background fill is reserved for "needs you", so it can't be mistaken
-    // for the coloured but ambient Processing border.
-    let (title, title_style) = if session.needs_attention() {
-        let chip = if title.ends_with(' ') {
-            format!(" {}", title)
-        } else {
-            format!(" {} ", title)
-        };
-        (
-            chip,
-            Style::default()
-                .fg(Color::Black)
-                .bg(dot)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        (title, Style::default().fg(dot).add_modifier(Modifier::BOLD))
-    };
-    Span::styled(title, title_style)
+    Line::from(vec![
+        Span::styled(agent_prefix(session), words),
+        Span::styled(STATE_DOT, Style::default().fg(dot)),
+        Span::styled(title, words),
+    ])
 }
 
 /// Task link mark (`L`): the task title on the bottom border in the task's
@@ -267,24 +251,35 @@ mod tests {
     }
 
     #[test]
-    fn attention_title_is_a_background_chip() {
+    fn only_the_dot_takes_the_state_colour() {
         let mut s = fake_session();
-        s.state = SessionState::WaitingForInput;
         s.title = Some("Fix auth".into());
-        let buf = render(&s, 42, 7);
-        let fx = (0..buf.area().width)
-            .find(|&x| buf[(x, 0)].symbol() == "F")
-            .expect("title text on border row");
-        assert_eq!(buf[(fx, 0)].style().bg, Some(Color::Green));
-
-        // Processing keeps a plain (no-fill) title — bg is exclusive to
-        // "needs you".
-        s.state = SessionState::Processing;
-        let buf = render(&s, 42, 7);
-        let fx = (0..buf.area().width)
-            .find(|&x| buf[(x, 0)].symbol() == "F")
-            .expect("title text on border row");
-        assert_ne!(buf[(fx, 0)].style().bg, Some(Color::Green));
+        for state in [
+            SessionState::WaitingForInput,
+            SessionState::Question,
+            SessionState::Idle,
+            SessionState::Inactive,
+        ] {
+            s.state = state.clone();
+            let buf = render(&s, 42, 7);
+            let cell = |sym: &str| {
+                (0..buf.area().width)
+                    .map(|x| &buf[(x, 0)])
+                    .find(|c| c.symbol() == sym)
+                    .expect("on the border row")
+                    .clone()
+            };
+            assert_eq!(
+                cell(crate::ui::common::STATE_DOT).fg,
+                super::state_color(&state)
+            );
+            let word = cell("F");
+            assert_eq!(
+                (word.fg, word.bg),
+                (Color::White, Color::Reset),
+                "{state:?}"
+            );
+        }
     }
 
     #[test]

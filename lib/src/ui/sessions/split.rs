@@ -1,20 +1,22 @@
 //! Split layout: a narrow session list on the left, the selected session's
 //! live pane docked on the right — an editor's sidebar and buffer.
 //!
-//! The sidebar keeps the list layout's grouping (project headers, the On
-//! hold section) but only the dot, the title and the age, so it stays
-//! narrow. What the rows drop — branch, model, context — goes up into the
+//! The sidebar reads like an explorer tree. Each project opens with its
+//! name and a horizontal rule to the edge; under it, sessions linked to a task gather beneath that
+//! task's header like files in a subfolder, and unlinked sessions follow at
+//! the project's own level. A session row is only the dot and the title, so
+//! the sidebar stays narrow; branch, model and context go up into the
 //! dock's border, for the one session on screen.
 
 use super::{
-    context_pct, dot_color, hold_header_above, keep_in_view, render_hold_header,
-    render_no_sessions, row_title, CardMarks, GROUP_GAP, GROUP_HEADER_HEIGHT,
+    badge_color, context_pct, dot_color, hold_header_above, keep_in_view, render_hold_header,
+    render_no_sessions, row_title, CardMarks,
 };
 use crate::app::{App, Dock, View};
-use crate::models::{first_line_truncated, ProjectGroup, SessionInfo, SessionState};
-use crate::ui::common::{format_elapsed, selection_stripe, short_model, STATE_DOT};
+use crate::models::{first_line_truncated, ProjectGroup, SessionInfo, SessionState, TaskBadge};
+use crate::ui::common::{selection_stripe, short_model, STATE_DOT};
 use crate::ui::now_ms;
-use crate::ui::palette::{DIM_TEXT, HANDOFF_BLUE, ICE_BLUE, SELECTED_ROW_BG, SEP_GRAY};
+use crate::ui::palette::{DIM_TEXT, HANDOFF_BLUE, SELECTED_ROW_BG, SEP_GRAY};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -28,8 +30,8 @@ const SIDEBAR_MAX: u16 = 48;
 /// Narrower than this, the dock isn't worth drawing: the sidebar takes it
 /// all.
 const DOCK_MIN: u16 = 40;
-/// Stripe(1) + dot(1) + space(1).
-const ROW_LEFT: usize = 3;
+/// The task header's mark, the same one the list and the cards use.
+const TASK_ICON: &str = "󰓹";
 
 pub(super) fn render_split(frame: &mut Frame, area: Rect, app: &mut App) {
     let sidebar_w = (area.width / 4).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
@@ -48,114 +50,172 @@ pub(super) fn render_split(frame: &mut Frame, area: Rect, app: &mut App) {
     render_dock(frame, dock, app);
 }
 
+/// One sidebar row, top to bottom.
+enum Row<'a> {
+    /// The On hold section's header, above the first held project.
+    Hold,
+    Project(&'a ProjectGroup),
+    /// A task's header, above the sessions linked to it.
+    Task(TaskBadge),
+    Session {
+        group: usize,
+        index: usize,
+        session: &'a SessionInfo,
+        /// The task the session sits under, if any: its rows indent behind
+        /// a guide in the task's colour.
+        task: Option<Color>,
+    },
+    Gap,
+}
+
+/// Every row of the sidebar, in order. Task-linked sessions already lead
+/// their project, clustered by task (see `App::rebuild_groups`), so one
+/// pass that opens a header wherever the task changes builds the tree.
+fn rows(app: &App) -> Vec<Row<'_>> {
+    let groups = &app.sessions.groups;
+    let mut rows = Vec::new();
+    for (gi, group) in groups.iter().enumerate() {
+        if hold_header_above(groups, gi) > 0 {
+            rows.push(Row::Hold);
+        }
+        rows.push(Row::Project(group));
+        let mut open_task: Option<String> = None;
+        for (si, session) in group.sessions.iter().enumerate() {
+            let badge = app.task_badge(&session.session_id);
+            let task = badge.as_ref().map(badge_color);
+            let task_id = badge.as_ref().map(|b| b.task_id.clone());
+            if task_id.is_some() && task_id != open_task {
+                rows.extend(badge.map(Row::Task));
+            }
+            open_task = task_id;
+            rows.push(Row::Session {
+                group: gi,
+                index: si,
+                session,
+                task,
+            });
+        }
+        rows.push(Row::Gap);
+    }
+    rows
+}
+
 fn render_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
     if app.sessions.groups.is_empty() {
         render_no_sessions(frame, area);
         return;
     }
 
-    // Content-space y of each group's header: the On hold header above the
-    // group that opens that section, one row per session, then the gap.
-    let mut group_offsets: Vec<u16> = Vec::new();
-    let mut y_acc: u16 = 0;
-    for (gi, group) in app.sessions.groups.iter().enumerate() {
-        y_acc = y_acc.saturating_add(hold_header_above(&app.sessions.groups, gi));
-        group_offsets.push(y_acc);
-        y_acc = y_acc.saturating_add(GROUP_HEADER_HEIGHT + group.sessions.len() as u16 + GROUP_GAP);
-    }
-
+    let mut scroll = app.render.grid_scroll;
+    let rows = rows(app);
     let (sel_group, sel_in_group) = (app.sessions.sel_group, app.sessions.sel_in_group);
-    let g_offset = group_offsets[sel_group];
-    let row_y = g_offset + GROUP_HEADER_HEIGHT + sel_in_group as u16;
-    keep_in_view(
-        &mut app.render.grid_scroll,
-        g_offset - hold_header_above(&app.sessions.groups, sel_group),
-        row_y,
-        row_y + 1,
-        area.height,
-    );
+    let selected = rows.iter().position(|r| {
+        matches!(r, Row::Session { group, index, .. } if (*group, *index) == (sel_group, sel_in_group))
+    });
+    // The selected project's first row: its bar, or the On hold header
+    // right above it.
+    let group_top = rows
+        .iter()
+        .position(|r| matches!(r, Row::Session { group, .. } if *group == sel_group))
+        .and_then(|first| {
+            rows[..first]
+                .iter()
+                .rposition(|r| matches!(r, Row::Project(_)))
+        })
+        .map(|bar| bar - usize::from(bar > 0 && matches!(rows[bar - 1], Row::Hold)));
+    if let (Some(sel), Some(top)) = (selected, group_top) {
+        keep_in_view(
+            &mut scroll,
+            top as u16,
+            sel as u16,
+            sel as u16 + 1,
+            area.height,
+        );
+    }
 
-    let scroll = app.render.grid_scroll as i32;
-    let on_screen = |y: u16| {
-        let sy = y as i32 - scroll;
-        (sy >= 0 && sy < area.height as i32)
-            .then(|| Rect::new(area.x, area.y + sy as u16, area.width, 1))
-    };
     let now = now_ms();
-    let groups = &app.sessions.groups;
-    for (gi, group) in groups.iter().enumerate() {
-        let g_y = group_offsets[gi];
-        let above = hold_header_above(groups, gi);
-        if let Some(row) = (above > 0).then(|| on_screen(g_y - above)).flatten() {
-            render_hold_header(frame, row, groups);
-        }
-        if let Some(row) = on_screen(g_y) {
-            render_group_header(frame, row, group);
-        }
-        for (si, session) in group.sessions.iter().enumerate() {
-            let Some(row) = on_screen(g_y + GROUP_HEADER_HEIGHT + si as u16) else {
-                continue;
-            };
-            let marks = CardMarks::of(app, gi, si, session);
-            render_row(frame, row, session, marks, now);
+    let visible = rows.iter().skip(scroll as usize).take(area.height as usize);
+    for (y, row) in visible.enumerate() {
+        let line = Rect::new(area.x, area.y + y as u16, area.width, 1);
+        match row {
+            Row::Hold => render_hold_header(frame, line, &app.sessions.groups),
+            Row::Project(group) => render_project_header(frame, line, group),
+            Row::Task(badge) => render_task_header(frame, line, badge),
+            Row::Session {
+                group,
+                index,
+                session,
+                task,
+            } => {
+                let marks = CardMarks::of(app, *group, *index, session);
+                render_session(frame, line, session, *task, marks, now);
+            }
+            Row::Gap => {}
         }
     }
+    drop(rows);
+    app.render.grid_scroll = scroll;
 }
 
-/// One-row project header: the name, and the session count at the right
-/// edge.
-fn render_group_header(frame: &mut Frame, area: Rect, group: &ProjectGroup) {
-    let count = format!("{} ", group.sessions.len());
-    let name_w = (area.width as usize).saturating_sub(count.chars().count() + 1);
-    let name = format!(
-        " {}",
-        first_line_truncated(&group.name, name_w.saturating_sub(1))
-    );
-    let pad = (area.width as usize).saturating_sub(name.chars().count() + count.chars().count());
+/// ` 󰉋 name ──────`: the project's name, then a rule to the edge that
+/// separates it from the project above.
+fn render_project_header(frame: &mut Frame, area: Rect, group: &ProjectGroup) {
+    let width = area.width as usize;
+    let name = first_line_truncated(&group.name, width.saturating_sub(6));
+    let title = format!(" 󰉋 {name} ");
+    let rule = "─".repeat(width.saturating_sub(title.chars().count()));
     let line = Line::from(vec![
         Span::styled(
-            name,
+            title,
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" ".repeat(pad)),
-        Span::styled(count, Style::default().fg(Color::DarkGray)),
+        Span::styled(rule, Style::default().fg(SEP_GRAY)),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// `▌● title…  12m`: the cursor stripe, the state dot, the title, and the
-/// last activity's age — ice blue once the prompt cache went cold.
-fn render_row(frame: &mut Frame, area: Rect, session: &SessionInfo, marks: CardMarks, now: u64) {
-    let dot = dot_color(&session.state, marks, now);
-    let age = session
-        .last_activity
-        .map(|ts| format!(" {} ", format_elapsed(now, ts)))
-        .unwrap_or_default();
-    let age_color = if session.cache_cold(now) {
-        ICE_BLUE
-    } else {
-        Color::DarkGray
-    };
-    let budget = (area.width as usize).saturating_sub(ROW_LEFT + age.chars().count());
-    let (title, title_style) = row_title(session, dot);
-    let title = first_line_truncated(&title, budget.saturating_sub(1));
-    let pad = budget.saturating_sub(title.chars().count());
+/// ` 󰓹 task title`, in the task's identity colour (gray once it is done).
+fn render_task_header(frame: &mut Frame, area: Rect, badge: &TaskBadge) {
+    let title = badge.title.lines().next().unwrap_or("");
+    let title = first_line_truncated(title, (area.width as usize).saturating_sub(4));
+    let line = Line::from(Span::styled(
+        format!(" {TASK_ICON} {title}"),
+        Style::default().fg(badge_color(badge)),
+    ));
+    frame.render_widget(Paragraph::new(line), area);
+}
 
-    let stripe = if marks.handoff {
+/// `▌● title…`, or `▌│ ● title…` under a task: the cursor stripe, the
+/// task's guide, the state dot, and the title.
+fn render_session(
+    frame: &mut Frame,
+    area: Rect,
+    session: &SessionInfo,
+    task: Option<Color>,
+    marks: CardMarks,
+    now: u64,
+) {
+    let dot = dot_color(&session.state, marks, now);
+    let mut spans = vec![if marks.handoff {
         Span::styled("▌", Style::default().fg(HANDOFF_BLUE))
     } else {
         selection_stripe(marks.selected)
-    };
-    let line = Line::from(vec![
-        stripe,
-        Span::styled(format!("{STATE_DOT} "), Style::default().fg(dot)),
-        Span::styled(title, title_style),
-        Span::raw(" ".repeat(pad)),
-        Span::styled(age, Style::default().fg(age_color)),
-    ]);
-    let mut row = Paragraph::new(line);
+    }];
+    if let Some(color) = task {
+        spans.push(Span::styled("│ ", Style::default().fg(color)));
+    }
+    spans.push(Span::styled(
+        format!("{STATE_DOT} "),
+        Style::default().fg(dot),
+    ));
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let (title, title_style) = row_title(session);
+    let title = first_line_truncated(&title, (area.width as usize).saturating_sub(used + 1));
+    spans.push(Span::styled(title, title_style));
+
+    let mut row = Paragraph::new(Line::from(spans));
     if marks.selected {
         row = row.style(Style::default().bg(SELECTED_ROW_BG));
     }
@@ -223,7 +283,7 @@ fn render_dock(frame: &mut Frame, area: Rect, app: &mut App) {
 /// ` ● title ` in the session's own colours.
 fn dock_title(session: &SessionInfo, marks: CardMarks, now: u64) -> Line<'static> {
     let dot = dot_color(&session.state, marks, now);
-    let (title, _) = row_title(session, dot);
+    let (title, _) = row_title(session);
     Line::from(vec![
         Span::styled(format!(" {STATE_DOT} "), Style::default().fg(dot)),
         Span::styled(
@@ -334,15 +394,85 @@ mod tests {
             });
             let rows = render(&mut app, 120, 10);
 
-            assert!(rows[0].starts_with(" alpha"), "{}", rows[0]);
+            assert!(rows[0].contains("alpha"), "{}", rows[0]);
             assert!(rows[1].contains("● Fix auth"), "{}", rows[1]);
             // The dock's frame starts right of the sidebar, titled with
             // the selected session, and says why it has no pane.
-            assert!(rows[0][32..].contains("╭"), "{}", rows[0]);
+            let dock: String = rows[0].chars().skip(33).collect();
+            assert!(dock.starts_with('╭'), "{}", rows[0]);
             assert!(rows[0].matches("Fix auth").count() == 1, "{}", rows[0]);
             assert!(rows.iter().any(|r| r.contains("outside tmux")), "{rows:#?}");
             // The next attach starts at the dock's inner size.
             assert_eq!(app.render.dock_size, (8, 120 - 32 - 1 - 2));
+        });
+    }
+
+    #[test]
+    fn task_sessions_gather_under_their_task() {
+        crate::test_util::with_temp_home(|| {
+            let session = |id: &str, title: &str| SessionInfo {
+                session_id: id.into(),
+                title: Some(title.into()),
+                tmux_session: None,
+                ..crate::test_util::session_info()
+            };
+            let mut app = App::new();
+            app.sessions.groups = vec![
+                ProjectGroup {
+                    name: "alpha".into(),
+                    cwd: "/tmp/alpha".into(),
+                    sessions: vec![
+                        session("a-1", "Plan"),
+                        session("a-2", "Build"),
+                        session("a-3", "Loose"),
+                    ],
+                    held: false,
+                },
+                ProjectGroup {
+                    name: "beta".into(),
+                    cwd: "/tmp/beta".into(),
+                    sessions: vec![session("b-1", "Other")],
+                    held: false,
+                },
+            ];
+            for id in ["a-1", "a-2"] {
+                app.session_task_links.insert(
+                    id.into(),
+                    crate::tasks::session_links::TaskLink {
+                        task_id: "tk-1".into(),
+                        title: "Ship it".into(),
+                    },
+                );
+            }
+            let rows: Vec<String> = render(&mut app, 120, 9)
+                .into_iter()
+                .map(|r| {
+                    r.chars()
+                        .take(32)
+                        .collect::<String>()
+                        .trim_end()
+                        .to_string()
+                })
+                .collect();
+            let header = |name: &str| {
+                let title = format!(" 󰉋 {name} ");
+                let rule = "─".repeat(32 - title.chars().count());
+                format!("{title}{rule}")
+            };
+            assert_eq!(
+                rows,
+                vec![
+                    header("alpha").as_str(),
+                    " 󰓹 Ship it",
+                    "▌│ ● Plan",
+                    " │ ● Build",
+                    " ● Loose",
+                    "",
+                    header("beta").as_str(),
+                    " ● Other",
+                    "",
+                ]
+            );
         });
     }
 
