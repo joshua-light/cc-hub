@@ -14,7 +14,7 @@ use crate::models;
 use crate::models::first_line_truncated;
 use crate::models::SessionState;
 use crate::tasks::store::{TaskPriority, TaskStatus};
-use crate::ui::palette::{BACKLOG_BLUE, GRAY_80, MUTED_TEXT, PURPLE, SEP_GRAY};
+use crate::ui::palette::{BACKLOG_BLUE, DOT_IDLE, GRAY_80, PURPLE, SEP_GRAY};
 use crate::usage::UsageInfo;
 use chrono::{DateTime, Local, TimeZone};
 use ratatui::layout::Rect;
@@ -198,22 +198,31 @@ fn format_reset(iso: &str, fmt: &str) -> Option<String> {
     )
 }
 
-pub(crate) fn state_indicator(state: &SessionState) -> (&'static str, Color) {
+/// The one glyph every session state draws. The state lives in its colour
+/// alone ([`state_color`]), so a column of dots reads at a glance.
+pub(crate) const STATE_DOT: &str = "●";
+
+/// White while the session works (the renderers blink it, see
+/// [`working_blink`]), green once it is done and waiting for you, blue
+/// when it asks a question, gray while it idles.
+pub(crate) fn state_color(state: &SessionState) -> Color {
     match state {
-        // Static fallback; both session renderers animate Starting with the
-        // orbit spinner (see [`starting_frame`]). Magenta keeps
-        // "booting" visually apart from the green Processing spinner.
-        SessionState::Starting => ("◌", Color::Magenta),
-        SessionState::Processing => ("󰒓", Color::Green),
-        SessionState::WaitingForInput => ("󰂞", Color::Yellow),
-        SessionState::Question => ("󰋗", Color::LightBlue),
-        SessionState::Idle => ("󰒲", MUTED_TEXT),
-        SessionState::Inactive => ("󰜎", GRAY_80),
+        SessionState::Starting | SessionState::Processing => Color::White,
+        SessionState::WaitingForInput => Color::Green,
+        SessionState::Question => Color::LightBlue,
+        SessionState::Idle => DOT_IDLE,
+        SessionState::Inactive => GRAY_80,
     }
 }
 
-pub(crate) fn state_color(state: &SessionState) -> Color {
-    state_indicator(state).1
+/// A working dot's colour at `now`: white and dim in turn, half a second
+/// each. The draw loop's clock tick repaints at that rate.
+pub(crate) fn working_blink(now: u64) -> Color {
+    if (now / 500).is_multiple_of(2) {
+        Color::White
+    } else {
+        GRAY_80
+    }
 }
 
 /// Braille spinner for work in flight: a Processing session, a ticking agent,
@@ -225,16 +234,6 @@ const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 
 pub(crate) fn spinner_frame(now: u64) -> &'static str {
     SPINNER_FRAMES[((now / 120) % SPINNER_FRAMES.len() as u64) as usize]
-}
-
-/// Single-dot orbit shown while a spawn placeholder is Starting. Same
-/// braille family as [`SPINNER_FRAMES`] but unmistakably different motion
-/// (one dot circling vs. a churning cluster), so a booting agent can't be
-/// read as one that's already processing.
-const STARTING_FRAMES: [&str; 8] = ["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"];
-
-pub(crate) fn starting_frame(now: u64) -> &'static str {
-    STARTING_FRAMES[((now / 120) % STARTING_FRAMES.len() as u64) as usize]
 }
 
 /// Snowflake marking a cold prompt cache (see

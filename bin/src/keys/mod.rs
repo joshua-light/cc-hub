@@ -8,7 +8,7 @@
 //! - `folder_picker`: the folder picker and its `gh repo create` input.
 //! - `pickers`: model, agent, respawn, task-kind and task-link pickers.
 //! - `metrics`: the Metrics tab.
-//! - `pane`: the embedded tmux pane.
+//! - `pane`: the embedded tmux pane, popup or docked.
 
 use crate::scan_msg::ScanMsg;
 use crate::term::Term;
@@ -76,7 +76,7 @@ pub(crate) async fn handle_key(
     // each view's own arm order.
     match app.view {
         View::Grid if on_metrics => metrics::handle(app, key, scan_tx),
-        View::TmuxPane => pane::handle(app, key),
+        View::TmuxPane | View::Dock => pane::handle(app, key),
         View::ConfirmClose => sessions::handle_confirm_close(app, key),
         View::FolderPicker => folder_picker::handle(app, key),
         View::GhCreateInput => folder_picker::handle_gh_create(app, key, scan_tx),

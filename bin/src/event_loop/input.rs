@@ -21,7 +21,8 @@ pub(super) async fn drain_input(
     detail_tx: &mpsc::Sender<String>,
     r: &mut Redraw,
 ) -> io::Result<Duration> {
-    let poll_ms = if app.view == View::TmuxPane { 16 } else { 5 };
+    let in_pane = matches!(app.view, View::TmuxPane | View::Dock);
+    let poll_ms = if in_pane { 16 } else { 5 };
 
     let mut input_dur = Duration::ZERO;
     if event::poll(Duration::from_millis(poll_ms))? {
@@ -41,15 +42,13 @@ pub(super) async fn drain_input(
             r.last_input_at = Some(Instant::now());
             match evt {
                 Event::Mouse(m) => {
-                    if app.view == View::TmuxPane {
-                        if let Some(pane) = app.tmux_pane.as_mut() {
-                            pane.send_mouse(m);
-                        }
+                    if let Some(pane) = app.focused_pane() {
+                        pane.send_mouse(m);
                     }
                 }
                 Event::Paste(text) => {
-                    if app.view == View::TmuxPane {
-                        if let Some(pane) = app.tmux_pane.as_ref() {
+                    if matches!(app.view, View::TmuxPane | View::Dock) {
+                        if let Some(pane) = app.focused_pane() {
                             if let Err(e) = pane.paste_text(&text) {
                                 app.set_status(format!("paste failed: {}", e));
                             }
@@ -86,7 +85,7 @@ pub(super) async fn drain_input(
                     // the next read() on an empty queue.
                     let force_redraw = key.code == KeyCode::Char('l')
                         && key.modifiers.contains(KeyModifiers::CONTROL)
-                        && app.view != View::TmuxPane;
+                        && !matches!(app.view, View::TmuxPane | View::Dock);
                     if force_redraw {
                         log::debug!("key: ctrl+l — manual full redraw");
                         terminal.clear()?;
@@ -103,6 +102,11 @@ pub(super) async fn drain_input(
                             && app.tmux_pane.as_ref().is_some_and(|p| p.is_exited())
                         {
                             app.close_tmux_pane();
+                        }
+                        if app.focused_pane().is_some_and(|p| p.is_exited()) {
+                            // Drops the dead dock pane and hands the
+                            // keyboard back to the list.
+                            app.follow_dock();
                         }
                         let sel_before = (app.sessions.sel_group, app.sessions.sel_in_group);
                         keys::handle_key(app, key, terminal, scan_tx, detail_tx).await;

@@ -1,7 +1,9 @@
-//! Sessions tab: every session grouped under its project, as a card grid
-//! or, toggled with `v`, a compact list. Held sessions keep their project
-//! groups but sit below the rest, under an On hold header.
+//! Sessions tab: every session grouped under its project, in one of three
+//! layouts `v` cycles through: a narrow list beside the selected session's
+//! live pane, a full-width compact list, or a card grid. Held sessions keep
+//! their project groups but sit below the rest, under an On hold header.
 //!
+//! - `split`: the sidebar-and-dock layout
 //! - `grid`: the card grid layout
 //! - `card`: one card's border, title and task badge
 //! - `card_body`: the rows inside a card
@@ -11,10 +13,9 @@
 use crate::app::App;
 use crate::models::{ProjectGroup, SessionInfo, SessionState, TaskBadge};
 use crate::ui::common::{
-    context_window_size, spinner_frame, starting_frame, state_indicator, task_color,
-    COLD_CACHE_ICON,
+    context_window_size, state_color, task_color, working_blink, COLD_CACHE_ICON, STATE_DOT,
 };
-use crate::ui::palette::{ICE_BLUE, MUTED_TEXT, SEP_GRAY};
+use crate::ui::palette::{CONTEXT_GRAY, ICE_BLUE, MUTED_TEXT, SEP_GRAY};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -26,15 +27,13 @@ mod card_body;
 mod detail;
 mod grid;
 mod list;
+mod split;
 
 pub(crate) use detail::render_popup;
 
 const GROUP_HEADER_HEIGHT: u16 = 1;
 const GROUP_GAP: u16 = 1;
 const HOLD_HEADER_HEIGHT: u16 = 1;
-/// The pause glyph: titles the On hold section and stands in for the state
-/// glyph of every session in it.
-const HOLD_ICON: &str = "󰏤";
 
 /// What the user has done to a session row or card, as opposed to what the
 /// session is doing: the cursor is on it, `h` marked it for a handoff, or
@@ -56,11 +55,11 @@ impl CardMarks {
     }
 }
 
-/// Sessions-tab body: dispatch to whichever layout is active. The card grid
-/// is the default; the compact list is the `v`-toggled experiment (see
+/// Sessions-tab body: dispatch to whichever layout is active (see
 /// [`crate::app::SessionsLayout`]).
 pub(crate) fn render_sessions_body(frame: &mut Frame, area: Rect, app: &mut App) {
     match app.sessions.layout {
+        crate::app::SessionsLayout::Split => split::render_split(frame, area, app),
         crate::app::SessionsLayout::Grid => grid::render_grid(frame, area, app),
         crate::app::SessionsLayout::List => list::render_list(frame, area, app),
     }
@@ -116,7 +115,7 @@ fn render_hold_header(frame: &mut Frame, area: Rect, groups: &[ProjectGroup]) {
         .filter(|g| g.held)
         .map(|g| g.sessions.len())
         .sum();
-    let title = format!(" {HOLD_ICON} On hold ");
+    let title = format!(" {STATE_DOT} On hold ");
     let count = format!(" {held} held ");
     let used = title.chars().count() + count.chars().count();
     let rule = "─".repeat((area.width as usize).saturating_sub(used));
@@ -152,8 +151,8 @@ fn render_group_header(frame: &mut Frame, area: Rect, group: &ProjectGroup) {
     ));
     if attn > 0 {
         spans.push(Span::styled(
-            format!("  󰂞 {}", attn),
-            Style::default().fg(Color::Yellow),
+            format!("  {STATE_DOT} {attn}"),
+            Style::default().fg(state_color(&SessionState::WaitingForInput)),
         ));
     }
     spans.push(Span::styled(
@@ -180,16 +179,39 @@ fn keep_in_view(scroll: &mut u16, group_top: u16, item_top: u16, item_bottom: u1
     }
 }
 
-/// State glyph and colour, animated: Processing spins, Starting orbits. A
-/// held session shows the On hold header's pause glyph in its muted gray:
-/// it is parked, whatever its state.
-fn animated_indicator(state: &SessionState, marks: CardMarks, now: u64) -> (&'static str, Color) {
-    let (indicator, color) = state_indicator(state);
+/// The state dot's colour, animated: a working session blinks. A held
+/// session reads as idle: it is parked, whatever its state.
+fn dot_color(state: &SessionState, marks: CardMarks, now: u64) -> Color {
     match state {
-        _ if marks.held => (HOLD_ICON, MUTED_TEXT),
-        SessionState::Processing => (spinner_frame(now), color),
-        SessionState::Starting => (starting_frame(now), color),
-        _ => (indicator, color),
+        _ if marks.held => state_color(&SessionState::Idle),
+        SessionState::Starting | SessionState::Processing => working_blink(now),
+        _ => state_color(state),
+    }
+}
+
+/// A one-row title and its style: the Haiku title, always white — the dot
+/// beside it is the only thing the state colours — and bold when the
+/// session needs you. Without one, the last user message stands in, as on
+/// the card body.
+fn row_title(session: &SessionInfo) -> (String, Style) {
+    match session.title.as_deref() {
+        Some(t) if !t.is_empty() => {
+            let mut style = Style::default().fg(Color::White);
+            if session.needs_attention() {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            (t.to_string(), style)
+        }
+        _ if session.titling => ("✎ …".to_string(), Style::default().fg(MUTED_TEXT)),
+        _ => {
+            let msg = session
+                .last_user_message
+                .as_ref()
+                .or(session.summary.as_ref())
+                .map(|m| m.replace('\n', " "))
+                .unwrap_or_default();
+            (msg, Style::default().fg(CONTEXT_GRAY))
+        }
     }
 }
 

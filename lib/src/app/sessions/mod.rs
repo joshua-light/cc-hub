@@ -2,6 +2,7 @@
 //! that starts from a session card.
 //!
 //! - `scan`: applies scan snapshots; view toggles and acks (`z`).
+//! - `dock`: the split layout's live pane of the selected session.
 //! - `groups`: turns a snapshot into ordered, task-clustered groups.
 //! - `spawn`: spawn watchdogs, placeholder cards, boot-time naming.
 //! - `hold`: put a session on hold, parking it in the On hold section (Space).
@@ -18,6 +19,7 @@ use crate::holds::Holds;
 use crate::models::{ProjectGroup, SessionInfo};
 use std::collections::HashSet;
 
+mod dock;
 mod groups;
 mod handoff;
 mod hold;
@@ -29,6 +31,7 @@ mod session_finder;
 mod spawn;
 mod task_link_picker;
 
+pub use dock::Dock;
 pub use model_picker::{AgentPickerState, ModelPickerChoice, ModelPickerState};
 pub use rename::RenameSubmit;
 pub use respawn_picker::{RespawnChoice, RespawnPickerState};
@@ -36,23 +39,35 @@ pub use session_finder::{SessionFinderChoice, SessionFinderState};
 pub(super) use spawn::SpawnWatch;
 pub use task_link_picker::{TaskLinkAction, TaskLinkChoice, TaskLinkPickerState};
 
-/// How the Sessions tab lays out its sessions. `List` renders one compact
-/// row per session, table-style, and is what the app opens on — it fits far
-/// more sessions on screen than the cards do; `Grid` is the classic card
-/// wall. Runtime toggle (`v`), in-memory only — resets to `List` on
-/// relaunch, same lifetime as the `show_*` filters on [`SessionsView`].
+/// How the Sessions tab lays out its sessions. `Split` is what the app
+/// opens on: a narrow list on the left, the selected session's live pane
+/// docked on the right ([`Dock`]). `List` is the full-width table, one
+/// compact row per session; `Grid` is the classic card wall. Runtime
+/// cycle (`v`), in-memory only — resets to `Split` on relaunch, same
+/// lifetime as the `show_*` filters on [`SessionsView`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SessionsLayout {
-    Grid,
     #[default]
+    Split,
     List,
+    Grid,
 }
 
 impl SessionsLayout {
     pub fn label(self) -> &'static str {
         match self {
-            SessionsLayout::Grid => "grid",
+            SessionsLayout::Split => "split",
             SessionsLayout::List => "list",
+            SessionsLayout::Grid => "grid",
+        }
+    }
+
+    /// The layout `v` moves on to.
+    pub(crate) fn next(self) -> Self {
+        match self {
+            SessionsLayout::Split => SessionsLayout::List,
+            SessionsLayout::List => SessionsLayout::Grid,
+            SessionsLayout::Grid => SessionsLayout::Split,
         }
     }
 }
@@ -65,6 +80,7 @@ pub struct SessionsView {
     pub sel_group: usize,
     pub sel_in_group: usize,
     pub layout: SessionsLayout,
+    pub dock: Dock,
     pub show_inactive: bool,
     pub acks: Acks,
     pub holds: Holds,
@@ -85,6 +101,7 @@ impl SessionsView {
             sel_group: 0,
             sel_in_group: 0,
             layout: SessionsLayout::default(),
+            dock: Dock::default(),
             show_inactive: false,
             acks: Acks::new(),
             holds: Holds::new(),

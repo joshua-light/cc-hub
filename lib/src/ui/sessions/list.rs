@@ -16,16 +16,19 @@
 //! skew rows whose cells are blank or whose padding bottoms out at zero.
 
 use super::{
-    activity_clock, agent_prefix, animated_indicator, badge_color, context_pct, hold_header_above,
-    keep_in_view, render_headers, render_no_sessions, CardMarks, GROUP_GAP, GROUP_HEADER_HEIGHT,
+    activity_clock, agent_prefix, badge_color, context_pct, dot_color, hold_header_above,
+    keep_in_view, render_headers, render_no_sessions, row_title, CardMarks, GROUP_GAP,
+    GROUP_HEADER_HEIGHT,
 };
 use crate::app::App;
-use crate::models::{first_line_truncated, SessionInfo, SessionState};
-use crate::ui::common::{ctx_color, format_elapsed, selection_stripe, short_model, Cell, COL_SEP};
+use crate::models::{first_line_truncated, SessionInfo};
+use crate::ui::common::{
+    ctx_color, format_elapsed, selection_stripe, short_model, Cell, COL_SEP, STATE_DOT,
+};
 use crate::ui::now_ms;
-use crate::ui::palette::{CONTEXT_GRAY, HANDOFF_BLUE, MUTED_TEXT, SELECTED_ROW_BG};
+use crate::ui::palette::{HANDOFF_BLUE, MUTED_TEXT, SELECTED_ROW_BG};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
@@ -200,7 +203,7 @@ fn render_row(
         selected, handoff, ..
     } = marks;
     let width = area.width as usize;
-    let (indicator, ind_color) = animated_indicator(&session.state, marks, now);
+    let dot = dot_color(&session.state, marks, now);
 
     let mut cluster: Vec<Cell> = Vec::new();
     if cols.task_w > 0 {
@@ -282,35 +285,12 @@ fn render_row(
     }
     let cluster_width: usize = cluster.iter().map(|c| c.target + COL_SEP).sum();
 
-    // Title region: agent badge, then the Haiku title, falling back to the
-    // last user message as the card body does.
+    // Title region: agent badge, then the title.
     let title_budget = width.saturating_sub(LEFT_FIXED + cluster_width);
     let agent_badge = agent_prefix(session);
     let prefix_w = agent_badge.chars().count();
 
-    let attention = session.needs_attention();
-    let (text, text_style) = match session.title.as_deref() {
-        Some(t) if !t.is_empty() => {
-            let style = if attention {
-                Style::default().fg(ind_color).add_modifier(Modifier::BOLD)
-            } else if session.state == SessionState::Inactive {
-                Style::default().fg(Color::DarkGray)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            (t.to_string(), style)
-        }
-        _ if session.titling => ("✎ …".to_string(), Style::default().fg(MUTED_TEXT)),
-        _ => {
-            let msg = session
-                .last_user_message
-                .as_ref()
-                .or(session.summary.as_ref())
-                .map(|m| m.replace('\n', " "))
-                .unwrap_or_default();
-            (msg, Style::default().fg(CONTEXT_GRAY))
-        }
-    };
+    let (text, text_style) = row_title(session);
     let text = first_line_truncated(&text, title_budget.saturating_sub(prefix_w));
     let used = prefix_w + text.chars().count();
 
@@ -323,8 +303,8 @@ fn render_row(
         selection_stripe(selected)
     });
     spans.push(Span::styled(
-        format!("{} ", indicator),
-        Style::default().fg(ind_color),
+        format!("{STATE_DOT} "),
+        Style::default().fg(dot),
     ));
     if prefix_w > 0 {
         spans.push(Span::styled(agent_badge, Style::default().fg(MUTED_TEXT)));
@@ -411,7 +391,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn held_groups_sit_under_the_on_hold_header() {
-        use crate::models::ProjectGroup;
+        use crate::models::{ProjectGroup, SessionState};
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
@@ -421,6 +401,7 @@ mod tests {
                 cwd: format!("/tmp/{name}"),
                 sessions: vec![crate::models::SessionInfo {
                     session_id: format!("{name}-1"),
+                    state: SessionState::Question,
                     ..crate::test_util::session_info()
                 }],
                 held,
@@ -447,14 +428,18 @@ mod tests {
             );
             assert!(row(4).contains("beta"), "{}", row(4));
 
-            // Only the held session trades its state glyph for the pause.
-            assert!(!row(1).contains(super::super::HOLD_ICON), "{}", row(1));
-            assert!(row(5).contains(super::super::HOLD_ICON), "{}", row(5));
-            let glyph = (0..100)
-                .map(|x| &buf[(x, 5)])
-                .find(|c| c.symbol() == super::super::HOLD_ICON)
-                .expect("pause glyph");
-            assert_eq!(glyph.fg, crate::ui::palette::MUTED_TEXT);
+            // Both sessions sit at the same busy state; only the held one's
+            // dot reads as idle.
+            let dot = |y: u16| {
+                (0..100)
+                    .map(|x| &buf[(x, y)])
+                    .find(|c| c.symbol() == STATE_DOT)
+                    .expect("state dot")
+                    .fg
+            };
+            let idle = crate::ui::common::state_color(&SessionState::Idle);
+            assert_ne!(dot(1), idle);
+            assert_eq!(dot(5), idle);
         });
     }
 }

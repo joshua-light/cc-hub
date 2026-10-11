@@ -9,16 +9,21 @@ use std::time::{Duration, Instant};
 /// costs at most one probe every 2s.
 const PROBE_INTERVAL: Duration = Duration::from_secs(2);
 
+/// The time-driven repaint: often enough for the elapsed clocks and for a
+/// working session's dot to blink (see `ui::common::working_blink`).
+const CLOCK_TICK: Duration = Duration::from_millis(500);
+
 /// Redraw gating and draw telemetry carried across loop passes.
 pub(super) struct Redraw {
     // Redraw gating. The loop wakes every ~5ms but the widget
     // tree only changes on input, on a drained ScanMsg, on a LiveTail poll
-    // that picked up new entries, or on the once-per-second elapsed clock.
-    // We draw immediately on the first three (so input latency is unchanged)
-    // and throttle the purely time-driven "refreshed Ns ago" / elapsed-card
-    // repaint to ~1Hz. `dirty` starts true so the first frame always renders.
+    // that picked up new entries, or on the clock tick. We draw immediately
+    // on the first three (so input latency is unchanged) and throttle the
+    // purely time-driven repaint (elapsed clocks, blinking dots) to
+    // `CLOCK_TICK`. `dirty` starts true so the first frame always renders.
     // The embedded tmux pane is the exception: its content is fed by a
-    // background reader, so while it's open we redraw every loop tick.
+    // background reader, so while the keyboard is in one we redraw every
+    // loop tick, and a dock without the keyboard redraws when it drew.
     pub(super) dirty: bool,
     last_clock_redraw: Instant,
     // Set when an input event is handled, consumed by the draw that follows:
@@ -84,10 +89,12 @@ pub(super) fn draw(
 ) -> io::Result<Duration> {
     // The embedded tmux pane streams content from a background reader, so
     // its widget tree changes without any event we observe here — always
-    // repaint while it's open. Otherwise paint only when something
-    // changed, plus a ~1Hz tick so the elapsed clocks keep moving.
-    let in_tmux = app.view == View::TmuxPane;
-    let clock_tick = r.last_clock_redraw.elapsed() >= Duration::from_secs(1);
+    // repaint while the keyboard is in one. A dock on screen without the
+    // keyboard repaints when its pane drew something. Otherwise paint only
+    // when something changed, plus the clock tick.
+    let in_tmux = matches!(app.view, View::TmuxPane | View::Dock);
+    let dock_drew = app.sessions.dock.pane().is_some_and(|p| p.take_fresh());
+    let clock_tick = r.last_clock_redraw.elapsed() >= CLOCK_TICK;
     if r.resize_settle_at.is_some_and(|t| Instant::now() >= t) {
         r.resize_settle_at = None;
         r.full_redraw = true;
@@ -95,7 +102,10 @@ pub(super) fn draw(
     }
     let t_draw = Instant::now();
     let mut draw_dur = Duration::ZERO;
-    if r.dirty || in_tmux || clock_tick || r.full_redraw {
+    if r.dirty || in_tmux || dock_drew || clock_tick || r.full_redraw {
+        // Frames only a pane asked for: their stream is summed in the
+        // trace, not logged one by one.
+        let streamed = in_tmux || !(r.dirty || r.full_redraw || clock_tick);
         if r.full_redraw {
             // Wipes the terminal and resets ratatui's back buffer, so
             // the draw below emits every non-blank cell instead of a
@@ -117,9 +127,9 @@ pub(super) fn draw(
         // alone proved state correct while a user still saw a stale
         // highlight — this line closes the state↔pixels gap). `latency`
         // is read-to-frame for the most recent input event: app-side
-        // responsiveness, measured per keypress. Skip the pane's 60Hz
-        // stream to keep the log readable.
-        if !in_tmux {
+        // responsiveness, measured per keypress. Skip the panes' stream to
+        // keep the log readable.
+        if !streamed {
             log::debug!(
                 "draw: sel=({}, {}) view={:?} trigger={} took={:?} bytes={} latency={:?}",
                 app.sessions.sel_group,

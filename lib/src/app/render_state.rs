@@ -13,6 +13,7 @@
 ///   [`Self::grid_scroll`] through `sessions::keep_in_view` (one writer per
 ///   layout); `ui/sessions/detail.rs` clamps [`Self::popup_scroll`].
 /// - `ui/builds.rs` writes [`Self::builds_cols`] and [`Self::builds_scroll`].
+/// - `ui/sessions/split.rs` writes [`Self::dock_size`].
 /// - `ui/metrics/mod.rs` writes [`Self::metrics_view_height`],
 ///   [`Self::metrics_row_lines`], and [`Self::metrics_scroll`].
 pub struct RenderState {
@@ -49,6 +50,9 @@ pub struct RenderState {
     /// renderer; the cursor moves a row by stepping `builds_cols` cards.
     pub builds_cols: u16,
     pub builds_scroll: u16,
+    /// `(rows, cols)` inside the split layout's dock, written by
+    /// `ui/sessions/split.rs`: the size the next attach starts at.
+    pub dock_size: (u16, u16),
 }
 
 impl Default for RenderState {
@@ -65,6 +69,7 @@ impl Default for RenderState {
             agent_detail_scroll: 0,
             builds_cols: 1,
             builds_scroll: 0,
+            dock_size: (30, 100),
         }
     }
 }

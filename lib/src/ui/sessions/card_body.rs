@@ -1,7 +1,7 @@
 use super::{activity_clock, context_pct};
 use crate::models::{first_line_truncated, short_sid, SessionInfo, SessionState};
 use crate::ui::common::{
-    ctx_bar, ctx_color, format_elapsed, format_tool_label, short_model, state_indicator,
+    ctx_bar, ctx_color, format_elapsed, format_tool_label, short_model, STATE_DOT,
 };
 use crate::ui::palette::{CONTEXT_GRAY, MUTED_TEXT, PURPLE};
 use ratatui::style::{Color, Modifier, Style};
@@ -71,11 +71,9 @@ fn activity_line(session: &SessionInfo, inner_w: usize) -> Option<Line<'static>>
             // The unresolved tool_use is AskUserQuestion; its hint is the
             // question text — the one thing worth a row.
             let hint = session.current_tool.as_ref()?.hint.clone()?;
-            let (icon, _) = state_indicator(&session.state);
-            // The icon renders two columns but measures one — count it as 2.
-            let hint = first_line_truncated(&hint, inner_w.saturating_sub(3).max(6));
+            let hint = first_line_truncated(&hint, inner_w.saturating_sub(2).max(6));
             Some(Line::from(Span::styled(
-                format!("{} {}", icon, hint),
+                format!("{STATE_DOT} {hint}"),
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),

@@ -33,6 +33,10 @@ pub struct TmuxPaneView {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     exited: Arc<AtomicBool>,
+    /// Set by the reader thread whenever the screen took new bytes, cleared
+    /// by [`Self::take_fresh`]: what lets a pane that is merely on screen
+    /// repaint at the rate it draws, not at the loop's.
+    fresh: Arc<AtomicBool>,
     owns_session: bool,
     /// OSC 52 escapes captured from the attach client's output, awaiting
     /// replay onto cc-hub's real terminal by the main loop.
@@ -89,6 +93,7 @@ impl TmuxPaneView {
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
         let exited = Arc::new(AtomicBool::new(false));
+        let fresh = Arc::new(AtomicBool::new(false));
         let osc52_pending: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
 
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(writer));
@@ -96,6 +101,7 @@ impl TmuxPaneView {
         {
             let parser = Arc::clone(&parser);
             let exited = Arc::clone(&exited);
+            let fresh = Arc::clone(&fresh);
             let osc52_pending = Arc::clone(&osc52_pending);
             std::thread::spawn(move || {
                 let mut reader = reader;
@@ -128,6 +134,7 @@ impl TmuxPaneView {
                             if let Ok(mut p) = parser.lock() {
                                 p.process(&buf[..n]);
                             }
+                            fresh.store(true, Ordering::SeqCst);
                         }
                         Err(e) => {
                             warn!("tmux_pane: reader error: {}", e);
@@ -149,6 +156,7 @@ impl TmuxPaneView {
             writer,
             child,
             exited,
+            fresh,
             owns_session: false,
             osc52_pending,
         })
@@ -183,6 +191,11 @@ impl TmuxPaneView {
 
     pub fn is_exited(&self) -> bool {
         self.exited.load(Ordering::SeqCst)
+    }
+
+    /// Whether the screen changed since the last call.
+    pub fn take_fresh(&self) -> bool {
+        self.fresh.swap(false, Ordering::SeqCst)
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
