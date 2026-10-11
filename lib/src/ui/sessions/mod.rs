@@ -11,9 +11,9 @@
 //! - `detail`: the per-session detail popup
 
 use crate::app::App;
-use crate::models::{ProjectGroup, SessionInfo, SessionState, TaskBadge};
+use crate::models::{first_line_truncated, ProjectGroup, SessionInfo, SessionState, TaskBadge};
 use crate::ui::common::{
-    context_window_size, state_color, task_color, working_blink, COLD_CACHE_ICON, STATE_DOT,
+    context_window_size, state_color, task_color, working_blink, COLD_CACHE_ICON, CURSOR, STATE_DOT,
 };
 use crate::ui::palette::{CONTEXT_GRAY, ICE_BLUE, MUTED_TEXT, SEP_GRAY};
 use ratatui::layout::Rect;
@@ -36,21 +36,24 @@ const GROUP_GAP: u16 = 1;
 const HOLD_HEADER_HEIGHT: u16 = 1;
 
 /// What the user has done to a session row or card, as opposed to what the
-/// session is doing: the cursor is on it, `h` marked it for a handoff, or
-/// Space put it on hold.
+/// session is doing: the cursor is on it, `h` marked it for a handoff,
+/// Space put it on hold, or `r` is renaming it — `draft` is the name typed
+/// so far, drawn where the title goes.
 #[derive(Clone, Copy, Debug, Default)]
-struct CardMarks {
+struct CardMarks<'a> {
     selected: bool,
     handoff: bool,
     held: bool,
+    draft: Option<&'a str>,
 }
 
-impl CardMarks {
-    fn of(app: &App, gi: usize, si: usize, session: &SessionInfo) -> Self {
+impl<'a> CardMarks<'a> {
+    fn of(app: &'a App, gi: usize, si: usize, session: &SessionInfo) -> Self {
         Self {
             selected: gi == app.sessions.sel_group && si == app.sessions.sel_in_group,
             handoff: app.sessions.hands_off(&session.session_id),
             held: app.sessions.holds.contains(&session.session_id),
+            draft: app.rename_draft(session),
         }
     }
 }
@@ -193,13 +196,18 @@ fn dot_color(state: &SessionState, marks: CardMarks, now: u64) -> Color {
     }
 }
 
-/// A one-row title and its style: the Haiku title, always white — the dot
-/// beside it is the only thing the state colours. Without one, the last
-/// user message stands in, as on the card body. Bold is the cursor's: only
+/// A one-row title and its style, fitted to `width`: the Haiku title,
+/// always white — the dot beside it is the only thing the state colours.
+/// Without one, the last user message stands in, as on the card body. A
+/// rename in progress shows its draft instead. Bold is the cursor's: only
 /// the selected session's name carries it.
-fn row_title(session: &SessionInfo, selected: bool) -> (String, Style) {
-    let (text, style) = match session.title.as_deref() {
-        Some(t) if !t.is_empty() => (t.to_string(), Style::default().fg(Color::White)),
+fn row_title(session: &SessionInfo, marks: CardMarks, width: usize) -> (String, Style) {
+    let (text, style) = match (marks.draft, session.title.as_deref()) {
+        (Some(draft), _) => (draft_text(draft, width), Style::default().fg(Color::White)),
+        (None, Some(t)) if !t.is_empty() => (
+            first_line_truncated(t, width),
+            Style::default().fg(Color::White),
+        ),
         _ if session.titling => ("✎ …".to_string(), Style::default().fg(MUTED_TEXT)),
         _ => {
             let msg = session
@@ -208,14 +216,29 @@ fn row_title(session: &SessionInfo, selected: bool) -> (String, Style) {
                 .or(session.summary.as_ref())
                 .map(|m| m.replace('\n', " "))
                 .unwrap_or_default();
-            (msg, Style::default().fg(CONTEXT_GRAY))
+            (
+                first_line_truncated(&msg, width),
+                Style::default().fg(CONTEXT_GRAY),
+            )
         }
     };
-    if selected {
+    if marks.selected {
         (text, style.add_modifier(Modifier::BOLD))
     } else {
         (text, style)
     }
+}
+
+/// The name being typed with the cursor after it, fitted to `width` from
+/// the front: a name longer than its slot scrolls, so the cursor stays in
+/// sight.
+fn draft_text(draft: &str, width: usize) -> String {
+    let overflow = (draft.chars().count() + 1).saturating_sub(width);
+    if overflow == 0 {
+        return format!("{draft}{CURSOR}");
+    }
+    let tail: String = draft.chars().skip(overflow + 1).collect();
+    format!("…{tail}{CURSOR}")
 }
 
 /// `[Codex] ` ahead of a non-Claude session's title. Claude is the ~99%
@@ -295,5 +318,17 @@ mod fixtures {
         (0..buf.area().width)
             .map(|x| buf[(x, y)].symbol().to_string())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::draft_text;
+
+    #[test]
+    fn a_long_draft_scrolls_to_keep_the_cursor_in_sight() {
+        assert_eq!(draft_text("abc", 5), "abc▎");
+        assert_eq!(draft_text("abcd", 5), "abcd▎");
+        assert_eq!(draft_text("abcdef", 5), "…def▎");
     }
 }

@@ -88,7 +88,7 @@ pub struct App {
     pub usage: Option<UsageInfo>,
     pub usage_line: Line<'static>,
     pub session_counts: SessionCounts,
-    /// Edit buffer of the rename modal, prefilled with the current title.
+    /// Edit buffer of the inline rename, prefilled with the current title.
     pub rename_buffer: String,
     /// Session being renamed, captured at open so a rescan moving the
     /// selection can't retarget the submit.
@@ -128,7 +128,7 @@ pub struct App {
     spawn_watches: Vec<SpawnWatch>,
     /// Boot-time names, keyed by the spawning tmux name: the one id that
     /// survives the placeholder-to-real transition. A present key means the
-    /// spawn already got its rename popup, so
+    /// spawn was already prompted for a name, so
     /// [`Self::maybe_autoprompt_rename_for_new_session`] skips it.
     /// `Some(title)` is a name given while booting, persisted to the real
     /// session id once the scanner sees it

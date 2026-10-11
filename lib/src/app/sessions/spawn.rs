@@ -155,8 +155,8 @@ impl App {
         }
         // With Haiku auto-titling off, prompt for the name now — during the
         // boot — so the dead seconds while the agent writes its session file
-        // are spent naming it instead of waiting to. The popup targets the
-        // placeholder; the typed name is carried to the real session id in
+        // are spent naming it instead of waiting to. The rename targets the
+        // placeholder's row; the typed name is carried to the real session id in
         // `adopt_pending_spawn_names` once the scanner sees it. The map entry
         // also suppresses the redundant load-time prompt for this spawn.
         if !config::get().title.enabled {
@@ -187,8 +187,12 @@ impl App {
                 let w = self.spawn_watches.remove(i);
                 // The agent never came up, so its real session will never
                 // arrive — drop any boot-time name entry that would otherwise
-                // linger unresolved.
+                // linger unresolved, and close a rename still typing into its
+                // placeholder, which the next rebuild takes off the screen.
                 self.pending_spawn_names.remove(&w.tmux_name);
+                if self.rename_target == Some(spawning_session_id(&w.tmux_name)) {
+                    self.close_rename_session();
+                }
                 let msg = crate::spawn::diagnose_stalled_spawn(&w.tmux_name, &w.agent);
                 log::warn!("spawn watch: {}", msg);
                 self.set_status(msg);
@@ -240,7 +244,7 @@ impl App {
 
     /// Stand-in for the Haiku titler when auto-titling is off: the moment a
     /// new session lands on the grid (the same detection that drives the focus
-    /// jump in [`Self::update_sessions`]), open its rename popup so it never
+    /// jump in [`Self::update_sessions`]), open its inline rename so it never
     /// sits nameless. No-op when auto-titling is on, when an overlay or another
     /// tab has focus, or when the session already carries a title — see
     /// [`should_autoprompt_rename`].
@@ -282,6 +286,20 @@ mod tests {
         assert!(!fired);
         assert!(app.spawn_watches.is_empty());
         assert!(app.status_msg.is_none());
+    }
+
+    // A spawn that never comes up takes its placeholder off the screen, so a
+    // name still being typed into it has nowhere left to show.
+    #[test]
+    fn a_stalled_spawn_closes_the_rename_typing_into_it() {
+        let mut app = App::new();
+        app.watch_spawn("cchub-w-7".into(), "claude".into(), "/tmp".into());
+        assert!(app.enter_rename_session());
+        app.rename_buffer = "half a na".into();
+
+        assert!(app.check_spawn_watches(&[], Instant::now() + 2 * SPAWN_WATCH_TIMEOUT));
+        assert_eq!(app.view, View::Grid);
+        assert!(app.rename_target.is_none());
     }
 
     // The auto-titler stand-in: with titling off, a fresh untitled session on

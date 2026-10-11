@@ -81,7 +81,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         View::RespawnPicker => popups::render_respawn_picker(frame, frame.area(), app),
         View::TaskLinkPicker => popups::render_task_link_picker(frame, frame.area(), app),
         View::SessionFinder => popups::render_session_finder(frame, frame.area(), app),
-        View::RenameSession => popups::render_rename_session(frame, frame.area(), app),
         View::TmuxPane => popups::render_tmux_pane(frame, frame.area(), app),
         View::FolderPicker => popups::render_folder_picker(frame, frame.area(), app),
         View::GhCreateInput => {
@@ -93,9 +92,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         View::TaskKindPicker => popups::render_task_kind_picker(frame, frame.area(), app),
         View::TaskInfo => tasks::render_task_info(frame, frame.area(), app),
         View::TaskAttachInput => popups::render_task_attach_input(frame, frame.area(), app),
-        // The filter bar lives inside the tasks body (already rendered
-        // above), so filter-editing needs no overlay.
-        View::TaskFilter => {}
+        // The filter bar lives inside the tasks body and the rename inside
+        // the session's own title (both already rendered above), so editing
+        // either needs no overlay.
+        View::TaskFilter | View::RenameSession => {}
         View::AgentDetail => agents::render_agent_detail(frame, frame.area(), app),
         View::BuildForm => builds::render_build_form(frame, frame.area(), app),
         View::BuildLog => builds::render_build_log(frame, frame.area(), app),
