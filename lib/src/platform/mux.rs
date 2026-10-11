@@ -359,6 +359,29 @@ pub fn enable_mouse(session: &str) {
     }
 }
 
+/// Move the attached client on terminal `client_tty` to `session`, and turn
+/// the mouse on there as [`enable_mouse`] would — one tmux call for both.
+/// The switch goes first: tmux stops a command sequence at its first error,
+/// and a failed mouse option must not cost the switch.
+pub fn switch_client(client_tty: &str, session: &str) -> io::Result<()> {
+    run(
+        &[
+            "switch-client",
+            "-c",
+            client_tty,
+            "-t",
+            session,
+            ";",
+            "set-option",
+            "-t",
+            session,
+            "mouse",
+            "on",
+        ],
+        "switch-client",
+    )
+}
+
 /// argv for attaching to `session`. Used by [`crate::tmux_pane`] when it
 /// spawns a portable-pty child.
 pub fn attach_argv(session: &str) -> Vec<String> {

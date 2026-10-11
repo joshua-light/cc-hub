@@ -32,8 +32,10 @@ pub(crate) mod state;
 pub mod tool_count;
 
 #[cfg(test)]
-mod test_util;
+pub(crate) mod test_util;
 
+#[cfg(test)]
+pub(crate) use cache::state_derive_parse_count;
 pub use cache::{derive_state_cached, first_user_message_cached, retain_cached, StateDerivation};
 pub use io::{
     count_blocks_in_reader, count_blocks_of_type, count_tool_uses_in_reader, read_jsonl_all,

@@ -1,8 +1,10 @@
 //! The dock: the split layout's right-hand side, the selected session's tmux
-//! pane attached live. It follows the cursor once the cursor rests, so
-//! running down ten rows doesn't attach to ten sessions — every attach
-//! resizes that session's window. Enter moves the keyboard into it
-//! ([`crate::app::View::Dock`]), F1 hands it back to the list.
+//! pane attached live. One attach client serves every session: following the
+//! cursor moves it with `switch-client` instead of ending it and starting
+//! another. It follows once the cursor rests, so running down ten rows
+//! doesn't switch through ten sessions — each switch resizes that session's
+//! window. Enter moves the keyboard into it ([`crate::app::View::Dock`]), F1
+//! hands it back to the list.
 
 use super::SessionsLayout;
 use crate::app::{App, Tab, View};
@@ -10,12 +12,16 @@ use crate::models::SessionState;
 use crate::tmux_pane::TmuxPaneView;
 use std::time::{Duration, Instant};
 
-/// How long the cursor rests on a session before the dock attaches to it.
-const SETTLE: Duration = Duration::from_millis(150);
+/// How long the cursor rests on a session before the dock shows it: long
+/// enough to skip the rows a held key runs past, short next to the switch
+/// itself (~6ms).
+const SETTLE: Duration = Duration::from_millis(60);
 
 #[derive(Default)]
 pub struct Dock {
     target: Option<Target>,
+    /// The attach client. Between a new target and its switch it still
+    /// shows the previous session, and stays hidden.
     pane: Option<TmuxPaneView>,
 }
 
@@ -29,12 +35,21 @@ struct Target {
 }
 
 impl Dock {
+    /// The pane, while it shows the target.
     pub fn pane(&self) -> Option<&TmuxPaneView> {
-        self.pane.as_ref()
+        self.pane.as_ref().filter(|_| self.shows_target())
     }
 
     pub fn pane_mut(&mut self) -> Option<&mut TmuxPaneView> {
-        self.pane.as_mut()
+        let shows = self.shows_target();
+        self.pane.as_mut().filter(|_| shows)
+    }
+
+    fn shows_target(&self) -> bool {
+        match (&self.target, &self.pane) {
+            (Some(target), Some(pane)) => target.due.is_none() && target.tmux == pane.session_name,
+            _ => false,
+        }
     }
 
     /// Whether an attach is still on its way.
@@ -48,10 +63,11 @@ impl Dock {
     }
 
     /// Point the dock at `tmux`, `None` for nothing to show. A new target
-    /// drops the old pane at once and attaches after [`SETTLE`]; `size` is
-    /// the `(rows, cols)` it attaches at, and the renderer resizes it to
-    /// the real area on the next frame. Returns whether what the dock shows
-    /// changed.
+    /// hides the pane at once and moves it there after [`SETTLE`], attaching
+    /// a client first when there is none; `size` is the `(rows, cols)` it
+    /// attaches at, and the renderer resizes it to the real area on the next
+    /// frame. Nothing to show lets the client go. Returns whether what the
+    /// dock shows changed.
     fn follow(&mut self, tmux: Option<&str>, size: (u16, u16)) -> bool {
         if self.target.as_ref().map(|t| t.tmux.as_str()) != tmux {
             self.aim(tmux, Instant::now() + SETTLE);
@@ -69,6 +85,15 @@ impl Dock {
             return exited;
         }
         target.due = None;
+        if let Some(pane) = self.pane.as_mut() {
+            match pane.switch_to(&target.tmux) {
+                Ok(()) => return true,
+                Err(e) => {
+                    log::debug!("dock: switch to {} failed, attaching: {}", target.tmux, e);
+                    self.pane = None;
+                }
+            }
+        }
         let (rows, cols) = size;
         match TmuxPaneView::spawn(&target.tmux, rows, cols) {
             Ok(pane) => self.pane = Some(pane),
@@ -80,12 +105,13 @@ impl Dock {
         true
     }
 
-    /// Aim at `tmux` and attach on the next [`Self::follow`], skipping the
+    /// Aim at `tmux` and show it on the next [`Self::follow`], skipping the
     /// settle: the user asked for this pane now.
     fn hurry(&mut self, tmux: &str) {
+        let shown = self.shows_target();
         match self.target.as_mut() {
             Some(t) if t.tmux == tmux => {
-                if self.pane.is_none() {
+                if !shown {
                     t.due = Some(Instant::now());
                 }
             }
@@ -94,7 +120,9 @@ impl Dock {
     }
 
     fn aim(&mut self, tmux: Option<&str>, due: Instant) {
-        self.pane = None;
+        if tmux.is_none() {
+            self.pane = None;
+        }
         self.target = tmux.map(|tmux| Target {
             tmux: tmux.to_string(),
             due: Some(due),
