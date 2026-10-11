@@ -6,8 +6,6 @@ use crate::app::App;
 pub enum BuildsCommand {
     NavUp,
     NavDown,
-    NavLeft,
-    NavRight,
     /// `n` — run the selected recipe with a checkout, ref or route of your
     /// own: the form, seeded from its last build.
     OpenForm,
@@ -28,8 +26,10 @@ pub enum BuildsCommand {
     /// Space — reserve the selected recipe's resource, or let it go when the
     /// tab holds or waits for it.
     ToggleHold,
-    /// Enter/`f` — the output of the build the selected card shows.
+    /// Enter/`f` — the keyboard to the selected recipe's page, to scroll
+    /// the log of the build it shows.
     OpenLog,
+    /// Esc/F1 on the page — the keyboard back to the list.
     CloseLog,
     LogUp,
     LogDown,
@@ -40,15 +40,12 @@ pub enum BuildsCommand {
 
 impl App {
     pub(super) fn execute_builds(&mut self, cmd: BuildsCommand) -> Vec<Effect> {
-        use crate::app::{BuildForm, LogView, View};
+        use crate::app::{BuildForm, View};
         use crate::builds::{self, hold, recipe};
         use BuildsCommand::*;
-        let cols = self.render.builds_cols.max(1) as isize;
         match cmd {
-            NavLeft => self.builds.nav(-1),
-            NavRight => self.builds.nav(1),
-            NavUp => self.builds.nav(-cols),
-            NavDown => self.builds.nav(cols),
+            NavUp => self.builds.nav(-1),
+            NavDown => self.builds.nav(1),
             OpenForm => {
                 let Some(name) = self.builds_recipe() else {
                     return Vec::new();
@@ -164,18 +161,12 @@ impl App {
                 let Some(name) = self.builds_recipe() else {
                     return Vec::new();
                 };
-                match self.builds.shown(&name).map(|b| b.id.clone()) {
-                    Some(id) => {
-                        self.builds.log = Some(LogView::open(&id));
-                        self.view = View::BuildLog;
-                    }
+                match self.builds.log {
+                    Some(_) => self.view = View::BuildLog,
                     None => self.set_status(format!("{}: never run", name)),
                 }
             }
-            CloseLog => {
-                self.builds.log = None;
-                self.view = View::Grid;
-            }
+            CloseLog => self.view = View::Grid,
             LogUp | LogDown | LogPageUp | LogPageDown | LogEnd => {
                 if let Some(log) = self.builds.log.as_mut() {
                     match cmd {

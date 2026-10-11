@@ -198,20 +198,65 @@ fn format_reset(iso: &str, fmt: &str) -> Option<String> {
     )
 }
 
-/// The one glyph every session state draws. The state lives in its colour
-/// alone ([`state_color`]), so a column of dots reads at a glance.
+/// The one glyph every session, agent and build draws for its state. The
+/// state lives in its colour alone ([`Dot`]), so a column of dots reads at
+/// a glance.
 pub(crate) const STATE_DOT: &str = "●";
 
-/// White while the session works (the renderers blink it, see
-/// [`working_blink`]), green once it is done and waiting for you, blue
-/// when it asks a question, dark gray while it rests.
-pub(crate) fn state_color(state: &SessionState) -> Color {
-    match state {
-        SessionState::Starting | SessionState::Processing => Color::White,
-        SessionState::WaitingForInput => Color::Green,
-        SessionState::Question => Color::LightBlue,
-        SessionState::Idle | SessionState::Inactive => GRAY_80,
+/// What a [`STATE_DOT`] says, whatever it belongs to: one palette for the
+/// Sessions, Agents and Builds lists, so a colour means the same thing on
+/// every tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Dot {
+    /// Work under way: white, blinking where it is drawn live.
+    Working,
+    /// Done, or stopped, and waiting for you: green.
+    Waiting,
+    /// Asking you something: blue.
+    Asking,
+    /// It went wrong: red.
+    Failed,
+    /// Nothing to do: dark gray.
+    Resting,
+}
+
+impl Dot {
+    pub fn of(state: &SessionState) -> Self {
+        match state {
+            SessionState::Starting | SessionState::Processing => Dot::Working,
+            SessionState::WaitingForInput => Dot::Waiting,
+            SessionState::Question => Dot::Asking,
+            SessionState::Idle | SessionState::Inactive => Dot::Resting,
+        }
     }
+
+    /// The colour at `now`: a working dot blinks.
+    pub fn color(self, now: u64) -> Color {
+        match self {
+            Dot::Working => working_blink(now),
+            other => other.steady(),
+        }
+    }
+
+    /// The colour where nothing blinks: a border, a count.
+    pub fn steady(self) -> Color {
+        match self {
+            Dot::Working => Color::White,
+            Dot::Waiting => Color::Green,
+            Dot::Asking => Color::LightBlue,
+            Dot::Failed => Color::Red,
+            Dot::Resting => GRAY_80,
+        }
+    }
+
+    pub fn span(self, now: u64) -> Span<'static> {
+        Span::styled(STATE_DOT, Style::default().fg(self.color(now)))
+    }
+}
+
+/// A session state's [`Dot`] colour, unblinking.
+pub(crate) fn state_color(state: &SessionState) -> Color {
+    Dot::of(state).steady()
 }
 
 /// A working dot's colour at `now`: white and light gray in turn, half a

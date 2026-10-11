@@ -1,4 +1,4 @@
-use super::detail::{render_empty, render_pane, render_rows, split_body};
+use super::page::{render_empty, render_pane, render_rows, split_body};
 use super::text::{clock, event_label, one_line, tilde};
 use crate::app::Detail;
 use crate::harness::settings::{Setting, SETTINGS};

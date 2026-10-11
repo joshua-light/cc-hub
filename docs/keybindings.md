@@ -73,32 +73,38 @@ session's folder. It overrides a built-in key it collides with.
 
 ## Builds
 
+The recipes run down the side; the selected one's page beside them shows
+its build and that build's output, following the end.
+
 | Key | Action |
 |---|---|
-| `h` `j` `k` `l` / arrows | Move between recipes |
+| `j` `k` / `↓` `↑` | Move between recipes |
 | `r` | Run the recipe on its checkout at the recipe's `ref` (else as it is now), on the route the recipe picks |
 | `n` | Run with a checkout, ref or route of your own (seeded from the last build) |
 | `c` | Cancel the recipe's running and queued builds |
-| `Enter` / `f` | Build output |
+| `Enter` / `f` | Scroll the build output |
 | `Space` | Reserve the recipe's resource, or release it |
 
 New-build form: `Tab`/`↓` and `Shift+Tab`/`↑` change field, `←`/`→` step a
 choice, typing edits text, `Enter` runs, `Esc` cancels.
 
 Build output: `j`/`k` scroll, `PgUp`/`PgDn` page, `G`/`End` follow the end,
-`Esc`/`q` close.
+`r`, `n`, `c` and `Space` as on the list, `Esc`/`F1`/`q` back to the list.
 
 ## Agents
+
+The agents run down the side; the selected one's page beside them leads
+with how it is doing.
 
 | Key | Action |
 |---|---|
 | `j` `k` / `↓` `↑` | Move |
-| `Enter` / `f` / `i` | Open the agent's detail |
+| `Enter` / `f` / `i` | Move the keyboard to the agent's page |
 | `Space` | Turn the agent off or on (on also clears a halt) |
 | `p` | Run now |
 | `n` | Interactive Claude session in the agent's folder |
 
-In the detail:
+On the page:
 
 | Key | Action |
 |---|---|
@@ -108,9 +114,9 @@ In the detail:
 | `j` `k` / `↓` `↑` | Move within the section |
 | `Enter` / `f` / `o` | Open the run's transcript or the artifact; change the setting |
 | `e` | Type a new value for the setting (`Enter` saves, `Esc` cancels) |
-| `Space`, `p`, `n` | As on the tab |
+| `Space`, `p`, `n` | As on the list |
 | `R` | Reset the agent's runs, spend and history (the workdir stays) |
-| `Esc` / `q` | Close |
+| `Esc` / `F1` / `q` | Back to the list |
 
 ## Metrics
 
@@ -127,7 +133,7 @@ Every key goes to the pane, except:
 | Key | Action |
 |---|---|
 | `F1` | Close the pane; in the split layout, give the keyboard back to the list |
-| Click | In the split layout: on a sidebar row, give the keyboard to the list with the cursor on that session; on the dock, type into its pane |
+| Click | In the split layout: on a sidebar row, give the keyboard to the list with the cursor on that session; on the dock, type into its pane. The Agents and Builds tabs take clicks the same way |
 | `Ctrl+Shift+V` | Paste the host clipboard |
 
 ## Popups

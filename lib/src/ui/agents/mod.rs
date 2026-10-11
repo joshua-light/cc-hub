@@ -1,57 +1,106 @@
-//! Agents tab: a row per persistent agent, and the detail view behind `f`.
+//! Agents tab: the agents down the side, the selected one's page beside
+//! them; `f` gives the page the keyboard.
 //!
-//! The row answers "is it on, and did its last run work?" at a glance. The
-//! detail leads with the same answer in words — why it failed, why it is
+//! A row answers "is it on, and did its last run work?" at a glance. The
+//! page leads with the same answer in words — why it failed, why it is
 //! halted — then splits the rest into sections (Runs, Artifacts, Log,
 //! Settings), each a list with the selected item spelled out below it.
 //!
-//! - `table`: the tab body, one row per agent
-//! - `detail`: the detail popup's headline, section strip and list/pane shell
+//! - `list`: the tab body, and one sidebar row per agent
+//! - `page`: the page's frame, headline, section strip and list/pane shell
 //! - `sections`: the Runs, Artifacts, Log and Settings sections
 //! - `text`: agent-specific text formatting
 
 use crate::app::{App, Section, View};
-use crate::harness::AgentStatus;
-use crate::ui::palette::{MUTED_TEXT, PURPLE, SEP_GRAY};
-use ratatui::style::Color;
+use crate::harness::{AgentSnapshot, AgentStatus};
+use crate::ui::common::Dot;
+use ratatui::style::Style;
+use ratatui::text::Span;
 
-mod detail;
+mod list;
+mod page;
 mod sections;
-mod table;
 mod text;
 
-pub(crate) use detail::render_agent_detail;
-pub(crate) use table::render_agents_body;
+pub(crate) use list::render_agents_body;
 
-fn status_indicator(status: AgentStatus) -> (&'static str, Color) {
-    match status {
-        AgentStatus::Ticking => ("󰒓", Color::Green),
-        AgentStatus::Sleeping => ("󰒲", MUTED_TEXT),
-        AgentStatus::Halted => ("󰂞", Color::Yellow),
-        AgentStatus::Paused => ("󰏤", PURPLE),
-        AgentStatus::Disabled => ("󰜎", SEP_GRAY),
-        AgentStatus::Broken => ("󰅙", Color::Red),
+/// An agent's mark: a hollow ring while it is switched off, so off and on
+/// differ in shape, not just shade; else its [`dot`].
+fn mark(agent: &AgentSnapshot, now: u64) -> Span<'static> {
+    match off(agent) {
+        true => Span::styled(OFF_RING, Style::default().fg(Dot::Resting.steady())),
+        false => dot(agent).span(now),
     }
 }
 
-/// Key hints for the Agents tab and its detail.
+/// The mark of an agent that won't run until you turn it back on.
+const OFF_RING: &str = "○";
+
+/// Switched off or paused: you said "not now".
+fn off(agent: &AgentSnapshot) -> bool {
+    matches!(agent.status(), AgentStatus::Paused | AgentStatus::Disabled)
+}
+
+/// An agent's dot, in the palette sessions use: white while it runs; red
+/// when its spec won't load or its last run failed, halted or not; green
+/// when a halt with nothing failed (a spent budget) waits for you; dark gray
+/// asleep. Switched off, it is dark gray whatever happened, as a held
+/// session is.
+fn dot(agent: &AgentSnapshot) -> Dot {
+    let failed = agent.last_run().is_some_and(|r| !r.ok);
+    match agent.status() {
+        AgentStatus::Ticking => Dot::Working,
+        AgentStatus::Paused | AgentStatus::Disabled => Dot::Resting,
+        AgentStatus::Broken => Dot::Failed,
+        _ if failed => Dot::Failed,
+        AgentStatus::Halted => Dot::Waiting,
+        AgentStatus::Sleeping => Dot::Resting,
+    }
+}
+
+/// Key hints for the Agents list and the page.
 pub(crate) fn hints(app: &App) -> &'static str {
-    let Some(d) = app
-        .harness
-        .detail
-        .as_ref()
-        .filter(|_| app.view == View::AgentDetail)
-    else {
-        return "f/enter:open  space:on/off  p:run now  n:claude here  j/k:nav  tab:next  q:quit";
-    };
+    if app.view != View::AgentDetail {
+        return "f/enter:page  space:on/off  p:run now  n:claude here  j/k:agent  tab:next  q:quit";
+    }
+    let d = &app.harness.detail;
     if d.editing.is_some() {
         return "type a value  enter:save  esc:cancel";
     }
     match d.section {
-        Section::Runs => "f/enter:transcript  j/k:run  h/l:section  space:on/off  p:run now  n:claude here  R:reset  esc:close",
-        Section::Artifacts => "f/enter:open  j/k:select  h/l:section  space:on/off  p:run now  n:claude here  esc:close",
-        Section::Log => "j/k:scroll  h/l:section  space:on/off  p:run now  n:claude here  esc:close",
-        Section::Settings => "enter:change  e:type value  j/k:field  h/l:section  space:on/off  n:claude here  esc:close",
+        Section::Runs => "f/enter:transcript  j/k:run  h/l:section  space:on/off  p:run now  n:claude here  R:reset  esc/F1:list",
+        Section::Artifacts => "f/enter:open  j/k:select  h/l:section  space:on/off  p:run now  n:claude here  esc/F1:list",
+        Section::Log => "j/k:scroll  h/l:section  space:on/off  p:run now  n:claude here  esc/F1:list",
+        Section::Settings => "enter:change  e:type value  j/k:field  h/l:section  space:on/off  n:claude here  esc/F1:list",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixtures::{snap, ticked};
+    use super::*;
+
+    // A halt that came from failing runs is red, like any failed last run;
+    // a halt with nothing failed waits for you in green; off is gray.
+    #[test]
+    fn a_failed_run_is_red_halted_or_not() {
+        let mut halted = ticked(false);
+        halted.stopped_reason = Some("5 consecutive failed ticks".into());
+        assert_eq!(dot(&snap("repair", halted)), Dot::Failed);
+        assert_eq!(dot(&snap("a", ticked(false))), Dot::Failed);
+
+        let mut spent = ticked(true);
+        spent.stopped_reason = Some("budget".into());
+        assert_eq!(dot(&snap("b", spent)), Dot::Waiting);
+        assert_eq!(dot(&snap("c", ticked(true))), Dot::Resting);
+
+        let mut off = snap("d", ticked(false));
+        if let Ok(spec) = off.spec.as_mut() {
+            spec.enabled = false;
+        }
+        assert_eq!(dot(&off), Dot::Resting);
+        assert_eq!(mark(&off, 0).content, OFF_RING);
+        assert_eq!(mark(&snap("c", ticked(true)), 0).content, "●");
     }
 }
 

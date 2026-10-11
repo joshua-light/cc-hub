@@ -13,7 +13,7 @@
 use crate::app::App;
 use crate::models::{first_line_truncated, ProjectGroup, SessionInfo, SessionState, TaskBadge};
 use crate::ui::common::{
-    context_window_size, state_color, task_color, working_blink, COLD_CACHE_ICON, CURSOR, STATE_DOT,
+    context_window_size, state_color, task_color, Dot, COLD_CACHE_ICON, CURSOR, STATE_DOT,
 };
 use crate::ui::palette::{CONTEXT_GRAY, ICE_BLUE, MUTED_TEXT, SEP_GRAY};
 use ratatui::layout::Rect;
@@ -189,10 +189,9 @@ fn keep_in_view(scroll: &mut u16, group_top: u16, item_top: u16, item_bottom: u1
 /// The state dot's colour, animated: a working session blinks. A held
 /// session reads as idle: it is parked, whatever its state.
 fn dot_color(state: &SessionState, marks: CardMarks, now: u64) -> Color {
-    match state {
-        _ if marks.held => state_color(&SessionState::Idle),
-        SessionState::Starting | SessionState::Processing => working_blink(now),
-        _ => state_color(state),
+    match marks.held {
+        true => Dot::Resting.color(now),
+        false => Dot::of(state).color(now),
     }
 }
 

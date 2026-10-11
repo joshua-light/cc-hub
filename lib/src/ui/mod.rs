@@ -19,6 +19,7 @@ pub mod metrics;
 pub mod palette;
 pub mod popups;
 pub mod sessions;
+mod split;
 mod status_bar;
 pub mod tasks;
 
@@ -96,11 +97,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         // the session's own title (both already rendered above), so editing
         // either needs no overlay.
         View::TaskFilter | View::RenameSession => {}
-        View::AgentDetail => agents::render_agent_detail(frame, frame.area(), app),
         View::BuildForm => builds::render_build_form(frame, frame.area(), app),
-        View::BuildLog => builds::render_build_log(frame, frame.area(), app),
-        // The dock is drawn inside the Sessions body: focusing it moves
-        // the keyboard, not the picture.
-        View::Grid | View::Dock => {}
+        // The dock and the Agents and Builds pages are drawn inside their
+        // tab's body: focusing them moves the keyboard, not the picture.
+        View::Grid | View::Dock | View::AgentDetail | View::BuildLog => {}
     }
 }

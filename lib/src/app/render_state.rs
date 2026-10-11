@@ -14,8 +14,10 @@ use ratatui::layout::{Position, Rect};
 /// - `ui/sessions/grid.rs` and `ui/sessions/list.rs` write
 ///   [`Self::grid_scroll`] through `sessions::keep_in_view` (one writer per
 ///   layout); `ui/sessions/detail.rs` clamps [`Self::popup_scroll`].
-/// - `ui/builds.rs` writes [`Self::builds_cols`] and [`Self::builds_scroll`].
-/// - `ui/sessions/split.rs` writes [`Self::dock_size`] and [`Self::split`].
+/// - `ui/builds.rs` writes [`Self::builds_scroll`].
+/// - `ui/sessions/split.rs` writes [`Self::dock_size`]; it,
+///   `ui/agents/table.rs` and `ui/builds.rs` write [`Self::split`] for the
+///   tab on screen.
 /// - `ui/metrics/mod.rs` writes [`Self::metrics_view_height`],
 ///   [`Self::metrics_row_lines`], and [`Self::metrics_scroll`].
 pub struct RenderState {
@@ -48,31 +50,32 @@ pub struct RenderState {
     /// First visible row of the agent detail's open section, written by
     /// the renderer to keep the cursor on screen.
     pub agent_detail_scroll: usize,
-    /// Builds-tab card columns and scroll (card rows), written by the
-    /// renderer; the cursor moves a row by stepping `builds_cols` cards.
-    pub builds_cols: u16,
+    /// Scroll offset (rows) of the Builds-tab list, written by the renderer
+    /// to keep the selected recipe on screen.
     pub builds_scroll: u16,
     /// `(rows, cols)` inside the split layout's dock, written by
     /// `ui/sessions/split.rs`: the size the next attach starts at.
     pub dock_size: (u16, u16),
-    /// Where the split layout last drew its two sides, so a click can tell
-    /// which one it landed on.
+    /// Where the tab on screen last drew its list and page, so a click can
+    /// tell which one it landed on.
     pub split: SplitAreas,
 }
 
-/// The split layout as last drawn: the sidebar, the dock beside it (empty
-/// when the screen is too narrow for one), and the session each visible
-/// sidebar row shows, top to bottom — `None` for headers and gaps.
+/// A sidebar-and-page tab as last drawn: the sidebar, the page beside it
+/// (either empty when the screen is too narrow for both), and the item each
+/// visible sidebar row shows, top to bottom — `None` for headers and gaps.
+/// Sessions are `(group, index)`; the flat Agents and Builds lists are
+/// `(0, index)`.
 #[derive(Default)]
 pub struct SplitAreas {
     pub sidebar: Rect,
-    pub dock: Rect,
+    pub page: Rect,
     pub rows: Vec<Option<(usize, usize)>>,
 }
 
 impl SplitAreas {
-    /// The `(group, index)` of the session drawn at screen cell `(x, y)`.
-    pub fn session_at(&self, x: u16, y: u16) -> Option<(usize, usize)> {
+    /// The item drawn at screen cell `(x, y)`.
+    pub fn item_at(&self, x: u16, y: u16) -> Option<(usize, usize)> {
         if !self.sidebar.contains(Position::new(x, y)) {
             return None;
         }
@@ -92,7 +95,6 @@ impl Default for RenderState {
             task_info_scroll: 0,
             agents_scroll: 0,
             agent_detail_scroll: 0,
-            builds_cols: 1,
             builds_scroll: 0,
             dock_size: (30, 100),
             split: SplitAreas::default(),

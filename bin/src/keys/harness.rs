@@ -1,15 +1,12 @@
 use cc_hub_lib::app::{App, Command, HarnessCommand as H, Section, View};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-/// Agents-tab and agent-detail key mapping. `f` opens an agent the way it
-/// opens a session on the Sessions tab, and inside the detail it opens the
-/// selected thing: a run's transcript, an artifact, a setting.
+/// Agents list and page key mapping. `f` gives the page the keyboard the way
+/// it gives a session's pane the keyboard on the Sessions tab, and on the
+/// page it opens the selected thing: a run's transcript, an artifact, a
+/// setting.
 pub(super) fn map_harness_command(app: &App, key: &KeyEvent, on_agents: bool) -> Option<Command> {
-    let editing = app
-        .harness
-        .detail
-        .as_ref()
-        .is_some_and(|d| d.editing.is_some());
+    let editing = app.harness.detail.editing.is_some();
     let cmd = match (&app.view, key.code) {
         (View::Grid, _) if !on_agents => return None,
         (View::Grid, KeyCode::Down | KeyCode::Char('j')) => H::NavDown,
@@ -30,7 +27,7 @@ pub(super) fn map_harness_command(app: &App, key: &KeyEvent, on_agents: bool) ->
         }
         (View::AgentDetail, _) if editing => return None,
 
-        (View::AgentDetail, KeyCode::Esc | KeyCode::Char('q')) => H::CloseDetail,
+        (View::AgentDetail, KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('q')) => H::CloseDetail,
         (View::AgentDetail, KeyCode::Tab | KeyCode::Right | KeyCode::Char('l')) => H::NextSection,
         (View::AgentDetail, KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h')) => {
             H::PrevSection

@@ -35,10 +35,12 @@ pub struct BuildsView {
     pub builds: Vec<Build>,
     pub holds: BTreeMap<String, Option<Hold>>,
     pub probe: BuildsProbe,
-    /// The selected recipe card.
+    /// The selected recipe.
     pub selected: usize,
     pub loaded: bool,
     pub form: Option<BuildForm>,
+    /// The output of the build the selected recipe's page shows, following
+    /// the cursor; `None` for a recipe never run.
     pub log: Option<LogView>,
 }
 
@@ -56,6 +58,7 @@ impl BuildsView {
         if let Some(log) = self.log.as_mut() {
             log.reload();
         }
+        self.follow_log();
     }
 
     pub fn selected_recipe(&self) -> Option<&str> {
@@ -73,7 +76,26 @@ impl BuildsView {
             return;
         }
         let max = self.recipes.len() as isize - 1;
-        self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
+        self.select((self.selected as isize + delta).clamp(0, max) as usize);
+    }
+
+    pub fn select(&mut self, i: usize) {
+        if i < self.recipes.len() {
+            self.selected = i;
+            self.follow_log();
+        }
+    }
+
+    /// Point the log at the build the selected recipe shows, when it shows
+    /// another one: the cursor moved, or a new build took over.
+    fn follow_log(&mut self) {
+        let id = self
+            .selected_recipe()
+            .and_then(|name| self.shown(name))
+            .map(|b| b.id.clone());
+        if self.log.as_ref().map(|l| &l.id) != id.as_ref() {
+            self.log = id.as_deref().map(LogView::open);
+        }
     }
 
     /// A recipe's builds, newest first.
