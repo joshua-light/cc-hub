@@ -191,21 +191,38 @@ fn reconcile_with_session_status(
 
 /// Claude sessions under the default home and every extra Claude account home.
 pub(super) fn scan(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
-    let mut sessions = scan_claude_sessions(titles);
     let default_home = claude_dir();
-    let mut seen = HashSet::new();
+    let mut extra_homes: Vec<PathBuf> = Vec::new();
     for account in crate::resources::accounts()
         .values()
         .filter(|a| a.provider == AgentKind::Claude)
     {
         if let Some(home) = account.home() {
-            if Some(&home) != default_home.as_ref() && seen.insert(home.clone()) {
-                sessions.extend(crate::resources::with_claude_home(home, || {
-                    scan_claude_sessions(titles)
-                }));
+            if Some(&home) != default_home.as_ref() && !extra_homes.contains(&home) {
+                extra_homes.push(home);
             }
         }
     }
+    scan_homes(&extra_homes, titles)
+}
+
+/// The default home's sessions, then each of `extra_homes`'.
+///
+/// The derived-state and summary caches are evicted here, once, against
+/// every home's transcripts. Evicting per home would let each home's scan
+/// throw out the others' entries, re-parsing every transcript on every tick.
+fn scan_homes(extra_homes: &[PathBuf], titles: &HashMap<String, String>) -> Vec<SessionInfo> {
+    let mut sessions = scan_claude_sessions(titles);
+    for home in extra_homes {
+        sessions.extend(crate::resources::with_claude_home(home.clone(), || {
+            scan_claude_sessions(titles)
+        }));
+    }
+    let visited: HashSet<PathBuf> = sessions
+        .iter()
+        .filter_map(|s| s.jsonl_path.clone())
+        .collect();
+    conversation::retain_cached(&visited);
     sessions
 }
 
@@ -393,15 +410,6 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
     );
     sessions.extend(orphans);
 
-    // Evict derived-state / summary cache entries for transcripts that didn't
-    // surface this scan (sessions aged out of the window, deleted JSONLs), so
-    // the caches don't grow unbounded.
-    let visited: HashSet<PathBuf> = sessions
-        .iter()
-        .filter_map(|s| s.jsonl_path.clone())
-        .collect();
-    conversation::retain_cached(&visited);
-
     super::scanner::sort_stable(&mut sessions);
 
     sessions
@@ -467,5 +475,39 @@ mod tests {
         let json = r#"{"pid":1,"sessionId":"s","cwd":"/x","startedAt":1}"#;
         let raw: RawSession = serde_json::from_str(json).expect("deserialize");
         assert_eq!(raw.status, None);
+    }
+
+    // A second home with no sessions of its own must not evict the first
+    // home's cached transcripts: an unchanged transcript is parsed once, not
+    // once per scan.
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_extra_home_keeps_the_default_homes_cache() {
+        use crate::conversation::test_util::{write_jsonl, PARSE_COUNTER_LOCK};
+        crate::test_util::with_temp_home(|| {
+            let _guard = PARSE_COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let home = dirs::home_dir().unwrap();
+            let project = home.join(".claude/projects/-work-app");
+            std::fs::create_dir_all(&project).unwrap();
+            write_jsonl(
+                &project.join("0b1e6a52-6c1f-4f7e-9d43-3f0f6f1c2a10.jsonl"),
+                &[
+                    r#"{"type":"user","cwd":"/work/app","message":{"role":"user","content":"hello"}}"#,
+                    r#"{"type":"assistant","cwd":"/work/app","message":{"role":"assistant","stop_reason":"end_turn","content":[]}}"#,
+                ],
+            );
+            let extra_homes = [home.join(".claude-second")];
+            let titles = HashMap::new();
+
+            let first = scan_homes(&extra_homes, &titles);
+            assert_eq!(first.len(), 1, "the orphan transcript is listed");
+            let parsed = conversation::state_derive_parse_count();
+            scan_homes(&extra_homes, &titles);
+            assert_eq!(
+                conversation::state_derive_parse_count(),
+                parsed,
+                "an unchanged transcript must come from the cache"
+            );
+        });
     }
 }
