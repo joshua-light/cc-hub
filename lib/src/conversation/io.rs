@@ -2,12 +2,12 @@
 
 use log::debug;
 use serde_json::Value;
+#[cfg(test)]
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-#[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// Read the tail of a JSONL session log, expanding the window until it
@@ -132,7 +132,13 @@ fn note_malformed_lines(source: Option<&Path>, byte_len: usize, err: &serde_json
         return;
     }
     #[cfg(test)]
-    MALFORMED_FILES.fetch_add(1, Ordering::Relaxed);
+    {
+        *malformed_warnings()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(source.map(Path::to_path_buf).unwrap_or_default())
+            .or_default() += 1;
+    }
     log::warn!(
         "malformed JSONL line in {} (first bad line {} bytes: {}) — skipped",
         source
@@ -143,16 +149,24 @@ fn note_malformed_lines(source: Option<&Path>, byte_len: usize, err: &serde_json
     );
 }
 
-/// Counts distinct files for which at least one malformed interior line was
-/// found (first sighting only). Mirrors `cache::STATE_DERIVE_PARSES`; tests
-/// assert it advances exactly once per corrupt file across repeated reads.
+/// How many times each path was warned about. Keyed by path rather than a
+/// single total, so a test reads only its own files: another test parsing a
+/// corrupt file of its own in parallel can't move the number it checks.
 #[cfg(test)]
-static MALFORMED_FILES: AtomicU64 = AtomicU64::new(0);
+fn malformed_warnings() -> &'static Mutex<HashMap<PathBuf, u64>> {
+    static WARNINGS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
+    WARNINGS.get_or_init(Default::default)
+}
 
-/// Test hook: total distinct files with malformed lines seen so far.
+/// Test hook: how many times `path` was warned about as malformed.
 #[cfg(test)]
-pub fn malformed_files_count() -> u64 {
-    MALFORMED_FILES.load(Ordering::Relaxed)
+pub fn malformed_warnings_for(path: &Path) -> u64 {
+    malformed_warnings()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(path)
+        .copied()
+        .unwrap_or(0)
 }
 
 /// Read every JSONL entry in `path`, start to end. Intended for one-shot
@@ -299,20 +313,11 @@ mod tests {
     use crate::conversation::extract_state;
     use crate::models::SessionState;
     use std::io::Write;
-    use std::sync::Mutex as StdMutex;
 
-    /// Serializes the malformed-counter tests: the counter is process-global,
-    /// so two running concurrently would race the "advances once" assertion.
-    static MALFORMED_COUNTER_LOCK: StdMutex<()> = StdMutex::new(());
-
-    // A corrupt *interior* line must warn+count exactly once per path across
-    // repeated reads, and a clean file must never advance the counter.
+    // A corrupt *interior* line must warn exactly once per path across
+    // repeated reads, and a clean file must never be warned about.
     #[test]
     fn malformed_interior_line_counts_once_across_two_reads() {
-        let _guard = MALFORMED_COUNTER_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-
         let corrupt = std::env::temp_dir().join(format!(
             "cc_hub_malformed_test_{}_{}.jsonl",
             std::process::id(),
@@ -356,30 +361,28 @@ mod tests {
             .unwrap();
         }
 
-        let before = malformed_files_count();
-
-        // Two reads of the corrupt file: the two valid lines survive, and the
-        // counter advances exactly once (once per path, not once per read).
+        // Two reads of the corrupt file: the two valid lines survive, and it
+        // is warned about exactly once (once per path, not once per read).
         let first = read_jsonl_all(&corrupt);
         assert_eq!(first.len(), 2, "valid lines survive the corrupt interior");
         assert_eq!(
-            malformed_files_count(),
-            before + 1,
+            malformed_warnings_for(&corrupt),
+            1,
             "first read of a corrupt file counts once"
         );
         let _ = read_jsonl_all(&corrupt);
         assert_eq!(
-            malformed_files_count(),
-            before + 1,
+            malformed_warnings_for(&corrupt),
+            1,
             "second read of the same path must NOT re-count"
         );
 
-        // A clean file never advances the counter.
+        // A clean file is never warned about.
         let clean_entries = read_jsonl_all(&clean);
         assert_eq!(clean_entries.len(), 2);
         assert_eq!(
-            malformed_files_count(),
-            before + 1,
+            malformed_warnings_for(&clean),
+            0,
             "a clean file must not be counted as malformed"
         );
 
