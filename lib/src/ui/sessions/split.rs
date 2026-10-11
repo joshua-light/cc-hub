@@ -211,7 +211,7 @@ fn render_session(
         Style::default().fg(dot),
     ));
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let (title, title_style) = row_title(session);
+    let (title, title_style) = row_title(session, marks.selected);
     let title = first_line_truncated(&title, (area.width as usize).saturating_sub(used + 1));
     spans.push(Span::styled(title, title_style));
 
@@ -283,7 +283,7 @@ fn render_dock(frame: &mut Frame, area: Rect, app: &mut App) {
 /// ` ● title ` in the session's own colours.
 fn dock_title(session: &SessionInfo, marks: CardMarks, now: u64) -> Line<'static> {
     let dot = dot_color(&session.state, marks, now);
-    let (title, _) = row_title(session);
+    let (title, _) = row_title(session, false);
     Line::from(vec![
         Span::styled(format!(" {STATE_DOT} "), Style::default().fg(dot)),
         Span::styled(
@@ -404,6 +404,42 @@ mod tests {
             assert!(rows.iter().any(|r| r.contains("outside tmux")), "{rows:#?}");
             // The next attach starts at the dock's inner size.
             assert_eq!(app.render.dock_size, (8, 120 - 32 - 1 - 2));
+        });
+    }
+
+    #[test]
+    fn only_the_selected_name_is_bold() {
+        crate::test_util::with_temp_home(|| {
+            let session = |id: &str, title: &str| SessionInfo {
+                session_id: id.into(),
+                title: Some(title.into()),
+                state: SessionState::WaitingForInput,
+                tmux_session: None,
+                ..crate::test_util::session_info()
+            };
+            let mut app = App::new();
+            app.sessions.groups = vec![ProjectGroup {
+                name: "alpha".into(),
+                cwd: "/tmp/alpha".into(),
+                sessions: vec![session("a-1", "Picked"), session("a-2", "Waiting")],
+                held: false,
+            }];
+            let mut terminal = Terminal::new(TestBackend::new(120, 6)).expect("terminal");
+            terminal
+                .draw(|f| render_split(f, f.area(), &mut app))
+                .expect("render");
+            let buf = terminal.backend().buffer();
+            let bold = |y: u16, first: &str| {
+                (0..32)
+                    .map(|x| &buf[(x, y)])
+                    .find(|c| c.symbol() == first)
+                    .expect("title on its row")
+                    .modifier
+                    .contains(Modifier::BOLD)
+            };
+            assert!(bold(1, "P"));
+            // Needing you is the dot's to say, not the weight's.
+            assert!(!bold(2, "W"));
         });
     }
 

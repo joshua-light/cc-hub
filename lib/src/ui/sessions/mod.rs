@@ -190,18 +190,12 @@ fn dot_color(state: &SessionState, marks: CardMarks, now: u64) -> Color {
 }
 
 /// A one-row title and its style: the Haiku title, always white — the dot
-/// beside it is the only thing the state colours — and bold when the
-/// session needs you. Without one, the last user message stands in, as on
-/// the card body.
-fn row_title(session: &SessionInfo) -> (String, Style) {
-    match session.title.as_deref() {
-        Some(t) if !t.is_empty() => {
-            let mut style = Style::default().fg(Color::White);
-            if session.needs_attention() {
-                style = style.add_modifier(Modifier::BOLD);
-            }
-            (t.to_string(), style)
-        }
+/// beside it is the only thing the state colours. Without one, the last
+/// user message stands in, as on the card body. Bold is the cursor's: only
+/// the selected session's name carries it.
+fn row_title(session: &SessionInfo, selected: bool) -> (String, Style) {
+    let (text, style) = match session.title.as_deref() {
+        Some(t) if !t.is_empty() => (t.to_string(), Style::default().fg(Color::White)),
         _ if session.titling => ("✎ …".to_string(), Style::default().fg(MUTED_TEXT)),
         _ => {
             let msg = session
@@ -212,6 +206,11 @@ fn row_title(session: &SessionInfo) -> (String, Style) {
                 .unwrap_or_default();
             (msg, Style::default().fg(CONTEXT_GRAY))
         }
+    };
+    if selected {
+        (text, style.add_modifier(Modifier::BOLD))
+    } else {
+        (text, style)
     }
 }
 

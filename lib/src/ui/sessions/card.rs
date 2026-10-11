@@ -82,12 +82,14 @@ fn border(session: &SessionInfo, marks: CardMarks) -> (BorderType, Color) {
 /// The top-border title, the card's main skim surface: agent badge, state
 /// dot, cold-cache mark, then the Haiku title (or `✎ …` while one is
 /// being generated). Only the dot takes the state's colour; the words stay
-/// white. The project name is left out: the group header shows it.
+/// white, bold only on the selected card. The project name is left out:
+/// the group header shows it.
 fn card_title(session: &SessionInfo, marks: CardMarks, now: u64) -> Line<'static> {
     let dot = dot_color(&session.state, marks, now);
-    let words = Style::default()
-        .fg(Color::White)
-        .add_modifier(Modifier::BOLD);
+    let mut words = Style::default().fg(Color::White);
+    if marks.selected {
+        words = words.add_modifier(Modifier::BOLD);
+    }
 
     // The snowflake marks a cold prompt cache (restarting beats resuming).
     // Here it takes the title's colour; the ice-blue one is the footer clock.
