@@ -241,14 +241,17 @@ fn render_dock(frame: &mut Frame, split: Split, app: &mut App) {
     let session = app.selected_session_info().cloned();
     let now = now_ms();
 
-    let mut block = split.page_block(Line::default());
-    if let Some(s) = session.as_ref() {
-        let marks = CardMarks {
-            held: app.sessions.holds.contains(&s.session_id),
-            ..CardMarks::default()
-        };
-        block = block.title(dock_title(s, marks, now));
-    }
+    let title = match session.as_ref() {
+        Some(s) => {
+            let marks = CardMarks {
+                held: app.sessions.holds.contains(&s.session_id),
+                ..CardMarks::default()
+            };
+            dock_title(s, marks, now)
+        }
+        None => Line::default(),
+    };
+    let mut block = split.page_block(title);
     let live = app.sessions.dock.pane().is_some();
     let hint = match (focused, live) {
         (true, _) => Some(" F1 back to the list "),
