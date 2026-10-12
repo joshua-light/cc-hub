@@ -89,6 +89,15 @@ impl App {
         self.view = View::Grid;
     }
 
+    /// Whether the open rename names a session still booting — the prompt a
+    /// spawn opens. Naming is the last step before using the new session,
+    /// so submitting it also focuses the session.
+    pub fn names_a_spawn(&self) -> bool {
+        self.rename_target
+            .as_deref()
+            .is_some_and(|target| spawning_tmux_of(target).is_some())
+    }
+
     /// The name being typed for `session`, while the rename is open on it.
     /// A name typed at boot targets the spawn placeholder, and follows the
     /// session that replaces it by the tmux name they share.

@@ -161,23 +161,33 @@ impl App {
                     self.set_status("no session selected to rename".into());
                 }
             }
-            SubmitRename => match self.submit_session_rename() {
-                RenameSubmit::Persist { sid, title } => match title::persist_title(&sid, &title) {
-                    Ok(()) => {
-                        self.sessions.unscanned_titles.insert(&sid, &title);
-                        self.set_status(format!("renamed to “{}”", title));
+            SubmitRename => {
+                let spawn = self.names_a_spawn();
+                match self.submit_session_rename() {
+                    RenameSubmit::Persist { sid, title } => {
+                        match title::persist_title(&sid, &title) {
+                            Ok(()) => {
+                                self.sessions.unscanned_titles.insert(&sid, &title);
+                                self.set_status(format!("renamed to “{}”", title));
+                            }
+                            Err(e) => {
+                                log::warn!("rename: persist failed for {}: {}", sid, e);
+                                self.set_status(format!("rename failed: {}", e));
+                            }
+                        }
                     }
-                    Err(e) => {
-                        log::warn!("rename: persist failed for {}: {}", sid, e);
-                        self.set_status(format!("rename failed: {}", e));
+                    RenameSubmit::Deferred { title } => self.set_status(format!(
+                        "named “{}” — applies when the session loads",
+                        title
+                    )),
+                    RenameSubmit::Cancelled => {
+                        self.set_status("rename cancelled — empty title".into())
                     }
-                },
-                RenameSubmit::Deferred { title } => self.set_status(format!(
-                    "named “{}” — applies when the session loads",
-                    title
-                )),
-                RenameSubmit::Cancelled => self.set_status("rename cancelled — empty title".into()),
-            },
+                }
+                if spawn {
+                    return self.focus_selected_session();
+                }
+            }
         }
         Vec::new()
     }
@@ -527,6 +537,43 @@ mod tests {
             };
             app.update_sessions(vec![renamed_elsewhere]);
             assert_eq!(title(&app).as_deref(), Some("Elsewhere"));
+        });
+    }
+
+    // Naming a session at its boot is the last step before using it, so
+    // Enter takes the user into it; renaming one already in use does not.
+    #[test]
+    fn naming_a_new_session_focuses_it() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt) =
+                app_with(vec![session("sid-1", SessionState::Idle, Some("hal-1"))]);
+            app.sessions.layout = crate::app::SessionsLayout::List;
+            app.watch_spawn("hal-w-1".into(), "claude".into(), "/tmp".into());
+            assert!(app.enter_rename_session());
+            app.rename_buffer = "Perf".into();
+
+            let effects = app.execute(Command::Sessions(SessionsCommand::SubmitRename));
+            assert_eq!(
+                effects,
+                vec![Effect::OpenTmuxPane {
+                    tmux: "hal-w-1".into(),
+                    owned: false
+                }]
+            );
+        });
+    }
+
+    #[test]
+    fn renaming_a_session_in_use_stays_on_the_list() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt) =
+                app_with(vec![session("sid-1", SessionState::Idle, Some("hal-1"))]);
+            app.sessions.layout = crate::app::SessionsLayout::List;
+            app.execute(Command::Sessions(SessionsCommand::OpenRenameSession));
+            app.rename_buffer = "Perf".into();
+
+            let effects = app.execute(Command::Sessions(SessionsCommand::SubmitRename));
+            assert!(effects.is_empty());
         });
     }
 
