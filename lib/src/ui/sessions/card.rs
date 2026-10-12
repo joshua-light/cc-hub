@@ -1,7 +1,7 @@
 use super::card_body::body_lines;
-use super::{agent_prefix, badge_color, dot_color, draft_text, CardMarks};
+use super::{agent_prefix, badge_color, dot_color, draft_text, session_mark, CardMarks};
 use crate::models::{first_line_truncated, SessionInfo, SessionState, TaskBadge};
-use crate::ui::common::{priority_color, state_color, COLD_CACHE_ICON, STATE_DOT};
+use crate::ui::common::{priority_color, state_color, COLD_CACHE_ICON};
 use crate::ui::palette::{HANDOFF_BLUE, SEP_GRAY};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -113,7 +113,7 @@ fn card_title(session: &SessionInfo, marks: CardMarks, width: u16, now: u64) -> 
     };
     Line::from(vec![
         Span::styled(prefix, words),
-        Span::styled(STATE_DOT, Style::default().fg(dot)),
+        Span::styled(session_mark(session), Style::default().fg(dot)),
         Span::styled(title, words),
     ])
 }
@@ -306,5 +306,25 @@ mod tests {
         assert_eq!(dot.fg, crate::ui::common::working_blink(NOW));
         let plain = buffer_to_string(&buf);
         assert!(plain.contains("Bash: cargo test"), "tool line:\n{}", plain);
+    }
+
+    // A terminal draws its icon where an agent draws its dot, and no
+    // `[Terminal]` badge: the icon already says what it is.
+    #[test]
+    fn a_terminal_card_carries_the_terminal_icon() {
+        let mut s = fake_session();
+        s.kind = crate::models::SessionKind::Terminal;
+        s.agent_id = crate::sessions::terminal::AGENT_ID.into();
+        s.title = Some("Server".into());
+        let top = row(&render(&s, 42, 7), 0);
+        assert!(
+            top.contains(super::super::TERMINAL_ICON),
+            "title row: {top}"
+        );
+        assert!(
+            !top.contains(crate::ui::common::STATE_DOT),
+            "title row: {top}"
+        );
+        assert!(!top.contains("[Terminal]"), "title row: {top}");
     }
 }

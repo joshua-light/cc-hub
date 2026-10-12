@@ -2,6 +2,7 @@ use super::Effect;
 use crate::agent::AgentKind;
 use crate::app::{App, RenameSubmit, SessionsLayout};
 use crate::config;
+use crate::models::SessionKind;
 use crate::{models, spawn, title};
 
 /// Sessions-tab commands.
@@ -19,8 +20,8 @@ pub enum SessionsCommand {
     ToggleLayout,
     /// `f`/Enter — resume inactive, attach live tmux, or focus the window.
     FocusSelected,
-    /// `o` — shell pane in the selected session's cwd.
-    OpenShellHere,
+    /// `t` — a terminal in the selected session's cwd, as its own session.
+    OpenTerminalHere,
     /// `x` — stage the close confirmation.
     StageConfirmClose,
     /// `z` — ack the selected session's attention state.
@@ -105,13 +106,7 @@ impl App {
                 self.set_status(format!("sessions layout: {}", self.sessions.layout.label()));
             }
             FocusSelected => return self.focus_selected_session(),
-            OpenShellHere => {
-                if let Some(session) = self.selected_session_info() {
-                    return vec![Effect::OpenShell {
-                        cwd: session.cwd.clone(),
-                    }];
-                }
-            }
+            OpenTerminalHere => self.open_terminal_here(),
             StageConfirmClose => self.enter_confirm_close(),
             AckSelected => {
                 self.ack_selected();
@@ -225,19 +220,21 @@ impl App {
                         models::short_sid(&session.session_id),
                         tmux
                     ));
-                    return vec![Effect::OpenTmuxPane { tmux, owned: false }];
+                    return vec![Effect::OpenTmuxPane { tmux }];
                 }
             }
-            let resume = match session.agent_kind {
+            let resume = match session.kind {
                 // Claude and Codex both resume by session id (`codex resume
-                // <uuid>`); Pi resumes by transcript file path.
-                AgentKind::Claude | AgentKind::Codex => {
+                // <uuid>`); Pi resumes by transcript file path. A closed
+                // terminal has nothing to resume.
+                SessionKind::Agent(AgentKind::Claude | AgentKind::Codex) => {
                     Some(spawn::SessionTarget::Resume(session.session_id.clone()))
                 }
-                AgentKind::Pi => session
+                SessionKind::Agent(AgentKind::Pi) => session
                     .jsonl_path
                     .clone()
                     .map(spawn::SessionTarget::ResumeFile),
+                SessionKind::Terminal => None,
             };
             let status = match resume {
                 Some(target) => match self.runtime.spawn_session(
@@ -262,12 +259,25 @@ impl App {
         } else if self.focus_dock() {
             Vec::new()
         } else if let Some(tmux) = session.tmux_session.clone() {
-            vec![Effect::OpenTmuxPane { tmux, owned: false }]
+            vec![Effect::OpenTmuxPane { tmux }]
         } else {
             vec![Effect::FocusWindow {
                 pid: session.pid,
                 cwd: session.cwd.clone(),
             }]
+        }
+    }
+
+    /// `t`: a terminal in the selected session's cwd. It lands on the grid
+    /// as its own session, cursor on it, asking for its name; Enter on the
+    /// name opens it, as for a new agent.
+    fn open_terminal_here(&mut self) {
+        let Some(cwd) = self.selected_session_info().map(|s| s.cwd.clone()) else {
+            return;
+        };
+        match self.runtime.spawn_terminal(&cwd) {
+            Ok(name) => self.watch_terminal(name, cwd),
+            Err(e) => self.set_status(format!("terminal failed: {}", e)),
         }
     }
 
@@ -323,7 +333,7 @@ mod tests {
     fn focus_inactive_pi_without_transcript_fails_without_spawn() {
         crate::test_util::with_temp_home(|| {
             let mut sess = session("sid-pi", SessionState::Inactive, None);
-            sess.agent_kind = AgentKind::Pi;
+            sess.kind = crate::models::SessionKind::Agent(AgentKind::Pi);
             sess.jsonl_path = None;
             let (mut app, runtime) = app_with(vec![sess]);
             let effects = app.execute(Command::Sessions(SessionsCommand::FocusSelected));
@@ -343,10 +353,10 @@ mod tests {
             // the live pane, never spawn a duplicate.
             let shared = std::path::PathBuf::from("/x/shared.jsonl");
             let mut live = session("sid-live", SessionState::Processing, Some("cc-pi-live"));
-            live.agent_kind = AgentKind::Pi;
+            live.kind = crate::models::SessionKind::Agent(AgentKind::Pi);
             live.jsonl_path = Some(shared.clone());
             let mut dead = session("sid-dead", SessionState::Inactive, None);
-            dead.agent_kind = AgentKind::Pi;
+            dead.kind = crate::models::SessionKind::Agent(AgentKind::Pi);
             dead.jsonl_path = Some(shared.clone());
 
             let (mut app, runtime) = app_with(vec![live, dead]);
@@ -371,7 +381,6 @@ mod tests {
                 effects,
                 vec![Effect::OpenTmuxPane {
                     tmux: "cc-pi-live".into(),
-                    owned: false
                 }]
             );
             assert!(
@@ -415,7 +424,6 @@ mod tests {
                 effects,
                 vec![Effect::OpenTmuxPane {
                     tmux: "cc-agent-1".into(),
-                    owned: false
                 }]
             );
         });
@@ -540,6 +548,38 @@ mod tests {
         });
     }
 
+    // `t` opens a terminal in the selected session's folder as a session of
+    // its own and asks for its name; Enter on the name takes the user into
+    // it, as for a new agent.
+    #[test]
+    fn t_opens_a_terminal_beside_the_session() {
+        crate::test_util::with_temp_home(|| {
+            let mut source = session("sid-1", SessionState::Idle, Some("hal-1"));
+            source.cwd = "/tmp/proj".into();
+            let (mut app, runtime) = app_with(vec![source]);
+            app.sessions.layout = crate::app::SessionsLayout::List;
+
+            app.execute(Command::Sessions(SessionsCommand::OpenTerminalHere));
+            assert_eq!(*runtime.terminals.lock().unwrap(), ["/tmp/proj"]);
+            let terminal = app.selected_session_info().expect("the cursor is on it");
+            assert_eq!(terminal.kind, SessionKind::Terminal);
+            assert_eq!(terminal.cwd, "/tmp/proj");
+
+            app.rename_buffer = "Server".into();
+            let effects = app.execute(Command::Sessions(SessionsCommand::SubmitRename));
+            assert_eq!(
+                effects,
+                vec![Effect::OpenTmuxPane {
+                    tmux: "mock-spawn".into()
+                }]
+            );
+            assert_eq!(
+                app.selected_session_info().and_then(|s| s.title.as_deref()),
+                Some("Server")
+            );
+        });
+    }
+
     // Naming a session at its boot is the last step before using it, so
     // Enter takes the user into it; renaming one already in use does not.
     #[test]
@@ -557,7 +597,6 @@ mod tests {
                 effects,
                 vec![Effect::OpenTmuxPane {
                     tmux: "hal-w-1".into(),
-                    owned: false
                 }]
             );
         });

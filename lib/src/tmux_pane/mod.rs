@@ -42,7 +42,6 @@ pub struct TmuxPaneView {
     /// by [`Self::take_fresh`]: what lets a pane that is merely on screen
     /// repaint at the rate it draws, not at the loop's.
     fresh: Arc<AtomicBool>,
-    owns_session: bool,
     /// OSC 52 escapes captured from the attach client's output, awaiting
     /// replay onto hal's real terminal by the main loop.
     osc52_pending: Arc<Mutex<Vec<Vec<u8>>>>,
@@ -175,7 +174,6 @@ impl TmuxPaneView {
             tty,
             exited,
             fresh,
-            owns_session: false,
             osc52_pending,
         })
     }
@@ -191,33 +189,14 @@ impl TmuxPaneView {
             .unwrap_or_default()
     }
 
-    /// Attach like [`Self::spawn`], but take ownership of `session_name`: Drop runs
-    /// `tmux kill-session`, and a construction failure kills the session before
-    /// returning so the caller does not leak it.
-    pub fn spawn_owned(session_name: &str, rows: u16, cols: u16) -> std::io::Result<Self> {
-        match Self::spawn(session_name, rows, cols) {
-            Ok(mut pane) => {
-                pane.owns_session = true;
-                Ok(pane)
-            }
-            Err(e) => {
-                let _ = crate::send::kill_tmux_session(session_name);
-                Err(e)
-            }
-        }
-    }
-
     /// Move this client onto `session` (`tmux switch-client`): tmux
     /// repaints the new session into the same pty, so there is no client to
     /// end and none to start. Fails when the client can't be addressed (no
-    /// tty name, e.g. under psmux), when tmux refuses, or for an owned pane,
-    /// whose session is tied to this client; the caller attaches anew.
+    /// tty name, e.g. under psmux) or when tmux refuses; the caller attaches
+    /// anew.
     pub fn switch_to(&mut self, session: &str) -> std::io::Result<()> {
         if self.session_name == session {
             return Ok(());
-        }
-        if self.owns_session {
-            return Err(std::io::Error::other("an owned pane stays on its session"));
         }
         let Some(tty) = self.tty.as_deref() else {
             return Err(std::io::Error::other("attach client has no tty name"));
@@ -346,14 +325,6 @@ impl Drop for TmuxPaneView {
                 let _ = child.kill();
                 let _ = child.wait();
             });
-        }
-        if self.owns_session {
-            if let Err(e) = crate::send::kill_tmux_session(&self.session_name) {
-                warn!(
-                    "tmux_pane: kill-session {} failed: {}",
-                    self.session_name, e
-                );
-            }
         }
     }
 }

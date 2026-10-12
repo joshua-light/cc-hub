@@ -10,11 +10,12 @@
 
 use super::{
     badge_color, dot_color, hold_header_above, keep_in_view, render_hold_header,
-    render_no_sessions, row_title, CardMarks,
+    render_no_sessions, row_title, session_mark, CardMarks,
 };
 use crate::app::{App, Dock, View};
-use crate::models::{first_line_truncated, ProjectGroup, SessionInfo, SessionState, TaskBadge};
-use crate::ui::common::STATE_DOT;
+use crate::models::{
+    first_line_truncated, ProjectGroup, SessionInfo, SessionKind, SessionState, TaskBadge,
+};
 use crate::ui::now_ms;
 use crate::ui::palette::{
     DIM_TEXT, HANDOFF_ROW_BG, SELECTED_HANDOFF_ROW_BG, SELECTED_ROW_BG, SEP_GRAY,
@@ -59,8 +60,9 @@ enum Row<'a> {
 }
 
 /// Every row of the sidebar, in order. Task-linked sessions already lead
-/// their project, clustered by task (see `App::rebuild_groups`), so one
-/// pass that opens a header wherever the task changes builds the tree.
+/// their project, clustered by task, and terminals trail it (see
+/// `App::rebuild_groups`), so one pass that opens a header wherever the task
+/// changes, and leaves a gap above the first terminal, builds the tree.
 fn rows(app: &App) -> Vec<Row<'_>> {
     let groups = &app.sessions.groups;
     let mut rows = Vec::new();
@@ -71,6 +73,15 @@ fn rows(app: &App) -> Vec<Row<'_>> {
         rows.push(Row::Project(group));
         let mut open_task: Option<String> = None;
         for (si, session) in group.sessions.iter().enumerate() {
+            let first_terminal = session.kind == SessionKind::Terminal
+                && si > 0
+                && group.sessions[si - 1].kind != SessionKind::Terminal;
+            if first_terminal {
+                rows.push(Row::Gap);
+                // A task the agents above share opens again for its
+                // terminals, so they don't read as loose rows.
+                open_task = None;
+            }
             let badge = app.task_badge(&session.session_id);
             let task_id = badge.as_ref().map(|b| b.task_id.clone());
             if task_id.is_some() && task_id != open_task {
@@ -204,7 +215,7 @@ fn render_session(
     let indent = if under_task { "   " } else { " " };
     let mut spans = vec![Span::raw(indent)];
     spans.push(Span::styled(
-        format!("{STATE_DOT} "),
+        format!("{} ", session_mark(session)),
         Style::default().fg(dot),
     ));
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
@@ -294,7 +305,10 @@ fn dock_title(session: &SessionInfo, marks: CardMarks, now: u64) -> Line<'static
     let dot = dot_color(&session.state, marks, now);
     let (title, _) = row_title(session, marks, 60);
     Line::from(vec![
-        Span::styled(format!(" {STATE_DOT} "), Style::default().fg(dot)),
+        Span::styled(
+            format!(" {} ", session_mark(session)),
+            Style::default().fg(dot),
+        ),
         Span::styled(
             format!("{title} "),
             Style::default()
@@ -344,6 +358,7 @@ fn render_placeholder(frame: &mut Frame, area: Rect, words: &[String; 2]) {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::agent::AgentKind;
     use crate::models::ProjectGroup;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -357,6 +372,33 @@ mod tests {
         (0..h)
             .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect())
             .collect()
+    }
+
+    // A project's terminals sit below its agents, a blank row between.
+    #[test]
+    fn a_gap_sets_terminals_off_from_agents() {
+        crate::test_util::with_temp_home(|| {
+            let session = |id: &str, title: &str, kind: SessionKind| SessionInfo {
+                session_id: id.into(),
+                title: Some(title.into()),
+                kind,
+                tmux_session: None,
+                ..crate::test_util::session_info()
+            };
+            let mut app = app_with(session(
+                "a-1",
+                "Agent",
+                SessionKind::Agent(AgentKind::Claude),
+            ));
+            app.sessions.groups[0]
+                .sessions
+                .push(session("t-1", "Shell", SessionKind::Terminal));
+            let rows = render(&mut app, 120, 6);
+
+            assert!(rows[1].contains("Agent"), "{rows:#?}");
+            assert!(rows[2].chars().take(30).all(|c| c == ' '), "{rows:#?}");
+            assert!(rows[3].contains("Shell"), "{rows:#?}");
+        });
     }
 
     fn app_with(session: SessionInfo) -> App {

@@ -37,7 +37,7 @@ fn build_session_info(
     let tool_uses_count = crate::conversation::tool_count::count_pi(&jsonl_path);
     Some(SessionInfo {
         agent_id,
-        agent_kind: AgentKind::Pi,
+        kind: crate::models::SessionKind::Agent(AgentKind::Pi),
         pid,
         session_id,
         cwd: cwd.clone(),
@@ -81,7 +81,7 @@ fn session_from_heartbeat(
     })?;
     Some(SessionInfo {
         agent_id: agent_id.to_string(),
-        agent_kind: AgentKind::Pi,
+        kind: crate::models::SessionKind::Agent(AgentKind::Pi),
         pid: hb.pid,
         session_id,
         cwd: hb.cwd.clone(),
@@ -366,7 +366,7 @@ mod tests {
             .expect("card built from heartbeat");
         assert_eq!(info.session_id, "019f9356");
         assert_eq!(info.cwd, "/tmp/proj");
-        assert_eq!(info.agent_kind, AgentKind::Pi);
+        assert_eq!(info.agent_kind(), Some(AgentKind::Pi));
         assert_eq!(info.tmux_session.as_deref(), Some("hal-1-2"));
         assert_eq!(info.model.as_deref(), Some("openai-codex/gpt-5.6-luna"));
         assert_eq!(info.state, SessionState::Idle);

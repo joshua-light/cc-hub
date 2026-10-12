@@ -1,10 +1,12 @@
 //! Session discovery: find every agent session on disk and report its state.
 //! Read-only: nothing here writes to an agent's transcript or status files.
 //!
-//! - [`scanner`] — the live-grid scan; merges Claude, Pi and Codex sessions.
+//! - [`scanner`] — the live-grid scan; merges Claude, Pi and Codex sessions
+//!   and terminals.
 //! - `claude` — Claude session discovery.
 //! - [`pi`] — Pi session discovery.
 //! - [`codex`] — Codex session discovery.
+//! - [`terminal`] — the shells `t` opens, found by their tmux session name.
 //! - `common` — helpers shared by the three scanners.
 //! - [`pi_bridge`] — Pi extension heartbeat files.
 //! - [`dir_cache`] — per-directory listing cache for the orphan/inactive walks.
@@ -21,4 +23,5 @@ pub mod index;
 pub mod pi;
 pub mod pi_bridge;
 pub mod scanner;
+pub mod terminal;
 pub mod watcher;

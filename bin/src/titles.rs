@@ -51,6 +51,11 @@ impl Titles {
             if session.state == models::SessionState::Inactive {
                 continue;
             }
+            // A terminal's summary is the command it runs, not a message
+            // worth a title; the user names a terminal by hand.
+            if session.kind == models::SessionKind::Terminal {
+                continue;
+            }
             let Some(first_msg) = session.summary.clone() else {
                 continue;
             };

@@ -39,7 +39,7 @@ pub(super) fn map_sessions_command(
         (View::Grid, KeyCode::Char('f') | KeyCode::Enter) if on_sessions => {
             Command::Sessions(S::FocusSelected)
         }
-        (View::Grid, KeyCode::Char('o')) if on_sessions => Command::Sessions(S::OpenShellHere),
+        (View::Grid, KeyCode::Char('t')) if on_sessions => Command::Sessions(S::OpenTerminalHere),
         (View::Grid, KeyCode::Char('x')) if on_sessions => Command::Sessions(S::StageConfirmClose),
         (View::Grid, KeyCode::Char(' ')) if on_sessions => Command::Sessions(S::ToggleHold),
         (View::Grid, KeyCode::Char('z')) if on_sessions => Command::Sessions(S::AckSelected),

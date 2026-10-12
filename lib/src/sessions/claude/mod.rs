@@ -371,7 +371,7 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
 
             SessionInfo {
                 agent_id: "claude".into(),
-                agent_kind: AgentKind::Claude,
+                kind: crate::models::SessionKind::Agent(AgentKind::Claude),
                 pid: raw.pid,
                 session_id: raw.session_id,
                 project_name: project_name(&raw.cwd),

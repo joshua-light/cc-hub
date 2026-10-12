@@ -257,7 +257,7 @@ impl App {
         ) {
             Ok(tmux) => {
                 self.set_status(format!("{}: Claude in {} — F1 detaches", name, cwd));
-                vec![Effect::OpenTmuxPane { tmux, owned: false }]
+                vec![Effect::OpenTmuxPane { tmux }]
             }
             Err(e) => {
                 self.set_status(format!("{}: spawn failed: {}", name, e));
@@ -368,7 +368,6 @@ mod tests {
                 effects,
                 vec![Effect::OpenTmuxPane {
                     tmux: "mock-spawn".into(),
-                    owned: false
                 }]
             );
             let spawns = rt.spawns.lock().unwrap();

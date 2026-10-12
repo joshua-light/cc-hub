@@ -218,7 +218,7 @@ fn build_session_info(
     let tool_uses_count = crate::conversation::tool_count::count_codex(&path);
     Some(SessionInfo {
         agent_id,
-        agent_kind: AgentKind::Codex,
+        kind: crate::models::SessionKind::Agent(AgentKind::Codex),
         pid,
         session_id,
         cwd: cwd.clone(),
@@ -255,7 +255,7 @@ fn process_only_card(
 ) -> SessionInfo {
     SessionInfo {
         agent_id: agent_id.to_string(),
-        agent_kind: AgentKind::Codex,
+        kind: crate::models::SessionKind::Agent(AgentKind::Codex),
         pid,
         session_id: format!("codex-{}", pid),
         project_name: project_name(&cwd),
@@ -469,7 +469,7 @@ mod tests {
                 .iter()
                 .find(|s| s.session_id == "019f60ca-f883-7a10-a997-5c17d556ee79")
                 .expect("disk session surfaced");
-            assert_eq!(s.agent_kind, AgentKind::Codex);
+            assert_eq!(s.agent_kind(), Some(AgentKind::Codex));
             assert_eq!(s.cwd, "/tmp/proj");
             assert_eq!(s.model.as_deref(), Some("gpt-5.6-luna"));
             assert_eq!(s.version.as_deref(), Some("0.144.3"));

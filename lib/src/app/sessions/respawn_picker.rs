@@ -31,7 +31,9 @@ impl RespawnPickerState {
         // that isn't the one the session already runs on.
         let selected = choices
             .iter()
-            .position(|c| c.provider == session.agent_kind && c.account_id != session.agent_id)
+            .position(|c| {
+                Some(c.provider) == session.agent_kind() && c.account_id != session.agent_id
+            })
             .unwrap_or(0);
         Self {
             session,

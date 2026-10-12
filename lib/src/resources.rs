@@ -236,7 +236,8 @@ pub fn label_sessions(sessions: &mut [crate::models::SessionInfo]) {
     for session in sessions {
         if let Some(path) = session.jsonl_path.as_ref() {
             if let Some((id, _)) = accounts.iter().find(|(_, a)| {
-                a.provider == session.agent_kind && a.home().is_some_and(|h| path.starts_with(h))
+                Some(a.provider) == session.agent_kind()
+                    && a.home().is_some_and(|h| path.starts_with(h))
             }) {
                 session.agent_id = id.clone();
             }

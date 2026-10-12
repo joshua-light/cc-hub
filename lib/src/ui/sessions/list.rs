@@ -7,7 +7,8 @@
 //! name fits.
 //!
 //! Within a group, a blank row splits runs linked to different tasks (the
-//! unlinked tail is one run), so the sort's task clusters read as blocks.
+//! unlinked tail is one run), so the sort's task clusters read as blocks,
+//! and sets the group's terminals off from its agents.
 //!
 //! Width math counts terminal advance, one cell per glyph
 //! (`chars().count()`). Nerd Font icons bleed into the next cell but advance
@@ -17,14 +18,12 @@
 
 use super::{
     activity_clock, agent_prefix, badge_color, context_pct, dot_color, hold_header_above,
-    keep_in_view, render_headers, render_no_sessions, row_title, CardMarks, GROUP_GAP,
-    GROUP_HEADER_HEIGHT,
+    keep_in_view, render_headers, render_no_sessions, row_title, session_mark, CardMarks,
+    GROUP_GAP, GROUP_HEADER_HEIGHT,
 };
 use crate::app::App;
-use crate::models::{first_line_truncated, SessionInfo};
-use crate::ui::common::{
-    ctx_color, format_elapsed, selection_stripe, short_model, Cell, COL_SEP, STATE_DOT,
-};
+use crate::models::{first_line_truncated, SessionInfo, SessionKind};
+use crate::ui::common::{ctx_color, format_elapsed, selection_stripe, short_model, Cell, COL_SEP};
 use crate::ui::now_ms;
 use crate::ui::palette::{HANDOFF_BLUE, MUTED_TEXT, SELECTED_ROW_BG};
 use ratatui::layout::Rect;
@@ -105,19 +104,19 @@ fn plan_columns(width: usize, task_need: Option<usize>) -> ListColumns {
 
 /// Body-row offset of each session under its group header (0 = the row
 /// right below it): the session index plus one blank separator row at
-/// every task boundary — adjacent rows linked to different tasks, with
-/// unlinked rows all counting as one shared run.
-fn body_row_offsets<'a>(tasks: impl Iterator<Item = Option<&'a str>>) -> Vec<u16> {
+/// every run boundary — adjacent rows whose runs differ. A session's run is
+/// its task (unlinked rows all share one) and whether it is a terminal.
+fn body_row_offsets<T: PartialEq>(runs: impl Iterator<Item = T>) -> Vec<u16> {
     let mut offsets = Vec::new();
     let mut y: u16 = 0;
-    let mut prev: Option<Option<&'a str>> = None;
-    for task in tasks {
-        if prev.is_some_and(|p| p != task) {
+    let mut prev: Option<T> = None;
+    for run in runs {
+        if prev.as_ref().is_some_and(|p| *p != run) {
             y = y.saturating_add(1);
         }
         offsets.push(y);
         y = y.saturating_add(1);
-        prev = Some(task);
+        prev = Some(run);
     }
     offsets
 }
@@ -138,9 +137,11 @@ pub(super) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
         y_acc = y_acc.saturating_add(hold_header_above(&app.sessions.groups, gi));
         group_offsets.push(y_acc);
         let offsets = body_row_offsets(group.sessions.iter().map(|s| {
-            app.session_task_links
+            let task = app
+                .session_task_links
                 .get(&s.session_id)
-                .map(|l| l.task_id.as_str())
+                .map(|l| l.task_id.as_str());
+            (s.kind == SessionKind::Terminal, task)
         }));
         let body_h = offsets.last().map_or(0, |&o| o + 1);
         row_offsets.push(offsets);
@@ -302,7 +303,7 @@ fn render_row(
         selection_stripe(selected)
     });
     spans.push(Span::styled(
-        format!("{STATE_DOT} "),
+        format!("{} ", session_mark(session)),
         Style::default().fg(dot),
     ));
     if prefix_w > 0 {
@@ -382,8 +383,15 @@ mod tests {
     }
 
     #[test]
+    fn a_separator_row_sets_terminals_off() {
+        let offsets =
+            body_row_offsets([(false, None::<&str>), (false, None), (true, None)].into_iter());
+        assert_eq!(offsets, vec![0, 1, 3]);
+    }
+
+    #[test]
     fn no_separators_without_task_links() {
-        let offsets = body_row_offsets([None, None, None].into_iter());
+        let offsets = body_row_offsets([None::<&str>, None, None].into_iter());
         assert_eq!(offsets, vec![0, 1, 2]);
     }
 
@@ -432,7 +440,7 @@ mod tests {
             let dot = |y: u16| {
                 (0..100)
                     .map(|x| &buf[(x, y)])
-                    .find(|c| c.symbol() == STATE_DOT)
+                    .find(|c| c.symbol() == crate::ui::common::STATE_DOT)
                     .expect("state dot")
                     .fg
             };

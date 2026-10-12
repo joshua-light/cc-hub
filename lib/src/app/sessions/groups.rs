@@ -1,11 +1,11 @@
 //! Scan snapshot to rendered group list: filtering, liveness bucketing,
-//! task clustering, the On hold section, and re-anchoring the cursor by
-//! session id.
+//! task clustering, terminals after agents, the On hold section, and
+//! re-anchoring the cursor by session id.
 
 use super::spawn::spawning_placeholder;
 use super::task_link_picker::task_display_title;
 use crate::app::App;
-use crate::models::{ProjectGroup, SessionInfo, SessionState, TaskBadge};
+use crate::models::{ProjectGroup, SessionInfo, SessionKind, SessionState, TaskBadge};
 use crate::tasks::store::{TaskPriority, TaskStatus};
 use std::collections::HashMap;
 
@@ -129,7 +129,8 @@ impl App {
         groups
     }
 
-    /// Group `sessions` by cwd, cluster each group by task, and sort the
+    /// Group `sessions` by cwd, cluster each group by task — agents first,
+    /// then the group's terminals, each clustered on their own — and sort the
     /// groups by name. `held` marks which section they belong to.
     fn group_by_cwd(&self, sessions: Vec<SessionInfo>, held: bool) -> Vec<ProjectGroup> {
         // HashMap::entry preserves bucket-relative order, so each group comes
@@ -155,10 +156,16 @@ impl App {
                     .first()
                     .map(|s| s.project_name.clone())
                     .unwrap_or_default();
+                let (terminals, agents): (Vec<SessionInfo>, Vec<SessionInfo>) = sessions
+                    .into_iter()
+                    .partition(|s| s.kind == SessionKind::Terminal);
+                let links = &self.session_task_links;
+                let mut sessions = cluster_by_task(agents, links, &priorities);
+                sessions.extend(cluster_by_task(terminals, links, &priorities));
                 ProjectGroup {
                     name,
                     cwd,
-                    sessions: cluster_by_task(sessions, &self.session_task_links, &priorities),
+                    sessions,
                     held,
                 }
             })
@@ -446,6 +453,25 @@ mod tests {
                 .unwrap();
             assert!(app.task_badge("s-linked").unwrap().stale);
         });
+    }
+
+    // A terminal trails its group's agents however live it is: the scanner
+    // puts the newest first, and an idle agent after a busy terminal would
+    // mix the two.
+    #[test]
+    fn terminals_trail_the_agents_of_their_group() {
+        let app = App::new();
+        let mut terminal = fake_session("hal-sh-1", SessionState::Processing);
+        terminal.kind = SessionKind::Terminal;
+        let agent = fake_session("hal-1", SessionState::Idle);
+
+        let groups = app.build_groups(&[terminal, agent]);
+        let ids: Vec<&str> = groups[0]
+            .sessions
+            .iter()
+            .map(|s| s.session_id.as_str())
+            .collect();
+        assert_eq!(ids, ["hal-1", "hal-sh-1"]);
     }
 
     #[test]

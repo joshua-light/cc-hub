@@ -65,11 +65,8 @@ pub enum Effect {
     /// Walk the transcript stores off the event loop and deliver the archive
     /// to the session finder ([`crate::sessions::index::scan`]).
     BuildSessionIndex,
-    /// Attach a tmux session as the embedded pane. `owned` panes are killed
-    /// with the pane (shell panes); un-owned panes outlive it (agents).
-    OpenTmuxPane { tmux: String, owned: bool },
-    /// Spawn a shell tmux session in `cwd`, then attach it as an owned pane.
-    OpenShell { cwd: String },
+    /// Attach a tmux session as the embedded pane. The session outlives it.
+    OpenTmuxPane { tmux: String },
     /// Focus the OS window hosting `pid`, falling back to a tmux reattach
     /// in `cwd` when the window manager reports the session is detached.
     FocusWindow { pid: u32, cwd: String },

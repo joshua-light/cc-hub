@@ -62,7 +62,7 @@ Sessions. Builds shows once a recipe exists. Agents shows once
 | `R` | Continue the session on another subscription account |
 | `r` | Rename the session. The name a new session asks for at boot takes you into it on Enter |
 | `L` | Link the session to a task, or unlink it |
-| `o` | Shell pane in this session's folder |
+| `t` | Terminal in this session's folder: a shell listed below the project's agents under its own icon. It asks for a name like a new session; Enter opens it |
 | `x` | End the session (asks first): kills its tmux session, else closes its window and terminates the agent |
 | `Space` | Put the session on hold, or release it. Held sessions move to the On hold section below every project, keep their real state, and stop counting toward attention; activity does not release them |
 | `z` | Acknowledge: mark the session idle until its next activity |

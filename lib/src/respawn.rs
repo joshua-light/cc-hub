@@ -57,8 +57,8 @@ impl Continuation {
                 .clone()
                 .ok_or_else(|| io::Error::other("session has no transcript on disk"))
         };
-        match (session.agent_kind, target.provider) {
-            (AgentKind::Claude, AgentKind::Claude) => {
+        match (session.agent_kind(), target.provider) {
+            (Some(AgentKind::Claude), AgentKind::Claude) => {
                 let from = transcript()?;
                 let home = target
                     .home()
@@ -75,7 +75,7 @@ impl Continuation {
             }
             // Same Codex home: the rollout is already where `codex resume`
             // looks, exactly the Sessions-grid resume path.
-            (AgentKind::Codex, AgentKind::Codex) if session.agent_id == target_id => {
+            (Some(AgentKind::Codex), AgentKind::Codex) if session.agent_id == target_id => {
                 Ok(Continuation::Resume {
                     session_id: session.session_id.clone(),
                     carry: None,
@@ -129,7 +129,7 @@ mod tests {
     fn session(kind: AgentKind, agent_id: &str, jsonl: Option<&str>) -> SessionInfo {
         SessionInfo {
             agent_id: agent_id.into(),
-            agent_kind: kind,
+            kind: crate::models::SessionKind::Agent(kind),
             session_id: "sid-1".into(),
             cwd: "/tmp/proj".into(),
             project_name: "proj".into(),

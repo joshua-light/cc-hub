@@ -255,7 +255,7 @@ mod tests {
         let tmux = "hal-w-codex";
         let mut process_only = fake_session("codex-123", SessionState::Idle);
         process_only.agent_id = "codex".into();
-        process_only.agent_kind = crate::agent::AgentKind::Codex;
+        process_only.kind = crate::models::SessionKind::Agent(crate::agent::AgentKind::Codex);
         process_only.tmux_session = Some(tmux.into());
         app.sessions.last_sessions = vec![process_only.clone()];
         app.rename_target = Some(spawning_session_id(tmux));
@@ -366,7 +366,7 @@ mod tests {
         let tmux = "hal-w-codex-manual";
         let mut process_only = fake_session("codex-456", SessionState::Idle);
         process_only.agent_id = "codex".into();
-        process_only.agent_kind = crate::agent::AgentKind::Codex;
+        process_only.kind = crate::models::SessionKind::Agent(crate::agent::AgentKind::Codex);
         process_only.tmux_session = Some(tmux.into());
         app.update_sessions(vec![process_only]);
 

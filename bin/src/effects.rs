@@ -35,29 +35,11 @@ pub(crate) async fn apply_effect(
                 let _ = tx.send(ScanMsg::SessionIndex(index)).await;
             });
         }
-        Effect::OpenTmuxPane { tmux, owned } => {
+        Effect::OpenTmuxPane { tmux } => {
             let (cols, rows) = popup_pane_size(terminal);
-            let pane = if owned {
-                tmux_pane::TmuxPaneView::spawn_owned(&tmux, rows, cols)
-            } else {
-                tmux_pane::TmuxPaneView::spawn(&tmux, rows, cols)
-            };
-            match pane {
+            match tmux_pane::TmuxPaneView::spawn(&tmux, rows, cols) {
                 Ok(pane) => app.enter_tmux_pane(pane),
                 Err(e) => app.set_status(format!("tmux attach failed: {}", e)),
-            }
-        }
-        Effect::OpenShell { cwd } => {
-            let (cols, rows) = popup_pane_size(terminal);
-            match spawn::spawn_shell_tmux_session(&cwd) {
-                Ok(tmux_name) => match tmux_pane::TmuxPaneView::spawn_owned(&tmux_name, rows, cols)
-                {
-                    Ok(pane) => app.enter_tmux_pane(pane),
-                    Err(e) => app.set_status(format!("shell attach failed: {}", e)),
-                },
-                Err(e) => {
-                    app.set_status(format!("shell spawn failed: {}", e));
-                }
             }
         }
         Effect::OpenExternal { target } => {

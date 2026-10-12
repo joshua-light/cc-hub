@@ -1,9 +1,10 @@
 //! Spawn watchdogs, the placeholder card that stands in for a session until
 //! the scanner first sees it, and naming a session while it boots.
 
+use crate::agent::AgentKind;
 use crate::app::App;
 use crate::config;
-use crate::models::{SessionInfo, SessionState};
+use crate::models::{SessionInfo, SessionKind, SessionState};
 use std::time::{Duration, Instant};
 
 /// One pending spawn-verification: the agent must show up in a scan snapshot
@@ -15,6 +16,8 @@ pub(in crate::app) struct SpawnWatch {
     pub(super) tmux_name: String,
     /// Agent id: names the placeholder card and the diagnosis status line.
     agent: String,
+    /// What the placeholder card stands in for.
+    kind: SessionKind,
     /// Where the session was spawned; parents the placeholder card's group.
     cwd: String,
     deadline: Instant,
@@ -25,6 +28,11 @@ pub(in crate::app) struct SpawnWatch {
 /// spawn; the slack covers slow cold starts. A false alarm costs one status
 /// line, so generous beats jumpy.
 const SPAWN_WATCH_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// [`SPAWN_WATCH_TIMEOUT`] for a terminal. A terminal writes no file to
+/// wake the scanner, so it surfaces on the 10s full scan: the watch has to
+/// outlast two of those, or a healthy terminal would be called stalled.
+const TERMINAL_WATCH_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// Marks a synthetic placeholder id (see [`spawning_session_id`]) so rename /
 /// titling can special-case a card the scanner hasn't issued a real id for.
@@ -49,7 +57,7 @@ pub(super) fn spawning_tmux_of(id: &str) -> Option<&str> {
 /// rollout file (and so gets its durable UUID) some time after it starts.
 /// Until then its card is keyed by a PID-derived id that won't survive.
 pub(super) fn is_codex_process_only(s: &SessionInfo) -> bool {
-    s.agent_kind == crate::agent::AgentKind::Codex && s.jsonl_path.is_none()
+    s.kind == SessionKind::Agent(AgentKind::Codex) && s.jsonl_path.is_none()
 }
 
 /// Loading-state stand-in for a spawn the scanner hasn't seen yet: Starting
@@ -57,14 +65,14 @@ pub(super) fn is_codex_process_only(s: &SessionInfo) -> bool {
 /// the real card first appears in) with a "starting …" title. `tmux_session`
 /// is real, so opening the card attaches to the pane where the agent is
 /// actually booting.
+///
+/// A terminal has nothing to boot — its shell is ready as soon as it is
+/// spawned — so its stand-in is a plain idle terminal until a scan finds
+/// the real one.
 pub(super) fn spawning_placeholder(watch: &SpawnWatch) -> SessionInfo {
-    let agent_kind = config::get()
-        .agent(&watch.agent)
-        .map(|a| a.kind)
-        .unwrap_or(crate::agent::AgentKind::Claude);
     let mut info = SessionInfo {
         agent_id: watch.agent.clone(),
-        agent_kind,
+        kind: watch.kind,
         pid: 0,
         session_id: spawning_session_id(&watch.tmux_name),
         cwd: watch.cwd.clone(),
@@ -89,7 +97,10 @@ pub(super) fn spawning_placeholder(watch: &SpawnWatch) -> SessionInfo {
         context_tokens: None,
         tool_uses_count: 0,
     };
-    info.title = Some(format!("starting {}…", info.agent_badge()));
+    match watch.kind {
+        SessionKind::Agent(_) => info.title = Some(format!("starting {}…", info.agent_badge())),
+        SessionKind::Terminal => info.state = SessionState::Idle,
+    }
     info
 }
 
@@ -127,15 +138,17 @@ impl App {
         cwd: String,
         title: Option<String>,
     ) {
-        let placeholder_id = spawning_session_id(&tmux_name);
-        self.spawn_watches.push(SpawnWatch {
+        let kind = config::get()
+            .agent(&agent)
+            .map(|a| a.kind)
+            .unwrap_or(AgentKind::Claude);
+        self.watch(SpawnWatch {
             tmux_name: tmux_name.clone(),
             agent,
+            kind: SessionKind::Agent(kind),
             cwd,
             deadline: Instant::now() + SPAWN_WATCH_TIMEOUT,
         });
-        self.rebuild_groups();
-        self.select_session_by_id(&placeholder_id);
         if let Some(title) = title {
             self.pending_spawn_names.insert(tmux_name, title);
             return;
@@ -148,6 +161,27 @@ impl App {
         if !config::get().title.enabled {
             self.enter_rename_session();
         }
+    }
+
+    /// [`Self::watch_spawn`] for a terminal `t` opened: no handoff to take,
+    /// and the name is asked for at once, as for an agent with auto-titling
+    /// off — nothing would ever name a terminal otherwise.
+    pub fn watch_terminal(&mut self, tmux_name: String, cwd: String) {
+        self.watch(SpawnWatch {
+            tmux_name,
+            agent: crate::sessions::terminal::AGENT_ID.into(),
+            kind: SessionKind::Terminal,
+            cwd,
+            deadline: Instant::now() + TERMINAL_WATCH_TIMEOUT,
+        });
+        self.enter_rename_session();
+    }
+
+    fn watch(&mut self, watch: SpawnWatch) {
+        let placeholder_id = spawning_session_id(&watch.tmux_name);
+        self.spawn_watches.push(watch);
+        self.rebuild_groups();
+        self.select_session_by_id(&placeholder_id);
     }
 
     /// Resolve pending spawn watches against a scan snapshot. A watch clears
@@ -257,6 +291,24 @@ mod tests {
         assert!(app.check_spawn_watches(&[], Instant::now() + 2 * SPAWN_WATCH_TIMEOUT));
         assert_eq!(app.view, View::Grid);
         assert!(app.rename_target.is_none());
+    }
+
+    // `t` puts the terminal on the grid at once, cursor on it, as a ready
+    // terminal rather than a session still booting.
+    #[test]
+    fn a_new_terminal_is_on_the_grid_at_once() {
+        let mut app = App::new();
+        app.watch_terminal("hal-sh-1-2".into(), "/tmp/proj".into());
+        let t = app.selected_session_info().expect("the cursor is on it");
+        assert_eq!(t.kind, SessionKind::Terminal);
+        assert_eq!(t.state, SessionState::Idle);
+        assert_eq!(t.title, None);
+        assert_eq!(t.tmux_session.as_deref(), Some("hal-sh-1-2"));
+        assert_eq!(
+            app.view,
+            View::RenameSession,
+            "a terminal asks for its name"
+        );
     }
 
     #[test]

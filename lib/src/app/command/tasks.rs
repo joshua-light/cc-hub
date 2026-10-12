@@ -222,7 +222,7 @@ impl App {
         if let Some(sid) = task.session_id.as_deref() {
             self.set_status(format!("opened {} [{}]", models::short_sid(sid), tmux));
         }
-        vec![Effect::OpenTmuxPane { tmux, owned: false }]
+        vec![Effect::OpenTmuxPane { tmux }]
     }
 }
 
@@ -292,7 +292,6 @@ mod tests {
                 effects,
                 vec![Effect::OpenTmuxPane {
                     tmux: "mux-live".into(),
-                    owned: false
                 }]
             );
             // Live attach never respawns.
@@ -325,7 +324,6 @@ mod tests {
                 effects,
                 vec![Effect::OpenTmuxPane {
                     tmux: "mock-spawn".into(),
-                    owned: false
                 }]
             );
             let spawns = runtime.spawns.lock().unwrap();

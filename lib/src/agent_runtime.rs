@@ -21,6 +21,8 @@ pub trait AgentRuntime: Send + Sync {
         model: Option<&str>,
         readonly_tools: bool,
     ) -> io::Result<String>;
+    /// Start a terminal in `cwd`; returns its tmux session name.
+    fn spawn_terminal(&self, cwd: &str) -> io::Result<String>;
 }
 
 /// Shared test double: records every runtime call so controller tests can
@@ -52,6 +54,8 @@ pub(crate) mod testing {
         pub prompts: Mutex<Vec<(String, String)>>,
         pub spawns: Mutex<Vec<SpawnCall>>,
         pub kills: Mutex<Vec<String>>,
+        /// The cwd of every terminal spawned.
+        pub terminals: Mutex<Vec<String>>,
         /// Name returned by successful spawns.
         pub spawn_name: String,
         /// When set, spawn_session fails with this message.
@@ -66,6 +70,7 @@ pub(crate) mod testing {
                 prompts: Mutex::new(Vec::new()),
                 spawns: Mutex::new(Vec::new()),
                 kills: Mutex::new(Vec::new()),
+                terminals: Mutex::new(Vec::new()),
                 spawn_name: "mock-spawn".into(),
                 spawn_error: None,
                 exists: AtomicBool::new(true),
@@ -114,6 +119,13 @@ pub(crate) mod testing {
                 None => Ok(self.spawn_name.clone()),
             }
         }
+        fn spawn_terminal(&self, cwd: &str) -> io::Result<String> {
+            self.terminals.lock().unwrap().push(cwd.to_string());
+            match &self.spawn_error {
+                Some(msg) => Err(io::Error::other(msg.clone())),
+                None => Ok(self.spawn_name.clone()),
+            }
+        }
     }
 }
 
@@ -154,5 +166,9 @@ impl AgentRuntime for SystemAgentRuntime {
             model,
             readonly_tools,
         )
+    }
+
+    fn spawn_terminal(&self, cwd: &str) -> io::Result<String> {
+        crate::spawn::spawn_terminal(cwd)
     }
 }

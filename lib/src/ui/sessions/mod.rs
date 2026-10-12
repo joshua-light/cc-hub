@@ -11,7 +11,9 @@
 //! - `detail`: the per-session detail popup
 
 use crate::app::App;
-use crate::models::{first_line_truncated, ProjectGroup, SessionInfo, SessionState, TaskBadge};
+use crate::models::{
+    first_line_truncated, ProjectGroup, SessionInfo, SessionKind, SessionState, TaskBadge,
+};
 use crate::ui::common::{
     context_window_size, state_color, task_color, Dot, COLD_CACHE_ICON, CURSOR, STATE_DOT,
 };
@@ -240,10 +242,25 @@ fn draft_text(draft: &str, width: usize) -> String {
     format!("…{tail}{CURSOR}")
 }
 
-/// `[Codex] ` ahead of a non-Claude session's title. Claude is the ~99%
-/// default, so labelling it would be noise.
+/// A terminal's mark, where an agent draws its [`STATE_DOT`].
+const TERMINAL_ICON: &str = "\u{f120}";
+
+/// The glyph ahead of a session's title, coloured by [`dot_color`]: the
+/// state dot for an agent, [`TERMINAL_ICON`] for a terminal. Like every
+/// Nerd Font icon it bleeds into the next cell, so callers follow it with a
+/// space.
+fn session_mark(session: &SessionInfo) -> &'static str {
+    match session.kind {
+        SessionKind::Agent(_) => STATE_DOT,
+        SessionKind::Terminal => TERMINAL_ICON,
+    }
+}
+
+/// `[Codex] ` ahead of a non-Claude agent's title. Claude is the ~99%
+/// default, so labelling it would be noise, and a terminal's mark already
+/// says what it is.
 fn agent_prefix(session: &SessionInfo) -> String {
-    if session.agent_id == "claude" {
+    if session.agent_id == "claude" || session.kind == SessionKind::Terminal {
         String::new()
     } else {
         format!("[{}] ", session.agent_badge())

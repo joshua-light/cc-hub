@@ -123,8 +123,21 @@ pub fn send_prompt(session: &str, text: &str) -> io::Result<()> {
 /// Snapshot of every `(pane_pid, session_name)` the server knows about.
 /// Returns empty when the server is down.
 pub fn list_panes() -> Vec<(u32, String)> {
+    list_panes_as("#{pane_pid} #{session_name}")
+        .iter()
+        .filter_map(|line| {
+            let (pid_s, name) = line.split_once(' ')?;
+            let pid: u32 = pid_s.parse().ok()?;
+            Some((pid, name.to_string()))
+        })
+        .collect()
+}
+
+/// Every pane the server knows about, one line each in tmux `format`.
+/// Returns empty when the server is down.
+pub fn list_panes_as(format: &str) -> Vec<String> {
     let Ok(out) = Command::new(MUX_BIN)
-        .args(["list-panes", "-a", "-F", "#{pane_pid} #{session_name}"])
+        .args(["list-panes", "-a", "-F", format])
         .output()
     else {
         return Vec::new();
@@ -141,11 +154,7 @@ pub fn list_panes() -> Vec<(u32, String)> {
     }
     String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter_map(|line| {
-            let (pid_s, name) = line.split_once(' ')?;
-            let pid: u32 = pid_s.parse().ok()?;
-            Some((pid, name.to_string()))
-        })
+        .map(str::to_string)
         .collect()
 }
 

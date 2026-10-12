@@ -132,10 +132,21 @@ impl fmt::Display for SessionState {
     }
 }
 
+/// What a session's pane runs: a coding agent, or a terminal — a plain
+/// shell `t` opened, listed beside the agents but with no transcript, model
+/// or context behind it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionKind {
+    Agent(AgentKind),
+    Terminal,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionInfo {
+    /// The configured agent (or account) the session runs as; `terminal`
+    /// for a terminal.
     pub agent_id: String,
-    pub agent_kind: AgentKind,
+    pub kind: SessionKind,
     pub pid: u32,
     pub session_id: String,
     pub cwd: String,
@@ -144,6 +155,8 @@ pub struct SessionInfo {
     pub last_activity: Option<u64>,
     pub state: SessionState,
     pub last_user_message: Option<String>,
+    /// What the session is about, shown while it has no title: the agent's
+    /// first message, or the command a terminal is running.
     pub summary: Option<String>,
     pub title: Option<String>,
     pub titling: bool,
@@ -180,12 +193,24 @@ impl SessionInfo {
         )
     }
 
+    /// The agent behind the session; `None` for a terminal.
+    pub fn agent_kind(&self) -> Option<AgentKind> {
+        match self.kind {
+            SessionKind::Agent(kind) => Some(kind),
+            SessionKind::Terminal => None,
+        }
+    }
+
     /// True when the session has sat quiet past the prompt-cache TTL. Never
     /// true while Processing or Starting — those are touching the cache
-    /// right now, whatever the transcript's last timestamp says. Sessions
-    /// with no transcript yet fall back to their start time; treating a
-    /// missing timestamp as cold would frost every fresh spawn.
+    /// right now, whatever the transcript's last timestamp says — nor for a
+    /// terminal, which has no cache. Sessions with no transcript yet fall
+    /// back to their start time; treating a missing timestamp as cold would
+    /// frost every fresh spawn.
     pub fn cache_cold(&self, now: u64) -> bool {
+        if self.kind == SessionKind::Terminal {
+            return false;
+        }
         if matches!(
             self.state,
             SessionState::Processing | SessionState::Starting
@@ -197,13 +222,16 @@ impl SessionInfo {
     }
 
     pub fn agent_badge(&self) -> String {
+        if self.kind == SessionKind::Terminal {
+            return "Terminal".into();
+        }
         if self.agent_id == "claude" {
             return "Claude".into();
         }
         if self.agent_id == "pi" {
             return "Pi".into();
         }
-        if self.agent_kind == AgentKind::Codex {
+        if self.kind == SessionKind::Agent(AgentKind::Codex) {
             return if self.agent_id == "codex" {
                 "Codex".into()
             } else {
@@ -211,7 +239,7 @@ impl SessionInfo {
             };
         }
         let lower = self.agent_id.to_ascii_lowercase();
-        if self.agent_kind == AgentKind::Pi && lower.contains("codex") {
+        if self.kind == SessionKind::Agent(AgentKind::Pi) && lower.contains("codex") {
             return "Pi/Codex".into();
         }
         self.agent_id.replace('-', " ")

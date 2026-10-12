@@ -36,7 +36,7 @@ fn synthesize_inactive_from_jsonl(
     let tool_uses_count = crate::conversation::tool_count::count_claude(path);
     Some(SessionInfo {
         agent_id: "claude".into(),
-        agent_kind: AgentKind::Claude,
+        kind: crate::models::SessionKind::Agent(AgentKind::Claude),
         pid: 0,
         session_id,
         project_name: project_name(&cwd),

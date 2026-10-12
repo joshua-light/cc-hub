@@ -93,7 +93,7 @@ when an account runs out, set up the resource broker
 
 - **Windows** has no window focus; psmux ignores the
   `list-clients -F` format hal would need. Use the embedded pane (`f` on a
-  session, `o` for a shell) instead of an external window. psmux also takes
+  session or terminal) instead of an external window. psmux also takes
   no command in `new-session`, so hal types `hal-new` into the new
   pane.
 - **macOS** asks for Accessibility permission the first time hal focuses

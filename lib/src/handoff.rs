@@ -31,7 +31,8 @@ impl Handoff {
     /// `None` when `session` has no transcript yet, or it holds no reply.
     pub fn of(session: &SessionInfo) -> Option<Self> {
         let entries = conversation::read_jsonl_tail(session.jsonl_path.as_ref()?, TAIL_BYTES);
-        let reply = conversation::extract_last_assistant_message_for(session.agent_kind, &entries)?;
+        let reply =
+            conversation::extract_last_assistant_message_for(session.agent_kind()?, &entries)?;
         Some(Self {
             session_id: session.session_id.clone(),
             title: session

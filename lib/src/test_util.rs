@@ -63,7 +63,7 @@ pub fn with_temp_home<F: FnOnce()>(f: F) {
 pub fn session_info() -> crate::models::SessionInfo {
     crate::models::SessionInfo {
         agent_id: "claude".into(),
-        agent_kind: crate::agent::AgentKind::Claude,
+        kind: crate::models::SessionKind::Agent(crate::agent::AgentKind::Claude),
         pid: 1,
         session_id: "s".into(),
         cwd: "/tmp".into(),

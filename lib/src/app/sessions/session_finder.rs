@@ -305,7 +305,7 @@ impl App {
             let sid = crate::models::short_sid(&live.session_id).to_string();
             if let Some(tmux) = live.tmux_session.clone() {
                 self.set_status(format!("attached live {} [{}]", sid, tmux));
-                return vec![Effect::OpenTmuxPane { tmux, owned: false }];
+                return vec![Effect::OpenTmuxPane { tmux }];
             }
             let (pid, cwd) = (live.pid, live.cwd.clone());
             self.set_status(format!("focused live {}", sid));
@@ -334,7 +334,7 @@ impl App {
                     crate::models::short_sid(&choice.session_id),
                     tmux
                 ));
-                vec![Effect::OpenTmuxPane { tmux, owned: false }]
+                vec![Effect::OpenTmuxPane { tmux }]
             }
             Err(e) => {
                 self.set_status(format!("resume failed: {}", e));
@@ -569,7 +569,6 @@ mod app_tests {
                 effects,
                 vec![Effect::OpenTmuxPane {
                     tmux: "mock-spawn".into(),
-                    owned: false
                 }]
             );
             assert_eq!(app.view, crate::app::View::Grid);
@@ -598,7 +597,6 @@ mod app_tests {
                 effects,
                 vec![Effect::OpenTmuxPane {
                     tmux: "cc-agent-live".into(),
-                    owned: false
                 }]
             );
             assert!(

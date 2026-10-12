@@ -88,8 +88,10 @@ fn stalled_spawn_message(agent: &str, tmux_name: &str, pane: &str) -> String {
     }
 }
 
-pub fn spawn_shell_tmux_session(cwd: &str) -> io::Result<String> {
-    let name = unique_session_name("hal-sh");
+/// Start a terminal — a plain shell in `cwd`, in a detached session the
+/// terminal scan ([`crate::sessions::terminal`]) knows by its name.
+pub fn spawn_terminal(cwd: &str) -> io::Result<String> {
+    let name = unique_session_name(crate::sessions::terminal::TMUX_PREFIX);
     mux::spawn_detached(&name, cwd, None)?;
     Ok(name)
 }

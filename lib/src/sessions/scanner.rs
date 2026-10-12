@@ -4,8 +4,9 @@
 use crate::agent::AgentKind;
 use crate::config;
 use crate::conversation;
-use crate::models::{SessionDetail, SessionInfo, SessionState};
-use crate::sessions::{claude, codex, pi};
+use crate::models::{SessionDetail, SessionInfo, SessionKind, SessionState};
+use crate::platform::process::{Process, ProcessInfo};
+use crate::sessions::{claude, codex, pi, terminal};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -58,6 +59,7 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
             .collect();
         sessions.extend(codex::scan(&codex_agents, &titles));
     }
+    sessions.extend(terminal::scan(&titles));
 
     // The tool-use count cache is shared by every backend, so evict it here,
     // after all scans, with every live path this tick. (conversation's other
@@ -78,14 +80,18 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
 /// True if `pid` is still a live process of `kind`. The liveness rule is
 /// per-backend: Claude's `is_pid_alive` also demands a real parent, but Pi and
 /// Codex children legitimately reparent to init, so they need only "alive and
-/// still that agent's process".
-fn session_pid_alive(kind: AgentKind, pid: u32) -> bool {
+/// still that agent's process". A terminal's pid is its pane's shell, which
+/// is any process at all.
+fn session_pid_alive(kind: SessionKind, pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
     match kind {
-        AgentKind::Claude => claude::is_pid_alive(pid),
-        AgentKind::Pi | AgentKind::Codex => crate::platform::process::is_agent_process(kind, pid),
+        SessionKind::Agent(AgentKind::Claude) => claude::is_pid_alive(pid),
+        SessionKind::Agent(kind @ (AgentKind::Pi | AgentKind::Codex)) => {
+            crate::platform::process::is_agent_process(kind, pid)
+        }
+        SessionKind::Terminal => Process::is_alive(pid),
     }
 }
 
@@ -96,8 +102,7 @@ fn session_pid_alive(kind: AgentKind, pid: u32) -> bool {
 pub fn refresh_process_liveness(sessions: &mut [SessionInfo]) -> bool {
     let mut changed = false;
     for session in sessions {
-        if session.state != SessionState::Inactive
-            && !session_pid_alive(session.agent_kind, session.pid)
+        if session.state != SessionState::Inactive && !session_pid_alive(session.kind, session.pid)
         {
             session.state = SessionState::Inactive;
             session.tmux_session = None;
@@ -111,9 +116,10 @@ pub fn load_detail(session_id: &str, sessions: &[SessionInfo]) -> Option<Session
     let info = sessions.iter().find(|s| s.session_id == session_id)?;
     let jsonl_path = info.jsonl_path.as_ref()?;
     let entries = conversation::read_jsonl_tail(jsonl_path, 65536);
-    let recent_messages = conversation::extract_messages_for(info.agent_kind, &entries, 15);
+    let agent_kind = info.agent_kind()?;
+    let recent_messages = conversation::extract_messages_for(agent_kind, &entries, 15);
     let (total_input_tokens, total_output_tokens) =
-        conversation::extract_token_totals_for(info.agent_kind, &entries);
+        conversation::extract_token_totals_for(agent_kind, &entries);
     Some(SessionDetail {
         info: info.clone(),
         recent_messages,
@@ -142,17 +148,21 @@ mod tests {
     // fallback tick, and the next full scan would restore it → blink. pid 0 is
     // the no-process sentinel for both, and a Pi session is decided by the Pi
     // detector, never the Claude one.
+    const CLAUDE: SessionKind = SessionKind::Agent(AgentKind::Claude);
+    const PI: SessionKind = SessionKind::Agent(AgentKind::Pi);
+
     #[test]
     fn session_pid_alive_routes_by_backend() {
-        assert!(!session_pid_alive(AgentKind::Pi, 0));
-        assert!(!session_pid_alive(AgentKind::Claude, 0));
+        assert!(!session_pid_alive(PI, 0));
+        assert!(!session_pid_alive(CLAUDE, 0));
         // The test process is a real, live pid that is neither `claude` nor
         // `pi`. Both branches must therefore report it dead — proving each
         // consults its own detector rather than blindly trusting kill(0).
         let live_pid = std::process::id();
         assert!(crate::platform::process::Process::is_alive(live_pid));
-        assert!(!session_pid_alive(AgentKind::Claude, live_pid));
-        assert!(!session_pid_alive(AgentKind::Pi, live_pid));
+        assert!(!session_pid_alive(CLAUDE, live_pid));
+        assert!(!session_pid_alive(PI, live_pid));
+        assert!(session_pid_alive(SessionKind::Terminal, live_pid));
     }
 
     // A live Pi session must not be reaped by the fallback pass. We can't
@@ -162,7 +172,7 @@ mod tests {
     #[test]
     fn refresh_liveness_reaps_dead_pi_session() {
         let mut dead = session("pi-dead", 0, SessionState::Idle);
-        dead.agent_kind = AgentKind::Pi;
+        dead.kind = crate::models::SessionKind::Agent(AgentKind::Pi);
         dead.pid = 0;
         dead.tmux_session = Some("mux".into());
         let mut list = [dead];
