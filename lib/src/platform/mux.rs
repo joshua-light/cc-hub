@@ -290,8 +290,18 @@ fn resolve_mux_bin() -> String {
 /// Capture the current visible content of `session`'s active pane.
 /// Returns empty string on failure (mux down, session gone, etc.).
 pub fn capture_pane(session: &str) -> String {
+    capture(session, &[])
+}
+
+/// [`capture_pane`] with the text's styling kept as SGR escapes (`-e`).
+fn capture_pane_styled(session: &str) -> String {
+    capture(session, &["-e"])
+}
+
+fn capture(session: &str, flags: &[&str]) -> String {
     let Ok(out) = Command::new(MUX_BIN)
         .args(["capture-pane", "-t", session, "-p"])
+        .args(flags)
         .output()
     else {
         return String::new();
@@ -321,31 +331,65 @@ pub fn has_session(session: &str) -> bool {
 /// to receive input. Without this gate, `send_prompt` races the cold-start
 /// of a worker session and the paste never lands.
 ///
-/// claude renders `❯` at the start of an otherwise empty row to mark the
-/// input box. The row sits between two `─` rule lines, with the status
-/// footer (model / cost / context / hints) below it — meaning it's
-/// typically 4-8 visible rows above the bottom plus several blank scrollback
-/// rows after that. Cheaper to scan the whole pane than to count rows from
-/// the bottom; the welcome banner uses different glyphs (`▐`, `▜`) so a
-/// false positive there is unlikely.
+/// claude renders `❯` at the start of the input row, between two `─` rule
+/// lines with the status footer below. Empty, the row is the bare glyph — or,
+/// in a fresh session, the glyph and a dim suggestion (`Try "…"`) that
+/// vanishes on the first key. The pane is captured with its styling so the
+/// suggestion can be told from typed text, which is never dim. Cheaper to
+/// scan the whole pane than to count rows from the bottom; the welcome
+/// banner uses different glyphs (`▐`, `▜`) so a false positive there is
+/// unlikely.
 pub fn pane_ready_for_input(session: &str) -> bool {
-    pane_content_shows_empty_input(&capture_pane(session))
+    pane_content_shows_empty_input(&capture_pane_styled(session))
 }
 
 /// Pure inspector — pulled out so it's unit-testable against captured
 /// fixtures. See [`pane_ready_for_input`].
 fn pane_content_shows_empty_input(pane: &str) -> bool {
-    if pane.is_empty() {
-        return false;
-    }
-    pane.lines().any(|l| {
-        let trimmed = l.trim();
-        // An empty input row is exactly the `❯` glyph (after trimming the
-        // single trailing space claude pads it with). A non-empty input
-        // row would have user-typed text after the glyph — not what we
-        // want to declare "ready" for paste.
-        trimmed == "❯"
+    pane.lines().any(|line| {
+        let mut typed = styled_chars(line)
+            .filter(|&(c, dim)| !c.is_whitespace() && !dim)
+            .map(|(c, _)| c);
+        // Anything typed after the glyph is the user's — not what we want
+        // to declare "ready" for paste.
+        typed.next() == Some('❯') && typed.next().is_none()
     })
+}
+
+/// The printed characters of a `capture-pane -e` line, each with whether it
+/// is drawn dim (SGR 2). Escapes are read for that alone and dropped.
+fn styled_chars(line: &str) -> impl Iterator<Item = (char, bool)> + '_ {
+    let mut chars = line.chars();
+    let mut dim = false;
+    std::iter::from_fn(move || loop {
+        let c = chars.next()?;
+        if c != '\x1b' {
+            return Some((c, dim));
+        }
+        if chars.next() != Some('[') {
+            continue;
+        }
+        let params: String = chars.by_ref().take_while(|&c| c != 'm').collect();
+        dim = dim_after(dim, &params);
+    })
+}
+
+/// Whether text is dim after an SGR with `params` (`2;38;5;246`). The colour
+/// arguments of `38`/`48` are skipped, so colour 2 is not read as dim.
+fn dim_after(mut dim: bool, params: &str) -> bool {
+    let mut params = params.split(';');
+    while let Some(p) = params.next() {
+        match p {
+            "" | "0" | "22" => dim = false,
+            "2" => dim = true,
+            "38" | "48" => {
+                let skip = if params.next() == Some("2") { 3 } else { 1 };
+                params.by_ref().take(skip).for_each(drop);
+            }
+            _ => {}
+        }
+    }
+    dim
 }
 
 /// Best-effort: log and swallow failures, since a missing mouse option is
@@ -474,6 +518,29 @@ mod tests {
     #[test]
     fn pre_input_banner_is_not_ready() {
         assert!(!pane_content_shows_empty_input(PRE_INPUT_BANNER_PANE));
+    }
+
+    /// Real `tmux capture-pane -p -e` input rows of a fresh Claude: the
+    /// suggestion it shows until the first key, and the same row once the
+    /// user typed.
+    const SUGGESTION_ROW: &str =
+        "\x1b[39m❯\u{a0}\x1b[2mTry \"write a test for parser.rs\"\x1b[0m\n";
+    const TYPED_ROW: &str = "\x1b[39m❯\u{a0}hello\n";
+
+    #[test]
+    fn a_dim_suggestion_is_an_empty_input() {
+        assert!(pane_content_shows_empty_input(SUGGESTION_ROW));
+        assert!(!pane_content_shows_empty_input(TYPED_ROW));
+    }
+
+    #[test]
+    fn colour_two_is_not_dim() {
+        assert!(!pane_content_shows_empty_input(
+            "\x1b[39m❯ \x1b[38;5;2mtyped\x1b[0m\n"
+        ));
+        assert!(!pane_content_shows_empty_input(
+            "\x1b[39m❯ \x1b[38;2;2;2;2mtyped\x1b[0m\n"
+        ));
     }
 
     #[test]
