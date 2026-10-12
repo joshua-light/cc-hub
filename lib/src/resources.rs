@@ -307,8 +307,8 @@ mod tests {
             let mut board = crate::tasks::PersonalBoard::load_result().unwrap();
             let task = board.add("retro").unwrap().unwrap();
             let state = serde_json::json!({"workers": {
-                "a": {"task": task, "tmux": "cchr-a-1", "title": "Task: Retro", "status": "starting"},
-                "b": {"task": task, "tmux": "cchr-b-1", "title": "Task: Old", "status": "blocked"},
+                "a": {"task": task, "tmux": "halr-a-1", "title": "Task: Retro", "status": "starting"},
+                "b": {"task": task, "tmux": "halr-b-1", "title": "Task: Old", "status": "blocked"},
             }});
             let directory = crate::platform::paths::hal_home()
                 .unwrap()
@@ -321,9 +321,9 @@ mod tests {
                 ..crate::test_util::session_info()
             };
             let mut sessions = [
-                hosted("cchr-a-1", None),
-                hosted("cchr-a-1", Some("Renamed")),
-                hosted("cchr-b-1", None),
+                hosted("halr-a-1", None),
+                hosted("halr-a-1", Some("Renamed")),
+                hosted("halr-b-1", None),
                 hosted("hal-1-2", None),
             ];
 

@@ -929,7 +929,7 @@ def reserve(worker, choice, cfg):
     profile = cfg['profiles'][choice['profile']]
     worker.update(model=profile['model'], effort=profile['effort'])
     worker['generation'] += 1
-    worker['tmux'] = 'cchr-' + worker['id'][:12] + '-' + str(worker['generation'])
+    worker['tmux'] = 'halr-' + worker['id'][:12] + '-' + str(worker['generation'])
     # A native resume keeps the session id; a hand-off is a new session.
     if not continues_natively(worker, cfg['accounts'][choice['account']]):
         worker['session_id'] = str(uuid.uuid4())

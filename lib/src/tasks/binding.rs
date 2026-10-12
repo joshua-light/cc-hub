@@ -66,16 +66,16 @@ mod tests {
             let learned = board
                 .bind_sessions(&[
                     scanned("sid-exhausted", SessionState::Idle, "hal-stale"),
-                    scanned("sid-worker", SessionState::Processing, "cchr-worker-2"),
+                    scanned("sid-worker", SessionState::Processing, "halr-worker-2"),
                 ])
                 .unwrap();
             assert!(learned);
             let card = PersonalBoard::load().get(&id).cloned().unwrap();
-            assert_eq!(card.tmux.as_deref(), Some("cchr-worker-2"));
+            assert_eq!(card.tmux.as_deref(), Some("halr-worker-2"));
             assert_eq!(card.session_id.as_deref(), Some("sid-worker"));
             // Nothing more to learn: the same scan is a no-op.
             assert!(!board
-                .bind_sessions(&[scanned("sid-worker", SessionState::Idle, "cchr-worker-2")])
+                .bind_sessions(&[scanned("sid-worker", SessionState::Idle, "halr-worker-2")])
                 .unwrap());
         });
     }
