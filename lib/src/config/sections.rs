@@ -164,6 +164,10 @@ pub struct UiConfig {
     /// stays visible and Space still approves it (the action keys off the
     /// card's status, not the column it renders in).
     pub show_planning_column: bool,
+    /// On the list-and-page tabs (Sessions' split layout, Builds, Agents),
+    /// draw the side without the keyboard dim. Off by default: the page's
+    /// frame alone says where typing goes.
+    pub dim_unfocused: bool,
     /// Retired with the Projects layer; accepted and ignored (see
     /// [`Config`](super::Config)'s `_backlog`).
     #[serde(rename = "show_projects_tab")]
@@ -192,6 +196,7 @@ impl Default for UiConfig {
             cell_width: 42,
             _show_projects_tab: None,
             show_planning_column: false,
+            dim_unfocused: false,
         }
     }
 }

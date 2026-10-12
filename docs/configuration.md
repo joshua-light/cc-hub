@@ -103,6 +103,7 @@ Sessions with no live process.
 | `cell_height` | `6` | Session card height, in rows. At 5 or less the card merges branch, model and id into one row. |
 | `cell_width` | `42` | Minimum session card width; the grid fits `terminal width / cell_width` columns. |
 | `show_planning_column` | `false` | Show the Planning column on the Tasks board. Hidden, its cards show under In Progress. |
+| `dim_unfocused` | `false` | Dim the side without the keyboard on the list-and-page tabs (Sessions' split layout, Builds, Agents). Off, the page's white frame alone marks where typing goes. |
 
 ## `[metrics]`
 

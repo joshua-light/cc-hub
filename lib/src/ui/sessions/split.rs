@@ -568,10 +568,10 @@ mod tests {
         });
     }
 
-    // Only the side with the keyboard is drawn at full strength: the dock
-    // dims while the list has it, and the list dims while the dock has it.
+    // `[ui].dim_unfocused` is off by default: neither side dims, whichever
+    // has the keyboard.
     #[test]
-    fn the_side_without_the_keyboard_is_dimmed() {
+    fn neither_side_dims_by_default() {
         crate::test_util::with_temp_home(|| {
             let mut app = app_with(SessionInfo {
                 session_id: "a-1".into(),
@@ -589,9 +589,9 @@ mod tests {
                 (dim(3), dim(40))
             };
 
-            assert_eq!(dimmed(&mut app), (false, true));
+            assert_eq!(dimmed(&mut app), (false, false));
             app.view = View::Dock;
-            assert_eq!(dimmed(&mut app), (true, false));
+            assert_eq!(dimmed(&mut app), (false, false));
         });
     }
 

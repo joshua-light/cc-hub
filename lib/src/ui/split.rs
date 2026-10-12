@@ -1,9 +1,11 @@
 //! The sidebar-and-page layout the Sessions, Agents and Builds tabs share:
 //! a narrow list on the left, the selected item's page on the right. One
-//! side has the keyboard; the other is drawn dim, as an editor's inactive
-//! pane is, so where typing goes reads at a glance.
+//! side has the keyboard: the page's frame turns white while it is the one,
+//! and with `[ui].dim_unfocused` the other side is drawn dim, as an editor's
+//! inactive pane is.
 
 use crate::ui::palette::{SELECTED_ROW_BG, SEP_GRAY};
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -53,15 +55,20 @@ impl Split {
         }
     }
 
-    /// Dim the side without the keyboard. Call it last, over both sides.
+    /// Dim the side without the keyboard when `[ui].dim_unfocused` asks
+    /// for it. Call it last, over both sides.
     pub fn dim_unfocused(&self, frame: &mut Frame) {
+        if crate::config::get().ui.dim_unfocused {
+            self.dim(frame.buffer_mut());
+        }
+    }
+
+    fn dim(&self, buf: &mut Buffer) {
         let unfocused = match self.page_focused {
             true => self.sidebar,
             false => self.page,
         };
-        frame
-            .buffer_mut()
-            .set_style(unfocused, Style::default().add_modifier(Modifier::DIM));
+        buf.set_style(unfocused, Style::default().add_modifier(Modifier::DIM));
     }
 
     /// The page's frame: rounded, white while it has the keyboard.
@@ -150,6 +157,21 @@ mod tests {
         assert_eq!((list.sidebar, list.page), (area, Rect::default()));
         let page = Split::of(area, true);
         assert_eq!((page.sidebar, page.page), (Rect::default(), area));
+    }
+
+    // Only the side with the keyboard keeps full strength: the page dims
+    // while the list has it, and the list while the page has it.
+    #[test]
+    fn dimming_takes_the_side_without_the_keyboard() {
+        let area = Rect::new(0, 0, 120, 4);
+        let dimmed = |page_focused: bool| {
+            let mut buf = Buffer::empty(area);
+            Split::of(area, page_focused).dim(&mut buf);
+            let dim = |x: u16| buf[(x, 1)].modifier.contains(Modifier::DIM);
+            (dim(3), dim(40))
+        };
+        assert_eq!(dimmed(false), (false, true));
+        assert_eq!(dimmed(true), (true, false));
     }
 
     #[test]
