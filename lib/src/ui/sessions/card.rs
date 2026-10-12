@@ -42,8 +42,9 @@ pub(super) fn render_card(
     frame.render_widget(paragraph, inner);
 }
 
-/// Border weight and colour: white double when selected, thick in the state
-/// colour when the session needs you. A handoff mark outranks every colour,
+/// Border weight and colour: thick in the state colour when the session
+/// needs you, white under the cursor — the weight stays, so a selected card
+/// still says whether it needs you. A handoff mark outranks every colour,
 /// and a held session is gray — the weight still says the rest. A working
 /// session keeps the quiet border: its blinking dot already says so.
 fn border(session: &SessionInfo, marks: CardMarks) -> (BorderType, Color) {
@@ -67,9 +68,7 @@ fn border(session: &SessionInfo, marks: CardMarks) -> (BorderType, Color) {
         SEP_GRAY
     };
 
-    let border_type = if selected {
-        BorderType::Double
-    } else if session.needs_attention() {
+    let border_type = if session.needs_attention() {
         // Weight makes "needs you" categorical, not a hue shift.
         BorderType::Thick
     } else if session.state == SessionState::Inactive {

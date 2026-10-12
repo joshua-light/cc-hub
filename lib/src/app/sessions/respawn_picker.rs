@@ -260,7 +260,7 @@ home = "~/.codex-personal"
             // prompt: it is staged for adoption under the new tmux name.
             assert_eq!(
                 app.pending_spawn_names.get("mock-spawn"),
-                Some(&Some("Fix the auth flow".into()))
+                Some(&"Fix the auth flow".into())
             );
         });
     }

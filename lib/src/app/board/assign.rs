@@ -150,7 +150,7 @@ impl App {
                 }
                 // Named after its card the moment the scanner sees it; see
                 // `adopt_pending_spawn_names`.
-                self.pending_spawn_names.insert(tmux.clone(), Some(title));
+                self.pending_spawn_names.insert(tmux.clone(), title);
                 self.focus_task(&id);
                 format!(
                     "assigned {} [{}] — planning (Space approves the plan)",
@@ -217,7 +217,7 @@ mod tests {
 
             assert_eq!(
                 app.pending_spawn_names.get("mock-spawn"),
-                Some(&Some("Task: implement it".into()))
+                Some(&"Task: implement it".into())
             );
         });
     }

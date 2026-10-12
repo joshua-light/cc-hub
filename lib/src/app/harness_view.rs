@@ -66,8 +66,12 @@ pub struct Detail {
 }
 
 impl HarnessView {
-    pub fn update(&mut self, agents: Vec<AgentSnapshot>) {
+    /// Adopt a fresh scan: the agents that run first, the switched-off ones
+    /// after them, each band in the scan's name order. The cursor stays on
+    /// its agent by name, so one switched off moves with it.
+    pub fn update(&mut self, mut agents: Vec<AgentSnapshot>) {
         let keep = self.selected().map(|a| a.name.clone());
+        agents.sort_by_key(AgentSnapshot::is_off);
         self.agents = agents;
         self.loaded = true;
         self.selected = keep

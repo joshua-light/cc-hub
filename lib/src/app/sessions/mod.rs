@@ -17,7 +17,6 @@ use crate::acks::Acks;
 use crate::handoff::Handoff;
 use crate::holds::Holds;
 use crate::models::{ProjectGroup, SessionInfo};
-use std::collections::HashSet;
 
 mod dock;
 mod groups;
@@ -36,7 +35,7 @@ pub use model_picker::{AgentPickerState, ModelPickerChoice, ModelPickerState};
 pub use rename::RenameSubmit;
 use rename::UnscannedTitles;
 pub use respawn_picker::{RespawnChoice, RespawnPickerState};
-pub use session_finder::{SessionFinderChoice, SessionFinderState};
+pub use session_finder::{FinderLine, Period, SessionFinderChoice, SessionFinderState};
 pub(super) use spawn::SpawnWatch;
 pub use task_link_picker::{TaskLinkAction, TaskLinkChoice, TaskLinkPickerState};
 
@@ -91,9 +90,6 @@ pub struct SessionsView {
     pub handoff: Option<Handoff>,
     /// Latest scan snapshot; drives [`crate::app::App::rebuild_groups`].
     pub(crate) last_sessions: Vec<SessionInfo>,
-    /// Session ids seen on the previous scan tick. `None` means the first
-    /// scan hasn't happened yet — used to skip cursor-jump on initial load.
-    pub(crate) known_session_ids: Option<HashSet<String>>,
 }
 
 impl SessionsView {
@@ -110,7 +106,6 @@ impl SessionsView {
             unscanned_titles: UnscannedTitles::default(),
             handoff: None,
             last_sessions: Vec::new(),
-            known_session_ids: None,
         }
     }
 
@@ -221,14 +216,6 @@ impl SessionsView {
             .iter()
             .enumerate()
             .find_map(|(gi, group)| group.sessions.iter().position(&pred).map(|si| (gi, si)))
-    }
-
-    /// Ids of every session currently on the grid.
-    pub(super) fn visible_ids(&self) -> HashSet<String> {
-        self.groups
-            .iter()
-            .flat_map(|g| g.sessions.iter().map(|s| s.session_id.clone()))
-            .collect()
     }
 
     pub fn session_count(&self) -> usize {

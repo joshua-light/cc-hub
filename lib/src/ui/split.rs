@@ -100,14 +100,12 @@ pub(crate) fn page_title(mark: Span<'static>, name: &str) -> Line<'static> {
     ])
 }
 
-/// One sidebar row of the Agents and Builds tabs: ` mark name`, and a fact
-/// right-aligned at the far end. The cursor is the row's background, and its
-/// name alone is bold.
+/// One sidebar row of the Agents and Builds tabs: ` mark name`, nothing
+/// more. The cursor is the row's background, and its name alone is bold.
 pub(crate) struct SidebarRow {
     pub mark: Span<'static>,
     pub name: String,
     pub name_style: Style,
-    pub aside: Span<'static>,
 }
 
 pub(crate) fn render_row(frame: &mut Frame, area: Rect, row: SidebarRow, selected: bool) {
@@ -115,19 +113,14 @@ pub(crate) fn render_row(frame: &mut Frame, area: Rect, row: SidebarRow, selecte
         true => row.name_style.add_modifier(Modifier::BOLD),
         false => row.name_style,
     };
-    let width = area.width as usize;
-    let aside_w = row.aside.content.chars().count();
-    // ` ● ` ahead of the name, a space before the aside and one after it.
-    let room = width.saturating_sub(3 + aside_w + 2);
+    // ` ● ` ahead of the name, a space after it.
+    let room = (area.width as usize).saturating_sub(3 + 1);
     let name = crate::models::first_line_truncated(&row.name, room);
-    let gap = width.saturating_sub(3 + name.chars().count() + aside_w + 1);
     let line = Line::from(vec![
         Span::raw(" "),
         row.mark,
         Span::raw(" "),
         Span::styled(name, name_style),
-        Span::raw(" ".repeat(gap)),
-        row.aside,
     ]);
     let mut row = Paragraph::new(line);
     if selected {

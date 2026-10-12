@@ -60,9 +60,9 @@ pub use picker_list::PickerRow;
 pub use places::GhCreateInput;
 pub use render_state::{RenderState, SplitAreas};
 pub use sessions::{
-    AgentPickerState, Dock, ModelPickerChoice, ModelPickerState, RenameSubmit, RespawnChoice,
-    RespawnPickerState, SessionFinderChoice, SessionFinderState, SessionsLayout, SessionsView,
-    TaskLinkAction, TaskLinkChoice, TaskLinkPickerState,
+    AgentPickerState, Dock, FinderLine, ModelPickerChoice, ModelPickerState, Period, RenameSubmit,
+    RespawnChoice, RespawnPickerState, SessionFinderChoice, SessionFinderState, SessionsLayout,
+    SessionsView, TaskLinkAction, TaskLinkChoice, TaskLinkPickerState,
 };
 pub use view::{visible_tabs, PendingClose, Tab, View, TABS};
 
@@ -130,14 +130,11 @@ pub struct App {
     /// no card ever appears. See [`Self::check_spawn_watches`].
     spawn_watches: Vec<SpawnWatch>,
     /// Boot-time names, keyed by the spawning tmux name: the one id that
-    /// survives the placeholder-to-real transition. A present key means the
-    /// spawn was already prompted for a name, so
-    /// [`Self::maybe_autoprompt_rename_for_new_session`] skips it.
-    /// `Some(title)` is a name given while booting, persisted to the real
-    /// session id once the scanner sees it
-    /// ([`Self::adopt_pending_spawn_names`]). Filled while Haiku titling is
-    /// off, by respawns carrying the old name, and by board assignments.
-    pending_spawn_names: HashMap<String, Option<String>>,
+    /// survives the placeholder-to-real transition. Each is persisted to the
+    /// real session id once the scanner sees it
+    /// ([`Self::adopt_pending_spawn_names`]). Filled by a name typed while
+    /// booting, by respawns carrying the old name, and by board assignments.
+    pending_spawn_names: HashMap<String, String>,
     /// The card a Done was just refused on because its newest note still
     /// asks the user something. A second Done on that card goes through: a
     /// card may be abandoned on purpose, just not closed by accident with a

@@ -95,14 +95,14 @@ pub(crate) fn render_builds_body(frame: &mut Frame, area: Rect, app: &mut App) {
     let now_ms = crate::ui::now_ms();
     let split = Split::of(area, app.view == View::BuildLog);
     app.render.split.page = split.page;
-    render_list(frame, split.sidebar, app, now, now_ms);
+    render_list(frame, split.sidebar, app, now_ms);
     if !split.page.is_empty() {
         render_page(frame, split, app, now);
     }
     split.dim_unfocused(frame);
 }
 
-fn render_list(frame: &mut Frame, area: Rect, app: &mut App, now: i64, now_ms: u64) {
+fn render_list(frame: &mut Frame, area: Rect, app: &mut App, now_ms: u64) {
     app.render.split.sidebar = area;
     keep_row_in_view(
         &mut app.render.builds_scroll,
@@ -119,7 +119,7 @@ fn render_list(frame: &mut Frame, area: Rect, app: &mut App, now: i64, now_ms: u
         .take(area.height as usize);
     for (i, name) in shown {
         let y = area.y + (i - first) as u16;
-        let row = sidebar_row(app, name, now, now_ms);
+        let row = sidebar_row(app, name, now_ms);
         render_row(
             frame,
             Rect::new(area.x, y, area.width, 1),
@@ -131,34 +131,13 @@ fn render_list(frame: &mut Frame, area: Rect, app: &mut App, now: i64, now_ms: u
     app.render.split.rows = (first..end).map(|i| Some((0, i))).collect();
 }
 
-/// The state dot, the recipe in white as a session's name is, and at the
-/// far end how long its build has run, or how it went and how long ago.
-fn sidebar_row(app: &App, name: &str, now: i64, now_ms: u64) -> SidebarRow {
-    let shown = app.builds.shown(name);
+/// The state dot and the recipe, white as a session's name is. How its
+/// builds went is on its page.
+fn sidebar_row(app: &App, name: &str, now_ms: u64) -> SidebarRow {
     SidebarRow {
-        mark: build_dot(shown).span(now_ms),
+        mark: build_dot(app.builds.shown(name)).span(now_ms),
         name: name.to_string(),
         name_style: Style::default().fg(Color::White),
-        aside: shown.map_or(Span::raw(""), |b| last_build(b, now)),
-    }
-}
-
-/// `▸ 3m` while it runs, `queued`, else `✓ 12m`, `✗ 3d` or `⊘ 1h` — the
-/// same marks the Agents list gives a run.
-fn last_build(build: &Build, now: i64) -> Span<'static> {
-    let ago = |mark: &str| match build.finished_at {
-        Some(at) => format!("{mark} {}", age(now, at)),
-        None => mark.to_string(),
-    };
-    match build.status {
-        BuildStatus::Running => Span::styled(
-            format!("▸ {}", duration(build.elapsed(now).unwrap_or(0))),
-            Style::default().fg(Color::Green),
-        ),
-        BuildStatus::Queued => Span::styled("queued", Style::default().fg(DIM_TEXT)),
-        BuildStatus::Succeeded => Span::styled(ago("✓"), Style::default().fg(DIM_TEXT)),
-        BuildStatus::Failed => Span::styled(ago("✗"), Style::default().fg(Color::Red)),
-        BuildStatus::Cancelled => Span::styled(ago("⊘"), Style::default().fg(DIM_TEXT)),
     }
 }
 

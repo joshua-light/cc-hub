@@ -135,8 +135,11 @@ impl App {
                 }
                 None => {
                     // Still booting: hold the name until the scanner issues a
-                    // real id (the placeholder card shows it in the meantime).
-                    self.pending_spawn_names.insert(tmux, Some(title.clone()));
+                    // real id. The placeholder shows it from this frame on —
+                    // left to the next scan, the card would fall back to its
+                    // "starting…" label for a tick once the draft closes.
+                    self.pending_spawn_names.insert(tmux, title.clone());
+                    self.rebuild_groups();
                     RenameSubmit::Deferred { title }
                 }
             }
@@ -190,7 +193,6 @@ mod tests {
     fn boot_time_name_defers_until_the_session_loads() {
         let mut app = App::new();
         let tmux = "cchub-w-boot";
-        app.pending_spawn_names.insert(tmux.into(), None);
         app.rename_target = Some(spawning_session_id(tmux));
         app.rename_buffer = "auth refactor".into();
         app.view = View::RenameSession;
@@ -204,7 +206,7 @@ mod tests {
         // Held against the tmux, awaiting the real session id.
         assert_eq!(
             app.pending_spawn_names.get(tmux),
-            Some(&Some("auth refactor".to_string()))
+            Some(&"auth refactor".to_string())
         );
         assert_eq!(app.view, View::Grid);
     }
@@ -218,7 +220,6 @@ mod tests {
         let mut real = fake_session("real-id-xyz", SessionState::Idle);
         real.tmux_session = Some(tmux.into());
         app.sessions.last_sessions = vec![real];
-        app.pending_spawn_names.insert(tmux.into(), None);
         app.rename_target = Some(spawning_session_id(tmux));
         app.rename_buffer = "auth refactor".into();
         app.view = View::RenameSession;
@@ -248,7 +249,6 @@ mod tests {
         process_only.agent_kind = crate::agent::AgentKind::Codex;
         process_only.tmux_session = Some(tmux.into());
         app.sessions.last_sessions = vec![process_only.clone()];
-        app.pending_spawn_names.insert(tmux.into(), None);
         app.rename_target = Some(spawning_session_id(tmux));
         app.rename_buffer = "stable name".into();
         app.view = View::RenameSession;
@@ -262,7 +262,7 @@ mod tests {
         assert!(app.update_sessions(vec![process_only]));
         assert_eq!(
             app.pending_spawn_names.get(tmux),
-            Some(&Some("stable name".to_string()))
+            Some(&"stable name".to_string())
         );
         assert_eq!(
             app.sessions.last_sessions[0].title.as_deref(),
@@ -270,19 +270,35 @@ mod tests {
         );
     }
 
-    // Cancelling the boot-time prompt (empty title) keeps the `None` marker so
-    // the load-time prompt stays suppressed — the user said no once already.
+    // Cancelling the boot-time prompt (empty title) stashes nothing: the
+    // session lands unnamed.
     #[test]
-    fn empty_boot_time_name_cancels_but_keeps_suppression() {
+    fn empty_boot_time_name_cancels_and_stashes_nothing() {
         let mut app = App::new();
         let tmux = "cchub-w-cancel";
-        app.pending_spawn_names.insert(tmux.into(), None);
         app.rename_target = Some(spawning_session_id(tmux));
         app.rename_buffer = "   ".into();
         app.view = View::RenameSession;
 
         assert_eq!(app.submit_session_rename(), RenameSubmit::Cancelled);
-        assert_eq!(app.pending_spawn_names.get(tmux), Some(&None));
+        assert!(app.pending_spawn_names.is_empty());
+    }
+
+    // A name submitted while the session still boots is on the placeholder
+    // the moment the draft closes — never the "starting…" label in between.
+    #[test]
+    fn a_boot_time_name_replaces_the_starting_label_at_once() {
+        let mut app = App::new();
+        let tmux = "cchub-w-named";
+        app.watch_spawn(tmux.into(), "claude".into(), "/tmp".into());
+        assert!(app.enter_rename_session());
+        app.rename_buffer = "Polish".into();
+
+        app.submit_session_rename();
+        assert_eq!(
+            app.selected_session_info().and_then(|s| s.title.as_deref()),
+            Some("Polish")
+        );
     }
 
     // Renaming a real (non-placeholder) session is unchanged: persist by its
@@ -367,7 +383,6 @@ mod tests {
             let mut app = App::new();
             let tmux = "cchub-w-race";
             app.watch_spawn(tmux.into(), "claude".into(), "/tmp".into());
-            app.pending_spawn_names.insert(tmux.into(), None);
             app.rename_target = Some(spawning_session_id(tmux));
             app.rename_buffer = "Performance".into();
             app.submit_session_rename();

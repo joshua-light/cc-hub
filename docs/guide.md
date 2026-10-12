@@ -112,8 +112,9 @@ end of its interval, and still decides what counts as an event. The board
 wakes `board` on every status change; a script wakes anything with
 `cc-hub wake <name>`.
 
-Agents report with `cc-hub agent note`. The Agents tab lists the agents and
-how each last run went; the selected agent's page shows:
+Agents report with `cc-hub agent note`. The Agents tab lists the agents, the
+ones that run first and the paused or disabled ones after them, each by its
+dot and name; the selected agent's page shows:
 
 - **Runs**: each remembered run, with its transcript.
 - **Artifacts**: the agent's notes; `f` opens a note's `--ref`.

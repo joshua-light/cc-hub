@@ -1,7 +1,7 @@
 //! Spawn watchdogs, the placeholder card that stands in for a session until
 //! the scanner first sees it, and naming a session while it boots.
 
-use crate::app::{App, Tab, View};
+use crate::app::App;
 use crate::config;
 use crate::models::{SessionInfo, SessionState};
 use std::time::{Duration, Instant};
@@ -93,32 +93,16 @@ pub(super) fn spawning_placeholder(watch: &SpawnWatch) -> SessionInfo {
     info
 }
 
-/// Whether a freshly-appeared, just-selected session should trigger the
-/// manual rename prompt that stands in for the Haiku titler when auto-titling
-/// is off — so no session is ever left nameless. Pure (no `self`, no config
-/// singleton) so the branch table is unit-testable without a live scan.
-fn should_autoprompt_rename(
-    auto_title_enabled: bool,
-    on_sessions_grid: bool,
-    session: &SessionInfo,
-) -> bool {
-    // Only stand in for the titler when the titler that would otherwise name
-    // this session is switched off.
-    !auto_title_enabled
-        // Only on the Sessions grid with no overlay already open: a background
-        // scan tick must never yank the user out of another tab or input.
-        && on_sessions_grid
-        // Only a real, still-nameless session: placeholders carry a "starting…"
-        // title, and orphan/Inactive cards aren't worth a naming prompt.
-        && session.title.is_none()
-        && session.state != SessionState::Inactive
-}
-
 impl App {
     /// Register a watchdog for a just-spawned detached agent session and
     /// surface its placeholder card immediately, cursor on it — the spawned
     /// agent takes seconds to write a session file the scanner can see, and
     /// until this rebuild the keypress had no visible effect.
+    ///
+    /// This is the one way a new card takes the cursor: the real session
+    /// inherits it from the placeholder through their shared tmux name (see
+    /// `adopt_groups`). Sessions started anywhere else — an agent, the
+    /// CLI, a deep link — land on the grid without moving it.
     ///
     /// This is every fresh session the user starts by hand, so it is also
     /// where a pending [`crate::handoff::Handoff`] is taken: its draft is
@@ -150,17 +134,15 @@ impl App {
         self.rebuild_groups();
         self.select_session_by_id(&placeholder_id);
         if let Some(title) = title {
-            self.pending_spawn_names.insert(tmux_name, Some(title));
+            self.pending_spawn_names.insert(tmux_name, title);
             return;
         }
         // With Haiku auto-titling off, prompt for the name now — during the
         // boot — so the dead seconds while the agent writes its session file
         // are spent naming it instead of waiting to. The rename targets the
         // placeholder's row; the typed name is carried to the real session id in
-        // `adopt_pending_spawn_names` once the scanner sees it. The map entry
-        // also suppresses the redundant load-time prompt for this spawn.
+        // `adopt_pending_spawn_names` once the scanner sees it.
         if !config::get().title.enabled {
-            self.pending_spawn_names.insert(tmux_name, None);
             self.enter_rename_session();
         }
     }
@@ -207,9 +189,7 @@ impl App {
     /// Bridge names typed while a session was still booting onto the real
     /// session the scanner has now produced. For each freshly-seen session
     /// whose spawning tmux carries a stashed name, persist it to the real id
-    /// and stamp it on this snapshot so the card shows it immediately. The
-    /// `None` entries (prompted, not yet named) are left for the cleanup at
-    /// the end of [`Self::update_sessions`].
+    /// and stamp it on this snapshot so the card shows it immediately.
     pub(super) fn adopt_pending_spawn_names(&mut self, sessions: &mut [SessionInfo]) {
         if self.pending_spawn_names.is_empty() {
             return;
@@ -218,7 +198,7 @@ impl App {
             let Some(tmux) = s.tmux_session.as_deref() else {
                 continue;
             };
-            let Some(Some(title)) = self.pending_spawn_names.get(tmux) else {
+            let Some(title) = self.pending_spawn_names.get(tmux) else {
                 continue;
             };
             let title = title.clone();
@@ -241,39 +221,13 @@ impl App {
             s.titling = false;
         }
     }
-
-    /// Stand-in for the Haiku titler when auto-titling is off: the moment a
-    /// new session lands on the grid (the same detection that drives the focus
-    /// jump in [`Self::update_sessions`]), open its inline rename so it never
-    /// sits nameless. No-op when auto-titling is on, when an overlay or another
-    /// tab has focus, or when the session already carries a title — see
-    /// [`should_autoprompt_rename`].
-    pub(super) fn maybe_autoprompt_rename_for_new_session(&mut self) {
-        let on_grid = self.current_tab == Tab::Sessions && self.view == View::Grid;
-        let enabled = config::get().title.enabled;
-        let trigger = match self.selected_session_info() {
-            Some(s) => {
-                // A spawn already prompted at boot must not prompt again now
-                // that it has loaded — its entry (named or not) is still in
-                // the map until the end-of-tick cleanup.
-                let already_prompted = match s.tmux_session.as_deref() {
-                    Some(tmux) => self.pending_spawn_names.contains_key(tmux),
-                    None => false,
-                };
-                should_autoprompt_rename(enabled, on_grid, s) && !already_prompted
-            }
-            None => false,
-        };
-        if trigger {
-            self.enter_rename_session();
-        }
-    }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::app::test_support::fake_session;
+    use crate::app::View;
 
     // A watch clears as soon as any live session maps to its tmux name —
     // even on the same tick its deadline passes (appearance wins over expiry).
@@ -300,37 +254,6 @@ mod tests {
         assert!(app.check_spawn_watches(&[], Instant::now() + 2 * SPAWN_WATCH_TIMEOUT));
         assert_eq!(app.view, View::Grid);
         assert!(app.rename_target.is_none());
-    }
-
-    // The auto-titler stand-in: with titling off, a fresh untitled session on
-    // the grid is prompted for a name; every other combination is a no-op.
-    #[test]
-    fn autoprompt_rename_fires_only_when_titling_off_and_grid_focused() {
-        let live = fake_session("cchub-new", SessionState::Idle);
-
-        // Titling off + on the grid + untitled + live → prompt.
-        assert!(should_autoprompt_rename(false, true, &live));
-
-        // Titling on → the Haiku titler will name it, so never intrude.
-        assert!(!should_autoprompt_rename(true, true, &live));
-
-        // Off the Sessions grid (another tab or an overlay open) → don't yank
-        // the user out of what they're doing.
-        assert!(!should_autoprompt_rename(false, false, &live));
-    }
-
-    #[test]
-    fn autoprompt_rename_skips_titled_and_inactive_sessions() {
-        // Already named (e.g. a resumed session, or the "starting…" placeholder)
-        // → nothing to prompt for.
-        let mut titled = fake_session("cchub-titled", SessionState::Idle);
-        titled.title = Some("existing name".into());
-        assert!(!should_autoprompt_rename(false, true, &titled));
-
-        // Orphan/Inactive cards are synthesized from dead processes — not worth
-        // a naming prompt.
-        let inactive = fake_session("cchub-orphan", SessionState::Inactive);
-        assert!(!should_autoprompt_rename(false, true, &inactive));
     }
 
     #[test]

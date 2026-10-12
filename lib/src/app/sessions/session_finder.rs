@@ -4,12 +4,16 @@
 //! [`crate::sessions::index`] archive knows — by saved title, session id,
 //! project, or first message — and Enter reopens the pick (attaching when it
 //! is still live, resuming when it is not).
+//!
+//! Unfiltered, the archive reads as a timeline split into [`Period`]s; a
+//! filter ranks the matches instead, and the periods step aside.
 
 use crate::agent::AgentKind;
 use crate::app::picker_list::{rank_rows, step, PickerRow, Searchable};
 use crate::app::{App, Effect, View};
-use crate::models::{first_line_truncated, short_sid, SessionState};
+use crate::models::{first_line_truncated, SessionState, TaskBadge};
 use crate::sessions::index::IndexedSession;
+use chrono::{Datelike, NaiveDate};
 use std::path::PathBuf;
 
 /// One archived session as a finder row: the searchable `label`/`detail`
@@ -25,7 +29,111 @@ pub struct SessionFinderChoice {
     /// Saved title when the session has one, else its first user message —
     /// the line the user most likely remembers the session by.
     pub label: String,
+    /// Whether `label` is a saved title rather than a first message.
+    pub titled: bool,
+    pub project: String,
+    /// The task the session is linked to, if any.
+    pub task: Option<TaskBadge>,
+    /// `project`, then the task title — the filter's second field. The
+    /// renderer splits its highlights back into the two columns at
+    /// [`Self::task_offset`].
     pub detail: String,
+}
+
+impl SessionFinderChoice {
+    pub(crate) fn of(session: IndexedSession, task: Option<TaskBadge>) -> Self {
+        let title = session.title.clone().filter(|t| !t.is_empty());
+        let titled = title.is_some();
+        let label = title
+            .or_else(|| {
+                session
+                    .first_message
+                    .as_deref()
+                    .map(|m| first_line_truncated(m, 96))
+            })
+            .unwrap_or_else(|| "(no messages)".into());
+        let detail = match &task {
+            Some(task) => format!(
+                "{} {}",
+                session.project_name,
+                task.title.lines().next().unwrap_or_default()
+            ),
+            None => session.project_name.clone(),
+        };
+        Self {
+            agent_id: session.agent_id,
+            agent_kind: session.agent_kind,
+            session_id: session.session_id,
+            cwd: session.cwd,
+            jsonl_path: session.jsonl_path,
+            mtime_ms: session.mtime_ms,
+            label,
+            titled,
+            project: session.project_name,
+            task,
+            detail,
+        }
+    }
+
+    /// Char index in `detail` where the task title starts.
+    pub fn task_offset(&self) -> usize {
+        self.project.chars().count() + 1
+    }
+}
+
+/// The stretch of the past a session was last touched in — the headings the
+/// unfiltered finder groups its timeline under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Period {
+    Today,
+    Yesterday,
+    /// Two to six days ago.
+    PastWeek,
+    Month {
+        year: i32,
+        month: u32,
+    },
+}
+
+impl Period {
+    pub fn of(day: NaiveDate, today: NaiveDate) -> Self {
+        match (today - day).num_days() {
+            ..=0 => Period::Today,
+            1 => Period::Yesterday,
+            2..=6 => Period::PastWeek,
+            _ => Period::Month {
+                year: day.year(),
+                month: day.month(),
+            },
+        }
+    }
+
+    /// The heading, with the year only when it isn't `today`'s.
+    pub fn label(self, today: NaiveDate) -> String {
+        match self {
+            Period::Today => "Today".into(),
+            Period::Yesterday => "Yesterday".into(),
+            Period::PastWeek => "Past week".into(),
+            Period::Month { year, month } => {
+                let name = NaiveDate::from_ymd_opt(year, month, 1)
+                    .map(|d| d.format("%B").to_string())
+                    .unwrap_or_default();
+                if year == today.year() {
+                    name
+                } else {
+                    format!("{name} {year}")
+                }
+            }
+        }
+    }
+}
+
+/// One line of the finder's list: a period heading with its row count, or
+/// the row at that index of [`SessionFinderState::rows`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FinderLine {
+    Period(Period, usize),
+    Row(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -41,7 +149,7 @@ pub struct SessionFinderState {
 
 impl SessionFinderState {
     /// The finder opens before the archive scan finishes, so typing starts
-    /// immediately; [`Self::set_index`] fills the list in when it lands.
+    /// immediately; [`Self::set_choices`] fills the list in when it lands.
     pub(crate) fn loading() -> Self {
         Self {
             loading: true,
@@ -54,10 +162,34 @@ impl SessionFinderState {
 
     /// Adopt the archive scan's result (newest first), re-running whatever
     /// filter the user typed while it was loading.
-    pub(crate) fn set_index(&mut self, index: Vec<IndexedSession>) {
-        self.choices = index.into_iter().map(choice_of).collect();
+    pub(crate) fn set_choices(&mut self, choices: Vec<SessionFinderChoice>) {
+        self.choices = choices;
         self.loading = false;
         self.refilter();
+    }
+
+    /// The list as drawn: unfiltered, the rows under a heading per
+    /// [`Period`], `day_of` placing each row's session on the calendar;
+    /// filtered, the ranked rows alone — headings would only cut a ranking
+    /// into pieces.
+    pub fn lines(&self, today: NaiveDate, day_of: impl Fn(u64) -> NaiveDate) -> Vec<FinderLine> {
+        if !self.filter.is_empty() {
+            return (0..self.rows.len()).map(FinderLine::Row).collect();
+        }
+        let mut lines = Vec::with_capacity(self.rows.len() + 8);
+        let mut heading = 0;
+        for (i, row) in self.rows.iter().enumerate() {
+            let period = Period::of(day_of(self.choices[row.choice].mtime_ms), today);
+            match lines.get_mut(heading) {
+                Some(FinderLine::Period(current, count)) if *current == period => *count += 1,
+                _ => {
+                    heading = lines.len();
+                    lines.push(FinderLine::Period(period, 1));
+                }
+            }
+            lines.push(FinderLine::Row(i));
+        }
+        lines
     }
 
     pub fn push_filter(&mut self, c: char) {
@@ -87,50 +219,12 @@ impl SessionFinderState {
             self.choices.iter().map(|session| Searchable {
                 label: &session.label,
                 detail: &session.detail,
-                // The full id is searchable though only its short form
-                // renders, so a pasted id finds its session.
+                // The id is searchable though it never renders, so a pasted
+                // id finds its session.
                 id: Some(&session.session_id),
             }),
         );
         self.selected = 0;
-    }
-}
-
-fn choice_of(session: IndexedSession) -> SessionFinderChoice {
-    let label = session
-        .title
-        .clone()
-        .filter(|t| !t.is_empty())
-        .or_else(|| {
-            session
-                .first_message
-                .as_deref()
-                .map(|m| first_line_truncated(m, 56))
-        })
-        .unwrap_or_else(|| "(no messages)".into());
-    let detail = if session.agent_id == "claude" {
-        format!(
-            "{} · {}",
-            session.project_name,
-            short_sid(&session.session_id)
-        )
-    } else {
-        format!(
-            "{} · {} · {}",
-            session.project_name,
-            short_sid(&session.session_id),
-            session.agent_id
-        )
-    };
-    SessionFinderChoice {
-        agent_id: session.agent_id,
-        agent_kind: session.agent_kind,
-        session_id: session.session_id,
-        cwd: session.cwd,
-        jsonl_path: session.jsonl_path,
-        mtime_ms: session.mtime_ms,
-        label,
-        detail,
     }
 }
 
@@ -158,9 +252,28 @@ impl App {
 
     /// Adopt a finished archive scan. Ignored when the finder was closed
     /// while the scan ran — the list is rebuilt fresh on every open.
-    pub fn update_session_index(&mut self, index: Vec<crate::sessions::index::IndexedSession>) {
+    ///
+    /// Agents' tick transcripts stay out, as they do on the grid: headless
+    /// runs nobody types into, and on a busy day the bulk of the archive.
+    pub fn update_session_index(&mut self, index: Vec<IndexedSession>) {
+        if self.session_finder.is_none() {
+            return;
+        }
+        let agents = crate::harness::AgentSessions::of(&self.harness.agents);
+        let choices = index
+            .into_iter()
+            .filter(|s| {
+                agents
+                    .owner(&s.session_id, std::path::Path::new(&s.cwd))
+                    .is_none()
+            })
+            .map(|s| {
+                let task = self.task_badge(&s.session_id);
+                SessionFinderChoice::of(s, task)
+            })
+            .collect();
         if let Some(finder) = self.session_finder.as_mut() {
-            finder.set_index(index);
+            finder.set_choices(choices);
         }
     }
 
@@ -249,10 +362,21 @@ mod tests {
         }
     }
 
+    fn choices(index: Vec<IndexedSession>) -> Vec<SessionFinderChoice> {
+        index
+            .into_iter()
+            .map(|s| SessionFinderChoice::of(s, None))
+            .collect()
+    }
+
     fn finder(index: Vec<IndexedSession>) -> SessionFinderState {
         let mut state = SessionFinderState::loading();
-        state.set_index(index);
+        state.set_choices(choices(index));
         state
+    }
+
+    fn day(d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 10, d).unwrap()
     }
 
     #[test]
@@ -306,12 +430,88 @@ mod tests {
             state.push_filter(c);
         }
         assert!(state.rows.is_empty());
-        state.set_index(vec![
+        state.set_choices(choices(vec![
             indexed("a", Some("kanban polish"), None, 2),
             indexed("b", Some("unrelated"), None, 1),
-        ]);
+        ]));
         assert_eq!(state.rows.len(), 1);
         assert_eq!(state.selected_choice().unwrap().session_id, "a");
+    }
+
+    // The task a session is linked to is searchable, and its highlight lands
+    // past the project in the shared detail field.
+    #[test]
+    fn a_task_title_finds_its_sessions() {
+        let task = TaskBadge {
+            task_id: "tk-1".into(),
+            title: "Parser rewrite".into(),
+            priority: None,
+            stale: false,
+        };
+        let mut state = SessionFinderState::loading();
+        state.set_choices(vec![
+            SessionFinderChoice::of(indexed("a", Some("Fix"), None, 2), Some(task)),
+            SessionFinderChoice::of(indexed("b", Some("Push"), None, 1), None),
+        ]);
+        for c in "write".chars() {
+            state.push_filter(c);
+        }
+        let hit = state.selected_choice().expect("task query matches");
+        assert_eq!(hit.session_id, "a");
+        assert!(state.rows[0]
+            .detail_indices
+            .iter()
+            .all(|&i| i >= hit.task_offset()));
+    }
+
+    #[test]
+    fn periods_name_the_recent_days_then_the_months() {
+        let today = day(12);
+        assert_eq!(Period::of(day(12), today), Period::Today);
+        assert_eq!(Period::of(day(11), today), Period::Yesterday);
+        assert_eq!(Period::of(day(6), today), Period::PastWeek);
+        assert_eq!(Period::of(day(5), today).label(today), "October");
+        let last_year = NaiveDate::from_ymd_opt(2025, 9, 30).unwrap();
+        assert_eq!(Period::of(last_year, today).label(today), "September 2025");
+    }
+
+    // Unfiltered, each period opens with a heading counting its rows; a
+    // filter drops the headings and leaves the ranking alone.
+    #[test]
+    fn the_unfiltered_list_reads_as_a_timeline() {
+        let mut state = finder(vec![
+            indexed("a", Some("Netcode"), None, 12),
+            indexed("b", Some("Network"), None, 12),
+            indexed("c", Some("Kanban"), None, 11),
+            indexed("d", Some("Nested"), None, 1),
+        ]);
+        // The test's mtimes are October days.
+        let day_of = |mtime: u64| day(mtime as u32);
+
+        assert_eq!(
+            state.lines(day(12), day_of),
+            vec![
+                FinderLine::Period(Period::Today, 2),
+                FinderLine::Row(0),
+                FinderLine::Row(1),
+                FinderLine::Period(Period::Yesterday, 1),
+                FinderLine::Row(2),
+                FinderLine::Period(
+                    Period::Month {
+                        year: 2026,
+                        month: 10
+                    },
+                    1
+                ),
+                FinderLine::Row(3),
+            ]
+        );
+
+        state.push_filter('n');
+        assert!(state
+            .lines(day(12), day_of)
+            .iter()
+            .all(|line| matches!(line, FinderLine::Row(_))));
     }
 
     #[test]

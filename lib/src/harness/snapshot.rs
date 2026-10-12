@@ -67,6 +67,11 @@ impl AgentSnapshot {
         }
     }
 
+    /// Switched off or paused: you said "not now".
+    pub fn is_off(&self) -> bool {
+        matches!(self.status(), AgentStatus::Paused | AgentStatus::Disabled)
+    }
+
     pub fn description(&self) -> &str {
         self.spec
             .as_ref()

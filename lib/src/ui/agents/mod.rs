@@ -27,7 +27,7 @@ pub(crate) use list::render_agents_body;
 /// An agent's mark: a hollow ring while it is switched off, so off and on
 /// differ in shape, not just shade; else its [`dot`].
 fn mark(agent: &AgentSnapshot, now: u64) -> Span<'static> {
-    match off(agent) {
+    match agent.is_off() {
         true => Span::styled(OFF_RING, Style::default().fg(Dot::Resting.steady())),
         false => dot(agent).span(now),
     }
@@ -35,11 +35,6 @@ fn mark(agent: &AgentSnapshot, now: u64) -> Span<'static> {
 
 /// The mark of an agent that won't run until you turn it back on.
 const OFF_RING: &str = "○";
-
-/// Switched off or paused: you said "not now".
-fn off(agent: &AgentSnapshot) -> bool {
-    matches!(agent.status(), AgentStatus::Paused | AgentStatus::Disabled)
-}
 
 /// An agent's dot, in the palette sessions use: white while it runs; red
 /// when its spec won't load or its last run failed, halted or not; green

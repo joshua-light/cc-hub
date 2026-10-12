@@ -80,7 +80,7 @@ pub(crate) const CURSOR: char = '▎';
 pub(crate) fn popup_block<'a>(title: impl Into<ratatui::text::Line<'a>>) -> Block<'a> {
     Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Double)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::White))
         .title(title)
 }

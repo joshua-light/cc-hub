@@ -1,12 +1,10 @@
-//! The Agents tab body: the agents down the side, each its status and how
-//! its last run went, and the selected one's page beside them (see
-//! `page`).
+//! The Agents tab body: the agents down the side, each its mark and name,
+//! and the selected one's page beside them (see `page`).
 
+use super::mark;
 use super::page::render_page;
-use super::{mark, off};
 use crate::app::{App, View};
 use crate::harness::AgentSnapshot;
-use crate::ui::common::age;
 use crate::ui::palette::{DIM_TEXT, LABEL_GRAY};
 use crate::ui::split::{keep_row_in_view, render_row, SidebarRow, Split};
 use ratatui::layout::Rect;
@@ -46,14 +44,14 @@ fn render_agents_body_at(frame: &mut Frame, area: Rect, app: &mut App, now: i64)
 
     let split = Split::of(area, app.view == View::AgentDetail);
     app.render.split.page = split.page;
-    render_list(frame, split.sidebar, app, now);
+    render_list(frame, split.sidebar, app);
     if !split.page.is_empty() {
         render_page(frame, split, app, now);
     }
     split.dim_unfocused(frame);
 }
 
-fn render_list(frame: &mut Frame, area: Rect, app: &mut App, now: i64) {
+fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
     app.render.split.sidebar = area;
     let scroll = &mut app.render.agents_scroll;
     keep_row_in_view(scroll, app.harness.selected, area.height);
@@ -67,7 +65,7 @@ fn render_list(frame: &mut Frame, area: Rect, app: &mut App, now: i64) {
         .take(area.height as usize);
     for (i, agent) in shown {
         let y = area.y + (i - first) as u16;
-        let row = sidebar_row(agent, now);
+        let row = sidebar_row(agent);
         render_row(
             frame,
             Rect::new(area.x, y, area.width, 1),
@@ -79,10 +77,10 @@ fn render_list(frame: &mut Frame, area: Rect, app: &mut App, now: i64) {
     app.render.split.rows = (first..end).map(|i| Some((0, i))).collect();
 }
 
-/// The mark, the name in white as a session's is — gray while the agent is
-/// off — and the last run at the far end.
-fn sidebar_row(agent: &AgentSnapshot, now: i64) -> SidebarRow {
-    let name = match off(agent) {
+/// The mark and the name, white as a session's is — gray while the agent
+/// is off. How its runs went is on its page.
+fn sidebar_row(agent: &AgentSnapshot) -> SidebarRow {
+    let name = match agent.is_off() {
         true => LABEL_GRAY,
         false => Color::White,
     };
@@ -90,28 +88,6 @@ fn sidebar_row(agent: &AgentSnapshot, now: i64) -> SidebarRow {
         mark: mark(agent, crate::ui::now_ms()),
         name: agent.name.clone(),
         name_style: Style::default().fg(name),
-        aside: last_run(agent, now),
-    }
-}
-
-/// `▸ 40s` while a run is under way, else `✓ 12m` or `✗ 3d` for the last.
-fn last_run(agent: &AgentSnapshot, now: i64) -> Span<'static> {
-    if let Some(t) = &agent.state.ticking {
-        return Span::styled(
-            format!("▸ {}", age(now, t.since)),
-            Style::default().fg(Color::Green),
-        );
-    }
-    match agent.last_run() {
-        Some(rec) if rec.ok => Span::styled(
-            format!("✓ {}", age(now, rec.at)),
-            Style::default().fg(DIM_TEXT),
-        ),
-        Some(rec) => Span::styled(
-            format!("✗ {}", age(now, rec.at)),
-            Style::default().fg(Color::Red),
-        ),
-        None => Span::raw(""),
     }
 }
 
@@ -141,24 +117,32 @@ mod tests {
         (out, kept.expect("rendered"))
     }
 
+    // A row is the mark and the name, nothing after it; the agents that run
+    // come first, the paused ones after them.
     #[test]
-    fn the_list_names_each_agent_and_its_last_run() {
+    fn the_list_names_each_agent_running_ones_first() {
+        let paused = crate::harness::AgentState {
+            paused: true,
+            ..ticked(true)
+        };
         let (out, app) = render(
-            vec![snap("bb-prs", ticked(true)), snap("jira", ticked(false))],
+            vec![
+                snap("aa-paused", paused),
+                snap("bb-prs", ticked(true)),
+                snap("jira", ticked(false)),
+            ],
             View::Grid,
             120,
         );
         let rows: Vec<&str> = out.lines().collect();
         let sidebar = |y: usize| rows[y].chars().take(32).collect::<String>();
-        assert!(
-            sidebar(0).contains("● bb-prs") && sidebar(0).contains("✓ 5m"),
-            "{out}"
+        assert_eq!(sidebar(0).trim_end(), " ● bb-prs", "{out}");
+        assert_eq!(sidebar(1).trim_end(), " ● jira", "{out}");
+        assert!(sidebar(2).contains("aa-paused"), "{out}");
+        assert_eq!(
+            app.render.split.rows,
+            vec![Some((0, 0)), Some((0, 1)), Some((0, 2))]
         );
-        assert!(
-            sidebar(1).contains("● jira") && sidebar(1).contains("✗ 5m"),
-            "{out}"
-        );
-        assert_eq!(app.render.split.rows, vec![Some((0, 0)), Some((0, 1))]);
     }
 
     // The selected agent's page sits beside the list, whichever side has

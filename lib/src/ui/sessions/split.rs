@@ -9,12 +9,12 @@
 //! dock's border, for the one session on screen.
 
 use super::{
-    badge_color, context_pct, dot_color, hold_header_above, keep_in_view, render_hold_header,
+    badge_color, dot_color, hold_header_above, keep_in_view, render_hold_header,
     render_no_sessions, row_title, CardMarks,
 };
 use crate::app::{App, Dock, View};
 use crate::models::{first_line_truncated, ProjectGroup, SessionInfo, SessionState, TaskBadge};
-use crate::ui::common::{short_model, STATE_DOT};
+use crate::ui::common::STATE_DOT;
 use crate::ui::now_ms;
 use crate::ui::palette::{
     DIM_TEXT, HANDOFF_ROW_BG, SELECTED_HANDOFF_ROW_BG, SELECTED_ROW_BG, SEP_GRAY,
@@ -247,9 +247,7 @@ fn render_dock(frame: &mut Frame, split: Split, app: &mut App) {
             held: app.sessions.holds.contains(&s.session_id),
             ..CardMarks::default()
         };
-        block = block
-            .title(dock_title(s, marks, now))
-            .title(dock_facts(s).alignment(Alignment::Right));
+        block = block.title(dock_title(s, marks, now));
     }
     let live = app.sessions.dock.pane().is_some();
     let hint = match (focused, live) {
@@ -301,27 +299,6 @@ fn dock_title(session: &SessionInfo, marks: CardMarks, now: u64) -> Line<'static
                 .add_modifier(Modifier::BOLD),
         ),
     ])
-}
-
-/// ` branch · model · 42% `: what the sidebar rows leave out.
-fn dock_facts(session: &SessionInfo) -> Line<'static> {
-    let mut facts: Vec<String> = Vec::new();
-    if let Some(branch) = session.git_branch.as_deref().filter(|b| !b.is_empty()) {
-        facts.push(first_line_truncated(branch, 32));
-    }
-    if let Some(model) = session.model.as_deref().filter(|m| !m.is_empty()) {
-        facts.push(short_model(model).to_string());
-    }
-    if let Some((pct, _)) = context_pct(session) {
-        facts.push(format!("{pct:.0}%"));
-    }
-    if facts.is_empty() {
-        return Line::default();
-    }
-    Line::from(Span::styled(
-        format!(" {} ", facts.join(" · ")),
-        Style::default().fg(Color::DarkGray),
-    ))
 }
 
 /// Why the dock has no pane, and what Enter does about it.

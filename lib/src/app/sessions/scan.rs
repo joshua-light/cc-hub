@@ -1,7 +1,6 @@
 //! Applying scan snapshots to the grid, plus the grid's view toggles and
 //! acks.
 
-use super::spawn::is_codex_process_only;
 use super::SessionsLayout;
 use crate::app::{App, Tab};
 use crate::models::{SessionInfo, SessionState};
@@ -86,8 +85,9 @@ impl App {
     /// - same cards in the same slots → swap card contents in place, leaving
     ///   the cursor alone (a state flip updates the badge, it does not
     ///   reshuffle the grid);
-    /// - membership changed → full rebuild with restore-selection-by-id and
-    ///   the new-session focus jump.
+    /// - membership changed → full rebuild that restores the selection by
+    ///   id. A new session never takes the cursor here; only a hotkey spawn
+    ///   does, through its placeholder (see [`Self::watch_spawn`]).
     pub fn update_sessions(&mut self, mut sessions: Vec<SessionInfo>) -> bool {
         // Tick transcripts belong to the Agents tab. They are headless
         // `claude -p` runs, so a card here could never be attached — `f`
@@ -167,7 +167,7 @@ impl App {
             });
         if same_structure {
             // Same cards in the same slots: refresh their contents and leave
-            // the cursor untouched. No restore, no focus jump — a scan tick
+            // the cursor untouched. No restore — a scan tick
             // that changes nothing the user can act on must not move the
             // selection out from under an in-flight keypress.
             let changed = new_groups != self.sessions.groups;
@@ -178,47 +178,6 @@ impl App {
 
         self.sessions.last_sessions = sessions;
         self.adopt_groups(new_groups);
-
-        let current_ids = self.sessions.visible_ids();
-        // First tick seeds known ids without hijacking the cursor; later ticks
-        // jump selection to a freshly-appeared session so it gets focus.
-        let new_selection = self.sessions.known_session_ids.as_ref().and_then(|known| {
-            self.sessions
-                .position_of(|s| !known.contains(&s.session_id))
-        });
-        self.sessions.known_session_ids = Some(current_ids);
-        if let Some((gi, si)) = new_selection {
-            log::debug!(
-                "scan: new session appeared, focus jump ({}, {}) -> ({}, {})",
-                self.sessions.sel_group,
-                self.sessions.sel_in_group,
-                gi,
-                si
-            );
-            self.sessions.sel_group = gi;
-            self.sessions.sel_in_group = si;
-            self.maybe_autoprompt_rename_for_new_session();
-        }
-
-        // A prompted spawn that has now materialised no longer needs its
-        // suppression entry: the load-time autoprompt above has already been
-        // held back for it this tick, and any name it carried was adopted
-        // before grouping. Entries for spawns still booting are kept.
-        let live_tmux: HashSet<String> = self
-            .sessions
-            .last_sessions
-            .iter()
-            .filter_map(|s| s.tmux_session.clone())
-            .collect();
-        self.pending_spawn_names.retain(|tmux, _| {
-            if !live_tmux.contains(tmux) {
-                return true;
-            }
-            self.sessions
-                .last_sessions
-                .iter()
-                .any(|s| s.tmux_session.as_deref() == Some(tmux) && is_codex_process_only(s))
-        });
         true
     }
 }
@@ -323,32 +282,39 @@ mod tests {
         assert_eq!(app.sessions.sel_in_group, 0);
     }
 
+    // A session the hub didn't spawn (an agent's, the CLI's) lands on the
+    // grid without moving the cursor off what the user is looking at.
     #[test]
-    fn rebuild_revealed_session_does_not_teleport_cursor() {
+    fn a_session_started_elsewhere_does_not_take_the_cursor() {
         let mut app = App::new();
-        let mut a = fake_session("A", SessionState::WaitingForInput);
-        a.tmux_session = None;
-        let mut b = fake_session("B", SessionState::Inactive);
-        b.tmux_session = None;
+        assert!(app.update_sessions(vec![fake_session("a", SessionState::Idle)]));
+        assert_eq!(app.selected_session_id().as_deref(), Some("a"));
 
-        // First scan: B is inactive and hidden, so only A is visible/known.
-        assert!(app.update_sessions(vec![a.clone(), b.clone()]));
-        assert_eq!(app.selected_session_id().as_deref(), Some("A"));
+        assert!(app.update_sessions(vec![
+            fake_session("polish", SessionState::Processing),
+            fake_session("a", SessionState::Idle),
+        ]));
+        assert_eq!(app.selected_session_id().as_deref(), Some("a"));
+    }
 
-        // Toggling show_inactive reveals B via a rebuild (no scan). B must get
-        // registered as known so it isn't mistaken for a fresh arrival later.
-        app.toggle_show_inactive();
-
-        // Next scan adds a genuinely new session C. The focus jump must land
-        // on C, not teleport onto B — which the user has already been seeing.
-        let mut c = fake_session("C", SessionState::WaitingForInput);
-        c.tmux_session = None;
-        assert!(app.update_sessions(vec![a, b, c]));
+    // A hotkey spawn keeps the cursor it took through its placeholder: the
+    // real card replaces it under the same tmux name, and the cursor follows.
+    #[test]
+    fn a_hotkey_spawn_keeps_the_cursor_when_its_session_lands() {
+        let mut app = App::new();
+        assert!(app.update_sessions(vec![fake_session("a", SessionState::Idle)]));
+        app.watch_spawn("cchub-w-new".into(), "claude".into(), "/tmp".into());
         assert_eq!(
             app.selected_session_id().as_deref(),
-            Some("C"),
-            "focus jump should target the new session, not the revealed one"
+            Some("spawning:cchub-w-new")
         );
+
+        assert!(app.update_sessions(vec![
+            fake_session("polish", SessionState::Processing),
+            fake_session("cchub-w-new", SessionState::Idle),
+            fake_session("a", SessionState::Idle),
+        ]));
+        assert_eq!(app.selected_session_id().as_deref(), Some("cchub-w-new"));
     }
 
     /// Three sessions in one group, in scanner order. `fake_session` keys

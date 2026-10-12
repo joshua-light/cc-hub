@@ -89,7 +89,7 @@ impl App {
                 // Once the user has named the spawn in the boot-time prompt,
                 // show that name in place of the "starting…" label so the card
                 // doesn't visibly revert until the real session lands.
-                if let Some(Some(name)) = self.pending_spawn_names.get(&w.tmux_name) {
+                if let Some(name) = self.pending_spawn_names.get(&w.tmux_name) {
                     card.title = Some(name.clone());
                 }
                 card
@@ -213,15 +213,27 @@ impl App {
     }
 
     /// Install a freshly-built group list and re-anchor the selection on the
-    /// session id that was selected before, clamping when it's gone.
+    /// session that was selected before, clamping when it's gone.
+    ///
+    /// The session is found by id, else by its tmux name: a card whose id
+    /// changes under the same tmux — a spawn placeholder becoming the real
+    /// session, a Codex process-only card getting its UUID — keeps the cursor.
     pub(super) fn adopt_groups(&mut self, groups: Vec<ProjectGroup>) {
-        let prev_id = self.selected_session_id();
+        let prev = self
+            .selected_session_info()
+            .map(|s| (s.session_id.clone(), s.tmux_session.clone()));
         let sel_before = (self.sessions.sel_group, self.sessions.sel_in_group);
         self.sessions.groups = groups;
 
-        // Re-anchor the selection on the previously-selected session id;
-        // clamp into range when it's gone.
-        let restored = prev_id.and_then(|id| self.sessions.position_of(|s| s.session_id == id));
+        let restored = prev.and_then(|(id, tmux)| {
+            self.sessions
+                .position_of(|s| s.session_id == id)
+                .or_else(|| {
+                    let tmux = tmux?;
+                    self.sessions
+                        .position_of(|s| s.tmux_session.as_deref() == Some(tmux.as_str()))
+                })
+        });
         match restored {
             Some((gi, si)) => {
                 self.sessions.sel_group = gi;
@@ -250,22 +262,6 @@ impl App {
     pub(super) fn rebuild_groups(&mut self) {
         let groups = self.build_groups(&self.sessions.last_sessions);
         self.adopt_groups(groups);
-        // A rebuild (a filter toggle) can reveal already-seen sessions
-        // without a scan. Register them as known now so the next scan doesn't
-        // mistake one for a fresh arrival and jump the cursor onto it.
-        self.sync_known_session_ids();
-    }
-
-    /// Refresh `known_session_ids` to the currently-visible session ids, but
-    /// only once the first scan has seeded it. Rebuilds that happen outside a
-    /// scan call this so a later scan's focus-jump fires only for genuinely
-    /// new sessions — never for one a rebuild merely made visible. Skipping
-    /// the `None` case preserves `update_sessions`' skip-jump-on-first-load.
-    fn sync_known_session_ids(&mut self) {
-        if self.sessions.known_session_ids.is_none() {
-            return;
-        }
-        self.sessions.known_session_ids = Some(self.sessions.visible_ids());
     }
 }
 
