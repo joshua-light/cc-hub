@@ -2,12 +2,14 @@
 //! stays generic.
 //!
 //! - [`mux`]: the tmux CLI, or psmux on Windows.
+//! - [`notification`]: posting a desktop notification.
 //! - [`paths`]: cache, config and agent data-dir paths.
 //! - [`process`]: parent pid, name, liveness and agent detection per OS.
 //! - [`terminal`]: launching a command in a terminal emulator.
 //! - [`window`]: focusing and closing windows through the window manager.
 
 pub mod mux;
+pub mod notification;
 pub mod paths;
 pub mod process;
 pub mod terminal;

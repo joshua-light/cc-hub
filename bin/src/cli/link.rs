@@ -14,17 +14,31 @@
 //! runs on whichever subscription has room, and the card moves to Running
 //! once its worker is bound. It is also handy by hand:
 //! `cc-hub open 'cc-hub://review?depth=light&pr=…' --dry-run` shows where a
-//! link would land without spawning anything.
+//! link would land without spawning anything. The URL-scheme handler runs it
+//! detached with `--notify`, so a link it refuses says why on the desktop
+//! instead of only in a log nobody reads.
 
+use super::flags::Flags;
 use super::{parse_flags, print_json, report_prompt_status, CliError};
 use cc_hub_lib::link::Link;
 use cc_hub_lib::ops;
+use cc_hub_lib::platform::notification;
 
 pub(crate) fn open(args: &[String]) -> Result<(), CliError> {
     let (url, rest) = args
         .split_first()
         .ok_or_else(|| CliError::Usage("open <url>: missing url".into()))?;
     let f = parse_flags(rest)?;
+    let opened = open_link(url, &f);
+    if let (true, Err(e)) = (f.notify, &opened) {
+        if let Err(why) = notification::post("cc-hub couldn't open the link", e.message()) {
+            log::warn!("open: notifying the failure failed: {}", why);
+        }
+    }
+    opened
+}
+
+fn open_link(url: &str, f: &Flags) -> Result<(), CliError> {
     let link: Link = url
         .parse()
         .map_err(|e| CliError::Usage(format!("open {}: {}", url, e)))?;

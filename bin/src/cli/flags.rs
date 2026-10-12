@@ -7,6 +7,8 @@ pub(super) struct Flags {
     pub(super) kind: Option<String>,
     pub(super) wait_secs: Option<u64>,
     pub(super) dry_run: bool,
+    /// `open`: post a failure as a desktop notification too.
+    pub(super) notify: bool,
     /// `board add` flags: the card's text, its tags (one string, split like
     /// the TUI's quick-capture field) and its priority (`p1`..`p4`).
     pub(super) text: Option<String>,
@@ -40,6 +42,10 @@ pub(super) fn parse_flags(args: &[String]) -> Result<Flags, CliError> {
             }
             "--dry-run" => {
                 f.dry_run = true;
+                i += 1;
+            }
+            "--notify" => {
+                f.notify = true;
                 i += 1;
             }
             "--title" => {
@@ -91,7 +97,7 @@ fn next_value(args: &[String], i: &mut usize, name: &str) -> Result<String, CliE
 
 /// Boolean flags that take no value — the no-argument arms of [`parse_flags`].
 /// Every other recognized `--flag` consumes the following token as its value.
-const BOOL_FLAGS: &[&str] = &["--dry-run", "--json"];
+const BOOL_FLAGS: &[&str] = &["--dry-run", "--notify", "--json"];
 
 /// Flag-aware scan for a help request among a verb's args.
 ///

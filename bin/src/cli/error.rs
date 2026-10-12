@@ -81,6 +81,17 @@ impl CliError {
         }
     }
 
+    /// The human message, as `handle` will report it.
+    pub(super) fn message(&self) -> &str {
+        match self {
+            CliError::Usage(msg)
+            | CliError::NotFound(msg)
+            | CliError::Other(msg)
+            | CliError::Reported(msg)
+            | CliError::Conflict { msg, .. } => msg,
+        }
+    }
+
     /// Decompose into the human message and an optional remediation recipe.
     fn into_message_and_recipe(self) -> (String, Option<String>) {
         match self {

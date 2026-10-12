@@ -107,8 +107,9 @@ Links:
       Spawn a session in the local checkout of the pull request's repository,
       name it "Review: <title>" (or "Review: <repo>#<n>"), and open it with
       "Let's do <depth> review of this PR: <url>". The checkout is found by
-      repo name among bookmarks and the cwds of known sessions;
-      without one the review runs from home, off the pull request alone.
+      repo name among bookmarks, the cwds of known sessions, and then the
+      folders directly inside a bookmark; without one the review runs from
+      home, off the pull request alone.
       An optional &post=<1-100> lets the review post findings it is at least
       that confident about without asking.
 
@@ -149,6 +150,9 @@ Options:
   --agent AGENT        Backend (default: [projects].default_session_agent)
   --wait-secs N        Prompt-dispatch readiness timeout (default: 120)
   --dry-run            Resolve cwd/prompt/agent, spawn nothing
+  --notify             On failure, also post the error as a desktop
+                       notification (for callers nobody watches, like the
+                       URL-scheme handler)
 
 Emits one JSON line with kind/tmux/cwd/agent_id/prompt/prompt_status.
 Install the macOS URL-scheme handler with contrib/macos/install-link-handler.sh.

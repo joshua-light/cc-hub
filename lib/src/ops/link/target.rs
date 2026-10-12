@@ -106,7 +106,7 @@ fn chore_target(chore: &dyn Chore, agent_id: String) -> Result<LinkTarget, OpErr
     let repo = chore.pr().repo();
     let cwd = folder_named(repo).ok_or_else(|| {
         OpError::NotFound(format!(
-            "no known folder named `{}` — bookmark the checkout in cc-hub and retry",
+            "no known folder named `{}` — bookmark the checkout, or the folder it sits in, in cc-hub and retry",
             repo
         ))
     })?;
@@ -176,11 +176,18 @@ pub(super) fn live_session_in(
 }
 
 /// The first known folder whose name is `repo` (case-insensitive) and that
-/// still exists on disk. Precedence follows the hub's folder picker:
-/// bookmarks, then session cwds newest-first.
+/// still exists on disk. Precedence follows the hub's folder picker —
+/// bookmarks, then session cwds newest-first — and only then the folders
+/// directly inside a bookmark, so a bookmarked parent such as `~/git/team`
+/// finds every checkout cloned into it without a bookmark of its own.
 fn folder_named(repo: &str) -> Option<PathBuf> {
-    known_folders()
-        .into_iter()
+    let bookmarks = Bookmarks::load().list();
+    let children = bookmarks.iter().flat_map(|b| subfolders(b));
+    bookmarks
+        .iter()
+        .cloned()
+        .chain(session_folders())
+        .chain(children)
         .find(|path| is_named(path, repo) && path.is_dir())
 }
 
@@ -190,16 +197,20 @@ fn is_named(path: &Path, name: &str) -> bool {
         .is_some_and(|n| n.eq_ignore_ascii_case(name))
 }
 
-fn known_folders() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    out.extend(Bookmarks::load().list());
-
+fn session_folders() -> Vec<PathBuf> {
     let mut sessions = scanner::scan_sessions();
     sessions.sort_by_key(|s| std::cmp::Reverse(s.last_activity.unwrap_or(s.started_at)));
-    out.extend(sessions.into_iter().map(|s| PathBuf::from(s.cwd)));
+    sessions.into_iter().map(|s| PathBuf::from(s.cwd)).collect()
+}
 
-    out.dedup();
-    out
+/// The entries directly inside `dir`; whether each is a folder is left to
+/// the caller, which asks only of the one whose name matches.
+fn subfolders(dir: &Path) -> impl Iterator<Item = PathBuf> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
 }
 
 #[cfg(test)]
@@ -243,6 +254,38 @@ mod tests {
             assert!(matches!(
                 target(&link, Some("claude")),
                 Err(OpError::NotFound(why)) if why.contains("never-cloned")
+            ));
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_fix_lands_in_a_checkout_inside_a_bookmark() {
+        crate::test_util::with_temp_home(|| {
+            let team = dirs::home_dir().expect("home").join("git").join("team");
+            std::fs::create_dir_all(team.join("Sample-App")).expect("checkout");
+            Bookmarks::load().toggle(team.clone());
+            let link = link_of(
+                "cc-hub://fix?pr=https://bitbucket.example.com/projects/APP/repos/sample-app/pull-requests/32",
+            );
+            let target = target(&link, Some("claude")).expect("target");
+            assert_eq!(target.cwd, team.join("Sample-App"));
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_bookmark_grandchild_is_not_a_checkout() {
+        crate::test_util::with_temp_home(|| {
+            let git = dirs::home_dir().expect("home").join("git");
+            std::fs::create_dir_all(git.join("team").join("sample-app")).expect("checkout");
+            Bookmarks::load().toggle(git);
+            let link = link_of(
+                "cc-hub://fix?pr=https://bitbucket.example.com/projects/APP/repos/sample-app/pull-requests/32",
+            );
+            assert!(matches!(
+                target(&link, Some("claude")),
+                Err(OpError::NotFound(_))
             ));
         });
     }
