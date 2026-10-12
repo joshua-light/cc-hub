@@ -44,14 +44,15 @@ fn render_agents_body_at(frame: &mut Frame, area: Rect, app: &mut App, now: i64)
 
     let split = Split::of(area, app.view == View::AgentDetail);
     app.render.split.page = split.page;
-    render_list(frame, split.sidebar, app);
+    render_list(frame, split, app);
     if !split.page.is_empty() {
         render_page(frame, split, app, now);
     }
     split.dim_unfocused(frame);
 }
 
-fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
+fn render_list(frame: &mut Frame, split: Split, app: &mut App) {
+    let area = split.sidebar;
     app.render.split.sidebar = area;
     let scroll = &mut app.render.agents_scroll;
     keep_row_in_view(scroll, app.harness.selected, area.height);
@@ -70,7 +71,7 @@ fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
             frame,
             Rect::new(area.x, y, area.width, 1),
             row,
-            i == app.harness.selected,
+            (i == app.harness.selected).then(|| split.cursor_bg()),
         );
     }
     let end = app.harness.agents.len().min(first + area.height as usize);

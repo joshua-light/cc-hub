@@ -1,10 +1,11 @@
 //! The sidebar-and-page layout the Sessions, Agents and Builds tabs share:
 //! a narrow list on the left, the selected item's page on the right. One
 //! side has the keyboard: the page's frame turns white while it is the one,
-//! and with `[ui].dim_unfocused` the other side is drawn dim, as an editor's
-//! inactive pane is.
+//! the list's cursor row fades while it is not, and with
+//! `[ui].dim_unfocused` the other side is drawn dim, as an editor's inactive
+//! pane is.
 
-use crate::ui::palette::{SELECTED_ROW_BG, SEP_GRAY};
+use crate::ui::palette::{SELECTED_ROW_BG, SEP_GRAY, UNFOCUSED_ROW_BG};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -71,6 +72,15 @@ impl Split {
         buf.set_style(unfocused, Style::default().add_modifier(Modifier::DIM));
     }
 
+    /// The sidebar's cursor row background: faded while the page has the
+    /// keyboard. The list has no frame to light up, so its cursor does.
+    pub fn cursor_bg(&self) -> Color {
+        match self.page_focused {
+            true => UNFOCUSED_ROW_BG,
+            false => SELECTED_ROW_BG,
+        }
+    }
+
     /// The page's frame: rounded, white while it has the keyboard.
     pub fn page_block(&self, title: Line<'static>) -> Block<'static> {
         let border = match self.page_focused {
@@ -101,17 +111,18 @@ pub(crate) fn page_title(mark: Span<'static>, name: &str) -> Line<'static> {
 }
 
 /// One sidebar row of the Agents and Builds tabs: ` mark name`, nothing
-/// more. The cursor is the row's background, and its name alone is bold.
+/// more. The cursor is the row's background, `cursor` (see
+/// [`Split::cursor_bg`]), and its name alone is bold.
 pub(crate) struct SidebarRow {
     pub mark: Span<'static>,
     pub name: String,
     pub name_style: Style,
 }
 
-pub(crate) fn render_row(frame: &mut Frame, area: Rect, row: SidebarRow, selected: bool) {
-    let name_style = match selected {
-        true => row.name_style.add_modifier(Modifier::BOLD),
-        false => row.name_style,
+pub(crate) fn render_row(frame: &mut Frame, area: Rect, row: SidebarRow, cursor: Option<Color>) {
+    let name_style = match cursor {
+        Some(_) => row.name_style.add_modifier(Modifier::BOLD),
+        None => row.name_style,
     };
     // ` ● ` ahead of the name, a space after it.
     let room = (area.width as usize).saturating_sub(3 + 1);
@@ -123,8 +134,8 @@ pub(crate) fn render_row(frame: &mut Frame, area: Rect, row: SidebarRow, selecte
         Span::styled(name, name_style),
     ]);
     let mut row = Paragraph::new(line);
-    if selected {
-        row = row.style(Style::default().bg(SELECTED_ROW_BG));
+    if let Some(bg) = cursor {
+        row = row.style(Style::default().bg(bg));
     }
     frame.render_widget(row, area);
 }
@@ -165,6 +176,15 @@ mod tests {
         };
         assert_eq!(dimmed(false), (false, true));
         assert_eq!(dimmed(true), (true, false));
+    }
+
+    // The list has no frame, so its cursor row carries the focus: plain
+    // while the list has the keyboard, faded while the page has it.
+    #[test]
+    fn the_cursor_row_fades_while_the_page_has_the_keyboard() {
+        let area = Rect::new(0, 0, 120, 4);
+        assert_eq!(Split::of(area, false).cursor_bg(), SELECTED_ROW_BG);
+        assert_eq!(Split::of(area, true).cursor_bg(), UNFOCUSED_ROW_BG);
     }
 
     #[test]

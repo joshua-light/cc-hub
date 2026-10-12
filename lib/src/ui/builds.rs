@@ -95,14 +95,15 @@ pub(crate) fn render_builds_body(frame: &mut Frame, area: Rect, app: &mut App) {
     let now_ms = crate::ui::now_ms();
     let split = Split::of(area, app.view == View::BuildLog);
     app.render.split.page = split.page;
-    render_list(frame, split.sidebar, app, now_ms);
+    render_list(frame, split, app, now_ms);
     if !split.page.is_empty() {
         render_page(frame, split, app, now);
     }
     split.dim_unfocused(frame);
 }
 
-fn render_list(frame: &mut Frame, area: Rect, app: &mut App, now_ms: u64) {
+fn render_list(frame: &mut Frame, split: Split, app: &mut App, now_ms: u64) {
+    let area = split.sidebar;
     app.render.split.sidebar = area;
     keep_row_in_view(
         &mut app.render.builds_scroll,
@@ -124,7 +125,7 @@ fn render_list(frame: &mut Frame, area: Rect, app: &mut App, now_ms: u64) {
             frame,
             Rect::new(area.x, y, area.width, 1),
             row,
-            i == app.builds.selected,
+            (i == app.builds.selected).then(|| split.cursor_bg()),
         );
     }
     let end = app.builds.recipes.len().min(first + area.height as usize);

@@ -18,7 +18,7 @@ use crate::models::{
 };
 use crate::ui::now_ms;
 use crate::ui::palette::{
-    DIM_TEXT, HANDOFF_ROW_BG, SELECTED_HANDOFF_ROW_BG, SELECTED_ROW_BG, SEP_GRAY,
+    DIM_TEXT, HANDOFF_ROW_BG, SELECTED_HANDOFF_ROW_BG, SEP_GRAY, UNFOCUSED_HANDOFF_ROW_BG,
 };
 use crate::ui::split::Split;
 use ratatui::layout::{Alignment, Rect};
@@ -34,7 +34,7 @@ const TASK_ICON: &str = "󰢨";
 pub(super) fn render_split(frame: &mut Frame, area: Rect, app: &mut App) {
     let split = Split::of(area, app.view == View::Dock);
     app.render.split.page = split.page;
-    render_sidebar(frame, split.sidebar, app);
+    render_sidebar(frame, split, app);
     if !split.page.is_empty() {
         render_dock(frame, split, app);
     }
@@ -101,7 +101,8 @@ fn rows(app: &App) -> Vec<Row<'_>> {
     rows
 }
 
-fn render_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
+fn render_sidebar(frame: &mut Frame, split: Split, app: &mut App) {
+    let area = split.sidebar;
     app.render.split.sidebar = area;
     app.render.split.rows.clear();
     if app.sessions.groups.is_empty() {
@@ -151,7 +152,7 @@ fn render_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
                 under_task,
             } => {
                 let marks = CardMarks::of(app, *group, *index, session);
-                render_session(frame, line, session, *under_task, marks, now);
+                render_session(frame, line, session, *under_task, marks, split, now);
             }
             Row::Gap => {}
         }
@@ -209,6 +210,7 @@ fn render_session(
     session: &SessionInfo,
     under_task: bool,
     marks: CardMarks,
+    split: Split,
     now: u64,
 ) {
     let dot = dot_color(&session.state, marks, now);
@@ -227,19 +229,21 @@ fn render_session(
     spans.push(Span::styled(title, title_style));
 
     let mut row = Paragraph::new(Line::from(spans));
-    if let Some(bg) = row_background(marks) {
+    if let Some(bg) = row_background(marks, split) {
         row = row.style(Style::default().bg(bg));
     }
     frame.render_widget(row, area);
 }
 
 /// A session row's background: blue for the handoff mark, lifted under the
-/// cursor; gray for the cursor alone; none otherwise.
-fn row_background(marks: CardMarks) -> Option<Color> {
+/// cursor; gray for the cursor alone; none otherwise. The cursor fades
+/// while the dock has the keyboard (see [`Split::cursor_bg`]).
+fn row_background(marks: CardMarks, split: Split) -> Option<Color> {
     match (marks.selected, marks.handoff) {
+        (true, true) if split.page_focused => Some(UNFOCUSED_HANDOFF_ROW_BG),
         (true, true) => Some(SELECTED_HANDOFF_ROW_BG),
         (false, true) => Some(HANDOFF_ROW_BG),
-        (true, false) => Some(SELECTED_ROW_BG),
+        (true, false) => Some(split.cursor_bg()),
         (false, false) => None,
     }
 }
@@ -360,6 +364,7 @@ mod tests {
     use super::*;
     use crate::agent::AgentKind;
     use crate::models::ProjectGroup;
+    use crate::ui::palette::{SELECTED_ROW_BG, UNFOCUSED_ROW_BG};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -506,6 +511,12 @@ mod tests {
             app.sessions.sel_in_group = 1;
             assert_eq!(bg(&mut app, 1), Color::Reset);
             assert_eq!(bg(&mut app, 2), SELECTED_HANDOFF_ROW_BG);
+
+            // With the keyboard in the dock, the cursor fades.
+            app.view = View::Dock;
+            assert_eq!(bg(&mut app, 2), UNFOCUSED_HANDOFF_ROW_BG);
+            app.sessions.sel_in_group = 0;
+            assert_eq!(bg(&mut app, 1), UNFOCUSED_ROW_BG);
         });
     }
 

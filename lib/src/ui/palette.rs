@@ -60,6 +60,11 @@ pub(crate) const ICE_BLUE: Color = Color::Rgb(130, 190, 220);
 /// table and detail lists).
 pub(crate) const SELECTED_ROW_BG: Color = Color::Rgb(40, 40, 52);
 
+/// Background of the cursor row in a sidebar without the keyboard —
+/// [`SELECTED_ROW_BG`] sunk, so the list's cursor fades as the page's frame
+/// goes gray. The sidebar with the keyboard keeps the plain one.
+pub(crate) const UNFOCUSED_ROW_BG: Color = Color::Rgb(30, 30, 40);
+
 /// Background of a row marked for a handoff (`h`) — [`HANDOFF_BLUE`] sunk
 /// into the dark, so the mark tints the whole row without outshouting it.
 pub(crate) const HANDOFF_ROW_BG: Color = Color::Rgb(22, 44, 68);
@@ -67,3 +72,7 @@ pub(crate) const HANDOFF_ROW_BG: Color = Color::Rgb(22, 44, 68);
 /// Background of the handoff row under the cursor: the same blue, lifted as
 /// far as [`SELECTED_ROW_BG`] lifts a plain row.
 pub(crate) const SELECTED_HANDOFF_ROW_BG: Color = Color::Rgb(34, 64, 98);
+
+/// The handoff row under the cursor of a sidebar without the keyboard,
+/// halfway between [`HANDOFF_ROW_BG`] and [`SELECTED_HANDOFF_ROW_BG`].
+pub(crate) const UNFOCUSED_HANDOFF_ROW_BG: Color = Color::Rgb(28, 54, 83);
