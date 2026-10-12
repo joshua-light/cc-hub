@@ -294,7 +294,7 @@ mod places_picker_tests {
         with_temp_home(|| {
             let mut app = App::new();
             let mut picker = FolderPicker::new_places(vec![
-                Place::new(PathBuf::from("/g/self/cc-hub"), PlaceSource::Bookmark),
+                Place::new(PathBuf::from("/g/self/my-hub"), PlaceSource::Bookmark),
                 Place::new(PathBuf::from("/g/self/reddit"), PlaceSource::Recent),
             ]);
             for c in "hub".chars() {
@@ -310,8 +310,8 @@ mod places_picker_tests {
                 .expect("render");
             let rendered = buffer_to_string(terminal.backend().buffer());
 
-            assert!(rendered.contains("cc-hub"), "name row:\n{}", rendered);
-            assert!(rendered.contains("/g/self/cc-hub"), "path:\n{}", rendered);
+            assert!(rendered.contains("my-hub"), "name row:\n{}", rendered);
+            assert!(rendered.contains("/g/self/my-hub"), "path:\n{}", rendered);
             assert!(rendered.contains("hub▎"), "filter line:\n{}", rendered);
             assert!(rendered.contains("1/2"), "match count:\n{}", rendered);
             assert!(

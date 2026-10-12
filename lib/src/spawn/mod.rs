@@ -51,7 +51,7 @@ pub fn spawn_agent_session(
     let agent = config::get()
         .agent(agent_id)
         .ok_or_else(|| io::Error::other(format!("unknown agent id: {}", agent_id)))?;
-    let name = unique_session_name("cchub");
+    let name = unique_session_name("hal");
     let cmd = build_agent_command(&agent, &name, target, initial_prompt, model, readonly_tools)?;
     if agent.kind == AgentKind::Claude {
         trust::ensure_trusted_for(&agent.id, cwd)?;
@@ -89,7 +89,7 @@ fn stalled_spawn_message(agent: &str, tmux_name: &str, pane: &str) -> String {
 }
 
 pub fn spawn_shell_tmux_session(cwd: &str) -> io::Result<String> {
-    let name = unique_session_name("cchub-sh");
+    let name = unique_session_name("hal-sh");
     mux::spawn_detached(&name, cwd, None)?;
     Ok(name)
 }
@@ -144,16 +144,16 @@ mod tests {
     fn stalled_message_surfaces_last_pane_line() {
         let pane = "\n[oh-my-zsh] Would you like to update? [Y/n]\n\n";
         assert_eq!(
-            stalled_spawn_message("claude", "cchub-1-2", pane),
-            "claude stuck in [cchub-1-2]: [oh-my-zsh] Would you like to update? [Y/n]"
+            stalled_spawn_message("claude", "hal-1-2", pane),
+            "claude stuck in [hal-1-2]: [oh-my-zsh] Would you like to update? [Y/n]"
         );
     }
 
     #[test]
     fn stalled_message_handles_blank_pane() {
         assert_eq!(
-            stalled_spawn_message("claude", "cchub-1-2", "\n\n"),
-            "claude not started in [cchub-1-2] (blank pane)"
+            stalled_spawn_message("claude", "hal-1-2", "\n\n"),
+            "claude not started in [hal-1-2] (blank pane)"
         );
     }
 }

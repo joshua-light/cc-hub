@@ -108,8 +108,8 @@ pub const TABS: &[Tab] = &[
 pub fn visible_tabs() -> Vec<Tab> {
     TABS.iter()
         .copied()
-        // Agents shows once `~/.cc-hub/agents/` exists (at startup) unless
-        // config hides it; `cc-hub agent new` creates the dir.
+        // Agents shows once `~/.hal/agents/` exists (at startup) unless
+        // config hides it; `hal agent new` creates the dir.
         .filter(|t| match t {
             Tab::Agents => config::get().harness.show_tab && crate::harness::root_exists(),
             // Builds shows once a recipe exists to build with.

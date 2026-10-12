@@ -106,7 +106,7 @@ fn chore_target(chore: &dyn Chore, agent_id: String) -> Result<LinkTarget, OpErr
     let repo = chore.pr().repo();
     let cwd = folder_named(repo).ok_or_else(|| {
         OpError::NotFound(format!(
-            "no known folder named `{}` — bookmark the checkout, or the folder it sits in, in cc-hub and retry",
+            "no known folder named `{}` — bookmark the checkout, or the folder it sits in, in hal and retry",
             repo
         ))
     })?;
@@ -131,7 +131,7 @@ pub(super) fn without_a_brief(card: &TaskState) -> Result<(), OpError> {
                 card.task_id
             ),
             format!(
-                "cc-hub board note --task {} --text '<problem, solution, verification>'",
+                "hal board note --task {} --text '<problem, solution, verification>'",
                 card.task_id
             ),
         ));
@@ -229,7 +229,7 @@ mod tests {
     fn a_review_without_a_checkout_runs_from_home() {
         crate::test_util::with_temp_home(|| {
             let link = link_of(
-                "cc-hub://review?depth=light&pr=https://bitbucket.example.com/projects/APP/repos/never-cloned/pull-requests/7",
+                "hal://review?depth=light&pr=https://bitbucket.example.com/projects/APP/repos/never-cloned/pull-requests/7",
             );
             let target = target(&link, Some("claude")).expect("target");
             assert_eq!(target.cwd, dirs::home_dir().expect("home"));
@@ -249,7 +249,7 @@ mod tests {
     fn a_fix_without_a_checkout_is_refused() {
         crate::test_util::with_temp_home(|| {
             let link = link_of(
-                "cc-hub://fix?pr=https://bitbucket.example.com/projects/APP/repos/never-cloned/pull-requests/7",
+                "hal://fix?pr=https://bitbucket.example.com/projects/APP/repos/never-cloned/pull-requests/7",
             );
             assert!(matches!(
                 target(&link, Some("claude")),
@@ -266,7 +266,7 @@ mod tests {
             std::fs::create_dir_all(team.join("Sample-App")).expect("checkout");
             Bookmarks::load().toggle(team.clone());
             let link = link_of(
-                "cc-hub://fix?pr=https://bitbucket.example.com/projects/APP/repos/sample-app/pull-requests/32",
+                "hal://fix?pr=https://bitbucket.example.com/projects/APP/repos/sample-app/pull-requests/32",
             );
             let target = target(&link, Some("claude")).expect("target");
             assert_eq!(target.cwd, team.join("Sample-App"));
@@ -281,7 +281,7 @@ mod tests {
             std::fs::create_dir_all(git.join("team").join("sample-app")).expect("checkout");
             Bookmarks::load().toggle(git);
             let link = link_of(
-                "cc-hub://fix?pr=https://bitbucket.example.com/projects/APP/repos/sample-app/pull-requests/32",
+                "hal://fix?pr=https://bitbucket.example.com/projects/APP/repos/sample-app/pull-requests/32",
             );
             assert!(matches!(
                 target(&link, Some("claude")),
@@ -295,7 +295,7 @@ mod tests {
     fn a_merge_target_without_a_checkout_is_refused() {
         crate::test_util::with_temp_home(|| {
             let link = link_of(
-                "cc-hub://merge-target?pr=https://bitbucket.example.com/projects/APP/repos/never-cloned/pull-requests/7",
+                "hal://merge-target?pr=https://bitbucket.example.com/projects/APP/repos/never-cloned/pull-requests/7",
             );
             assert!(matches!(
                 target(&link, Some("claude")),
@@ -310,7 +310,7 @@ mod tests {
         crate::test_util::with_temp_home(|| {
             let dir = std::env::temp_dir();
             let id = card(None);
-            let link: Link = format!("cc-hub://task?id={}&dir={}&kind=basic", id, dir.display())
+            let link: Link = format!("hal://task?id={}&dir={}&kind=basic", id, dir.display())
                 .parse()
                 .expect("parse");
             let target = target(&link, Some("claude")).expect("target");
@@ -329,7 +329,7 @@ mod tests {
         crate::test_util::with_temp_home(|| {
             let dir = std::env::temp_dir();
             let id = card(Some(&dir.to_string_lossy()));
-            let link: Link = format!("cc-hub://task?id={}", id).parse().expect("parse");
+            let link: Link = format!("hal://task?id={}", id).parse().expect("parse");
             assert_eq!(target(&link, Some("claude")).expect("target").cwd, dir);
         });
     }
@@ -341,7 +341,7 @@ mod tests {
             let dir = std::env::temp_dir();
             let id = card(None);
             let link: Link = format!(
-                "cc-hub://task?id={}&dir={}&role=verification",
+                "hal://task?id={}&dir={}&role=verification",
                 id,
                 dir.display()
             )
@@ -366,7 +366,7 @@ mod tests {
     fn a_card_with_nowhere_to_run_is_a_usage_error() {
         crate::test_util::with_temp_home(|| {
             card(None);
-            let link: Link = "cc-hub://task?id=tk-1".parse().expect("parse");
+            let link: Link = "hal://task?id=tk-1".parse().expect("parse");
             assert!(matches!(
                 target(&link, Some("claude")),
                 Err(OpError::Usage(_))
@@ -378,7 +378,7 @@ mod tests {
     #[cfg(unix)]
     fn an_unknown_card_is_not_found() {
         crate::test_util::with_temp_home(|| {
-            let link: Link = "cc-hub://task?id=tk-404".parse().expect("parse");
+            let link: Link = "hal://task?id=tk-404".parse().expect("parse");
             assert!(matches!(
                 target(&link, Some("claude")),
                 Err(OpError::NotFound(_))
@@ -395,16 +395,16 @@ mod tests {
 
     #[test]
     fn a_live_session_in_the_same_place_is_the_link_target() {
-        let card = card_with_session("/g/sample", Some("cchub-1"));
+        let card = card_with_session("/g/sample", Some("hal-1"));
         assert_eq!(
             live_session_in(&card, Path::new("/g/sample"), |_| true),
-            Some("cchub-1".into())
+            Some("hal-1".into())
         );
     }
 
     #[test]
     fn a_link_to_another_place_starts_fresh() {
-        let card = card_with_session("/g/cc-hub", Some("cchub-1"));
+        let card = card_with_session("/g/hal", Some("hal-1"));
         assert_eq!(
             live_session_in(&card, Path::new("/g/sample"), |_| true),
             None
@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn a_dead_or_missing_session_starts_fresh() {
-        let dead = card_with_session("/g/sample", Some("cchub-1"));
+        let dead = card_with_session("/g/sample", Some("hal-1"));
         assert_eq!(
             live_session_in(&dead, Path::new("/g/sample"), |_| false),
             None

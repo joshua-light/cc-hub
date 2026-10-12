@@ -121,7 +121,7 @@ pub fn build_args(
 }
 
 /// Run one tick to completion. `log_path` receives the raw stream-json,
-/// prefixed by a `cc-hub-tick` header line so ticks in one day file can be
+/// prefixed by a `hal-tick` header line so ticks in one day file can be
 /// told apart. `session_started` is called once, as soon as the CLI
 /// announces the session id — long before the tick ends, so the Agents tab
 /// can tail a tick in flight.
@@ -149,7 +149,7 @@ pub fn run(
     }
 
     let spawn = crate::title::spawn_argv().unwrap_or_else(|| vec!["claude".into()]);
-    // Agents report back through `cc-hub agent note`; make sure the `cc-hub`
+    // Agents report back through `hal agent note`; make sure the `hal`
     // they find is the one running them, even when it isn't on PATH.
     let path = child_path();
     let (exe, base) = spawn.split_first().expect("non-empty argv");
@@ -161,8 +161,8 @@ pub fn run(
             "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
             spec.run.window_pct.to_string(),
         )
-        .env("CC_HUB_AGENT", &spec.name)
-        .env("CC_HUB_AGENT_DIR", &spec.dir)
+        .env("HAL_AGENT", &spec.name)
+        .env("HAL_AGENT_DIR", &spec.dir)
         .env("PATH", path)
         .envs(&spec.run.env)
         .stdin(Stdio::null())
@@ -173,7 +173,7 @@ pub fn run(
         .run
         .account
         .as_ref()
-        .or_else(|| spec.run.env.get("CC_HUB_ACCOUNT"))
+        .or_else(|| spec.run.env.get("HAL_ACCOUNT"))
     {
         match crate::resources::accounts().remove(name) {
             Some(account) if account.provider == crate::agent::AgentKind::Claude => {

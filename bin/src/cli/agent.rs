@@ -1,12 +1,12 @@
-//! `cc-hub agent ...` — persistent agents (`lib/src/harness/`).
+//! `hal agent ...` — persistent agents (`lib/src/harness/`).
 //!
 //! User-facing: `list`, `new`, `once`, `poke`, `pause`, `resume`, `reset`,
 //! `show`. Agent-facing (run from inside a tick, which sets
-//! `CC_HUB_AGENT`): `note`. Flags are parsed locally — none of the shared
+//! `HAL_AGENT`): `note`. Flags are parsed locally — none of the shared
 //! `Flags` fields fit.
 
 use super::{print_json, CliError};
-use cc_hub_lib::harness::{self, spec, AgentSnapshot, Event};
+use hal_lib::harness::{self, spec, AgentSnapshot, Event};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -77,7 +77,7 @@ impl Args {
     }
 }
 
-/// The agent named positionally, by `--agent`, or by `CC_HUB_AGENT` (set
+/// The agent named positionally, by `--agent`, or by `HAL_AGENT` (set
 /// inside a tick).
 fn resolve_dir(a: &Args) -> Result<(String, PathBuf), CliError> {
     let name = a
@@ -85,9 +85,9 @@ fn resolve_dir(a: &Args) -> Result<(String, PathBuf), CliError> {
         .first()
         .cloned()
         .or_else(|| a.get("agent").map(str::to_string))
-        .or_else(|| std::env::var("CC_HUB_AGENT").ok())
+        .or_else(|| std::env::var("HAL_AGENT").ok())
         .ok_or_else(|| {
-            CliError::Usage("agent name required (positional, --agent, or CC_HUB_AGENT)".into())
+            CliError::Usage("agent name required (positional, --agent, or HAL_AGENT)".into())
         })?;
     if !harness::valid_name(&name) {
         return Err(CliError::Usage(format!("invalid agent name {:?}", name)));
@@ -149,7 +149,7 @@ fn list(args: &[String]) -> Result<(), CliError> {
     }
     if agents.is_empty() {
         println!(
-            "no agents under {} (try `cc-hub agent new <name>`)",
+            "no agents under {} (try `hal agent new <name>`)",
             harness::root()
                 .map(|r| r.display().to_string())
                 .unwrap_or_default()
@@ -212,10 +212,10 @@ fn new(args: &[String]) -> Result<(), CliError> {
         "name": name,
         "dir": dir,
         "spec": dir.join(spec::SPEC_FILE),
-        "next": "edit the spec, then `cc-hub agent once <name> --event 'hello'` to try a tick",
+        "next": "edit the spec, then `hal agent once <name> --event 'hello'` to try a tick",
     }));
     eprintln!(
-        "created {} — edit {} then run `cc-hub agent once {}`",
+        "created {} — edit {} then run `hal agent once {}`",
         dir.display(),
         dir.join(spec::SPEC_FILE).display(),
         name
@@ -304,8 +304,8 @@ fn reset(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-/// `cc-hub agent note --text "..." [--level warn] [--ref URL]`. Run by
-/// agents; the name comes from `CC_HUB_AGENT`.
+/// `hal agent note --text "..." [--level warn] [--ref URL]`. Run by
+/// agents; the name comes from `HAL_AGENT`.
 fn note(args: &[String]) -> Result<(), CliError> {
     let a = parse(args);
     let (name, dir) = resolve_dir(&a)?;

@@ -20,7 +20,7 @@ pub struct ProjectsConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct TasksConfig {
     /// The deliverable kinds a card may be given on the board (`T`), in the
-    /// order the picker offers them. cc-hub never interprets a kind: it stores
+    /// order the picker offers them. hal never interprets a kind: it stores
     /// the word and hands it to whoever opens the session — the task router
     /// owns where each one lands. Empty (the default) means the board offers
     /// nothing to pick and every card stays router-classified.
@@ -44,7 +44,7 @@ impl TasksConfig {
             return Ok(kind.to_string());
         }
         Err(if self.kinds.is_empty() {
-            "no task kinds configured — set [tasks].kinds in ~/.cc-hub/config.toml".into()
+            "no task kinds configured — set [tasks].kinds in ~/.hal/config.toml".into()
         } else {
             format!("{} is not one of {}", kind, self.kinds.join(", "))
         })
@@ -225,13 +225,13 @@ impl Default for MetricsConfig {
 
 /// Persistent agents (the Agents tab, `lib/src/harness/`). The supervisor
 /// runs inside the TUI and only spends money on agents that exist under
-/// `~/.cc-hub/agents/` and are enabled, so it is on by default.
+/// `~/.hal/agents/` and are enabled, so it is on by default.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HarnessConfig {
     /// Run the supervisor loop inside the TUI.
     pub enabled: bool,
-    /// Show the Agents tab. It is also hidden while `~/.cc-hub/agents/`
+    /// Show the Agents tab. It is also hidden while `~/.hal/agents/`
     /// does not exist.
     pub show_tab: bool,
     /// How often the TUI re-reads agent state from disk.

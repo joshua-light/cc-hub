@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Account-aware task sessions. Standard library only; shipped in cc-hub.
+"""Account-aware task sessions. Standard library only; shipped in hal.
 
 A task has one worker at a time. `start` for a task that already has a live
 worker in another role, or in another directory, is a hand-over: the new
@@ -40,11 +40,11 @@ import uuid
 
 
 def root():
-    return Path(os.environ.get('CC_HUB_RESOURCE_DIR', Path.home() / '.cc-hub/resources'))
+    return Path(os.environ.get('HAL_RESOURCE_DIR', Path.home() / '.hal/resources'))
 
 
 def config_path():
-    return Path(os.environ.get('CC_HUB_RESOURCE_CONFIG', Path.home() / '.cc-hub/resources.toml'))
+    return Path(os.environ.get('HAL_RESOURCE_CONFIG', Path.home() / '.hal/resources.toml'))
 
 
 def read_json(path, default=None):
@@ -213,7 +213,7 @@ def rpc(account, requests):
         raise TimeoutError(f'Codex {method} timed out')
 
     try:
-        request('initialize', {'clientInfo': {'name': 'cc_hub', 'version': '1.0'}, 'capabilities': {}})
+        request('initialize', {'clientInfo': {'name': 'hal', 'version': '1.0'}, 'capabilities': {}})
         send({'method': 'initialized'})
         return [request(method, params) for method, params in requests]
     finally:
@@ -278,8 +278,8 @@ def probe(account, stale_seconds=900):
                     'models': {m['model']: [e['reasoningEffort'] for e in m.get('supportedReasoningEfforts', [])]
                                for m in models.get('data', [])}}
         home = account_home(account)
-        # One store for every consumer on this machine; see `cc-hub usage`.
-        answer = run([os.environ.get('CC_HUB_BINARY', 'cc-hub'), 'usage', '--home', str(home)])
+        # One store for every consumer on this machine; see `hal usage`.
+        answer = run([os.environ.get('HAL_BINARY', 'hal'), 'usage', '--home', str(home)])
         report = json.loads(answer.stdout) if answer.returncode == 0 else {}
         if not report.get('ok'):
             return {'health': 'unknown', 'windows': [], 'error': 'usage store unavailable'}
@@ -397,7 +397,7 @@ def state():
 
 def save(value):
     atomic_json(root() / 'state.json', value)
-    board = Path(os.environ.get('TASK_BOARD_DIR', Path.home() / '.cc-hub/tasks'))
+    board = Path(os.environ.get('TASK_BOARD_DIR', Path.home() / '.hal/tasks'))
     by_task = {}
     for worker in value['workers'].values():
         if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', worker['task']):
@@ -542,7 +542,7 @@ def claim(cfg, db, worker, names):
     another."""
     unknown = [name for name in names if name not in cfg['resources']]
     if unknown:
-        raise ValueError('unknown resource ' + ', '.join(unknown) + '; see `cc-hub resource list`')
+        raise ValueError('unknown resource ' + ', '.join(unknown) + '; see `hal resource list`')
     if sorted(names) == worker.get('holds'):
         return worker
     release(db, worker)
@@ -649,12 +649,12 @@ def resource_list(cfg, db):
 
 
 def current_worker(db, requested=None, require_owner=False):
-    worker_id = requested or os.environ.get('CC_HUB_RESOURCE_WORKER')
+    worker_id = requested or os.environ.get('HAL_RESOURCE_WORKER')
     worker = db['workers'].get(worker_id)
     if worker is None:
         raise ValueError('unknown worker; run inside a managed session or supply --worker')
     if require_owner:
-        if worker_id != os.environ.get('CC_HUB_RESOURCE_WORKER') or str(worker['generation']) != os.environ.get('CC_HUB_RESOURCE_GENERATION'):
+        if worker_id != os.environ.get('HAL_RESOURCE_WORKER') or str(worker['generation']) != os.environ.get('HAL_RESOURCE_GENERATION'):
             raise ValueError('stale worker generation; this session was replaced')
         if worker['status'] not in ('starting', 'running'):
             raise ValueError('worker lease is not active')
@@ -668,10 +668,10 @@ SHELLS = ('sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'csh', 'tcsh', 'env', 'log
 
 def passthrough(command):
     """Whether a process is somebody running a command rather than the session
-    that wanted it: a shell, or the `cc-hub` that runs this file. The broker is
+    that wanted it: a shell, or the `hal` that runs this file. The broker is
     always the first parent and it lives no longer than the answer it prints,
     so a guest anchored to it would be gone the moment it was granted."""
-    return command in SHELLS or command == Path(os.environ.get('CC_HUB_BINARY', 'cc-hub')).name
+    return command in SHELLS or command == Path(os.environ.get('HAL_BINARY', 'hal')).name
 
 
 def session_pid(start=None):
@@ -713,7 +713,7 @@ def guest(db, name=None, pid=None):
 def current_session(db, args):
     """Who is asking. A managed worker names itself through the environment
     the hub launched it with; anybody else asks as a guest."""
-    if args.worker or os.environ.get('CC_HUB_RESOURCE_WORKER'):
+    if args.worker or os.environ.get('HAL_RESOURCE_WORKER'):
         return current_worker(db, args.worker, require_owner=True)
     return guest(db, getattr(args, 'name', None), getattr(args, 'pid', None))
 
@@ -724,7 +724,7 @@ def releasing(db, args):
     agent does not always run its release from the process it claimed from,
     and a release must never register a guest, so the name finds and does
     not create."""
-    if args.worker or os.environ.get('CC_HUB_RESOURCE_WORKER'):
+    if args.worker or os.environ.get('HAL_RESOURCE_WORKER'):
         return [current_worker(db, args.worker, require_owner=True)]
     found = guest(db, pid=args.pid)
     if found:
@@ -770,7 +770,7 @@ def stop(worker, reason):
 
 # ─── sessions ────────────────────────────────────────────────────────────
 
-INSTRUCTIONS = '''You are running as a cc-hub managed task session. The account you run on is
+INSTRUCTIONS = '''You are running as a hal managed task session. The account you run on is
 the hub's choice; never log out or change auth. If it runs dry, the hub stops
 this session and continues it on another account from this transcript; you do
 not need to prepare for that. Read ~/.claude/skills/task/SKILL.md and follow it.'''
@@ -782,9 +782,9 @@ RESOURCES = '''The hub lends these out, one session at a time:
 Claim what the work needs, and only that — a claim you don't need is a queue
 for someone who does:
 
-  cc-hub resource claim <name>... [--wait SECONDS]   the complete set you need
-  cc-hub resource release [<name>...]                as soon as you are done
-  cc-hub resource list                               who holds what, and the queue
+  hal resource claim <name>... [--wait SECONDS]   the complete set you need
+  hal resource release [<name>...]                as soon as you are done
+  hal resource list                               who holds what, and the queue
 
 `claim` prints what you now hold, or what you are waiting for and how many
 sessions asked before you; call it again to ask again. A claim is the whole
@@ -844,11 +844,11 @@ def execution(worker, cfg):
     profile = dict(cfg['profiles'].get(worker['profile'], {}))
     profile.update({key: worker[key] for key in ('model', 'effort') if key in worker})
     env = account_env(account)
-    env.update(CC_HUB_RESOURCE_WORKER=worker['id'], CC_HUB_RESOURCE_GENERATION=str(worker['generation']),
-               CC_HUB_RESOURCE_TASK=worker['task'], CC_HUB_RESOURCE_KIND=worker['kind'],
-               CC_HUB_RESOURCE_ROLE=worker['role'], CC_HUB_RESOURCE_TMUX=worker['tmux'],
-               CC_HUB_RESOURCE_CONFIG=str(config_path()), CC_HUB_RESOURCE_DIR=str(root()))
-    binary = os.environ.get('CC_HUB_BINARY')
+    env.update(HAL_RESOURCE_WORKER=worker['id'], HAL_RESOURCE_GENERATION=str(worker['generation']),
+               HAL_RESOURCE_TASK=worker['task'], HAL_RESOURCE_KIND=worker['kind'],
+               HAL_RESOURCE_ROLE=worker['role'], HAL_RESOURCE_TMUX=worker['tmux'],
+               HAL_RESOURCE_CONFIG=str(config_path()), HAL_RESOURCE_DIR=str(root()))
+    binary = os.environ.get('HAL_BINARY')
     if binary and Path(binary).is_absolute():
         env['PATH'] = str(Path(binary).parent) + os.pathsep + env.get('PATH', '')
     previous = worker.get('previous_transcript')
@@ -892,8 +892,8 @@ def launch(worker, cfg):
     name_session(worker, cfg)
     execute = [sys.executable, str(Path(__file__).resolve()), '_exec', '--worker', worker['id'],
                '--generation', str(worker['generation'])]
-    argv = ['/usr/bin/env', 'CC_HUB_RESOURCE_CONFIG=' + str(config_path()),
-            'CC_HUB_RESOURCE_DIR=' + str(root()), 'CC_HUB_BINARY=' + os.environ.get('CC_HUB_BINARY', 'cc-hub'),
+    argv = ['/usr/bin/env', 'HAL_RESOURCE_CONFIG=' + str(config_path()),
+            'HAL_RESOURCE_DIR=' + str(root()), 'HAL_BINARY=' + os.environ.get('HAL_BINARY', 'hal'),
             os.environ.get('SHELL', '/bin/sh'), '-ic', 'exec ' + shlex.join(execute)]
     result = run(['tmux', 'new-session', '-d', '-s', worker['tmux'], '-c', worker['cwd'], *argv])
     if result.returncode:
@@ -905,13 +905,13 @@ def name_session(worker, cfg):
     Only Claude takes the id it is given; a Codex session mints its own and is
     named when `bind_board` first learns it. A failure costs the name, not the
     launch: the hub asks the user for one instead."""
-    binary = os.environ.get('CC_HUB_BINARY')
+    binary = os.environ.get('HAL_BINARY')
     if binary and cfg['accounts'][worker['account']]['provider'] == 'claude':
         run([binary, 'resource', '_name', json.dumps(worker)])
 
 
 def bind_board(worker, cfg):
-    binary = os.environ.get('CC_HUB_BINARY')
+    binary = os.environ.get('HAL_BINARY')
     if not binary:
         return
     binding = dict(worker)
@@ -1107,7 +1107,7 @@ def hook():
     """PreToolUse: remember where this session's transcript is, and say how
     much of the account is left. Nothing here blocks a tool."""
     event = json.load(sys.stdin)
-    if not os.environ.get('CC_HUB_RESOURCE_WORKER'):
+    if not os.environ.get('HAL_RESOURCE_WORKER'):
         return None
     cfg = load_config()
     with lock():
@@ -1162,7 +1162,7 @@ def parser():
     start = commands.add_parser('start')
     for name in ('task', 'kind', 'role', 'cwd', 'prompt'):
         start.add_argument('--' + name, required=True)
-    # The session's name; without one it takes its card's (see `cc-hub resource _name`).
+    # The session's name; without one it takes its card's (see `hal resource _name`).
     start.add_argument('--title')
     commands.add_parser('status').add_argument('--worker')
     commands.add_parser('retry').add_argument('--worker', required=True)
@@ -1221,7 +1221,7 @@ def main(argv=None):
             with lock():
                 db = state()
                 if args.verb == 'status':
-                    result = current_worker(db, args.worker) if args.worker or os.environ.get('CC_HUB_RESOURCE_WORKER') else list(db['workers'].values())
+                    result = current_worker(db, args.worker) if args.worker or os.environ.get('HAL_RESOURCE_WORKER') else list(db['workers'].values())
                 elif args.verb == 'retry':
                     worker = current_worker(db, args.worker)
                     if worker['status'] != 'blocked' or (worker.get('tmux') and tmux_exists(worker['tmux'])):

@@ -35,13 +35,13 @@ pub struct Recipe {
     /// `HEAD` builds the last commit. Without one, such a build takes the
     /// working tree.
     pub r#ref: Option<String>,
-    /// The resource (`~/.cc-hub/resources.toml`) a run needs. Held from the
+    /// The resource (`~/.hal/resources.toml`) a run needs. Held from the
     /// first run until it is released by hand.
     pub resource: Option<String>,
     /// Routes a build may ask for. Asking for none lets the recipe choose.
     pub routes: Vec<String>,
     /// The steps, in order. The run succeeds when every one exits 0 and stops
-    /// at the first that does not; `cc-hub: <key> <value>` lines from any of
+    /// at the first that does not; `hal: <key> <value>` lines from any of
     /// them report progress ([`super::Report`]).
     pub run: Vec<Vec<String>>,
     /// Stops a running step, including whatever it started elsewhere. Run by
@@ -119,7 +119,7 @@ pub fn command(argv: &[String], cwd: &str) -> Command {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let mut command = Command::new(shell);
     command
-        .args(["-lc", r#"exec "$@""#, "cc-hub-build"])
+        .args(["-lc", r#"exec "$@""#, "hal-build"])
         .args(argv)
         .current_dir(crate::platform::paths::expand_home(cwd));
     command

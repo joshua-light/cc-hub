@@ -11,9 +11,9 @@ const OSC52_MAX: usize = 1024 * 1024;
 /// tmux delivers copies to its clients as OSC 52, but the embedded client's
 /// output goes to the vt100 parser, which doesn't understand the sequence
 /// and silently drops it. The reader thread runs every chunk through this
-/// scanner so the escapes can be replayed onto cc-hub's real terminal —
+/// scanner so the escapes can be replayed onto hal's real terminal —
 /// the hop that lands an in-pane copy on the *viewer's* clipboard when
-/// cc-hub itself runs on a remote box over ssh (tmux's copy-command can
+/// hal itself runs on a remote box over ssh (tmux's copy-command can
 /// only reach the remote host's clipboard).
 ///
 /// Stateful across `feed` calls: a large selection easily out-sizes one
@@ -91,7 +91,7 @@ fn match_prefix(n: usize, b: u8) -> Osc52State {
 }
 
 /// Queue a finished escape unless it's a clipboard *query* (payload `?`):
-/// replaying a query would make the host terminal answer on cc-hub's
+/// replaying a query would make the host terminal answer on hal's
 /// stdin, where crossterm would misread the reply as key input.
 fn push_unless_query(out: &mut Vec<Vec<u8>>, seq: Vec<u8>) {
     let body = match seq.last() {
@@ -142,7 +142,7 @@ mod tests {
     }
 
     /// A clipboard *query* must not be replayed: the host terminal would
-    /// answer it on cc-hub's stdin.
+    /// answer it on hal's stdin.
     #[test]
     fn drops_clipboard_queries() {
         let mut s = Osc52Scanner::new();

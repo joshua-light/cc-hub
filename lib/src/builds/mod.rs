@@ -2,8 +2,8 @@
 //! moment it is asked for until every step succeeded, one failed, or it was
 //! cancelled.
 //!
-//! Each build is a directory under `~/.cc-hub/builds/<id>/`, `build.json`
-//! beside `output.log`, so the TUI, `cc-hub build` and the runner doing the
+//! Each build is a directory under `~/.hal/builds/<id>/`, `build.json`
+//! beside `output.log`, so the TUI, `hal build` and the runner doing the
 //! work read one record. Only the [`runner`] changes a build by doing
 //! something: it waits its turn, gets the recipe's resource [`hold`], runs the
 //! recipe's steps and folds what they [`Report`] into the record. Everybody
@@ -16,7 +16,7 @@ pub mod runner;
 pub use recipe::Recipe;
 
 use crate::persist::now_unix_secs;
-use crate::platform::paths::cc_hub_home;
+use crate::platform::paths::hal_home;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Write};
@@ -145,7 +145,7 @@ impl Build {
 }
 
 /// A line of recipe output addressed to the hub rather than to a person:
-/// `cc-hub: <key> <value>`. The runner exports `CC_HUB_BUILD`, so a recipe
+/// `hal: <key> <value>`. The runner exports `HAL_BUILD`, so a recipe
 /// that also runs by hand can stay quiet when nobody is listening.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Report {
@@ -160,7 +160,7 @@ pub enum Report {
 
 impl Report {
     pub fn parse(line: &str) -> Option<Report> {
-        let (key, value) = line.strip_prefix("cc-hub: ")?.split_once(' ')?;
+        let (key, value) = line.strip_prefix("hal: ")?.split_once(' ')?;
         let value = value.trim().to_string();
         if value.is_empty() {
             return None;
@@ -190,7 +190,7 @@ pub fn short_commit(commit: &str) -> &str {
 // ---- the store --------------------------------------------------------------
 
 pub fn builds_dir() -> Option<PathBuf> {
-    cc_hub_home().map(|h| h.join("builds"))
+    hal_home().map(|h| h.join("builds"))
 }
 
 fn build_dir(id: &str) -> io::Result<PathBuf> {
@@ -402,7 +402,7 @@ pub fn cancel(id: &str) -> io::Result<Build> {
     })
 }
 
-/// Start `cc-hub <args>` as a process of its own session, so it outlives the
+/// Start `hal <args>` as a process of its own session, so it outlives the
 /// TUI or the shell that asked for it. Its pid is its only handle.
 pub(crate) fn detach(args: &[&str]) -> io::Result<u32> {
     use std::process::{Command, Stdio};
@@ -444,16 +444,16 @@ mod tests {
     #[test]
     fn a_report_is_a_prefixed_key_and_value() {
         assert_eq!(
-            Report::parse("cc-hub: route swap"),
+            Report::parse("hal: route swap"),
             Some(Report::Route("swap".into()))
         );
         assert_eq!(
-            Report::parse("cc-hub: phase compiling scripts"),
+            Report::parse("hal: phase compiling scripts"),
             Some(Report::Phase("compiling scripts".into()))
         );
         assert_eq!(Report::parse("build-server: swap build of 1a2b3c4"), None);
-        assert_eq!(Report::parse("cc-hub: colour blue"), None);
-        assert_eq!(Report::parse("cc-hub: commit "), None);
+        assert_eq!(Report::parse("hal: colour blue"), None);
+        assert_eq!(Report::parse("hal: commit "), None);
     }
 
     #[test]

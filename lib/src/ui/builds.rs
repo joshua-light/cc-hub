@@ -80,7 +80,7 @@ pub(crate) fn render_builds_body(frame: &mut Frame, area: Rect, app: &mut App) {
     }
     if app.builds.recipes.is_empty() {
         let msg = if app.builds.loaded {
-            " No recipes. Add one under [builds.recipes] in config.toml — see `cc-hub help build`."
+            " No recipes. Add one under [builds.recipes] in config.toml — see `hal help build`."
         } else {
             " Reading builds …"
         };
@@ -521,7 +521,7 @@ fn log_lines(log: &LogView, area: Rect) -> Vec<Line<'static>> {
                 Style::default()
                     .fg(ACCENT_BLUE)
                     .add_modifier(Modifier::BOLD)
-            } else if line.starts_with("cc-hub: ") {
+            } else if line.starts_with("hal: ") {
                 Style::default().fg(MUTED_TEXT)
             } else {
                 Style::default().fg(FAINT_TEXT)

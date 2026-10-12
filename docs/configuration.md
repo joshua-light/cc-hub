@@ -1,20 +1,20 @@
 # Configuration reference
 
-cc-hub reads `~/.cc-hub/config.toml` once, at startup. The file is optional.
+hal reads `~/.hal/config.toml` once, at startup. The file is optional.
 Every key has a default, so list only what you change.
 
 Unknown keys are rejected. A read or parse error, including one unknown key,
-makes cc-hub ignore the whole file and use the defaults. The only signal is a
+makes hal ignore the whole file and use the defaults. The only signal is a
 `config: parse error … — using defaults` warning in the log.
 
-The resource broker has its own file, `~/.cc-hub/resources.toml`; see
+The resource broker has its own file, `~/.hal/resources.toml`; see
 [resource-management.md](resource-management.md).
 
 ## `[spawn]`
 
 | Key | Default | Meaning |
 |---|---|---|
-| `command` | `"cc-hub-new"` | Command for the built-in `claude` agent. Runs through your interactive shell, so aliases and functions work. |
+| `command` | `"hal-new"` | Command for the built-in `claude` agent. Runs through your interactive shell, so aliases and functions work. |
 
 ## `[agents.<id>]`
 
@@ -26,8 +26,8 @@ a table here already uses that name.
 | Key | Default | Meaning |
 |---|---|---|
 | `kind` | `"claude"` | Backend: `claude`, `pi` or `codex`. |
-| `command` | `"cc-hub-new"` | Shell command that starts the agent. cc-hub appends model, resume and prompt arguments, so keep `--model`/`-m`/`resume` out of it. |
-| `use_bridge` | `false` | Pi only: load cc-hub's heartbeat extension, so the hub sees the session's live state. |
+| `command` | `"hal-new"` | Shell command that starts the agent. hal appends model, resume and prompt arguments, so keep `--model`/`-m`/`resume` out of it. |
+| `use_bridge` | `false` | Pi only: load hal's heartbeat extension, so the hub sees the session's live state. |
 | `models` | `[]` | Model-picker entries (`N`). Each is an id string or `{ label, id }`. Empty on a `claude` agent means the three built-in Claude models; on others, the command's own default. |
 | `hotkey` | none | One character that spawns this agent in the selected session's folder on the Sessions tab. Shadows the built-in key it collides with. Malformed or duplicate hotkeys are dropped with a log warning. |
 | `account` | none | A `resources.toml` account to run under. Spawning fails when the account does not exist or has another provider. |
@@ -45,13 +45,13 @@ hotkey = "C"
 
 | Key | Default | Meaning |
 |---|---|---|
-| `default_session_agent` | `"claude"` | Agent for new sessions and `cc-hub open`. In the TUI, `A` on the Sessions tab overrides it until restart. |
+| `default_session_agent` | `"claude"` | Agent for new sessions and `hal open`. In the TUI, `A` on the Sessions tab overrides it until restart. |
 
 ## `[tasks]`
 
 | Key | Default | Meaning |
 |---|---|---|
-| `kinds` | `[]` | Words a card may carry as its kind (`T`, `board add --kind`, `&kind=`), in picker order. cc-hub stores the word and passes it on; it never interprets it. |
+| `kinds` | `[]` | Words a card may carry as its kind (`T`, `board add --kind`, `&kind=`), in picker order. hal stores the word and passes it on; it never interprets it. |
 | `handover_kinds` | `[]` | Kinds worked by two sessions in sequence. A `role=verification` link for any other kind is refused. Empty lets every kind hand over. |
 
 ## `[title]`
@@ -122,7 +122,7 @@ Persistent agents (the Agents tab).
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Run the agent supervisor inside the TUI. |
-| `show_tab` | `true` | Show the Agents tab. It also stays hidden until `~/.cc-hub/agents/` exists. |
+| `show_tab` | `true` | Show the Agents tab. It also stays hidden until `~/.hal/agents/` exists. |
 | `refresh_secs` | `3` | How often the TUI rereads agent state (minimum 1). |
 
 ## `[builds]`
@@ -146,7 +146,7 @@ values. An argument that is only a placeholder with no value is dropped.
 | `ref` | none | What a build that names no ref builds, read when it starts: `"HEAD"` builds the last commit. Without it, such a build takes the working tree. |
 | `resource` | none | A `resources.toml` resource the builds need. Claimed before the first build and held until released. |
 | `routes` | `[]` | Routes a build may ask for. With none asked for, the recipe picks. |
-| `run` | `[]` | The steps, each an argv, run in order. The build succeeds when every step exits 0 and stops at the first that does not. Any step reports progress with `cc-hub: commit <sha>`, `cc-hub: route <name>` and `cc-hub: phase <text>` lines; a later step can use the reported `{commit}`. |
+| `run` | `[]` | The steps, each an argv, run in order. The build succeeds when every step exits 0 and stops at the first that does not. Any step reports progress with `hal: commit <sha>`, `hal: route <name>` and `hal: phase <text>` lines; a later step can use the reported `{commit}`. |
 | `cancel` | `[]` | Stops a running step, including work it started elsewhere. |
 | `current` | `[]` | Prints the commit the recipe's last run left in place. |
 
@@ -166,6 +166,6 @@ current = ["ssh", "-o", "RemoteCommand=none", "buildbox", "cat ~/build/state/bui
 
 ## Retired keys
 
-These keys belonged to the removed Projects layer. cc-hub still accepts and
+These keys belonged to the removed Projects layer. hal still accepts and
 ignores them, so an old file keeps loading: `[backlog]`, `[auto_review]`,
 `[ui].show_projects_tab` and `[projects].default_orchestrator_agent`.

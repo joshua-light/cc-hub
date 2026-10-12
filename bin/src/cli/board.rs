@@ -1,22 +1,22 @@
-//! `cc-hub board ...` — the personal Tasks board (`lib/src/tasks/`).
+//! `hal board ...` — the personal Tasks board (`lib/src/tasks/`).
 //!
 //! `add` mints a card in To-Do the way the `a` key does in the TUI. It exists
 //! so a script can hand the user a card — the escalation record — and then
-//! open it with a `cc-hub://task` link, which only ever addresses a card that
+//! open it with a `hal://task` link, which only ever addresses a card that
 //! already exists.
 //!
 //! `note` and `notes` are how a task session writes on the card and reads
 //! what was written: the brief it agreed with the user, the branch it built,
 //! what verification found. The notes are the same `note` attachments the
 //! `p` key pastes, so they show on the board where the user already looks,
-//! and `cc-hub open` refuses a hand-over for a card that has none.
+//! and `hal open` refuses a hand-over for a card that has none.
 
 use std::io::{IsTerminal, Read};
 
 use super::{parse_flags, print_json, CliError};
-use cc_hub_lib::ops;
-use cc_hub_lib::tasks::store::{self, TaskPriority};
-use cc_hub_lib::tasks::{parse_tags, PersonalBoard};
+use hal_lib::ops;
+use hal_lib::tasks::store::{self, TaskPriority};
+use hal_lib::tasks::{parse_tags, PersonalBoard};
 
 const VERBS: &str = "`add`, `note` or `notes`";
 
@@ -35,7 +35,7 @@ pub(crate) fn board_subcommand(args: &[String]) -> Result<(), CliError> {
     }
 }
 
-/// `cc-hub board add --text TEXT [--title TEXT] [--tags "a b"] [--priority
+/// `hal board add --text TEXT [--title TEXT] [--tags "a b"] [--priority
 /// p1..p4] [--kind WORD]`
 ///
 /// The card lands in To-Do with no session; nothing is spawned. Emits
@@ -84,7 +84,7 @@ fn board_add(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-/// `cc-hub board note --task ID [--text TEXT]`
+/// `hal board note --task ID [--text TEXT]`
 ///
 /// Append a note to the card: `--text`, or stdin when there is none, so a
 /// long brief can arrive as a heredoc without a temp file. The note lands
@@ -132,7 +132,7 @@ fn piped_stdin() -> Result<String, CliError> {
     Ok(text)
 }
 
-/// `cc-hub board notes --task ID [--json]`
+/// `hal board notes --task ID [--json]`
 ///
 /// The card's notes in attach order: the record a session reads before it
 /// acts on a card. Plain output separates notes by a dated rule; `--json`
@@ -179,7 +179,7 @@ fn when(unix_secs: i64) -> String {
 /// A kind is only a kind if `[tasks].kinds` says so: one list behind the
 /// board picker, this flag, and the routing table the agent reads.
 fn known_kind(kind: &str) -> Result<String, CliError> {
-    cc_hub_lib::config::get()
+    hal_lib::config::get()
         .tasks
         .known_kind(kind)
         .map_err(|why| CliError::Usage(format!("--kind: {}", why)))
@@ -202,7 +202,7 @@ fn parse_priority(s: &str) -> Result<TaskPriority, CliError> {
 mod tests {
     use super::*;
     use crate::test_util::{argv, with_tempdir_home};
-    use cc_hub_lib::tasks::store::TaskStatus;
+    use hal_lib::tasks::store::TaskStatus;
 
     #[test]
     fn add_mints_a_todo_card_with_its_metadata() {

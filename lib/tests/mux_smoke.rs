@@ -1,7 +1,7 @@
 //! End-to-end smoke test for the mux shim on the host platform.
 //! Spawns a detached session, lists it, sends keys, captures output, kills it.
 
-use cc_hub_lib::platform::mux;
+use hal_lib::platform::mux;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -34,7 +34,7 @@ fn mux_roundtrip() {
         eprintln!("mux_roundtrip: tmux not on PATH, skipping");
         return;
     }
-    let name = format!("cchub-smoke-{}", std::process::id());
+    let name = format!("hal-smoke-{}", std::process::id());
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".into());

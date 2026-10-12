@@ -198,8 +198,8 @@ mod tests {
     fn split_app() -> App {
         let mut app = App::new();
         app.update_sessions(vec![
-            fake_session("cchub-a", SessionState::Idle),
-            fake_session("cchub-b", SessionState::Idle),
+            fake_session("hal-a", SessionState::Idle),
+            fake_session("hal-b", SessionState::Idle),
         ]);
         app.render.split = crate::app::SplitAreas {
             sidebar: ratatui::layout::Rect::new(0, 0, 32, 10),
@@ -216,8 +216,8 @@ mod tests {
     fn the_wheel_over_the_list_moves_the_cursor() {
         let mut app = App::new();
         app.update_sessions(vec![
-            fake_session("cchub-a", SessionState::Idle),
-            fake_session("cchub-b", SessionState::Idle),
+            fake_session("hal-a", SessionState::Idle),
+            fake_session("hal-b", SessionState::Idle),
         ]);
         app.sessions.layout = SessionsLayout::List;
         assert!(!app.wants_mouse());
@@ -265,8 +265,8 @@ mod tests {
     fn the_wheel_leaves_the_cursor_alone_under_a_popup() {
         let mut app = App::new();
         app.update_sessions(vec![
-            fake_session("cchub-a", SessionState::Idle),
-            fake_session("cchub-b", SessionState::Idle),
+            fake_session("hal-a", SessionState::Idle),
+            fake_session("hal-b", SessionState::Idle),
         ]);
         app.view = View::RenameSession;
 

@@ -3,7 +3,7 @@
 //! Most app tests are unix-only: they redirect `$HOME` with
 //! `with_temp_home`, which `dirs::home_dir()` honours on unix and ignores on
 //! Windows. Every `App` touches the on-disk task store, so one built outside
-//! `with_temp_home` reads and writes the developer's real `~/.cc-hub`; the
+//! `with_temp_home` reads and writes the developer's real `~/.hal`; the
 //! fixtures that build one are unix-only.
 
 #[cfg(unix)]
@@ -78,7 +78,7 @@ const AGENT_SPEC: &str = "description = \"Watches PRs\"\n\n[run]\nmax_budget_usd
 #[cfg(unix)]
 pub(super) fn app_with_agent() -> (App, Arc<RecordingRuntime>, std::path::PathBuf) {
     let (mut app, runtime) = app_with(Vec::new());
-    let dir = dirs::home_dir().unwrap().join(".cc-hub/agents/bb-prs");
+    let dir = dirs::home_dir().unwrap().join(".hal/agents/bb-prs");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("agent.toml"), AGENT_SPEC).unwrap();
     app.harness.update(vec![crate::harness::snapshot(&dir)]);

@@ -62,7 +62,7 @@ mod tests {
 
     fn fix_link(query: &str) -> FixLink {
         let raw = format!(
-            "cc-hub://fix?pr=https://bitbucket.example.com/projects/APP/repos/sample-project/pull-requests/11280{}",
+            "hal://fix?pr=https://bitbucket.example.com/projects/APP/repos/sample-project/pull-requests/11280{}",
             query
         );
         match raw.parse::<Link>() {

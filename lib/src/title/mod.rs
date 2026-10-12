@@ -1,4 +1,4 @@
-//! Cheap 2-3 word titles for sessions, generated once via `cc-hub-new -p`
+//! Cheap 2-3 word titles for sessions, generated once via `hal-new -p`
 //! (Haiku) and cached forever on disk.
 //!
 //! Runs in a dedicated scratch cwd so the JSONL that Claude Code writes for
@@ -39,7 +39,7 @@ fn cache_file() -> PathBuf {
     paths::cache_dir().join("session-titles.json")
 }
 
-/// Scratch cwd used for every `cc-hub-new -p` run. Pinned so the scanner
+/// Scratch cwd used for every `hal-new -p` run. Pinned so the scanner
 /// can skip this directory in a single equality check and the Claude
 /// projects dir contains at most one encoded folder for all our summaries.
 ///
@@ -50,7 +50,7 @@ fn cache_file() -> PathBuf {
 pub fn scratch_cwd() -> &'static Path {
     static SCRATCH: OnceLock<PathBuf> = OnceLock::new();
     SCRATCH.get_or_init(|| {
-        let base = PathBuf::from("/tmp/cc-hub-summaries");
+        let base = PathBuf::from("/tmp/hal-summaries");
         let _ = fs::create_dir_all(&base);
         fs::canonicalize(&base).unwrap_or(base)
     })

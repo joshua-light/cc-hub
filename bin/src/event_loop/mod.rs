@@ -11,9 +11,9 @@ use crate::scan_msg::{apply_scan_msg, ScanMsg};
 use crate::term::Term;
 use crate::titles::Titles;
 use crate::{logging, workers};
-use cc_hub_lib::app::{self, App, View};
-use cc_hub_lib::{config, send};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use hal_lib::app::{self, App, View};
+use hal_lib::{config, send};
 use std::io;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -29,8 +29,8 @@ pub(crate) async fn run(terminal: &mut Term, frame_bytes: Arc<AtomicU64>) -> io:
     // Swap in the persisted ack and hold trackers so `z`-idled and held
     // cards survive a restart. Loaded here, not in App::new(): tests must
     // never touch the real home, so App::new() constructs in-memory ones.
-    app.sessions.acks = cc_hub_lib::acks::Acks::load();
-    app.sessions.holds = cc_hub_lib::holds::Holds::load();
+    app.sessions.acks = hal_lib::acks::Acks::load();
+    app.sessions.holds = hal_lib::holds::Holds::load();
 
     let titles = Titles::new(config::get().title.concurrency);
 

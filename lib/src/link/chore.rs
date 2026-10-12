@@ -37,7 +37,7 @@ pub trait Chore {
         format!(
             "{}\n\nThis work is card {} on the Tasks board. \
              When {}, write one note on it: \
-             cc-hub board note --task {} --text \"Pushed: <what changed, one line>\"",
+             hal board note --task {} --text \"Pushed: <what changed, one line>\"",
             self.prompt(),
             card,
             self.done_when(),

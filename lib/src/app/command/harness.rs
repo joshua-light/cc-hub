@@ -272,14 +272,14 @@ impl App {
 fn edit_prompt(agent: &crate::harness::AgentSnapshot) -> String {
     let name = &agent.name;
     let mut p = format!(
-        "You're working on `{name}`, a cc-hub persistent agent: a headless `claude -p` \
+        "You're working on `{name}`, a hal persistent agent: a headless `claude -p` \
 that wakes on its trigger and runs one bounded turn. This directory is the agent:
 - agent.toml — its spec: trigger, model, tools, budgets, prompts. Edits apply on the next run.
 - work/ — its default working directory and its only memory between runs.
 - notes.jsonl — what it reported. events.jsonl — the harness log: runs, poll failures, halts.
 - log/ — raw stream-json of every run, one file per day.
 - state.json — harness bookkeeping. Don't edit it.
-`cc-hub agent once {name}` runs it once and prints the outcome.\n"
+`hal agent once {name}` runs it once and prints the outcome.\n"
     );
     let trouble = match (&agent.spec, &agent.state.stopped_reason, agent.last_run()) {
         (Err(e), _, _) => Some(format!("agent.toml doesn't load: {}", e)),

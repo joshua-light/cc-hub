@@ -41,19 +41,19 @@ fn ensure_path_trusted_at(cwd: &str, config_path: PathBuf) -> io::Result<()> {
     if !config_path.exists() {
         return Ok(());
     }
-    // Serialize cc-hub's own read-modify-write of this account-wide file so a
+    // Serialize hal's own read-modify-write of this account-wide file so a
     // concurrent spawn (e.g. a deep link racing a keypress spawn) can't
     // clobber another project's freshly written trust entry via last-writer-
     // wins. The lock lives in a sidecar file because the store is tempfile+
     // rename — flock follows the inode, so the target itself can't be locked
     // across a replace. Residual limitation: the running `claude` process does
-    // NOT take this lock, so it only prevents cc-hub-vs-cc-hub lost updates and
+    // NOT take this lock, so it only prevents hal-vs-hal lost updates and
     // narrows — does not close — the window against an external writer.
     let mut lock_path = config_path.clone().into_os_string();
-    lock_path.push(".cc-hub.lock");
+    lock_path.push(".hal.lock");
     let _lock = crate::persist::lock_exclusive(Path::new(&lock_path))?;
     // Read AFTER taking the lock so the mutation applies to fresh state, not a
-    // snapshot another cc-hub writer has since superseded. `_lock` stays live
+    // snapshot another hal writer has since superseded. `_lock` stays live
     // to the end of the function; Drop releases the flock after the rename.
     let canon = std::fs::canonicalize(cwd).unwrap_or_else(|_| Path::new(cwd).to_path_buf());
     let data = match std::fs::read_to_string(&config_path) {

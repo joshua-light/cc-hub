@@ -354,7 +354,7 @@ mod tests {
         let hb = crate::sessions::pi_bridge::Heartbeat {
             agent: "codex".into(),
             pid: 4242,
-            tmux: "cchub-1-2".into(),
+            tmux: "hal-1-2".into(),
             cwd: "/tmp/proj".into(),
             session_file: Some(PathBuf::from("/does/not/exist/019f9356.jsonl")),
             session_id: Some("019f9356".into()),
@@ -367,7 +367,7 @@ mod tests {
         assert_eq!(info.session_id, "019f9356");
         assert_eq!(info.cwd, "/tmp/proj");
         assert_eq!(info.agent_kind, AgentKind::Pi);
-        assert_eq!(info.tmux_session.as_deref(), Some("cchub-1-2"));
+        assert_eq!(info.tmux_session.as_deref(), Some("hal-1-2"));
         assert_eq!(info.model.as_deref(), Some("openai-codex/gpt-5.6-luna"));
         assert_eq!(info.state, SessionState::Idle);
         // The (not-yet-existing) transcript path is retained so a later tick

@@ -1,6 +1,6 @@
 //! Dispatch a prompt into a running Claude Code session via the multiplexer.
 //!
-//! The session must live inside a multiplexer pane (either because cc-hub
+//! The session must live inside a multiplexer pane (either because hal
 //! spawned it via [`crate::spawn`], or because the user set it up that way
 //! by hand). We find the pane by matching the Claude PID's ancestor chain
 //! against the mux's pane list, then inject the prompt with `send-keys`.
@@ -46,11 +46,11 @@ impl Delivery {
     }
 }
 
-/// Opens every prompt cc-hub injects on its own behalf rather than the
+/// Opens every prompt hal injects on its own behalf rather than the
 /// user's. A pane paste has no channel of its own — whatever we type lands
 /// in the agent's transcript as a user turn — so the marker is what tells
 /// the agent, and [`crate::conversation`], that nobody said this.
-pub const AUTOMATION_MARKER: &str = "[cc-hub automation notice — not from the user]";
+pub const AUTOMATION_MARKER: &str = "[hal automation notice — not from the user]";
 
 /// Inject `text` as an automation notice: the marker line, then the body.
 pub fn send_notice(session: &str, text: &str) -> io::Result<()> {
@@ -74,7 +74,7 @@ pub fn tmux_client_pids(session_name: &str) -> Vec<u32> {
     mux::client_pids(session_name)
 }
 
-/// Kill the multiplexer session `session_name`. Ends any `cc-hub-new`/claude
+/// Kill the multiplexer session `session_name`. Ends any `hal-new`/claude
 /// processes running inside and causes attached clients to exit (closing
 /// their terminal windows).
 pub fn kill_tmux_session(session_name: &str) -> io::Result<()> {

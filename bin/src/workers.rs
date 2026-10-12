@@ -2,9 +2,9 @@
 //! on the tokio blocking pool and reports back as a [`ScanMsg`].
 
 use crate::scan_msg::ScanMsg;
-use cc_hub_lib::app;
-use cc_hub_lib::sessions::{count, scanner, watcher};
-use cc_hub_lib::{config, harness, metrics, models, send, usage};
+use hal_lib::app;
+use hal_lib::sessions::{count, scanner, watcher};
+use hal_lib::{config, harness, metrics, models, send, usage};
 use std::io;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -102,7 +102,7 @@ pub(crate) fn spawn_builds(scan_tx: &mpsc::Sender<ScanMsg>) {
 }
 
 fn builds_snapshot() -> app::BuildsSnapshot {
-    use cc_hub_lib::builds::{self, hold, recipe};
+    use hal_lib::builds::{self, hold, recipe};
     app::BuildsSnapshot {
         recipes: recipe::all().map(|(name, _)| name.to_string()).collect(),
         builds: builds::all(),
@@ -117,7 +117,7 @@ fn builds_snapshot() -> app::BuildsSnapshot {
 }
 
 fn builds_probe() -> app::BuildsProbe {
-    use cc_hub_lib::builds::{hold, recipe};
+    use hal_lib::builds::{hold, recipe};
     let mut probe = app::BuildsProbe::default();
     for (name, recipe) in recipe::all() {
         if let Some(resource) = &recipe.resource {
@@ -222,8 +222,7 @@ pub(crate) fn spawn_task_stats(task_stats_tx: mpsc::Sender<ScanMsg>) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            if let Ok(stats) = tokio::task::spawn_blocking(cc_hub_lib::tasks::stats::refresh).await
-            {
+            if let Ok(stats) = tokio::task::spawn_blocking(hal_lib::tasks::stats::refresh).await {
                 if task_stats_tx.send(ScanMsg::TaskStats(stats)).await.is_err() {
                     break;
                 }

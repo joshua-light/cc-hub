@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     fn an_agent_owns_the_sessions_it_ran_and_its_own_directory() {
-        let dir = Path::new("/home/me/.cc-hub/agents/bb-prs");
+        let dir = Path::new("/home/me/.hal/agents/bb-prs");
         let mut state = AgentState {
             session_id: Some("persistent".into()),
             ..Default::default()
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn the_newest_known_session_wins() {
-        let dir = Path::new("/home/me/.cc-hub/agents/a");
+        let dir = Path::new("/home/me/.hal/agents/a");
         let mut state = AgentState {
             session_id: Some("persistent".into()),
             ..Default::default()

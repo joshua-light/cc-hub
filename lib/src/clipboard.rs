@@ -3,10 +3,10 @@
 //! Wraps whichever of `wl-copy`/`wl-paste`, `xclip`, or `pbcopy`/`pbpaste` is
 //! installed via a small shell fallback chain. Copies additionally go out as
 //! OSC 52 escapes — that is what makes them land on the *viewer's* clipboard
-//! when cc-hub itself runs on a remote box over ssh (the host chain alone
+//! when hal itself runs on a remote box over ssh (the host chain alone
 //! only reaches the remote machine's clipboard) — via two routes:
 //!
-//! - [`copy`] writes the escape straight to cc-hub's own /dev/tty, and
+//! - [`copy`] writes the escape straight to hal's own /dev/tty, and
 //! - the composed shell command forwards through tmux `load-buffer -w` to
 //!   every attached client's terminal. That command is handed to tmux's
 //!   `copy-command` server option, so mouse-drag selections inside an
@@ -44,9 +44,9 @@ pub const COPY_SHELL: &str =
 pub fn copy_shell_with_osc52(mux_bin: &str) -> String {
     format!(
         "tmp=$(mktemp) || exit 1; cat >\"$tmp\"; \
-         \"{mux_bin}\" load-buffer -b cchub-clip \"$tmp\" 2>/dev/null; \
+         \"{mux_bin}\" load-buffer -b hal-clip \"$tmp\" 2>/dev/null; \
          for c in $(\"{mux_bin}\" list-clients -F \"#{{client_name}}\" 2>/dev/null); do \
-         \"{mux_bin}\" load-buffer -b cchub-clip -w -t \"$c\" \"$tmp\" 2>/dev/null; done; \
+         \"{mux_bin}\" load-buffer -b hal-clip -w -t \"$c\" \"$tmp\" 2>/dev/null; done; \
          ({COPY_SHELL}) <\"$tmp\"; rm -f \"$tmp\""
     )
 }
@@ -65,7 +65,7 @@ pub fn paste() -> io::Result<String> {
 /// tmux, plus the OSC 52 forward for remote viewers. Silently no-ops if no
 /// backend is installed (the chain in [`COPY_SHELL`] short-circuits to
 /// success after each `2>/dev/null`). Plain "tmux" is fine here: this runs
-/// with cc-hub's own PATH, not the tmux server's.
+/// with hal's own PATH, not the tmux server's.
 pub fn copy(text: &str) -> io::Result<()> {
     // The tmux fan-out below only reaches *attached* clients — with no
     // session open (e.g. copying a task id from the grid) there are none,
@@ -89,11 +89,11 @@ pub fn copy(text: &str) -> io::Result<()> {
 }
 
 /// Emit `text` to the controlling terminal as an OSC 52 escape, so the
-/// *viewer's* clipboard is set even when cc-hub runs on a remote box over
-/// ssh — the host chain in [`COPY_SHELL`] only reaches the machine cc-hub
+/// *viewer's* clipboard is set even when hal runs on a remote box over
+/// ssh — the host chain in [`COPY_SHELL`] only reaches the machine hal
 /// runs on. Goes to /dev/tty rather than stdout so it bypasses whatever
 /// the TUI backend is doing with stdout. Best-effort: no controlling
-/// terminal means the host chain is the only path. If cc-hub itself runs
+/// terminal means the host chain is the only path. If hal itself runs
 /// inside a tmux, that tmux forwards the escape outward (`set-clipboard`
 /// defaults to `external`).
 #[cfg(unix)]

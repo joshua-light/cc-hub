@@ -1,4 +1,4 @@
-use cc_hub_lib::ops::OpError;
+use hal_lib::ops::OpError;
 
 use super::print_json;
 

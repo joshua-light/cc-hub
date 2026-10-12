@@ -2,13 +2,13 @@
 //! events, run one bounded `claude -p` tick, leave findings in files, and
 //! ask when they need a human.
 //!
-//! Layout under `~/.cc-hub/agents/<name>/`:
+//! Layout under `~/.hal/agents/<name>/`:
 //!
 //! ```text
 //! agent.toml          the spec (see spec.rs); edits apply on the next tick
 //! work/               the agent's whole world (default workdir)
 //! state.json          supervisor-owned: ticks, spend, failures, halt reason
-//! notes.jsonl         outbox to the user (`cc-hub agent note`)
+//! notes.jsonl         outbox to the user (`hal agent note`)
 //! events.jsonl        harness log: runs, poll failures, halts, hub edits
 //! inbox/              events: new files, then processing/ done/ failed/
 //! log/YYYY-MM-DD.jsonl raw stream-json per tick
@@ -61,9 +61,9 @@ pub(crate) use tick::truncate;
 pub use tick::{budget_block, tick_once, MAX_FAILURES_IN_A_ROW, MAX_HISTORY};
 pub use trigger::Event;
 
-/// `~/.cc-hub/agents/`
+/// `~/.hal/agents/`
 pub fn root() -> Option<PathBuf> {
-    crate::platform::paths::cc_hub_home().map(|h| h.join("agents"))
+    crate::platform::paths::hal_home().map(|h| h.join("agents"))
 }
 
 /// Whether the agents root existed at process start. Cached because

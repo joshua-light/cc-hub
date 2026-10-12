@@ -1,12 +1,12 @@
-//! The `cc-hub://` deep link: the URL an outside tool opens to make the hub
-//! start something. An OS scheme handler routes it to `cc-hub open <url>`,
+//! The `hal://` deep link: the URL an outside tool opens to make the hub
+//! start something. An OS scheme handler routes it to `hal open <url>`,
 //! which parses it here and acts on it in [`crate::ops::link`].
 //!
 //! ```text
-//! cc-hub://review?depth=light&pr=https%3A%2F%2Fbitbucket.example.com%2Fprojects%2FAPP%2Frepos%2Fsample-project%2Fpull-requests%2F11280
-//! cc-hub://fix?pr=https%3A%2F%2Fbitbucket.example.com%2Fprojects%2FAPP%2Frepos%2Fsample-project%2Fpull-requests%2F11280&kind=tps
-//! cc-hub://merge-target?pr=https%3A%2F%2Fbitbucket.example.com%2Fprojects%2FAPP%2Frepos%2Fsample-project%2Fpull-requests%2F11280&kind=tps
-//! cc-hub://task?id=tk-1788509616255974000&dir=%2FUsers%2Fme%2Fgit%2Fself%2Fcc-hub
+//! hal://review?depth=light&pr=https%3A%2F%2Fbitbucket.example.com%2Fprojects%2FAPP%2Frepos%2Fsample-project%2Fpull-requests%2F11280
+//! hal://fix?pr=https%3A%2F%2Fbitbucket.example.com%2Fprojects%2FAPP%2Frepos%2Fsample-project%2Fpull-requests%2F11280&kind=tps
+//! hal://merge-target?pr=https%3A%2F%2Fbitbucket.example.com%2Fprojects%2FAPP%2Frepos%2Fsample-project%2Fpull-requests%2F11280&kind=tps
+//! hal://task?id=tk-1788509616255974000&dir=%2FUsers%2Fme%2Fgit%2Fself%2Fhal
 //! ```
 //!
 //! This module is pure: a string becomes a [`Link`], and each link renders
@@ -42,9 +42,9 @@ use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-pub const SCHEME: &str = "cc-hub";
+pub const SCHEME: &str = "hal";
 
-/// A parsed `cc-hub://` URL. Each variant is one thing the hub can be asked
+/// A parsed `hal://` URL. Each variant is one thing the hub can be asked
 /// to start from outside.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Link {
@@ -55,7 +55,7 @@ pub enum Link {
 }
 
 impl Link {
-    /// The path segment that names this kind of link (`cc-hub://<kind>?…`).
+    /// The path segment that names this kind of link (`hal://<kind>?…`).
     pub fn kind(&self) -> &'static str {
         match self {
             Link::Review(_) => "review",
@@ -84,7 +84,7 @@ impl FromStr for Link {
             .get(..scheme_len)
             .is_some_and(|head| head.eq_ignore_ascii_case(&format!("{}:", SCHEME)));
         if !has_scheme {
-            return Err(LinkError::NotCcHub(s.to_string()));
+            return Err(LinkError::WrongScheme(s.to_string()));
         }
         let rest = s[scheme_len..].trim_start_matches('/');
         let (kind, query) = rest.split_once('?').unwrap_or((rest, ""));
@@ -134,7 +134,7 @@ pub(crate) fn titled(prefix: &str, subject: &str) -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkError {
-    NotCcHub(String),
+    WrongScheme(String),
     UnknownKind(String),
     MissingParam(&'static str),
     BadDepth(String),
@@ -146,7 +146,7 @@ pub enum LinkError {
 impl fmt::Display for LinkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LinkError::NotCcHub(s) => write!(f, "not a {}:// link: {}", SCHEME, s),
+            LinkError::WrongScheme(s) => write!(f, "not a {}:// link: {}", SCHEME, s),
             LinkError::UnknownKind(k) => {
                 write!(
                     f,
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn depth_is_case_insensitive_and_scheme_too() {
-        let r: Link = format!("CC-HUB://review?depth=Full&pr={}", PR)
+        let r: Link = format!("HAL://review?depth=Full&pr={}", PR)
             .parse()
             .unwrap();
         assert_eq!(
@@ -213,14 +213,14 @@ mod tests {
     fn rejects_foreign_scheme() {
         assert!(matches!(
             "https://example.com".parse::<Link>(),
-            Err(LinkError::NotCcHub(_))
+            Err(LinkError::WrongScheme(_))
         ));
     }
 
     #[test]
     fn rejects_unknown_kind() {
         assert!(matches!(
-            "cc-hub://deploy?pr=x".parse::<Link>(),
+            "hal://deploy?pr=x".parse::<Link>(),
             Err(LinkError::UnknownKind(k)) if k == "deploy"
         ));
     }
@@ -228,15 +228,15 @@ mod tests {
     #[test]
     fn rejects_missing_and_bad_params() {
         assert_eq!(
-            format!("cc-hub://review?pr={}", PR).parse::<Link>(),
+            format!("hal://review?pr={}", PR).parse::<Link>(),
             Err(LinkError::MissingParam("depth"))
         );
         assert_eq!(
-            "cc-hub://review?depth=light".parse::<Link>(),
+            "hal://review?depth=light".parse::<Link>(),
             Err(LinkError::MissingParam("pr"))
         );
         assert!(matches!(
-            format!("cc-hub://review?depth=deep&pr={}", PR).parse::<Link>(),
+            format!("hal://review?depth=deep&pr={}", PR).parse::<Link>(),
             Err(LinkError::BadDepth(d)) if d == "deep"
         ));
     }

@@ -1,4 +1,4 @@
-//! The runner: `cc-hub build _run <id>`, detached, the one process that moves
+//! The runner: `hal build _run <id>`, detached, the one process that moves
 //! a build forward.
 //!
 //! It waits for its turn, since a recipe runs one build at a time, oldest
@@ -128,7 +128,7 @@ fn follow(
         match cancelled_at {
             None if load(id)?.cancel => {
                 cancelled_at = Some(Instant::now());
-                append_output(id, "cc-hub: cancelling")?;
+                append_output(id, "hal: cancelling")?;
                 cancel(id, recipe, build)?;
             }
             Some(at) if at.elapsed() > CANCEL_GRACE => {
@@ -169,7 +169,7 @@ fn stream(id: &str, argv: &[String], cwd: &str) -> io::Result<(Child, Receiver<S
     let (reader, writer) = io::pipe()?;
     let mut command = recipe::command(argv, cwd);
     command
-        .env("CC_HUB_BUILD", id)
+        .env("HAL_BUILD", id)
         .stdin(std::process::Stdio::null())
         .stdout(writer.try_clone()?)
         .stderr(writer);
@@ -244,7 +244,7 @@ impl HoldWatch {
         }
         if self.pids.len() > 3 {
             return Err(io::Error::other(format!(
-                "the hold on {} keeps ending; try `cc-hub resource claim {} --as test`",
+                "the hold on {} keeps ending; try `hal resource claim {} --as test`",
                 resource, resource
             )));
         }
@@ -257,7 +257,7 @@ impl HoldWatch {
 }
 
 fn fail(id: &str, error: String) -> io::Result<BuildStatus> {
-    let _ = append_output(id, &format!("cc-hub: {}", error));
+    let _ = append_output(id, &format!("hal: {}", error));
     update(id, |b| b.finish(BuildStatus::Failed, Some(error)))?;
     Ok(BuildStatus::Failed)
 }

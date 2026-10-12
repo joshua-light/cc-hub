@@ -27,9 +27,9 @@ class TmuxIntegrationTests(unittest.TestCase):
             executable.write_text('#!' + sys.executable + '''
 import json, os, sys, time
 from pathlib import Path
-directory=Path(os.environ['CC_HUB_RESOURCE_DIR'])/'workers'/os.environ['CC_HUB_RESOURCE_WORKER']
+directory=Path(os.environ['HAL_RESOURCE_DIR'])/'workers'/os.environ['HAL_RESOURCE_WORKER']
 directory.mkdir(parents=True,exist_ok=True)
-(directory/('receipt-'+os.environ['CC_HUB_RESOURCE_GENERATION']+'.json')).write_text(json.dumps({
+(directory/('receipt-'+os.environ['HAL_RESOURCE_GENERATION']+'.json')).write_text(json.dumps({
  'pid':os.getpid(), 'home':os.environ.get('CLAUDE_CONFIG_DIR'),
  'api_key_present':'ANTHROPIC_API_KEY' in os.environ, 'argv': sys.argv[1:]}))
 while True: time.sleep(.1)
@@ -53,11 +53,11 @@ accounts=["first","second"]
 [routing.default.implementation]
 profiles=["sonnet"]
 ''')
-            env = dict(os.environ, CC_HUB_RESOURCE_DIR=str(base / 'state'),
-                       CC_HUB_RESOURCE_CONFIG=str(config), TMUX_TMPDIR=str(base / 'socket'),
+            env = dict(os.environ, HAL_RESOURCE_DIR=str(base / 'state'),
+                       HAL_RESOURCE_CONFIG=str(config), TMUX_TMPDIR=str(base / 'socket'),
                        ANTHROPIC_API_KEY='fixture-must-not-leak')
             env.pop('TMUX', None)
-            env.pop('CC_HUB_BINARY', None)
+            env.pop('HAL_BINARY', None)
             with patch.dict(os.environ, env, clear=True):
                 try:
                     cfg = broker.load_config()

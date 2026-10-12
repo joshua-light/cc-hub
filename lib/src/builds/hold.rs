@@ -6,12 +6,12 @@
 //! claim the resource through the broker. Builds come in bursts, and handing
 //! the resource back between two of them would let a session in between, so
 //! the first build claims and the claim outlives it. Space on the tab (or
-//! `cc-hub build reserve` / `release`) takes it ahead of any build and lets
+//! `hal build reserve` / `release`) takes it ahead of any build and lets
 //! it go.
 //!
 //! The broker ties a guest's claim to a live process, so the hold is one:
-//! `cc-hub build _hold <resource>`, detached, claiming as [`GUEST`] and then
-//! doing nothing but living. Its file under `~/.cc-hub/builds/holds/` says
+//! `hal build _hold <resource>`, detached, claiming as [`GUEST`] and then
+//! doing nothing but living. Its file under `~/.hal/builds/holds/` says
 //! where it stands, for the runners that wait on it and the tab that shows it.
 
 use crate::persist::now_unix_secs;
@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-/// The name the hold claims under, as `cc-hub resource list` shows it.
+/// The name the hold claims under, as `hal resource list` shows it.
 pub const GUEST: &str = "Builds";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -152,7 +152,7 @@ pub fn known(resource: &str) -> io::Result<bool> {
     Ok(broker(&["list"])?.get(resource).is_some())
 }
 
-/// `cc-hub resource <args>`, answered by its `result`.
+/// `hal resource <args>`, answered by its `result`.
 fn broker(args: &[&str]) -> io::Result<serde_json::Value> {
     let output = Command::new(std::env::current_exe()?)
         .arg("resource")

@@ -1,7 +1,7 @@
-//! `cc-hub usage`: the shared quota store, for scripts.
+//! `hal usage`: the shared quota store, for scripts.
 use super::CliError;
-use cc_hub_lib::platform::paths;
-use cc_hub_lib::usage::{self, Account};
+use hal_lib::platform::paths;
+use hal_lib::usage::{self, Account};
 
 pub(crate) fn usage(args: &[String]) -> Result<(), CliError> {
     let mut home = None;

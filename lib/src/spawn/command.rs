@@ -147,7 +147,7 @@ pub(super) fn build_agent_command(
                     .ok_or_else(|| io::Error::other("home dir unavailable for pi heartbeat dir"))?;
                 std::fs::create_dir_all(&heartbeat_dir)?;
                 cmd = format!(
-                    "CC_HUB_TMUX={} CC_HUB_AGENT_ID={} CC_HUB_HEARTBEAT_DIR={} {}",
+                    "HAL_TMUX={} HAL_AGENT_ID={} HAL_HEARTBEAT_DIR={} {}",
                     shell_quote(tmux_name),
                     shell_quote(&agent.id),
                     shell_quote(&heartbeat_dir.to_string_lossy()),
@@ -227,9 +227,9 @@ pub(super) fn build_agent_command(
 /// syntax: `unset A B; export K='v'; cmd`. The string is parsed by the user's
 /// interactive shell (`$SHELL -ic`, see
 /// [`crate::platform::mux::spawn_detached`]), so `cmd` stays at command
-/// position and rc aliases such as `cc-hub-new` still expand. The earlier
+/// position and rc aliases such as `hal-new` still expand. The earlier
 /// `env -u A ... /bin/sh -c 'cmd'` form re-parsed `cmd` in a bare `/bin/sh`
-/// that reads no rc file: `cc-hub-new: command not found`, and the hub
+/// that reads no rc file: `hal-new: command not found`, and the hub
 /// reported the session as "exited during startup".
 ///
 /// `export` rather than a `K='v' cmd` prefix: a prefix scopes to the first
@@ -265,28 +265,28 @@ mod tests {
     use crate::agent::{AgentConfig, AgentKind};
 
     /// The account wrapper is plain POSIX statements the interactive shell
-    /// parses itself, so rc aliases (`cc-hub-new`) still resolve: no `/bin/sh
+    /// parses itself, so rc aliases (`hal-new`) still resolve: no `/bin/sh
     /// -c` re-parse, no `env` binary. `export` scopes the whole command, not
     /// just its first simple command.
     #[test]
     fn account_env_prefix_is_posix_statements_before_the_command() {
         let unset = ["A".to_string(), "B".to_string()];
         let set = [("K".to_string(), "v w".to_string())];
-        let cmd = "cc-hub-new --resume 'x' && echo done";
+        let cmd = "hal-new --resume 'x' && echo done";
         let out = account_env_prefix(&unset, &set, cmd);
         assert_eq!(out, format!("unset A B; export K='v w'; {cmd}"));
         assert!(out.ends_with(&format!("; {cmd}")), "got: {out}");
         assert!(!out.contains("/bin/sh"), "got: {out}");
         assert!(!out.contains("env "), "got: {out}");
         assert_eq!(
-            account_env_prefix(&unset, &[], "cc-hub-new"),
-            "unset A B; cc-hub-new"
+            account_env_prefix(&unset, &[], "hal-new"),
+            "unset A B; hal-new"
         );
         assert_eq!(
-            account_env_prefix(&[], &set, "cc-hub-new"),
-            "export K='v w'; cc-hub-new"
+            account_env_prefix(&[], &set, "hal-new"),
+            "export K='v w'; hal-new"
         );
-        assert_eq!(account_env_prefix(&[], &[], "cc-hub-new"), "cc-hub-new");
+        assert_eq!(account_env_prefix(&[], &[], "hal-new"), "hal-new");
     }
 
     #[test]
@@ -300,7 +300,7 @@ mod tests {
         };
         let cmd = build_agent_command(
             &agent,
-            "cchub-1-2",
+            "hal-1-2",
             None,
             None,
             Some("claude-sonnet-5"),
@@ -312,7 +312,7 @@ mod tests {
             "got: {}",
             cmd
         );
-        let cmd = build_agent_command(&agent, "cchub-1-2", None, None, None, false).unwrap();
+        let cmd = build_agent_command(&agent, "hal-1-2", None, None, None, false).unwrap();
         assert!(!cmd.contains("--model"), "got: {}", cmd);
     }
 
@@ -326,7 +326,7 @@ mod tests {
             models: Vec::new(),
         };
         let cmd =
-            build_agent_command(&agent, "cchub-1-2", None, None, Some("gpt-5.6"), false).unwrap();
+            build_agent_command(&agent, "hal-1-2", None, None, Some("gpt-5.6"), false).unwrap();
         assert!(cmd.contains("--model 'gpt-5.6'"), "got: {}", cmd);
     }
 
@@ -342,7 +342,7 @@ mod tests {
         };
         let cmd = build_agent_command(
             &agent,
-            "cchub-1-2",
+            "hal-1-2",
             None,
             Some("do the thing"),
             Some("gpt-5.6-luna"),
@@ -366,7 +366,7 @@ mod tests {
         };
         let cmd = build_agent_command(
             &agent,
-            "cchub-1-2",
+            "hal-1-2",
             Some(super::SessionTarget::Resume("sid-1".into())),
             Some("pick up where you left off"),
             None,
@@ -390,7 +390,7 @@ mod tests {
         };
         let cmd = build_agent_command(
             &agent,
-            "cchub-1-2",
+            "hal-1-2",
             Some(super::SessionTarget::Fresh("0000-fresh-uuid".into())),
             None,
             None,
@@ -414,7 +414,7 @@ mod tests {
         };
         let err = build_agent_command(
             &agent,
-            "cchub-1-2",
+            "hal-1-2",
             Some(super::SessionTarget::Fresh("0000-fresh-uuid".into())),
             None,
             None,
@@ -436,7 +436,7 @@ mod tests {
         // A resumed session restores its own model, so `-m` must NOT be added.
         let cmd = build_agent_command(
             &agent,
-            "cchub-1-2",
+            "hal-1-2",
             Some(super::SessionTarget::Resume("019f60ca-uuid".into())),
             None,
             Some("gpt-5.6-luna"),
@@ -457,7 +457,7 @@ mod tests {
         };
         let err = build_agent_command(
             &agent,
-            "cchub-1-2",
+            "hal-1-2",
             Some(super::SessionTarget::ResumeFile("/x/s.jsonl".into())),
             None,
             None,

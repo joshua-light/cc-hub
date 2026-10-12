@@ -2,7 +2,7 @@
 //!
 //! Two flavours of lookup:
 //!
-//! - **Detached-tmux agents** (what cc-hub spawns): the Claude process
+//! - **Detached-tmux agents** (what hal spawns): the Claude process
 //!   tree lives under the tmux server (reparented to init), so walking up
 //!   from the Claude pid never reaches a window. We ask tmux for the
 //!   session's *client* pids — those are the `tmux attach` processes, which
@@ -48,7 +48,7 @@ pub fn focus_window(pid: u32) -> FocusOutcome {
         warn!("no window found for pid {} or any ancestor", pid);
         #[cfg(target_os = "macos")]
         let message = format!(
-            "could not select window for PID {} — grant cc-hub Accessibility access",
+            "could not select window for PID {} — grant hal Accessibility access",
             pid
         );
         #[cfg(not(target_os = "macos"))]

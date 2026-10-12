@@ -319,12 +319,12 @@ mod tests {
     #[test]
     fn malformed_interior_line_counts_once_across_two_reads() {
         let corrupt = std::env::temp_dir().join(format!(
-            "cc_hub_malformed_test_{}_{}.jsonl",
+            "hal_malformed_test_{}_{}.jsonl",
             std::process::id(),
             "corrupt"
         ));
         let clean = std::env::temp_dir().join(format!(
-            "cc_hub_malformed_test_{}_{}.jsonl",
+            "hal_malformed_test_{}_{}.jsonl",
             std::process::id(),
             "clean"
         ));
@@ -393,7 +393,7 @@ mod tests {
     #[test]
     fn read_jsonl_tail_for_state_expands_past_64k_of_tool_results() {
         let tmp =
-            std::env::temp_dir().join(format!("cc_hub_expand_test_{}.jsonl", std::process::id()));
+            std::env::temp_dir().join(format!("hal_expand_test_{}.jsonl", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
 
         let mut f = std::fs::File::create(&tmp).expect("create tmp");

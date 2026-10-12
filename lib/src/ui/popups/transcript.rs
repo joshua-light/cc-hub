@@ -81,7 +81,7 @@ pub(super) fn render_prompt_block(lines: &mut Vec<Line<'static>>, body: &str) {
     );
 }
 
-/// A notice cc-hub injected on its own behalf. Marked and coloured apart
+/// A notice hal injected on its own behalf. Marked and coloured apart
 /// from [`render_prompt_block`] so the reader never mistakes it for a prompt
 /// the user wrote.
 pub(super) fn render_notice_block(lines: &mut Vec<Line<'static>>, body: &str) {

@@ -1,5 +1,5 @@
 //! Space-to-hold: sessions parked in the On hold section, persisted to
-//! `~/.cc-hub/holds.json`; see [`Holds`].
+//! `~/.hal/holds.json`; see [`Holds`].
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashSet};
@@ -7,7 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::persist::save_json;
-use crate::platform::paths::cc_hub_home;
+use crate::platform::paths::hal_home;
 
 /// Sessions the user put on hold. A held session keeps its real state; it
 /// only leaves its project group for the On hold section at the bottom of
@@ -15,7 +15,7 @@ use crate::platform::paths::cc_hub_home;
 ///
 /// Unlike an [`crate::acks::Acks`] entry, a hold ignores activity: it lasts
 /// until Space releases it or the session drops out of the scan. It
-/// persists to `~/.cc-hub/holds.json` (via [`Holds::load`]), mirrored on
+/// persists to `~/.hal/holds.json` (via [`Holds::load`]), mirrored on
 /// every mutation.
 #[derive(Default)]
 pub struct Holds {
@@ -37,7 +37,7 @@ impl Holds {
         Self::default()
     }
 
-    /// Load persisted holds from `~/.cc-hub/holds.json`; subsequent
+    /// Load persisted holds from `~/.hal/holds.json`; subsequent
     /// mutations save back to the same file. A missing or unreadable file
     /// starts empty.
     pub fn load() -> Self {
@@ -95,7 +95,7 @@ impl Holds {
 }
 
 fn holds_path() -> Option<PathBuf> {
-    cc_hub_home().map(|h| h.join("holds.json"))
+    hal_home().map(|h| h.join("holds.json"))
 }
 
 #[cfg(all(test, unix))]

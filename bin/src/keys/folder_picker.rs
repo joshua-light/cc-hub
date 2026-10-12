@@ -4,10 +4,10 @@
 #![allow(clippy::collapsible_match)]
 
 use crate::scan_msg::ScanMsg;
-use cc_hub_lib::app::App;
-use cc_hub_lib::folder_picker::PickerMode;
-use cc_hub_lib::spawn;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use hal_lib::app::App;
+use hal_lib::folder_picker::PickerMode;
+use hal_lib::spawn;
 use tokio::sync::mpsc;
 
 pub(super) fn handle(app: &mut App, key: KeyEvent) {
@@ -166,7 +166,7 @@ pub(super) fn handle_gh_create(app: &mut App, key: KeyEvent, scan_tx: &mpsc::Sen
                 let name_for_msg = trimmed.clone();
                 tokio::spawn(async move {
                     let result = tokio::task::spawn_blocking(move || {
-                        cc_hub_lib::gh::create_repo(&cwd, &trimmed, private)
+                        hal_lib::gh::create_repo(&cwd, &trimmed, private)
                     })
                     .await
                     .unwrap_or_else(|e| Err(format!("task panicked: {}", e)));

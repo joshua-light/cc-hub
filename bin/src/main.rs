@@ -1,4 +1,4 @@
-//! The cc-hub binary: CLI verbs first, then the TUI.
+//! The hal binary: CLI verbs first, then the TUI.
 //!
 //! - `args`: global flags stripped before verb dispatch.
 //! - `cli`: the JSON CLI verbs.
@@ -9,8 +9,8 @@
 //! - `workers`, `scan_msg`: background tasks and the messages they send.
 //! - `titles`: background session titling.
 
-use cc_hub_lib::sessions::scanner;
-use cc_hub_lib::{models, title};
+use hal_lib::sessions::scanner;
+use hal_lib::{models, title};
 use std::io;
 
 mod args;
@@ -30,6 +30,9 @@ mod workers;
 async fn main() -> io::Result<()> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let argv = args::extract_claude_config_dir(argv);
+    if let Err(e) = hal_lib::platform::paths::migrate_from_cc_hub() {
+        eprintln!("hal: could not move cc-hub's state to hal's: {}", e);
+    }
     if let Some(code) = cli::dispatch(&argv) {
         std::process::exit(code);
     }

@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use crate::platform::paths::cc_hub_home;
+use crate::platform::paths::hal_home;
 
 /// Board-level metadata that isn't per-task: currently just the cwd of the
 /// most recent assignment, kept across restarts so the assign picker promotes
@@ -16,7 +16,7 @@ pub(super) struct BoardMeta {
 }
 
 fn board_meta_path() -> Option<PathBuf> {
-    cc_hub_home().map(|h| h.join("board.json"))
+    hal_home().map(|h| h.join("board.json"))
 }
 
 pub(super) fn load_board_meta() -> BoardMeta {
@@ -47,7 +47,7 @@ mod tests {
             let mut b = PersonalBoard::load();
             assert_eq!(b.last_assign_cwd(), None);
             let id = b.add("t").unwrap().unwrap();
-            b.assign(&id, "/tmp/proj", "claude", "cchub-1-42").unwrap();
+            b.assign(&id, "/tmp/proj", "claude", "hal-1-42").unwrap();
             assert_eq!(PersonalBoard::load().last_assign_cwd(), Some("/tmp/proj"));
             // Deleting the task must not forget where it ran.
             b.remove(&id).unwrap();

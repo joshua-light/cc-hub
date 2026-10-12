@@ -3,14 +3,14 @@
 //! Centralised so callers don't bake `/tmp` or `~/.config/<compositor>` into
 //! unrelated modules.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// Cache directory for cc-hub. Falls back to `/tmp` when `dirs::cache_dir`
+/// Cache directory for hal. Falls back to `/tmp` when `dirs::cache_dir`
 /// can't resolve a home.
 pub fn cache_dir() -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("cc-hub")
+        .join("hal")
 }
 
 /// `~/x` → `<home>/x`; anything else is taken as given. Config and links
@@ -22,16 +22,40 @@ pub fn expand_home(p: &str) -> PathBuf {
     }
 }
 
-pub fn cc_hub_home() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".cc-hub"))
+pub fn hal_home() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".hal"))
+}
+
+/// hal was called cc-hub, and kept its state in `~/.cc-hub` and its cache
+/// in `<cache>/cc-hub`. Move both to their hal names once, leaving a symlink
+/// behind on unix so scripts and running sessions that still say the old path
+/// reach the new one. A no-op once the new directory exists.
+pub fn migrate_from_cc_hub() -> std::io::Result<()> {
+    if let Some(home) = dirs::home_dir() {
+        move_with_symlink(&home.join(".cc-hub"), &home.join(".hal"))?;
+    }
+    if let Some(cache) = dirs::cache_dir() {
+        move_with_symlink(&cache.join("cc-hub"), &cache_dir())?;
+    }
+    Ok(())
+}
+
+fn move_with_symlink(old: &Path, new: &Path) -> std::io::Result<()> {
+    if new.exists() || !old.is_dir() {
+        return Ok(());
+    }
+    std::fs::rename(old, new)?;
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(new, old)?;
+    Ok(())
 }
 
 /// An explicit Claude config-dir override, mirroring Claude Code's own
 /// `CLAUDE_CONFIG_DIR` env var. When set, Claude relocates its entire user
 /// data tree (`sessions/`, `projects/`, `history.jsonl`, `.credentials.json`)
-/// *and* the `.claude.json` state file into this directory. cc-hub honours the
+/// *and* the `.claude.json` state file into this directory. hal honours the
 /// same variable so a single instance reads/writes exactly the account Claude
-/// itself would use — letting you run one cc-hub per account in parallel.
+/// itself would use — letting you run one hal per account in parallel.
 ///
 /// `None` (env unset or empty) means the default `~/.claude` layout. The
 /// `--claude-config-dir` CLI flag is sugar that simply sets this env var (so
@@ -87,18 +111,18 @@ pub fn codex_sessions_dir() -> Option<PathBuf> {
 }
 
 pub fn pi_bridge_file() -> Option<PathBuf> {
-    cc_hub_home().map(|h| h.join("pi-bridge.ts"))
+    hal_home().map(|h| h.join("pi-bridge.ts"))
 }
 
 pub fn pi_heartbeats_dir() -> Option<PathBuf> {
-    cc_hub_home().map(|h| h.join("pi-heartbeats"))
+    hal_home().map(|h| h.join("pi-heartbeats"))
 }
 
 /// Optional user-provided wrapper script for a terminal emulator under the
 /// Hyprland dotfiles layout (`~/.config/hypr/scripts/<name>`). Many users
 /// configure their SUPER+Enter binding to invoke such a script so the terminal
 /// is launched with a personalised `--config-file`; honouring it here keeps
-/// cc-hub's spawned windows visually consistent with their normal terminals.
+/// hal's spawned windows visually consistent with their normal terminals.
 pub fn terminal_wrapper_script(name: &str) -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     let p = PathBuf::from(home).join(".config/hypr/scripts").join(name);
@@ -130,8 +154,8 @@ mod tests {
 
     #[test]
     fn override_relocates_data_and_state_into_config_dir() {
-        with_config_dir(Some("/tmp/cc-hub-test-personal"), || {
-            let base = PathBuf::from("/tmp/cc-hub-test-personal");
+        with_config_dir(Some("/tmp/hal-test-personal"), || {
+            let base = PathBuf::from("/tmp/hal-test-personal");
             assert_eq!(claude_config_dir(), Some(base.clone()));
             assert_eq!(claude_home(), Some(base.clone()));
             // .claude.json lives INSIDE the config dir when overridden.
@@ -155,5 +179,39 @@ mod tests {
         with_config_dir(Some(""), || {
             assert_eq!(claude_config_dir(), None);
         });
+    }
+
+    #[test]
+    fn old_home_moves_once_and_still_resolves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (old, new) = (tmp.path().join(".cc-hub"), tmp.path().join(".hal"));
+        std::fs::create_dir(&old).unwrap();
+        std::fs::write(old.join("board.json"), "{}").unwrap();
+
+        move_with_symlink(&old, &new).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(new.join("board.json")).unwrap(),
+            "{}"
+        );
+        #[cfg(unix)]
+        assert_eq!(std::fs::read_link(&old).unwrap(), new);
+
+        std::fs::write(new.join("board.json"), "[]").unwrap();
+        move_with_symlink(&old, &new).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(new.join("board.json")).unwrap(),
+            "[]"
+        );
+    }
+
+    #[test]
+    fn existing_new_home_is_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (old, new) = (tmp.path().join(".cc-hub"), tmp.path().join(".hal"));
+        std::fs::create_dir(&old).unwrap();
+        std::fs::create_dir(&new).unwrap();
+
+        move_with_symlink(&old, &new).unwrap();
+        assert!(old.is_dir() && !old.is_symlink());
     }
 }

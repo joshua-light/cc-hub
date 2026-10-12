@@ -24,8 +24,8 @@ class ResourceTests(unittest.TestCase):
         self.config_file = self.directory / 'resources.toml'
         self.config_file.write_text((REPO / 'contrib/resources.toml').read_text())
         self.board = self.directory / 'board'
-        self.env = patch.dict(os.environ, CC_HUB_RESOURCE_CONFIG=str(self.config_file),
-                              CC_HUB_RESOURCE_DIR=str(self.directory / 'state'),
+        self.env = patch.dict(os.environ, HAL_RESOURCE_CONFIG=str(self.config_file),
+                              HAL_RESOURCE_DIR=str(self.directory / 'state'),
                               TASK_BOARD_DIR=str(self.board))
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -54,8 +54,8 @@ class ResourceTests(unittest.TestCase):
             return {w['id']: w for w in broker.supervise(self.cfg, self.usage)}
 
     def owner(self, worker, generation=None):
-        return patch.dict(os.environ, CC_HUB_RESOURCE_WORKER=worker['id'],
-                          CC_HUB_RESOURCE_GENERATION=str(generation or worker['generation']))
+        return patch.dict(os.environ, HAL_RESOURCE_WORKER=worker['id'],
+                          HAL_RESOURCE_GENERATION=str(generation or worker['generation']))
 
     # ─── selection ───────────────────────────────────────────────────────
 
@@ -298,7 +298,7 @@ PROJECT="keep-project"
     def test_the_session_is_told_what_exists_and_how_to_ask(self):
         worker = self.start('verification')
         command, env = broker.execution(worker, self.cfg)
-        self.assertIn('cc-hub resource claim', command[-1])
+        self.assertIn('hal resource claim', command[-1])
         self.assertIn('android — Android phone', command[-1])
         self.assertIn('ssh workhorse', command[-1])
         # Nothing is claimed for it, so nothing is announced as held.
@@ -377,11 +377,11 @@ PROJECT="keep-project"
             self.assertNotIn('4343', db['guests'])
 
     def test_a_guest_claims_for_the_session_not_the_shell_it_typed_in(self):
-        # As the broker is really reached: a `cc-hub` run from a shell, which
+        # As the broker is really reached: a `hal` run from a shell, which
         # runs this file. Anchoring on either of the two would end the hold
         # with the command that made it.
         tree = {'900': '1 /usr/local/bin/claude', '901': '900 -zsh',
-                '902': '901 /opt/cc-hub/bin/cc-hub', '903': '902 python3'}
+                '902': '901 /opt/hal/bin/hal', '903': '902 python3'}
         with patch.object(broker, 'run', side_effect=lambda argv, **kw: type(
                 'done', (), {'returncode': 0, 'stdout': tree.get(argv[2], '')})()):
             self.assertEqual(broker.session_pid(start=903), 900)
@@ -389,7 +389,7 @@ PROJECT="keep-project"
         tree['902'] = '901 /opt/hub/libexec/hubd'
         with patch.object(broker, 'run', side_effect=lambda argv, **kw: type(
                 'done', (), {'returncode': 0, 'stdout': tree.get(argv[2], '')})()):
-            with patch.dict(os.environ, CC_HUB_BINARY='/opt/hub/libexec/hubd'):
+            with patch.dict(os.environ, HAL_BINARY='/opt/hub/libexec/hubd'):
                 self.assertEqual(broker.session_pid(start=903), 900)
 
     def test_unknown_role_has_no_policy(self):
@@ -466,8 +466,8 @@ PROJECT="keep-project"
         worker = self.start()
         with patch.dict(os.environ, ANTHROPIC_API_KEY='must-not-leak', OPENAI_API_KEY='must-not-leak'):
             command, env = broker.execution(worker, self.cfg)
-        self.assertEqual(env['CC_HUB_RESOURCE_WORKER'], worker['id'])
-        self.assertEqual(env['CC_HUB_RESOURCE_ROLE'], 'implementation')
+        self.assertEqual(env['HAL_RESOURCE_WORKER'], worker['id'])
+        self.assertEqual(env['HAL_RESOURCE_ROLE'], 'implementation')
         self.assertNotIn('ANTHROPIC_API_KEY', env)
         self.assertNotIn('OPENAI_API_KEY', env)
         self.assertIn('skills/task/SKILL.md', command[-1])
@@ -491,7 +491,7 @@ PROJECT="keep-project"
         self.assertEqual(worker['title'], 'Polish: The PR')
         order = []
         done = type('done', (), {'returncode': 0, 'stdout': ''})()
-        with patch.dict(os.environ, CC_HUB_BINARY='/opt/hub'), patch.object(broker, 'tmux_exists', return_value=False), \
+        with patch.dict(os.environ, HAL_BINARY='/opt/hub'), patch.object(broker, 'tmux_exists', return_value=False), \
                 patch.object(broker, 'run', side_effect=lambda argv, **_: order.append(argv) or done):
             broker.launch(worker, self.cfg)
         provider = self.cfg['accounts'][worker['account']]['provider']
@@ -522,7 +522,7 @@ PROJECT="keep-project"
         self.assertIn('another account', json.loads(result['hookSpecificOutput']['additionalContext'])['resource']['note'])
 
     def test_a_broken_hook_fails_open(self):
-        with patch.dict(os.environ, CC_HUB_RESOURCE_WORKER='nobody', CC_HUB_RESOURCE_GENERATION='1'), \
+        with patch.dict(os.environ, HAL_RESOURCE_WORKER='nobody', HAL_RESOURCE_GENERATION='1'), \
                 patch('sys.stdin', io.StringIO('{}')), patch('sys.stderr', io.StringIO()):
             self.assertEqual(broker.main(['hook']), 1)
 

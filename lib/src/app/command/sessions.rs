@@ -130,7 +130,7 @@ impl App {
                     let msg = if self.selected_session_info().is_none() {
                         "no session selected"
                     } else {
-                        "no accounts configured — see ~/.cc-hub/resources.toml"
+                        "no accounts configured — see ~/.hal/resources.toml"
                     };
                     self.set_status(msg.into());
                 }
@@ -506,7 +506,7 @@ mod tests {
     #[test]
     fn rename_survives_a_scan_that_predates_it() {
         crate::test_util::with_temp_home(|| {
-            let stale = session("sid-1", SessionState::Idle, Some("cchub-1"));
+            let stale = session("sid-1", SessionState::Idle, Some("hal-1"));
             let (mut app, _rt) = app_with(vec![stale.clone()]);
             app.execute(Command::Sessions(SessionsCommand::OpenRenameSession));
             app.rename_buffer = "Performance".into();

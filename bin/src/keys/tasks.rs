@@ -1,5 +1,5 @@
-use cc_hub_lib::app::{App, Command, Tab, TasksCommand, View};
 use crossterm::event::{KeyCode, KeyEvent};
+use hal_lib::app::{App, Command, Tab, TasksCommand, View};
 
 /// Map a Tasks-board or Tasks-modal-submit key onto a [`Command`]. The
 /// Esc-clears-filter arm claims Esc only while a filter is set, so an
@@ -26,7 +26,7 @@ pub(super) fn map_tasks_command(app: &App, key: &KeyEvent, on_tasks: bool) -> Op
         (View::Grid, KeyCode::Char('t')) if on_tasks => T::OpenTags,
         (View::Grid, KeyCode::Char('T')) if on_tasks => T::OpenKindPicker,
         (View::Grid, KeyCode::Char(c @ ('1' | '2' | '3' | '4'))) if on_tasks => {
-            use cc_hub_lib::tasks::store::TaskPriority;
+            use hal_lib::tasks::store::TaskPriority;
             let priority = match c {
                 '1' => TaskPriority::P1,
                 '2' => TaskPriority::P2,
@@ -88,7 +88,7 @@ pub(super) fn handle(app: &mut App, key: KeyEvent) -> bool {
         (View::TaskInfo, KeyCode::Char('c')) => {
             match app.selected_task_attachment().map(|a| a.path.clone()) {
                 None => app.set_status("no attachment to copy".into()),
-                Some(path) => match cc_hub_lib::clipboard::copy(&path) {
+                Some(path) => match hal_lib::clipboard::copy(&path) {
                     Ok(()) => app.set_status(format!("copied: {}", path)),
                     Err(e) => app.set_status(format!("copy failed: {}", e)),
                 },
@@ -120,7 +120,7 @@ pub(super) fn handle(app: &mut App, key: KeyEvent) -> bool {
 /// Read the host clipboard and attach its text to the focused card as a
 /// `note` attachment. All failure modes land in the status bar.
 fn paste_note(app: &mut App) {
-    match cc_hub_lib::clipboard::paste() {
+    match hal_lib::clipboard::paste() {
         Ok(text) => match app.attach_text_to_selected(&text) {
             Some(msg) => app.set_status(msg),
             None => app.set_status("no task focused".into()),
@@ -133,7 +133,7 @@ fn paste_note(app: &mut App) {
 mod tests {
     use super::*;
     use crate::keys::map_command;
-    use cc_hub_lib::app::GlobalCommand;
+    use hal_lib::app::GlobalCommand;
 
     fn press(app: &App, c: char) -> Option<Command> {
         map_tasks_command(app, &KeyEvent::from(KeyCode::Char(c)), true)

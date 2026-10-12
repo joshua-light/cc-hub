@@ -1,5 +1,5 @@
-use cc_hub_lib::app::App;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use hal_lib::app::App;
 
 /// Like the places picker, printable keys belong to the fuzzy filter;
 /// use arrows or ctrl-j/k/n/p to navigate without stealing letters.

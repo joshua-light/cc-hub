@@ -277,7 +277,7 @@ mod task_info_tests {
         with_temp_home(|| {
             let mut app = App::new();
             let id = app.tasks.board.add("write the report").unwrap().unwrap();
-            let dir = std::env::temp_dir().join(format!("cchub-info-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("hal-info-{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             let doc = dir.join("notes.md");
             std::fs::write(&doc, "alpha finding\nbeta finding\n").unwrap();

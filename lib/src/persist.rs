@@ -1,4 +1,4 @@
-//! Persistence helpers for the state files under `~/.cc-hub/`: atomic
+//! Persistence helpers for the state files under `~/.hal/`: atomic
 //! writes (tempfile, fsync, rename) so a crash mid-write can't leave a torn
 //! file, and the sidecar flock that serializes read-modify-write cycles.
 

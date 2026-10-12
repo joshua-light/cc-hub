@@ -303,18 +303,18 @@ mod tests {
     fn a_hotkey_spawn_keeps_the_cursor_when_its_session_lands() {
         let mut app = App::new();
         assert!(app.update_sessions(vec![fake_session("a", SessionState::Idle)]));
-        app.watch_spawn("cchub-w-new".into(), "claude".into(), "/tmp".into());
+        app.watch_spawn("hal-w-new".into(), "claude".into(), "/tmp".into());
         assert_eq!(
             app.selected_session_id().as_deref(),
-            Some("spawning:cchub-w-new")
+            Some("spawning:hal-w-new")
         );
 
         assert!(app.update_sessions(vec![
             fake_session("polish", SessionState::Processing),
-            fake_session("cchub-w-new", SessionState::Idle),
+            fake_session("hal-w-new", SessionState::Idle),
             fake_session("a", SessionState::Idle),
         ]));
-        assert_eq!(app.selected_session_id().as_deref(), Some("cchub-w-new"));
+        assert_eq!(app.selected_session_id().as_deref(), Some("hal-w-new"));
     }
 
     /// Three sessions in one group, in scanner order. `fake_session` keys

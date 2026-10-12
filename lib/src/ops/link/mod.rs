@@ -1,4 +1,4 @@
-//! `cc-hub open` body: act on a parsed [`Link`].
+//! `hal open` body: act on a parsed [`Link`].
 //!
 //! A review runs in the local checkout of the pull request's repository,
 //! found by name among bookmarks and scanned session cwds. Without one it

@@ -392,7 +392,7 @@ command = "./watch.sh"
 interval_s = 300
 
 [run]
-tools = ["Read", "Bash(cc-hub agent *)"]
+tools = ["Read", "Bash(hal agent *)"]
 window_pct = 32                  # ~32k context
 max_budget_usd = 0.50            # per tick
 

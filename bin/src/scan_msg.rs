@@ -1,19 +1,19 @@
 use crate::titles::Titles;
-use cc_hub_lib::app::{self, App};
-use cc_hub_lib::sessions::count;
-use cc_hub_lib::{harness, metrics, models, ui, usage};
+use hal_lib::app::{self, App};
+use hal_lib::sessions::count;
+use hal_lib::{harness, metrics, models, ui, usage};
 
 /// A background worker's result, drained by the event loop between frames.
 pub(crate) enum ScanMsg {
     SessionList(Vec<models::SessionInfo>),
     /// The full transcript archive for the session finder, built off the
     /// event loop by [`Effect::BuildSessionIndex`](app::Effect::BuildSessionIndex).
-    SessionIndex(Vec<cc_hub_lib::sessions::index::IndexedSession>),
+    SessionIndex(Vec<hal_lib::sessions::index::IndexedSession>),
     Detail(models::SessionDetail),
     Usage(usage::UsageInfo),
     SessionCounts(count::SessionCounts),
     Metrics(metrics::MetricsAnalysis),
-    TaskStats(Vec<(String, cc_hub_lib::tasks::stats::TaskStats)>),
+    TaskStats(Vec<(String, hal_lib::tasks::stats::TaskStats)>),
     MetricsProgress {
         scanned: usize,
         total: usize,

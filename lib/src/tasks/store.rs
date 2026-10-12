@@ -1,6 +1,6 @@
 //! On-disk store for Tasks-board cards: one `state.json` per task under
-//! `~/.cc-hub/tasks/<task-id>/`, next to a `state.lock` that serializes every
-//! read-mutate-write across processes (TUI, `cc-hub board`, deep links).
+//! `~/.hal/tasks/<task-id>/`, next to a `state.lock` that serializes every
+//! read-mutate-write across processes (TUI, `hal board`, deep links).
 //! Writes are atomic (tempfile + rename), and every status change passes
 //! [`validate_status_transition`], the board's single legal-edge table.
 //!
@@ -8,7 +8,7 @@
 //! to nanosecond resolution, no extra dep.
 
 use crate::persist::now_unix_secs;
-use crate::platform::paths::cc_hub_home;
+use crate::platform::paths::hal_home;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -17,9 +17,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use super::status::{validate_status_transition, TaskPriority, TaskStatus};
 
-/// Root of the task store: `~/.cc-hub/tasks/`.
+/// Root of the task store: `~/.hal/tasks/`.
 pub fn tasks_dir() -> Option<PathBuf> {
-    cc_hub_home().map(|h| h.join("tasks"))
+    hal_home().map(|h| h.join("tasks"))
 }
 
 pub fn task_dir(task_id: &str) -> Option<PathBuf> {
@@ -54,7 +54,7 @@ pub struct Artifact {
     /// `kind == "url"` (or any URL-shaped path).
     pub path: String,
     /// User-supplied path/url, preserved so consumers can show where the
-    /// artifact originated even after cc-hub has copied it into its store.
+    /// artifact originated even after hal has copied it into its store.
     pub original: String,
     pub caption: Option<String>,
     pub added_at: i64,

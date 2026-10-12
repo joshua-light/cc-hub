@@ -1,10 +1,10 @@
 [package]
-name = "cc-hub"
+name = "hal"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-cc-hub-lib = { path = "../lib" }
+hal-lib = { path = "../lib" }
 serde_json = "1"
 ratatui.workspace = true
 crossterm.workspace = true

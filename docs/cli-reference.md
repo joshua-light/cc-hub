@@ -1,7 +1,7 @@
 # CLI reference
 
-The output contract every `cc-hub` verb shares, and the `agent` verb in
-full. The other verbs document themselves: `cc-hub help <verb>`.
+The output contract every `hal` verb shares, and the `agent` verb in
+full. The other verbs document themselves: `hal help <verb>`.
 
 ## Conventions
 
@@ -23,26 +23,26 @@ full. The other verbs document themselves: `cc-hub help <verb>`.
 
 | Verb | Does | Details |
 |---|---|---|
-| `board` | Add a card, add or read its notes | `cc-hub help board` |
-| `open` | Act on a `cc-hub://` link | `cc-hub help open` |
+| `board` | Add a card, add or read its notes | `hal help board` |
+| `open` | Act on a `hal://` link | `hal help open` |
 | `agent` | Scaffold, run and inspect persistent agents | below |
-| `build` | Run, cancel and list builds | `cc-hub help build` |
-| `resource` | Accounts, task sessions and shared resources | `cc-hub help resource`, [resource-management.md](resource-management.md) |
-| `usage` | Quota of a Claude account | `cc-hub help usage` |
-| `wake` | `cc-hub wake <name>`: agents watching `<name>` poll now. Prints `{"ok": true, "wake": "<name>"}` | none |
+| `build` | Run, cancel and list builds | `hal help build` |
+| `resource` | Accounts, task sessions and shared resources | `hal help resource`, [resource-management.md](resource-management.md) |
+| `usage` | Quota of a Claude account | `hal help usage` |
+| `wake` | `hal wake <name>`: agents watching `<name>` poll now. Prints `{"ok": true, "wake": "<name>"}` | none |
 
 ## agent
 
-A persistent agent is a folder `~/.cc-hub/agents/<name>/` with an
+A persistent agent is a folder `~/.hal/agents/<name>/` with an
 `agent.toml`. The TUI supervises the enabled ones; these subcommands
 scaffold, drive and inspect them. Name the agent positionally, with
-`--agent NAME`, or, inside a run, through `CC_HUB_AGENT`, which the runner
+`--agent NAME`, or, inside a run, through `HAL_AGENT`, which the runner
 sets.
 
 ### agent list
 
 ```sh
-cc-hub agent list [--json]
+hal agent list [--json]
 ```
 
 One tab-separated line per agent: name, status (`sleeping`, `ticking`,
@@ -54,10 +54,10 @@ total spend, then the halt reason or spec error. `--json` prints
 ### agent new
 
 ```sh
-cc-hub agent new NAME [--from DIR]
+hal agent new NAME [--from DIR]
 ```
 
-Creates `~/.cc-hub/agents/NAME/` with `work/`, `inbox/` and the built-in
+Creates `~/.hal/agents/NAME/` with `work/`, `inbox/` and the built-in
 `agent.toml` template, or a copy of `DIR`. Fails if the folder exists or the
 name has characters outside `[A-Za-z0-9_-]`. Prints `name`, `dir`, `spec`
 and `next`.
@@ -65,7 +65,7 @@ and `next`.
 ### agent once
 
 ```sh
-cc-hub agent once NAME [--event TEXT | --event-file PATH] [--force]
+hal agent once NAME [--event TEXT | --event-file PATH] [--force]
 ```
 
 Runs one tick now and records it as the supervisor would. Ignores `enabled`,
@@ -78,7 +78,7 @@ line with `"ok": false` and exits 1.
 ### agent poke
 
 ```sh
-cc-hub agent poke NAME [--event TEXT | --event-file PATH]
+hal agent poke NAME [--event TEXT | --event-file PATH]
 ```
 
 Drops an event file into the agent's `inbox/`. Every trigger kind checks the
@@ -88,9 +88,9 @@ inbox first, so this wakes the agent on its next loop pass. Prints `agent`,
 ### agent pause, resume, reset
 
 ```sh
-cc-hub agent pause NAME
-cc-hub agent resume NAME
-cc-hub agent reset NAME
+hal agent pause NAME
+hal agent resume NAME
+hal agent reset NAME
 ```
 
 `pause` makes the supervisor skip the agent. `resume` undoes that and also
@@ -101,7 +101,7 @@ leaves the workdir, notes and inbox alone; it prints `agent`.
 ### agent show
 
 ```sh
-cc-hub agent show NAME
+hal agent show NAME
 ```
 
 The `list --json` fields for one agent, plus `history` (the last 50 runs)
@@ -110,10 +110,10 @@ and `recent_notes` (the last 50 notes).
 ### agent note
 
 ```sh
-cc-hub agent note --text TEXT [--level info|warn] [--ref URL]
+hal agent note --text TEXT [--level info|warn] [--ref URL]
 ```
 
 For the agent itself. Appends a line to `notes.jsonl` and prints `agent` and
 `tick`. The Agents tab shows the newest note on the agent's row and the rest
-under Artifacts; `--ref` is what `f` opens there. Needs `CC_HUB_AGENT` or
+under Artifacts; `--ref` is what `f` opens there. Needs `HAL_AGENT` or
 `--agent`.

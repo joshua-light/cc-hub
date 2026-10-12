@@ -28,7 +28,7 @@ pub fn count_recent_sessions() -> SessionCounts {
         today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
 
     // Skip the titler's scratch project dir: its JSONLs are one-shot
-    // `claude -p` runs cc-hub itself spawns, not real sessions — the same
+    // `claude -p` runs hal itself spawns, not real sessions — the same
     // exclusion the Claude scanner applies. Sharing the predicate keeps both
     // aligned.
     let scratch_proj_dir = crate::sessions::scanner::scratch_project_dir_name();

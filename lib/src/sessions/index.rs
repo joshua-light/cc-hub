@@ -32,7 +32,7 @@ pub struct IndexedSession {
     pub jsonl_path: PathBuf,
     /// Transcript mtime (epoch ms) — the archive's notion of recency.
     pub mtime_ms: u64,
-    /// Saved cc-hub title (Haiku or manual rename), when one exists.
+    /// Saved hal title (Haiku or manual rename), when one exists.
     pub title: Option<String>,
     /// First user message — the cheap "what was this session about" text.
     pub first_message: Option<String>,
@@ -92,7 +92,7 @@ fn scan_claude(titles: &HashMap<String, String>) -> Vec<IndexedSession> {
     let scratch = scanner::scratch_project_dir_name();
     let mut out = Vec::new();
     for proj in project_dirs.flatten() {
-        // The titler's one-shot `cc-hub-new -p` runs are not real sessions.
+        // The titler's one-shot `hal-new -p` runs are not real sessions.
         if scratch.as_deref() == proj.file_name().to_str() {
             continue;
         }

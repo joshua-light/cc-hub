@@ -1,4 +1,4 @@
-//! `cc-hub open <url>` — act on a `cc-hub://` deep link.
+//! `hal open <url>` — act on a `hal://` deep link.
 //!
 //! This is the verb a locally configured OS URL-scheme handler calls,
 //! so a browser button can start a hub session — and the verb a persistent
@@ -13,16 +13,16 @@
 //! link's card: through the broker when accounts are configured, so the chore
 //! runs on whichever subscription has room, and the card moves to Running
 //! once its worker is bound. It is also handy by hand:
-//! `cc-hub open 'cc-hub://review?depth=light&pr=…' --dry-run` shows where a
+//! `hal open 'hal://review?depth=light&pr=…' --dry-run` shows where a
 //! link would land without spawning anything. The URL-scheme handler runs it
 //! detached with `--notify`, so a link it refuses says why on the desktop
 //! instead of only in a log nobody reads.
 
 use super::flags::Flags;
 use super::{parse_flags, print_json, report_prompt_status, CliError};
-use cc_hub_lib::link::Link;
-use cc_hub_lib::ops;
-use cc_hub_lib::platform::notification;
+use hal_lib::link::Link;
+use hal_lib::ops;
+use hal_lib::platform::notification;
 
 pub(crate) fn open(args: &[String]) -> Result<(), CliError> {
     let (url, rest) = args
@@ -31,7 +31,7 @@ pub(crate) fn open(args: &[String]) -> Result<(), CliError> {
     let f = parse_flags(rest)?;
     let opened = open_link(url, &f);
     if let (true, Err(e)) = (f.notify, &opened) {
-        if let Err(why) = notification::post("cc-hub couldn't open the link", e.message()) {
+        if let Err(why) = notification::post("hal couldn't open the link", e.message()) {
             log::warn!("open: notifying the failure failed: {}", why);
         }
     }
@@ -65,13 +65,13 @@ fn open_link(url: &str, f: &Flags) -> Result<(), CliError> {
     };
     let close_superseded = || {
         if let Some(tmux) = &superseded {
-            if let Err(e) = cc_hub_lib::send::kill_tmux_session(tmux) {
+            if let Err(e) = hal_lib::send::kill_tmux_session(tmux) {
                 log::warn!("open: closing superseded session {} failed: {}", tmux, e);
             }
         }
     };
 
-    if f.agent.is_none() && !cc_hub_lib::resources::accounts().is_empty() {
+    if f.agent.is_none() && !hal_lib::resources::accounts().is_empty() {
         if let Some(chore) = link.chore() {
             let target = ops::link::target(&link, None)?;
             let card = ops::link::file_chore(chore)?;
@@ -92,7 +92,7 @@ fn open_link(url: &str, f: &Flags) -> Result<(), CliError> {
             if let Some(kind) = task
                 .kind
                 .clone()
-                .or_else(|| cc_hub_lib::resources::task_kind(task.id.as_str()))
+                .or_else(|| hal_lib::resources::task_kind(task.id.as_str()))
             {
                 let target = ops::link::target(&link, None)?;
                 let started = broker_start(
@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn open_with_unknown_kind_is_a_usage_error() {
         assert_eq!(
-            dispatch(&argv(&["open", "cc-hub://deploy?pr=x", "--dry-run"])),
+            dispatch(&argv(&["open", "hal://deploy?pr=x", "--dry-run"])),
             Some(2)
         );
     }

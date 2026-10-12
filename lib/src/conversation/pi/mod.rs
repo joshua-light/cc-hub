@@ -70,7 +70,7 @@ fn content_text(content: &Value, max_len: usize) -> Option<String> {
 /// The state *semantics* live in [`classify::classify`], shared with the
 /// Claude backend. Pi has no interrupt marker and no blocking tools today,
 /// so those adapters are constant — if Pi grows either, this is the one
-/// place to teach cc-hub about it.
+/// place to teach hal about it.
 pub(crate) struct PiDialect;
 
 impl classify::TranscriptDialect for PiDialect {
@@ -418,7 +418,7 @@ mod tests {
 
     #[test]
     fn read_jsonl_tail_for_state_missing_file_is_empty() {
-        let path = Path::new("/nonexistent/cc_hub_pi_does_not_exist.jsonl");
+        let path = Path::new("/nonexistent/hal_pi_does_not_exist.jsonl");
         assert!(read_jsonl_tail_for_state(path).is_empty());
     }
 

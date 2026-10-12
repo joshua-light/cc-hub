@@ -216,7 +216,7 @@ mod tests {
     /// A throwaway source file outside the (redirected) home, like a real
     /// research doc an agent left in some working dir.
     fn temp_doc(name: &str, body: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("cchub-attach-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("hal-attach-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join(name);
         std::fs::write(&p, body).unwrap();
@@ -246,7 +246,7 @@ mod tests {
             assert_eq!(a.original, doc.display().to_string());
             let stored = std::path::PathBuf::from(&a.path);
             assert!(
-                stored.starts_with(dirs::home_dir().unwrap().join(".cc-hub/tasks").join(&id)),
+                stored.starts_with(dirs::home_dir().unwrap().join(".hal/tasks").join(&id)),
                 "copy must land inside the task's own dir, got {}",
                 a.path
             );
@@ -477,7 +477,7 @@ mod tests {
             assert_eq!(a.caption.as_deref(), Some("# Cache research"));
             let stored = std::path::PathBuf::from(&a.path);
             assert!(
-                stored.starts_with(dirs::home_dir().unwrap().join(".cc-hub/tasks").join(&id)),
+                stored.starts_with(dirs::home_dir().unwrap().join(".hal/tasks").join(&id)),
                 "note must land inside the task's own dir, got {}",
                 a.path
             );

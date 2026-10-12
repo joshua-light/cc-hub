@@ -6,7 +6,7 @@ use crate::models::ConversationMessage;
 use serde_json::Value;
 use std::collections::HashSet;
 
-/// The [`crate::models::ConversationMessage::role`] cc-hub's own notices get,
+/// The [`crate::models::ConversationMessage::role`] hal's own notices get,
 /// alongside the providers' `user` / `assistant` / `system`.
 pub const AUTOMATION_ROLE: &str = "automation";
 
@@ -171,7 +171,7 @@ pub fn extract_messages(entries: &[Value], count: usize) -> Vec<ConversationMess
         .map(|e| {
             let content_preview = extract_text_content(e);
             let role = match e.get("type").and_then(|t| t.as_str()) {
-                // A notice cc-hub injected itself is not the user speaking,
+                // A notice hal injected itself is not the user speaking,
                 // and a transcript that says it is costs the reader an hour.
                 Some("user") if automation_body(e).is_some() => AUTOMATION_ROLE.to_string(),
                 Some(kind) => kind.to_string(),
@@ -267,7 +267,7 @@ pub fn extract_token_totals(entries: &[Value]) -> (u64, u64) {
 mod tests {
     use super::*;
 
-    /// A notice cc-hub injected is its own role, shows its body rather than
+    /// A notice hal injected is its own role, shows its body rather than
     /// the marker line, and never answers "what did the user last say".
     #[test]
     fn an_injected_notice_is_not_the_user_speaking() {

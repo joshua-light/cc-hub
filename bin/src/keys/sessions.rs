@@ -1,6 +1,6 @@
-use cc_hub_lib::app::{App, Command, View};
-use cc_hub_lib::focus;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use hal_lib::app::{App, Command, View};
+use hal_lib::focus;
 
 /// Sessions- and Global-tab command mapping (Tasks lives in
 /// [`super::tasks::map_tasks_command`]).
@@ -9,7 +9,7 @@ pub(super) fn map_sessions_command(
     key: &KeyEvent,
     on_sessions: bool,
 ) -> Option<Command> {
-    use cc_hub_lib::app::{GlobalCommand as G, SessionsCommand as S};
+    use hal_lib::app::{GlobalCommand as G, SessionsCommand as S};
     if let Some(cmd) = map_agent_hotkey(app, key, on_sessions) {
         return Some(cmd);
     }
@@ -69,7 +69,7 @@ pub(super) fn map_sessions_command(
 /// model picker — the config doc says custom hotkeys shadow built-ins.
 /// Ctrl/Alt chords are left alone; Shift is what makes an uppercase char.
 fn map_agent_hotkey(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<Command> {
-    use cc_hub_lib::app::SessionsCommand as S;
+    use hal_lib::app::SessionsCommand as S;
     if !on_sessions || app.view != View::Grid {
         return None;
     }
@@ -82,7 +82,7 @@ fn map_agent_hotkey(app: &App, key: &KeyEvent, on_sessions: bool) -> Option<Comm
     let KeyCode::Char(c) = key.code else {
         return None;
     };
-    let agent_id = cc_hub_lib::config::get().agent_for_hotkey(c)?;
+    let agent_id = hal_lib::config::get().agent_for_hotkey(c)?;
     Some(Command::Sessions(S::SpawnAgentHereWith { agent_id }))
 }
 

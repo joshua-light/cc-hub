@@ -1,7 +1,7 @@
 use super::chore::Chore;
 use super::pull_request::{pull_request_titled, PullRequestUrl};
 
-/// `cc-hub://fix?pr=<url>[&title=<text>][&kind=<word>]`: address the review
+/// `hal://fix?pr=<url>[&title=<text>][&kind=<word>]`: address the review
 /// comments of a pull request in a fresh agent session, filed as a card on
 /// the Tasks board. `title` is the pull request's own title, as on a review
 /// link; it names the session and the card. `kind` is the card's kind (see
@@ -68,7 +68,7 @@ mod tests {
     use crate::link::{Link, LinkError};
 
     fn fix(query: &str) -> FixLink {
-        let raw = format!("cc-hub://fix?{}", query);
+        let raw = format!("hal://fix?{}", query);
         match raw.parse::<Link>() {
             Ok(Link::Fix(x)) => x,
             Ok(other) => panic!("{}: parsed as {}", raw, other.kind()),
@@ -88,7 +88,7 @@ mod tests {
             Some("tps")
         );
         assert_eq!(
-            "cc-hub://fix?title=x".parse::<Link>(),
+            "hal://fix?title=x".parse::<Link>(),
             Err(LinkError::MissingParam("pr"))
         );
     }
@@ -125,7 +125,7 @@ mod tests {
             prompt
         );
         assert!(
-            prompt.contains("cc-hub board note --task tk-42 --text \"Pushed:"),
+            prompt.contains("hal board note --task tk-42 --text \"Pushed:"),
             "{}",
             prompt
         );

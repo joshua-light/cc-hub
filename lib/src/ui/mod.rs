@@ -23,7 +23,7 @@ mod split;
 mod status_bar;
 pub mod tasks;
 
-// Items consumed by bin/src/main.rs keep their `cc_hub_lib::ui::X` paths.
+// Items consumed by bin/src/main.rs keep their `hal_lib::ui::X` paths.
 pub use common::build_usage_line;
 
 use crate::app::{App, Tab, View};

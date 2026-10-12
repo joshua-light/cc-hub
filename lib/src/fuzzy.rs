@@ -84,33 +84,33 @@ mod tests {
 
     #[test]
     fn substring_matches_with_contiguous_indices() {
-        let m = fuzzy_match("hub", "cc-hub").unwrap();
+        let m = fuzzy_match("hub", "my-hub").unwrap();
         assert_eq!(m.indices, vec![3, 4, 5]);
     }
 
     #[test]
     fn match_is_case_insensitive() {
-        assert!(fuzzy_match("CCH", "cc-hub").is_some());
-        assert!(fuzzy_match("cch", "CC-HUB").is_some());
+        assert!(fuzzy_match("MYH", "my-hub").is_some());
+        assert!(fuzzy_match("myh", "MY-HUB").is_some());
     }
 
     #[test]
     fn subsequence_matches_across_separators() {
-        let m = fuzzy_match("cchub", "cc-hub").unwrap();
+        let m = fuzzy_match("myhub", "my-hub").unwrap();
         assert_eq!(m.indices, vec![0, 1, 3, 4, 5]);
     }
 
     #[test]
     fn missing_chars_yield_none() {
-        assert!(fuzzy_match("xyz", "cc-hub").is_none());
-        assert!(fuzzy_match("hubb", "cc-hub").is_none());
+        assert!(fuzzy_match("xyz", "my-hub").is_none());
+        assert!(fuzzy_match("hubb", "my-hub").is_none());
     }
 
     #[test]
     fn boundary_start_outranks_mid_word() {
-        // "hub" after the dash in cc-hub is a word start; inside
+        // "hub" after the dash in my-hub is a word start; inside
         // "github-stuff" it is mid-word at the same offset.
-        assert!(score("hub", "cc-hub") > score("hub", "github-stuff"));
+        assert!(score("hub", "my-hub") > score("hub", "github-stuff"));
     }
 
     #[test]
@@ -120,6 +120,6 @@ mod tests {
 
     #[test]
     fn consecutive_run_outranks_scattered() {
-        assert!(score("hub", "cc-hub") > score("hub", "hxuxbx"));
+        assert!(score("hub", "my-hub") > score("hub", "hxuxbx"));
     }
 }

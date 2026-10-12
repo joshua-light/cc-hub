@@ -1,4 +1,4 @@
-//! `z`-to-idle acknowledgements, persisted to `~/.cc-hub/acks.json`; see
+//! `z`-to-idle acknowledgements, persisted to `~/.hal/acks.json`; see
 //! [`Acks`].
 
 use serde::{Deserialize, Serialize};
@@ -7,7 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::persist::save_json;
-use crate::platform::paths::cc_hub_home;
+use crate::platform::paths::hal_home;
 
 /// Tracks user acknowledgements that force a session to display as Idle.
 ///
@@ -16,7 +16,7 @@ use crate::platform::paths::cc_hub_home;
 /// its real state (WaitingForInput or Processing). Any new activity advances
 /// the watermark and auto-clears the ack.
 ///
-/// Acks persist to `~/.cc-hub/acks.json` (via [`Acks::load`]) so a `z`-idled
+/// Acks persist to `~/.hal/acks.json` (via [`Acks::load`]) so a `z`-idled
 /// card stays idle across hub restarts and reboots — `last_activity` is derived
 /// from transcript timestamps, so the stamped watermark stays comparable after
 /// a restart. The file mirrors every mutation; there is no separate flush step.
@@ -40,7 +40,7 @@ impl Acks {
         Self::default()
     }
 
-    /// Load persisted acks from `~/.cc-hub/acks.json`; subsequent mutations
+    /// Load persisted acks from `~/.hal/acks.json`; subsequent mutations
     /// save back to the same file. A missing or unreadable file starts empty.
     pub fn load() -> Self {
         let path = acks_path();
@@ -103,7 +103,7 @@ impl Acks {
 }
 
 fn acks_path() -> Option<PathBuf> {
-    cc_hub_home().map(|h| h.join("acks.json"))
+    hal_home().map(|h| h.join("acks.json"))
 }
 
 #[cfg(all(test, unix))]

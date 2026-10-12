@@ -1,5 +1,5 @@
-use cc_hub_lib::app::{App, BuildsCommand as B, Command, View};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use hal_lib::app::{App, BuildsCommand as B, Command, View};
 
 /// Builds-tab, new-build form and build-log key mapping. The list and the
 /// log share the recipe verbs, so a build can be run or cancelled while its

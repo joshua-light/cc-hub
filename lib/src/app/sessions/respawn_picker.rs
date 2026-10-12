@@ -17,7 +17,7 @@ pub struct RespawnChoice {
 
 /// State behind [`View::RespawnPicker`]. The source session is captured at
 /// open so a rescan can't move it under the popup; accounts come from
-/// `~/.cc-hub/resources.toml` in their registry order.
+/// `~/.hal/resources.toml` in their registry order.
 #[derive(Clone, Debug)]
 pub struct RespawnPickerState {
     pub session: SessionInfo,
@@ -164,7 +164,7 @@ mod tests {
     /// The four-account registry from contrib/resources.toml, homes
     /// under the (redirected) test $HOME.
     fn write_accounts_registry() {
-        let dir = dirs::home_dir().unwrap().join(".cc-hub");
+        let dir = dirs::home_dir().unwrap().join(".hal");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("resources.toml"),

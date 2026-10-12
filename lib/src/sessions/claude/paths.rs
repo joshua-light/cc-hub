@@ -70,8 +70,8 @@ pub(super) fn is_scratch_cwd(cwd: &str) -> bool {
 }
 
 /// The `~/.claude/projects/` subdirectory name that the titler's scratch cwd
-/// encodes to (e.g. `-tmp-cc-hub-summaries`), or `None` when that path isn't
-/// valid UTF-8. Every JSONL under this dir is a one-shot `cc-hub-new -p`
+/// encodes to (e.g. `-tmp-hal-summaries`), or `None` when that path isn't
+/// valid UTF-8. Every JSONL under this dir is a one-shot `hal-new -p`
 /// run — not a real session — so callers walking the projects tree skip
 /// it. Shared with [`crate::sessions::count`] so the exclusion can't drift.
 pub fn scratch_project_dir_name() -> Option<String> {

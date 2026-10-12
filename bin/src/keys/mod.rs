@@ -12,8 +12,8 @@
 
 use crate::scan_msg::ScanMsg;
 use crate::term::Term;
-use cc_hub_lib::app::{App, Command, Tab, View};
 use crossterm::event::{KeyCode, KeyEvent};
+use hal_lib::app::{App, Command, Tab, View};
 use tokio::sync::mpsc;
 
 mod builds;

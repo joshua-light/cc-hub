@@ -21,7 +21,7 @@ fn user_text(entry: &Value) -> Option<&str> {
         .find_map(|block| block.get("text").and_then(|t| t.as_str()))
 }
 
-/// The body of a notice cc-hub injected itself: the text after the
+/// The body of a notice hal injected itself: the text after the
 /// [`crate::send::AUTOMATION_MARKER`] line. `None` for anything the user
 /// really typed. Read before truncation, which would keep only the marker.
 pub(crate) fn automation_body(entry: &Value) -> Option<&str> {

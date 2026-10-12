@@ -175,7 +175,7 @@ mod tests {
     fn fresh_path(name: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
         p.push(format!(
-            "cchub-tool-use-cache-{}-{}.jsonl",
+            "hal-tool-use-cache-{}-{}.jsonl",
             std::process::id(),
             name
         ));
@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn missing_file_returns_zero() {
         let mut p = std::env::temp_dir();
-        p.push("cchub-tool-use-cache-does-not-exist.jsonl");
+        p.push("hal-tool-use-cache-does-not-exist.jsonl");
         let _ = std::fs::remove_file(&p);
         assert_eq!(count_claude(&p), 0);
     }

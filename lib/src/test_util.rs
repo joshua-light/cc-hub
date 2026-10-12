@@ -9,7 +9,7 @@ pub static HOME_TEST_LOCK: Mutex<()> = Mutex::new(());
 /// a test that leaves one standing reads the real machine and passes or
 /// fails by where it was run. `CLAUDE_CONFIG_DIR` relocates the whole
 /// Claude layout (`--claude-config-dir` sessions export it). The
-/// `CC_HUB_RESOURCE_*` pair is exported into every session the hub
+/// `HAL_RESOURCE_*` pair is exported into every session the hub
 /// starts, which is exactly where the suite is run — leaving them set
 /// made `resources::accounts()` find the real registry inside a temp home.
 #[cfg(unix)]
@@ -17,8 +17,8 @@ const REDIRECTED: [&str; 5] = [
     "HOME",
     "CODEX_HOME",
     "CLAUDE_CONFIG_DIR",
-    "CC_HUB_RESOURCE_CONFIG",
-    "CC_HUB_RESOURCE_DIR",
+    "HAL_RESOURCE_CONFIG",
+    "HAL_RESOURCE_DIR",
 ];
 
 /// Run `f` with `$HOME` pointing at a fresh tempdir and [`REDIRECTED`]

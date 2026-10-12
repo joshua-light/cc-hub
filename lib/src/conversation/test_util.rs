@@ -19,7 +19,7 @@ pub(crate) fn write_jsonl(path: &Path, lines: &[&str]) {
 pub(crate) fn fresh_jsonl(name: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
     p.push(format!(
-        "cchub-state-cache-{}-{}.jsonl",
+        "hal-state-cache-{}-{}.jsonl",
         std::process::id(),
         name
     ));

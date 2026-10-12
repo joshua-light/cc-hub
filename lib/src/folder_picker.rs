@@ -341,7 +341,7 @@ mod tests {
 
     fn places() -> Vec<Place> {
         vec![
-            Place::new(PathBuf::from("/g/self/cc-hub"), PlaceSource::Bookmark),
+            Place::new(PathBuf::from("/g/self/my-hub"), PlaceSource::Bookmark),
             Place::new(PathBuf::from("/g/self/reddit"), PlaceSource::Bookmark),
             Place::new(PathBuf::from("/g/work/hub-tools"), PlaceSource::Recent),
         ]
@@ -356,7 +356,7 @@ mod tests {
                 p.rows.iter().map(|r| r.place).collect::<Vec<_>>(),
                 vec![0, 1, 2]
             );
-            assert_eq!(p.selected_path(), Some(PathBuf::from("/g/self/cc-hub")));
+            assert_eq!(p.selected_path(), Some(PathBuf::from("/g/self/my-hub")));
         });
     }
 
@@ -368,7 +368,7 @@ mod tests {
                 p.push_filter(c);
             }
             // "reddit" has no h/u/b anywhere in name or path — dropped.
-            // hub-tools starts with the query, which outranks cc-hub's
+            // hub-tools starts with the query, which outranks my-hub's
             // mid-name boundary match.
             let visible: Vec<usize> = p.rows.iter().map(|r| r.place).collect();
             assert_eq!(visible, vec![2, 0]);

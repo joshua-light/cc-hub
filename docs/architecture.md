@@ -1,14 +1,14 @@
 # Architecture
 
 How the source is laid out and how a key press becomes a change on disk. For
-contributors; read the [README](../README.md) first for what cc-hub does.
+contributors; read the [README](../README.md) first for what hal does.
 Each module's `//!` doc says more than its entry here.
 
 ## Two crates and a broker
 
 ```text
-bin/     cc-hub: the binary. Runtime, terminal, key dispatch, CLI verbs.
-lib/     cc-hub-lib: state, scanners, rendering, platform shims.
+bin/     hal: the binary. Runtime, terminal, key dispatch, CLI verbs.
+lib/     hal-lib: state, scanners, rendering, platform shims.
 broker/  resource_manager.py, the resource broker, bundled into the binary.
 ```
 
@@ -18,7 +18,7 @@ commands against it and render it without a terminal. The broker is Python;
 `cli::resource` embeds it with `include_str!` and runs it with `python3`.
 
 Disk is the source of truth. Scanners read the agents' own files and
-cc-hub's files under `~/.cc-hub/` into snapshots. Every mutation writes
+hal's files under `~/.hal/` into snapshots. Every mutation writes
 through to disk, so the next scan re-derives the same state, and the CLI and
 the TUI see each other's changes.
 
@@ -62,10 +62,10 @@ the TUI see each other's changes.
   `PersonalBoard` is the in-memory board.
 - `ops/`: compound task and deep-link operations shared by the CLI and the
   TUI. Typed input, typed outcome, `OpError` for failures.
-- `link/`: parses `cc-hub://` URLs and renders their prompts. Pure.
+- `link/`: parses `hal://` URLs and renders their prompts. Pure.
 - `harness/`: persistent agents: spec, triggers, supervisor, one tick,
   state and notes.
-- `builds/`: the build store, recipes, the runner (`cc-hub build _run`) and
+- `builds/`: the build store, recipes, the runner (`hal build _run`) and
   the resource hold.
 - `metrics/`: cost and token analysis over every transcript.
 - `spawn/`: builds an agent's command line and starts it in a detached
@@ -93,17 +93,17 @@ cover the runtime.
 
 | What | Where | Owner |
 |---|---|---|
-| Config | `~/.cc-hub/config.toml` | `config` |
-| Task cards | `~/.cc-hub/tasks/<id>/state.json`, `board.json`, `tasks-archive-v2.json` | `tasks` |
-| Session-to-task links | `~/.cc-hub/session-tasks.json` | `tasks::session_links` |
-| Acks, holds, bookmarks | `~/.cc-hub/acks.json`, `holds.json`, `bookmarks.json` | `acks`, `holds`, `bookmarks` |
-| Usage readings | `~/.cc-hub/usage.json` | `usage` |
-| Persistent agents | `~/.cc-hub/agents/<name>/` | `harness` |
-| Wakes | `~/.cc-hub/wake/<name>` | `wake` |
-| Builds and holds | `~/.cc-hub/builds/<id>/`, `builds/holds/` | `builds` |
-| Accounts, resources | `~/.cc-hub/resources.toml`; broker state in `~/.cc-hub/resources/` | broker, `resources` |
-| Pi heartbeats | `~/.cc-hub/pi-heartbeats/<tmux>.json` | `sessions::pi_bridge` |
-| Titles, logs | the cache dir: `session-titles.json`, `cc-hub_*.log` | `title`, `logging` |
+| Config | `~/.hal/config.toml` | `config` |
+| Task cards | `~/.hal/tasks/<id>/state.json`, `board.json`, `tasks-archive-v2.json` | `tasks` |
+| Session-to-task links | `~/.hal/session-tasks.json` | `tasks::session_links` |
+| Acks, holds, bookmarks | `~/.hal/acks.json`, `holds.json`, `bookmarks.json` | `acks`, `holds`, `bookmarks` |
+| Usage readings | `~/.hal/usage.json` | `usage` |
+| Persistent agents | `~/.hal/agents/<name>/` | `harness` |
+| Wakes | `~/.hal/wake/<name>` | `wake` |
+| Builds and holds | `~/.hal/builds/<id>/`, `builds/holds/` | `builds` |
+| Accounts, resources | `~/.hal/resources.toml`; broker state in `~/.hal/resources/` | broker, `resources` |
+| Pi heartbeats | `~/.hal/pi-heartbeats/<tmux>.json` | `sessions::pi_bridge` |
+| Titles, logs | the cache dir: `session-titles.json`, `hal_*.log` | `title`, `logging` |
 | Agent transcripts | `~/.claude/`, `~/.pi/agent/sessions/`, `~/.codex/sessions/` | the agents (read-only) |
 
 ## Where to change what

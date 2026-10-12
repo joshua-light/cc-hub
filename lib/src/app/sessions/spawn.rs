@@ -234,8 +234,8 @@ mod tests {
     #[test]
     fn spawn_watch_clears_when_agent_appears() {
         let mut app = App::new();
-        app.watch_spawn("cchub-w-1".into(), "claude".into(), "/tmp".into());
-        let sessions = vec![fake_session("cchub-w-1", SessionState::Idle)];
+        app.watch_spawn("hal-w-1".into(), "claude".into(), "/tmp".into());
+        let sessions = vec![fake_session("hal-w-1", SessionState::Idle)];
         let fired = app.check_spawn_watches(&sessions, Instant::now() + 2 * SPAWN_WATCH_TIMEOUT);
         assert!(!fired);
         assert!(app.spawn_watches.is_empty());
@@ -247,7 +247,7 @@ mod tests {
     #[test]
     fn a_stalled_spawn_closes_the_rename_typing_into_it() {
         let mut app = App::new();
-        app.watch_spawn("cchub-w-7".into(), "claude".into(), "/tmp".into());
+        app.watch_spawn("hal-w-7".into(), "claude".into(), "/tmp".into());
         assert!(app.enter_rename_session());
         app.rename_buffer = "half a na".into();
 
@@ -258,14 +258,14 @@ mod tests {
 
     #[test]
     fn spawning_tmux_of_reads_placeholder_ids_only() {
-        assert_eq!(spawning_tmux_of("spawning:cchub-w-1"), Some("cchub-w-1"));
+        assert_eq!(spawning_tmux_of("spawning:hal-w-1"), Some("hal-w-1"));
         assert_eq!(spawning_tmux_of("real-scanner-id"), None);
     }
 
     #[test]
     fn spawn_watch_stays_quiet_before_deadline() {
         let mut app = App::new();
-        app.watch_spawn("cchub-w-2".into(), "claude".into(), "/tmp".into());
+        app.watch_spawn("hal-w-2".into(), "claude".into(), "/tmp".into());
         let fired = app.check_spawn_watches(&[], Instant::now());
         assert!(!fired);
         assert_eq!(app.spawn_watches.len(), 1);
@@ -278,7 +278,7 @@ mod tests {
     fn spawn_watch_fires_diagnosis_after_timeout() {
         let mut app = App::new();
         app.watch_spawn(
-            "cchub-watchtest-missing".into(),
+            "hal-watchtest-missing".into(),
             "claude".into(),
             "/tmp".into(),
         );
@@ -287,7 +287,7 @@ mod tests {
         assert!(app.spawn_watches.is_empty());
         let (msg, _) = app.status_msg.as_ref().expect("diagnosis status");
         assert!(
-            msg.contains("cchub-watchtest-missing"),
+            msg.contains("hal-watchtest-missing"),
             "status should name the tmux session: {}",
             msg
         );
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn watch_spawn_shows_placeholder_immediately() {
         let mut app = App::new();
-        app.watch_spawn("cchub-w-3".into(), "claude".into(), "/tmp/proj".into());
+        app.watch_spawn("hal-w-3".into(), "claude".into(), "/tmp/proj".into());
         let all: Vec<&SessionInfo> = app
             .sessions
             .groups
@@ -307,13 +307,13 @@ mod tests {
             .collect();
         assert_eq!(all.len(), 1);
         let p = all[0];
-        assert_eq!(p.session_id, "spawning:cchub-w-3");
+        assert_eq!(p.session_id, "spawning:hal-w-3");
         assert_eq!(p.state, SessionState::Starting);
         assert_eq!(p.cwd, "/tmp/proj");
-        assert_eq!(p.tmux_session.as_deref(), Some("cchub-w-3"));
+        assert_eq!(p.tmux_session.as_deref(), Some("hal-w-3"));
         assert_eq!(
             app.selected_session_id().as_deref(),
-            Some("spawning:cchub-w-3")
+            Some("spawning:hal-w-3")
         );
     }
 
@@ -326,19 +326,16 @@ mod tests {
     fn placeholder_sorts_into_the_idle_band() {
         let mut app = App::new();
         app.update_sessions(vec![
-            fake_session("cchub-active", SessionState::Processing),
-            fake_session("cchub-idle", SessionState::Idle),
+            fake_session("hal-active", SessionState::Processing),
+            fake_session("hal-idle", SessionState::Idle),
         ]);
-        app.watch_spawn("cchub-w-6".into(), "claude".into(), "/tmp".into());
+        app.watch_spawn("hal-w-6".into(), "claude".into(), "/tmp".into());
         let ids: Vec<&str> = app.sessions.groups[0]
             .sessions
             .iter()
             .map(|s| s.session_id.as_str())
             .collect();
-        assert_eq!(
-            ids,
-            vec!["cchub-active", "spawning:cchub-w-6", "cchub-idle"]
-        );
+        assert_eq!(ids, vec!["hal-active", "spawning:hal-w-6", "hal-idle"]);
     }
 
     // The scanner reporting a session hosted by the watched tmux name swaps
@@ -346,8 +343,8 @@ mod tests {
     #[test]
     fn placeholder_replaced_by_real_session() {
         let mut app = App::new();
-        app.watch_spawn("cchub-w-4".into(), "claude".into(), "/tmp".into());
-        let real = fake_session("cchub-w-4", SessionState::Idle);
+        app.watch_spawn("hal-w-4".into(), "claude".into(), "/tmp".into());
+        let real = fake_session("hal-w-4", SessionState::Idle);
         assert!(app.update_sessions(vec![real]));
         let ids: Vec<String> = app
             .sessions
@@ -355,7 +352,7 @@ mod tests {
             .iter()
             .flat_map(|g| g.sessions.iter().map(|s| s.session_id.clone()))
             .collect();
-        assert_eq!(ids, vec!["cchub-w-4".to_string()]);
+        assert_eq!(ids, vec!["hal-w-4".to_string()]);
         assert!(app.spawn_watches.is_empty());
     }
 
@@ -364,7 +361,7 @@ mod tests {
     #[test]
     fn placeholder_dropped_when_watch_expires() {
         let mut app = App::new();
-        app.watch_spawn("cchub-w-5".into(), "claude".into(), "/tmp".into());
+        app.watch_spawn("hal-w-5".into(), "claude".into(), "/tmp".into());
         app.check_spawn_watches(&[], Instant::now() + 2 * SPAWN_WATCH_TIMEOUT);
         app.rebuild_groups();
         assert!(app.sessions.groups.is_empty());

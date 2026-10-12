@@ -59,19 +59,13 @@ mod tests {
             let mut board = PersonalBoard::load();
             let id = board.add("managed task").unwrap().unwrap();
             board
-                .bind_resource(
-                    &id,
-                    "/tmp/project",
-                    "cc-1",
-                    "cchub-stale",
-                    Some("sid-worker"),
-                )
+                .bind_resource(&id, "/tmp/project", "cc-1", "hal-stale", Some("sid-worker"))
                 .unwrap();
             // The card's tmux was repointed at a resumed, long-dead session
             // while the worker it names runs on in the broker's tmux.
             let learned = board
                 .bind_sessions(&[
-                    scanned("sid-exhausted", SessionState::Idle, "cchub-stale"),
+                    scanned("sid-exhausted", SessionState::Idle, "hal-stale"),
                     scanned("sid-worker", SessionState::Processing, "cchr-worker-2"),
                 ])
                 .unwrap();
@@ -96,7 +90,7 @@ mod tests {
                     &id,
                     "/tmp/project",
                     "claude",
-                    "cchub-resumed",
+                    "hal-resumed",
                     Some("sid-old"),
                 )
                 .unwrap();
@@ -104,13 +98,13 @@ mod tests {
             // the old id only survives in the archive.
             board
                 .bind_sessions(&[
-                    scanned("sid-old", SessionState::Inactive, "cchub-dead"),
-                    scanned("sid-forked", SessionState::Idle, "cchub-resumed"),
+                    scanned("sid-old", SessionState::Inactive, "hal-dead"),
+                    scanned("sid-forked", SessionState::Idle, "hal-resumed"),
                 ])
                 .unwrap();
             let card = PersonalBoard::load().get(&id).cloned().unwrap();
             assert_eq!(card.session_id.as_deref(), Some("sid-forked"));
-            assert_eq!(card.tmux.as_deref(), Some("cchub-resumed"));
+            assert_eq!(card.tmux.as_deref(), Some("hal-resumed"));
         });
     }
 

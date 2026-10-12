@@ -1,6 +1,6 @@
 //! Subscription accounts and the resource broker's state.
 //!
-//! Accounts come from `~/.cc-hub/resources.toml`, the registry cc-hub shares
+//! Accounts come from `~/.hal/resources.toml`, the registry hal shares
 //! with the bundled broker: each names a provider and a home directory. This
 //! module maps agents to accounts, points child processes at an account's
 //! home, and scans every account's sessions. It never reads credentials.
@@ -28,13 +28,13 @@ struct Registry {
     accounts: BTreeMap<String, Account>,
 }
 
-/// Every account in the registry (`$CC_HUB_RESOURCE_CONFIG`, else
-/// `~/.cc-hub/resources.toml`), keyed by name. Empty when the file is missing
+/// Every account in the registry (`$HAL_RESOURCE_CONFIG`, else
+/// `~/.hal/resources.toml`), keyed by name. Empty when the file is missing
 /// or does not parse.
 pub fn accounts() -> BTreeMap<String, Account> {
-    let path = std::env::var_os("CC_HUB_RESOURCE_CONFIG")
+    let path = std::env::var_os("HAL_RESOURCE_CONFIG")
         .map(PathBuf::from)
-        .or_else(|| crate::platform::paths::cc_hub_home().map(|h| h.join("resources.toml")));
+        .or_else(|| crate::platform::paths::hal_home().map(|h| h.join("resources.toml")));
     path.and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| toml::from_str::<Registry>(&s).ok())
         .unwrap_or_default()
@@ -130,9 +130,9 @@ pub fn for_agent(id: &str) -> Option<Account> {
 /// The broker's live workers, from its `state.json`. Stopped and blocked
 /// workers don't count. Empty when there is no broker.
 fn live_workers() -> Vec<serde_json::Value> {
-    let Some(directory) = std::env::var_os("CC_HUB_RESOURCE_DIR")
+    let Some(directory) = std::env::var_os("HAL_RESOURCE_DIR")
         .map(PathBuf::from)
-        .or_else(|| crate::platform::paths::cc_hub_home().map(|h| h.join("resources")))
+        .or_else(|| crate::platform::paths::hal_home().map(|h| h.join("resources")))
     else {
         return Vec::new();
     };
@@ -310,7 +310,7 @@ mod tests {
                 "a": {"task": task, "tmux": "cchr-a-1", "title": "Task: Retro", "status": "starting"},
                 "b": {"task": task, "tmux": "cchr-b-1", "title": "Task: Old", "status": "blocked"},
             }});
-            let directory = crate::platform::paths::cc_hub_home()
+            let directory = crate::platform::paths::hal_home()
                 .unwrap()
                 .join("resources");
             std::fs::create_dir_all(&directory).unwrap();
@@ -324,7 +324,7 @@ mod tests {
                 hosted("cchr-a-1", None),
                 hosted("cchr-a-1", Some("Renamed")),
                 hosted("cchr-b-1", None),
-                hosted("cchub-1-2", None),
+                hosted("hal-1-2", None),
             ];
 
             name_worker_sessions(&mut sessions);

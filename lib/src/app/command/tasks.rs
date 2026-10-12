@@ -114,7 +114,7 @@ impl App {
             OpenKindPicker => {
                 if !self.enter_task_kind_picker() {
                     let why = if config::get().tasks.kinds.is_empty() {
-                        "no task kinds configured — set [tasks].kinds in ~/.cc-hub/config.toml"
+                        "no task kinds configured — set [tasks].kinds in ~/.hal/config.toml"
                     } else {
                         "no task focused"
                     };

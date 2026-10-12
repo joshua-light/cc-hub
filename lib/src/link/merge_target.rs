@@ -1,7 +1,7 @@
 use super::chore::Chore;
 use super::pull_request::{pull_request_titled, PullRequestUrl};
 
-/// `cc-hub://merge-target?pr=<url>[&title=<text>][&kind=<word>]`: merge a
+/// `hal://merge-target?pr=<url>[&title=<text>][&kind=<word>]`: merge a
 /// pull request's target branch into its source branch in a fresh agent
 /// session, filed as a card on the Tasks board — the PR that fell behind,
 /// or that conflicts. `title` and `kind` are as on a fix link.
@@ -69,7 +69,7 @@ mod tests {
     use crate::link::{Link, LinkError};
 
     fn merge(query: &str) -> MergeTargetLink {
-        let raw = format!("cc-hub://merge-target?{}", query);
+        let raw = format!("hal://merge-target?{}", query);
         match raw.parse::<Link>() {
             Ok(Link::MergeTarget(x)) => x,
             Ok(other) => panic!("{}: parsed as {}", raw, other.kind()),
@@ -83,7 +83,7 @@ mod tests {
         assert_eq!(x.pr.repo(), "sample-project");
         assert_eq!(x.kind.as_deref(), Some("tps"));
         assert_eq!(
-            "cc-hub://merge-target?title=x".parse::<Link>(),
+            "hal://merge-target?title=x".parse::<Link>(),
             Err(LinkError::MissingParam("pr"))
         );
     }
@@ -115,7 +115,7 @@ mod tests {
         let prompt = merge(&format!("pr={}", PR)).prompt_for(&card);
         assert!(prompt.contains("When the merge is pushed"), "{}", prompt);
         assert!(
-            prompt.contains("cc-hub board note --task tk-42 --text \"Pushed:"),
+            prompt.contains("hal board note --task tk-42 --text \"Pushed:"),
             "{}",
             prompt
         );

@@ -21,7 +21,7 @@ pub const AUTOCOMPACT_FLOOR: u64 = 100_000;
 pub const BASE_SYSTEM_PROMPT: &str = "\
 You are an autonomous worker process. You run unattended on a loop; no human is \
 watching this turn, and nothing you say reaches a person unless you write it to a \
-file or report it with `cc-hub agent note`.
+file or report it with `hal agent note`.
 
 Operating rules:
 - Your conversation memory is discarded without warning. Files are the only memory \

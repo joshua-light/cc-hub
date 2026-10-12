@@ -707,8 +707,8 @@ mod session_finder_tests {
             agent_id: "claude".into(),
             agent_kind: AgentKind::Claude,
             session_id: sid.into(),
-            cwd: "/tmp/cc-hub".into(),
-            project_name: "cc-hub".into(),
+            cwd: "/tmp/hal".into(),
+            project_name: "hal".into(),
             jsonl_path: format!("/x/{sid}.jsonl").into(),
             mtime_ms: crate::ui::now_ms() - hours_ago * 3_600_000,
             title: title.map(str::to_string),
@@ -766,11 +766,7 @@ mod session_finder_tests {
                 rendered
                     .lines()
                     .filter(|l| l.contains(needle))
-                    .map(|l| {
-                        l[..l.find("cc-hub").expect("project column")]
-                            .chars()
-                            .count()
-                    })
+                    .map(|l| l[..l.find("hal").expect("project column")].chars().count())
                     .next()
             };
             assert_eq!(

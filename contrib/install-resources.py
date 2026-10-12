@@ -22,7 +22,7 @@ def toml_value(value):
 
 def share_tools(home, marketplaces=()):
     """Share local task tooling, never subscription or connector credentials."""
-    backup = home / '.cc-hub/resources/backups' / datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+    backup = home / '.hal/resources/backups' / datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
     changed = []
 
     def write(path, text):
@@ -113,8 +113,8 @@ def main():
     args = parser.parse_args()
     binary = args.binary.resolve()
     if not binary.is_file():
-        parser.error('build cc-hub first')
-    destination = args.home / '.cc-hub/resources.toml'
+        parser.error('build hal first')
+    destination = args.home / '.hal/resources.toml'
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not destination.exists():
         shutil.copy2(Path(__file__).with_name('resources.toml'), destination)
@@ -123,15 +123,15 @@ def main():
     if args.watchdog:
         if sys.platform != 'darwin' or args.home.resolve() != Path.home().resolve():
             parser.error('--watchdog requires the current macOS user')
-        logs = args.home / '.cc-hub/resources'
+        logs = args.home / '.hal/resources'
         logs.mkdir(parents=True, exist_ok=True, mode=0o700)
-        plist = args.home / 'Library/LaunchAgents/local.cc-hub.resources.plist'
+        plist = args.home / 'Library/LaunchAgents/local.hal.resources.plist'
         plist.parent.mkdir(parents=True, exist_ok=True)
         if plist.exists():
             stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
             shutil.copy2(plist, logs / ('supervisor-' + stamp + '.plist.bak'))
         configuration = {
-            'Label': 'local.cc-hub.resources',
+            'Label': 'local.hal.resources',
             'ProgramArguments': [str(binary), 'resource', 'supervise'],
             'StartInterval': 30, 'RunAtLoad': True, 'ProcessType': 'Background',
             'EnvironmentVariables': {'PATH': ':'.join([str(binary.parent), str(args.home / '.local/bin'),

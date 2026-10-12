@@ -1,5 +1,5 @@
 [package]
-name = "cc-hub-lib"
+name = "hal-lib"
 version.workspace = true
 edition.workspace = true
 

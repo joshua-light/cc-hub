@@ -151,52 +151,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cc-hub"
-version = "0.75.2"
-dependencies = [
- "cc-hub-lib",
- "chrono",
- "crossterm",
- "libc",
- "log",
- "ratatui",
- "serde_json",
- "simplelog",
- "tempfile",
- "time",
- "tokio",
-]
-
-[[package]]
-name = "cc-hub-lib"
-version = "0.75.2"
-dependencies = [
- "chrono",
- "crossterm",
- "dirs",
- "fs2",
- "libc",
- "libproc",
- "log",
- "notify",
- "notify-debouncer-mini",
- "portable-pty",
- "ratatui",
- "serde",
- "serde_json",
- "sha2",
- "simplelog",
- "tempfile",
- "tokio",
- "toml",
- "toml_edit",
- "tui-term",
- "uuid",
- "vt100",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "cexpr"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -613,6 +567,52 @@ name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
+
+[[package]]
+name = "hal"
+version = "0.75.2"
+dependencies = [
+ "chrono",
+ "crossterm",
+ "hal-lib",
+ "libc",
+ "log",
+ "ratatui",
+ "serde_json",
+ "simplelog",
+ "tempfile",
+ "time",
+ "tokio",
+]
+
+[[package]]
+name = "hal-lib"
+version = "0.75.2"
+dependencies = [
+ "chrono",
+ "crossterm",
+ "dirs",
+ "fs2",
+ "libc",
+ "libproc",
+ "log",
+ "notify",
+ "notify-debouncer-mini",
+ "portable-pty",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "sha2",
+ "simplelog",
+ "tempfile",
+ "tokio",
+ "toml",
+ "toml_edit",
+ "tui-term",
+ "uuid",
+ "vt100",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "hashbrown"

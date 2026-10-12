@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub const TEMPLATE_SPEC: &str = r#"# cc-hub persistent agent. Edits apply on the next tick.
+pub const TEMPLATE_SPEC: &str = r#"# hal persistent agent. Edits apply on the next tick.
 description = "What this agent watches and does"
 enabled = true
 # workdir = "~/somewhere"        # default: <this dir>/work — keep it clean
@@ -14,7 +14,7 @@ kind = "inbox"                   # inbox | poll | interval
 # interval_s = 300               # poll / interval cadence
 
 [run]
-tools = ["Read", "Write", "Glob", "Bash(cc-hub agent *)"]
+tools = ["Read", "Write", "Glob", "Bash(hal agent *)"]
 # model = "sonnet"
 # effort = "low"
 window_pct = 32                  # ~32k context; fresh session each tick
@@ -25,7 +25,7 @@ daily_budget_usd = 5.0           # then halts until tomorrow
 [prompt]
 append = """
 Describe the agent's job and its state files here. Report findings with
-`cc-hub agent note --text "..."`."""
+`hal agent note --text "..."`."""
 
 instruction = """
 The event below describes one thing that happened.
@@ -79,10 +79,6 @@ mod tests {
     fn template_spec_parses() {
         let s = spec::parse(Path::new("/tmp/agents/demo"), TEMPLATE_SPEC).unwrap();
         assert_eq!(s.name, "demo");
-        assert!(s
-            .run
-            .tools
-            .iter()
-            .any(|t| t.starts_with("Bash(cc-hub agent")));
+        assert!(s.run.tools.iter().any(|t| t.starts_with("Bash(hal agent")));
     }
 }

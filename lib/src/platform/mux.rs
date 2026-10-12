@@ -2,7 +2,7 @@
 
 //! Terminal-multiplexer CLI shim.
 //!
-//! cc-hub was born on tmux, but every CLI it actually uses (`new-session`,
+//! hal was born on tmux, but every CLI it actually uses (`new-session`,
 //! `send-keys`, `list-panes`, `kill-session`) is present in psmux — a
 //! tmux-compatible multiplexer that runs natively on Windows via ConPTY, and
 //! ships a `tmux.exe` binary. Both platforms go through the same `tmux` CLI
@@ -53,7 +53,7 @@ fn spawn_detached_impl(name: &str, cwd: &str, initial_cmd: Option<&str>) -> io::
 ///
 /// tmux runs the trailing arg via `/bin/sh -c`, which word-splits on spaces.
 /// The command must be a single quoted token for `-c`, otherwise
-/// `zsh -ic cc-hub-new --resume SID` becomes `zsh -i -c cc-hub-new` with
+/// `zsh -ic hal-new --resume SID` becomes `zsh -i -c hal-new` with
 /// `--resume SID` attached to zsh's positional params — never reaching the
 /// alias. `-ic` keeps the user's shell rc in the loop (aliases, PATH).
 ///
@@ -188,12 +188,12 @@ pub fn kill_session(session: &str) -> io::Result<()> {
 /// newline arrives as Enter and submits the partial line."
 pub fn paste_buffer(session: &str, text: &str) -> io::Result<()> {
     // Per-call buffer name: tmux buffers are server-wide, so a fixed name
-    // would race when two callers (e.g. concurrent `cc-hub spawn-worker`
+    // would race when two callers (e.g. concurrent `hal spawn-worker`
     // invocations from a TUI dispatcher and a CLI subcommand) interleave
     // load-buffer/paste-buffer/-d cycles. PID + nanos is unique within one
     // host's tmux server lifetime.
     let buf_name = format!(
-        "cchub-{}-{}",
+        "hal-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -240,16 +240,16 @@ pub fn paste_buffer(session: &str, text: &str) -> io::Result<()> {
 }
 
 /// Wire tmux's `copy-command` (a server option, tmux 3.2+) to the same
-/// copy pipeline cc-hub uses — OSC 52 forward to attached clients plus the
+/// copy pipeline hal uses — OSC 52 forward to attached clients plus the
 /// host-clipboard fallback chain — so a mouse-drag selection in an embedded
 /// pane lands on the viewer's clipboard via the default
-/// `copy-pipe-and-cancel` binding, even when cc-hub runs on a remote box
+/// `copy-pipe-and-cancel` binding, even when hal runs on a remote box
 /// over ssh. Best-effort — server-wide, clobbers any pre-existing
 /// `copy-command`; users who want different behaviour can re-set it in
-/// their tmux.conf after cc-hub spawns a session.
+/// their tmux.conf after hal spawns a session.
 pub fn configure_clipboard() {
     // `set-clipboard external` (the default) makes tmux DROP OSC 52 escapes
-    // emitted by applications inside it. When cc-hub itself runs in a tmux
+    // emitted by applications inside it. When hal itself runs in a tmux
     // pane — the usual shape for a long-lived hub driven over ssh — its
     // clipboard writes ARE such an application escape: both the /dev/tty
     // emit in `clipboard::copy` and the embedded-pane relay replayed by the
@@ -417,26 +417,26 @@ mod tests {
     #[test]
     fn initial_shell_cmd_guards_rc_prompts_and_quotes_cmd() {
         assert_eq!(
-            initial_shell_cmd("/bin/zsh", "cc-hub-new --resume SID"),
-            "DISABLE_AUTO_UPDATE=true /bin/zsh -ic 'cc-hub-new --resume SID'"
+            initial_shell_cmd("/bin/zsh", "hal-new --resume SID"),
+            "DISABLE_AUTO_UPDATE=true /bin/zsh -ic 'hal-new --resume SID'"
         );
     }
 
     /// Real `tmux capture-pane -p` output from a freshly-spawned
-    /// `cc-hub-new` session.
+    /// `hal-new` session.
     /// The input row is `❯ ` — the only `❯` in the pane.
     const COLD_READY_PANE: &str = concat!(
         "╭─── Claude Code v2.1.119 ─────────────────────────────────────────────────────╮\n",
         "│                                                    │ Tips for getting        │\n",
         "│                Welcome back example-user!               │ started                 │\n",
         "│                       ▐▛███▜▌                      │                         │\n",
-        "│                 /tmp/cchub-e2e-E4I                 │                         │\n",
+        "│                 /tmp/hal-e2e-E4I                 │                         │\n",
         "╰──────────────────────────────────────────────────────────────────────────────╯\n",
         "\n",
         "────────────────────────────────────────────────────────────────────────────────\n",
         "❯ \n",
         "────────────────────────────────────────────────────────────────────────────────\n",
-        "  ◆ Opus 4.7 (1M context) │ cchub-e2e-E4I │ ⎇ main │ $0.00 │ ⏱ 0s\n",
+        "  ◆ Opus 4.7 (1M context) │ hal-e2e-E4I │ ⎇ main │ $0.00 │ ⏱ 0s\n",
         "  ctx ╌╌╌╌╌╌╌╌╌╌ 0% │ 5h 4pm ━━╌╌╌╌╌╌╌╌ 21% │ wk mon 8am ━╌╌╌╌╌╌╌╌╌ 9%\n",
         "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
         "\n\n\n\n\n\n",

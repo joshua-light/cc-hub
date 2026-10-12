@@ -28,9 +28,9 @@ fn render_agents_body_at(frame: &mut Frame, area: Rect, app: &mut App, now: i64)
         } else {
             let root = crate::harness::root()
                 .map(|r| r.display().to_string())
-                .unwrap_or_else(|| "~/.cc-hub/agents".into());
+                .unwrap_or_else(|| "~/.hal/agents".into());
             format!(
-                " No agents yet. Scaffold one with `cc-hub agent new <name>` — specs live in {}",
+                " No agents yet. Scaffold one with `hal agent new <name>` — specs live in {}",
                 root
             )
         };

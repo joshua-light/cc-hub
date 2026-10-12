@@ -204,7 +204,7 @@ pub(super) fn render_artifacts(
         render_empty(
             frame,
             body,
-            "Nothing reported yet. An agent reports with `cc-hub agent note --text … --ref <url or path>`.",
+            "Nothing reported yet. An agent reports with `hal agent note --text … --ref <url or path>`.",
         );
         return;
     }

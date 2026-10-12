@@ -1,4 +1,4 @@
-use cc_hub_lib::platform;
+use hal_lib::platform;
 use log::LevelFilter;
 use simplelog::WriteLogger;
 use std::fs::File;
@@ -11,7 +11,7 @@ pub(crate) fn init_logging() -> PathBuf {
     std::fs::create_dir_all(&log_dir).ok();
 
     let log_path = log_dir.join(format!(
-        "cc-hub_{}.log",
+        "hal_{}.log",
         chrono::Local::now().format("%Y%m%d_%H%M%S")
     ));
 

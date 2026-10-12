@@ -1,5 +1,5 @@
 //! Task note and attachment ops: attach a file, URL or free-text note to a
-//! card, read its notes back, remove one. The CLI (`cc-hub board`) keeps flag
+//! card, read its notes back, remove one. The CLI (`hal board`) keeps flag
 //! parsing and JSON rendering; everything that mutates on-disk task state
 //! lives here.
 
@@ -214,7 +214,7 @@ pub fn notes_of(task: &TaskState) -> Vec<Note> {
         .collect()
 }
 
-/// `cc-hub board notes` body: the notes of a card.
+/// `hal board notes` body: the notes of a card.
 pub fn task_notes(task_id: &str) -> Result<Vec<Note>, OpError> {
     let state = store::read_task_state(task_id)
         .map_err(|e| OpError::NotFound(format!("no board task {}: {}", task_id, e)))?;

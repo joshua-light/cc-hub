@@ -2,8 +2,8 @@
 
 The resource broker decides which subscription account runs the session
 working a task, and keeps that session alive across account limits. It ships
-inside `cc-hub` as `cc-hub resource …` and needs Python 3.11+ and tmux. Its
-configuration is `~/.cc-hub/resources.toml`;
+inside `hal` as `hal resource …` and needs Python 3.11+ and tmux. Its
+configuration is `~/.hal/resources.toml`;
 [contrib/resources.toml](../contrib/resources.toml) is the annotated example.
 
 - **Accounts** are separate Claude or Codex homes, each with its own login.
@@ -19,28 +19,28 @@ configuration is `~/.cc-hub/resources.toml`;
 
 ## One session per task
 
-A task has one worker at a time. `cc-hub resource start` returns the live
+A task has one worker at a time. `hal resource start` returns the live
 worker when one exists in the same role and folder. When the live worker has
 another role or folder, `start` is a hand-over: it stops the old worker and
 launches the new one. The card's notes carry the context
 between them.
 
 ```sh
-cc-hub resource start --task tk-ID --kind tps --role implementation --cwd /repo --prompt '…' [--title TEXT]
-cc-hub resource status [--worker ID]
-cc-hub resource stop --worker ID [--reason TEXT]
-cc-hub resource retry --worker ID     # a blocked worker, once you know why it exited
-cc-hub resource select --kind KIND --role ROLE   # preview an allocation
+hal resource start --task tk-ID --kind tps --role implementation --cwd /repo --prompt '…' [--title TEXT]
+hal resource status [--worker ID]
+hal resource stop --worker ID [--reason TEXT]
+hal resource retry --worker ID     # a blocked worker, once you know why it exited
+hal resource select --kind KIND --role ROLE   # preview an allocation
 ```
 
 A worker's session is named at birth: `--title`, else the card's title,
 else `Task: <card text>`. A Claude session is named before launch, a Codex
-session once its id is known. cc-hub never overwrites a name, so a session
+session once its id is known. hal never overwrites a name, so a session
 resumed on another account keeps a name you gave it.
 
-A `cc-hub://task?…` link reaches the broker the same way: with accounts
+A `hal://task?…` link reaches the broker the same way: with accounts
 configured, no `--agent`, and a known kind (`&kind=`, or an earlier broker
-worker on the card), `cc-hub open` starts it through `resource start`.
+worker on the card), `hal open` starts it through `resource start`.
 
 ## Resources
 
@@ -66,9 +66,9 @@ doing the work knows that: a Grafana check and an on-device test are both
 nothing and claims what it needs:
 
 ```sh
-cc-hub resource claim android --wait 300   # the complete set the work needs
-cc-hub resource release [NAME...] [--as NAME]   # as soon as it is done, or to stop waiting
-cc-hub resource list                       # who holds what, and the queue
+hal resource claim android --wait 300   # the complete set the work needs
+hal resource release [NAME...] [--as NAME]   # as soon as it is done, or to stop waiting
+hal resource list                       # who holds what, and the queue
 ```
 
 A claim is all or nothing, first come first served: it is granted only when
@@ -95,14 +95,14 @@ A terminal, an editor's agent or a hand-started `claude` claims as a
 **guest**. It names itself once; after that, its process is its identity:
 
 ```sh
-cc-hub resource claim main-tps --as 'reviving TPS-21146' --wait 300
-cc-hub resource release
+hal resource claim main-tps --as 'reviving TPS-21146' --wait 300
+hal resource release
 ```
 
 A guest shares the workers' queue and shows in `resource list` under its
 name. It gets no account, no card and no replacement; the hub only lends it
 a resource. The hold ends with the claiming process: the broker walks up past
-shells and `cc-hub` itself to find the session's process, and `--pid` names
+shells and `hal` itself to find the session's process, and `--pid` names
 it when that walk would guess wrong.
 
 A release is found the same way, and when it runs from some other process —
@@ -128,7 +128,7 @@ relaunches:
   session whose opening prompt names the old transcript. A generation that
   died before writing a transcript passes on the one it was given.
 
-There are no checkpoint files and no model call to prepare. `cc-hub resource
+There are no checkpoint files and no model call to prepare. `hal resource
 supervise` runs one supervisor pass; the TUI's `R` key applies the same rules
 by hand.
 
@@ -138,8 +138,8 @@ retrying: inspect it, then `retry`. `max_attempts` bounds relaunches.
 
 ## Account health
 
-`cc-hub resource accounts` shows each account's health and quota. A Claude
-account can take a worker when `cc-hub usage --home DIR` reports it `ready`,
+`hal resource accounts` shows each account's health and quota. A Claude
+account can take a worker when `hal usage --home DIR` reports it `ready`,
 its usage is below `start_percent`, and fewer than `max_workers` of its
 workers are live. A route may set its own `start_percent`; the higher of the
 two applies:
@@ -172,15 +172,15 @@ a card to Done.
 
 ```sh
 cargo build --release
-python3 contrib/install-resources.py --binary target/release/cc-hub --share-tools --marketplace example-tools --watchdog
+python3 contrib/install-resources.py --binary target/release/hal --share-tools --marketplace example-tools --watchdog
 ```
 
-The installer copies the example config to `~/.cc-hub/resources.toml` if
+The installer copies the example config to `~/.hal/resources.toml` if
 none exists. `--share-tools` copies plugin and tool settings from the
 default profiles to the second ones (`--marketplace` names which plugin
 marketplaces to share; repeat it for more). It never copies credentials, so
 each account keeps its own login. `--watchdog` (macOS only) installs the
-launchd job `local.cc-hub.resources`, which runs `cc-hub resource supervise`
+launchd job `local.hal.resources`, which runs `hal resource supervise`
 every 30 seconds, so replacement works while the TUI is closed.
 
 Every account also appears as a hub agent under its own name. An

@@ -1,7 +1,7 @@
 use crate::scan_msg::ScanMsg;
-use cc_hub_lib::app::App;
-use cc_hub_lib::{live_view, models, platform};
 use crossterm::event::{KeyCode, KeyEvent};
+use hal_lib::app::App;
+use hal_lib::{live_view, models, platform};
 use tokio::sync::mpsc;
 
 pub(super) fn handle(app: &mut App, key: KeyEvent, scan_tx: &mpsc::Sender<ScanMsg>) {
@@ -18,9 +18,9 @@ pub(super) fn handle(app: &mut App, key: KeyEvent, scan_tx: &mpsc::Sender<ScanMs
                     .as_ref()
                     .is_some_and(|dir| row.jsonl_path.starts_with(dir))
                 {
-                    cc_hub_lib::agent::AgentKind::Pi
+                    hal_lib::agent::AgentKind::Pi
                 } else {
-                    cc_hub_lib::agent::AgentKind::Claude
+                    hal_lib::agent::AgentKind::Claude
                 };
                 let lv = live_view::LiveView::review(
                     row.jsonl_path.clone(),

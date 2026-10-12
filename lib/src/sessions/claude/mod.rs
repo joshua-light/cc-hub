@@ -95,9 +95,9 @@ fn read_raw_sessions() -> Vec<RawSession> {
         file_count += 1;
         if let Ok(contents) = std::fs::read_to_string(&path) {
             if let Ok(raw) = serde_json::from_str::<RawSession>(&contents) {
-                // Skip the one-shot `cc-hub-new -p` children our titler
+                // Skip the one-shot `hal-new -p` children our titler
                 // spawns — they live briefly in scratch_cwd and would
-                // otherwise surface as a spurious "cc-hub-summaries"
+                // otherwise surface as a spurious "hal-summaries"
                 // project in the grid.
                 if is_scratch_cwd(&raw.cwd) {
                     debug!(

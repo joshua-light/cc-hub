@@ -1,4 +1,4 @@
-use cc_hub_lib::{models, title};
+use hal_lib::{models, title};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -37,7 +37,7 @@ impl Titles {
         }
     }
 
-    /// Spawn a background `cc-hub-new -p` per session that has a first user
+    /// Spawn a background `hal-new -p` per session that has a first user
     /// message but no cached title yet, then stamp `titling` on every
     /// session whose titler is running.
     pub(crate) fn queue_missing(&self, sessions: &mut [models::SessionInfo]) {

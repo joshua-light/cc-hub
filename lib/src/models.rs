@@ -13,7 +13,7 @@ pub fn short_sid(sid: &str) -> &str {
 
 /// Canonical relative-age formatting. `secs` is the elapsed time in seconds.
 /// Renders the largest whole unit (`s`/`m`/`h`/`d`) with an ` ago` suffix —
-/// e.g. `45s ago`, `3m ago`, `2h ago`, `5d ago`. Used wherever cc-hub shows
+/// e.g. `45s ago`, `3m ago`, `2h ago`, `5d ago`. Used wherever hal shows
 /// "how long ago" a task/session/banner was updated.
 pub fn relative_age(secs: u64) -> String {
     format!("{} ago", relative_age_short(secs))

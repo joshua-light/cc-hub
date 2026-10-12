@@ -1,4 +1,4 @@
-//! A wake is a named "something happened", at `~/.cc-hub/wake/<name>`.
+//! A wake is a named "something happened", at `~/.hal/wake/<name>`.
 //! Whoever knows a thing changed touches it; an agent whose spec lists
 //! `trigger.wake = ["board"]` runs its poll on the next second instead of
 //! at the end of its interval. The board touches [`BOARD`] on every card
@@ -38,9 +38,7 @@ impl Wake {
         }
         Some(Self {
             name: name.to_string(),
-            path: crate::platform::paths::cc_hub_home()?
-                .join("wake")
-                .join(name),
+            path: crate::platform::paths::hal_home()?.join("wake").join(name),
         })
     }
 

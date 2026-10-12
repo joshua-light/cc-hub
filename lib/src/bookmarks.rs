@@ -1,5 +1,5 @@
 //! Persistent list of folders the user has bookmarked in the session
-//! picker. Stored at `~/.cc-hub/bookmarks.json` as a flat array of absolute
+//! picker. Stored at `~/.hal/bookmarks.json` as a flat array of absolute
 //! paths so the file is trivially editable by hand if needed.
 
 use serde::{Deserialize, Serialize};
@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::platform::paths::cc_hub_home;
+use crate::platform::paths::hal_home;
 
 #[derive(Default, Clone, Debug)]
 pub struct Bookmarks {
@@ -78,7 +78,7 @@ impl Bookmarks {
 }
 
 fn bookmarks_path() -> Option<PathBuf> {
-    cc_hub_home().map(|h| h.join("bookmarks.json"))
+    hal_home().map(|h| h.join("bookmarks.json"))
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
-use cc_hub_lib::app::{App, Command, HarnessCommand as H, Section, View};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use hal_lib::app::{App, Command, HarnessCommand as H, Section, View};
 
 /// Agents list and page key mapping. `f` gives the page the keyboard the way
 /// it gives a session's pane the keyboard on the Sessions tab, and on the

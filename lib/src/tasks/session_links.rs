@@ -1,7 +1,7 @@
 //! User-driven session→task links behind `L` on the Sessions tab.
 //!
 //! Sessions are discovered read-only from agent transcripts, so the link
-//! lives in a sidecar keyed by session id — `~/.cc-hub/session-tasks.json` —
+//! lives in a sidecar keyed by session id — `~/.hal/session-tasks.json` —
 //! the same pattern as the rename sidecar (`session-titles.json`). The
 //! session side owns the link (one task ↔ many sessions), so nothing here
 //! touches the lock-serialized `TaskState` files.
@@ -13,7 +13,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use crate::platform::paths::cc_hub_home;
+use crate::platform::paths::hal_home;
 
 /// One session's link to a task. `title` is a snapshot taken at link time
 /// (refreshed while the task is readable) so the Sessions grid can still
@@ -38,7 +38,7 @@ struct OnDisk {
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 fn store_path() -> Option<PathBuf> {
-    cc_hub_home().map(|h| h.join("session-tasks.json"))
+    hal_home().map(|h| h.join("session-tasks.json"))
 }
 
 /// Current on-disk map of `session_id → TaskLink`. Empty on any read/parse

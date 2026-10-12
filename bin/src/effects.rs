@@ -1,6 +1,6 @@
 //! Interpreter for the lib-side [`Effect`] contract.
 //!
-//! [`cc_hub_lib::app::App::execute`] performs every in-process consequence of
+//! [`hal_lib::app::App::execute`] performs every in-process consequence of
 //! a command and returns the effects that need bin-owned machinery: the
 //! terminal (pane sizing), the event loop's channels, or the window manager.
 //! This module is a thin IO shim: decisions and status messages belong in
@@ -9,8 +9,8 @@
 
 use crate::scan_msg::ScanMsg;
 use crate::term::Term;
-use cc_hub_lib::app::{App, Effect};
-use cc_hub_lib::{focus, spawn, tmux_pane};
+use hal_lib::app::{App, Effect};
+use hal_lib::{focus, spawn, tmux_pane};
 use std::io;
 use tokio::sync::mpsc;
 
@@ -29,7 +29,7 @@ pub(crate) async fn apply_effect(
         Effect::BuildSessionIndex => {
             let tx = scan_tx.clone();
             tokio::spawn(async move {
-                let index = tokio::task::spawn_blocking(cc_hub_lib::sessions::index::scan)
+                let index = tokio::task::spawn_blocking(hal_lib::sessions::index::scan)
                     .await
                     .unwrap_or_default();
                 let _ = tx.send(ScanMsg::SessionIndex(index)).await;

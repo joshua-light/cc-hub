@@ -3,7 +3,7 @@
 debug
 target
 
-# Worktree directories left by older cc-hub versions
+# Worktree directories left by older versions, back when hal was cc-hub
 .cc-hub-wt/
 
 # Claude Code session state (per-project), recreated each run

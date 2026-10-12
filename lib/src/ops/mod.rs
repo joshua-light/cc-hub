@@ -14,7 +14,7 @@
 //!   * Ops mutate tasks through `store::update_task`, which holds the
 //!     per-task lock and validates transitions.
 //!
-//! - `link`: act on a parsed `cc-hub://` link (`cc-hub open`).
+//! - `link`: act on a parsed `hal://` link (`hal open`).
 //! - `prompt`: deliver a prompt once a fresh session is ready for input.
 //! - `task`: attach, list and remove a card's notes and attachments.
 

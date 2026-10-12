@@ -81,7 +81,7 @@ fn compute_resolve() -> Option<Vec<String>> {
 ///   can be recovered. `stderr` is dropped so shell chatter stays out of the
 ///   stdout parse.
 /// - Windows: the spawn command is usually a function defined in the user's
-///   PowerShell `$PROFILE` (e.g. `cc-hub-new`), invisible to `command -v` and
+///   PowerShell `$PROFILE` (e.g. `hal-new`), invisible to `command -v` and
 ///   to a non-profile shell. So we let `powershell.exe` load the profile and
 ///   print `(Get-Command name).Definition` — an application resolves to its
 ///   exe path, a function/alias to its body (e.g. `claude --flag @args`).
@@ -200,18 +200,18 @@ mod tests {
     #[test]
     fn parse_resolution_prefers_absolute_path() {
         assert_eq!(
-            parse_resolution("/usr/local/bin/cc-hub-new\n", "cc-hub-new"),
-            Some(vec!["/usr/local/bin/cc-hub-new".into()])
+            parse_resolution("/usr/local/bin/hal-new\n", "hal-new"),
+            Some(vec!["/usr/local/bin/hal-new".into()])
         );
     }
 
     #[test]
     fn parse_resolution_zsh_alias() {
-        // `alias cc-hub-new` in zsh prints `cc-hub-new='claude --flag'`.
+        // `alias hal-new` in zsh prints `hal-new='claude --flag'`.
         assert_eq!(
             parse_resolution(
-                "cc-hub-new='claude --dangerously-skip-permissions'\n",
-                "cc-hub-new"
+                "hal-new='claude --dangerously-skip-permissions'\n",
+                "hal-new"
             ),
             Some(vec![
                 "claude".into(),
@@ -222,9 +222,9 @@ mod tests {
 
     #[test]
     fn parse_resolution_bash_alias() {
-        // `alias cc-hub-new` in bash prints `alias cc-hub-new='claude …'`.
+        // `alias hal-new` in bash prints `alias hal-new='claude …'`.
         assert_eq!(
-            parse_resolution("alias cc-hub-new='claude --model haiku'\n", "cc-hub-new"),
+            parse_resolution("alias hal-new='claude --model haiku'\n", "hal-new"),
             Some(vec!["claude".into(), "--model".into(), "haiku".into()])
         );
     }
@@ -233,8 +233,8 @@ mod tests {
     fn parse_resolution_path_wins_over_alias() {
         // Both lines present: pick the path, skip the alias.
         assert_eq!(
-            parse_resolution("/opt/bin/cc-hub-new\ncc-hub-new='claude'\n", "cc-hub-new"),
-            Some(vec!["/opt/bin/cc-hub-new".into()])
+            parse_resolution("/opt/bin/hal-new\nhal-new='claude'\n", "hal-new"),
+            Some(vec!["/opt/bin/hal-new".into()])
         );
     }
 
@@ -242,10 +242,10 @@ mod tests {
     fn parse_resolution_ignores_rc_chatter_before_alias() {
         // `zsh -ic` sources rc files first, so assignments print before the
         // real alias output. A stray `EDITOR=nvim` must NOT be taken as the
-        // resolution — only the line that actually defines cc-hub-new is.
-        let raw = "EDITOR=nvim\nLESS=-R\ncc-hub-new='claude --flag'\n";
+        // resolution — only the line that actually defines hal-new is.
+        let raw = "EDITOR=nvim\nLESS=-R\nhal-new='claude --flag'\n";
         assert_eq!(
-            parse_resolution(raw, "cc-hub-new"),
+            parse_resolution(raw, "hal-new"),
             Some(vec!["claude".into(), "--flag".into()])
         );
     }
@@ -254,9 +254,9 @@ mod tests {
     fn parse_resolution_ignores_unrelated_path_chatter() {
         // An unrelated absolute path from startup chatter is not the
         // resolution; the alias line for the queried command is.
-        let raw = "/opt/tools/some-other-bin\ncc-hub-new='claude'\n";
+        let raw = "/opt/tools/some-other-bin\nhal-new='claude'\n";
         assert_eq!(
-            parse_resolution(raw, "cc-hub-new"),
+            parse_resolution(raw, "hal-new"),
             Some(vec!["claude".into()])
         );
     }
@@ -266,34 +266,25 @@ mod tests {
         // Nothing resolves the queried command → None, so the caller falls
         // back to spawning through the shell rather than exec'ing garbage.
         assert_eq!(
-            parse_resolution(
-                "EDITOR=nvim\nPAGER=less\nGREP_OPTIONS=--color\n",
-                "cc-hub-new"
-            ),
+            parse_resolution("EDITOR=nvim\nPAGER=less\nGREP_OPTIONS=--color\n", "hal-new"),
             None
         );
     }
 
     #[test]
     fn parse_resolution_rejects_prefix_named_assignment() {
-        // `cc-hub-newer=x` shares a prefix with the command but is a different
+        // `hal-newer=x` shares a prefix with the command but is a different
         // var — the `=` must sit immediately after the exact command name.
-        assert_eq!(
-            parse_resolution("cc-hub-newer='wrong'\n", "cc-hub-new"),
-            None
-        );
+        assert_eq!(parse_resolution("hal-newer='wrong'\n", "hal-new"), None);
     }
 
     #[cfg(windows)]
     #[test]
     fn parse_resolution_windows_function_body() {
-        // PowerShell `(Get-Command cc-hub-new).Definition` for a $PROFILE
+        // PowerShell `(Get-Command hal-new).Definition` for a $PROFILE
         // function prints its body; split it and drop the `@args` splat.
         assert_eq!(
-            parse_resolution(
-                "claude --dangerously-skip-permissions @args\n",
-                "cc-hub-new"
-            ),
+            parse_resolution("claude --dangerously-skip-permissions @args\n", "hal-new"),
             Some(vec![
                 "claude".into(),
                 "--dangerously-skip-permissions".into()
@@ -314,7 +305,7 @@ mod tests {
 
     #[test]
     fn parse_resolution_empty_returns_none() {
-        assert_eq!(parse_resolution("", "cc-hub-new"), None);
-        assert_eq!(parse_resolution("\n\n  \n", "cc-hub-new"), None);
+        assert_eq!(parse_resolution("", "hal-new"), None);
+        assert_eq!(parse_resolution("\n\n  \n", "hal-new"), None);
     }
 }

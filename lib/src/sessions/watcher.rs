@@ -13,8 +13,8 @@ pub fn spawn_fs_watcher(tx: mpsc::Sender<()>) {
     let claude = paths::claude_home();
     let pi = paths::pi_home();
     let codex = paths::codex_home();
-    let cc_hub = paths::cc_hub_home();
-    if claude.is_none() && pi.is_none() && codex.is_none() && cc_hub.is_none() {
+    let hal = paths::hal_home();
+    if claude.is_none() && pi.is_none() && codex.is_none() && hal.is_none() {
         warn!("fs watcher: no agent homes resolvable, skipping");
         return;
     }
@@ -42,8 +42,8 @@ pub fn spawn_fs_watcher(tx: mpsc::Sender<()>) {
         if let Some(codex) = codex {
             targets.push((codex.join("sessions"), RecursiveMode::Recursive));
         }
-        if let Some(cc_hub) = cc_hub {
-            targets.push((cc_hub.join("pi-heartbeats"), RecursiveMode::Recursive));
+        if let Some(hal) = hal {
+            targets.push((hal.join("pi-heartbeats"), RecursiveMode::Recursive));
         }
 
         for account in crate::resources::accounts().values() {

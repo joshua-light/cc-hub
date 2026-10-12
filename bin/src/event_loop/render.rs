@@ -1,5 +1,5 @@
 use crate::term::Term;
-use cc_hub_lib::app::{App, View};
+use hal_lib::app::{App, View};
 use std::io;
 use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -112,7 +112,7 @@ pub(super) fn draw(
             // diff against a frame the screen no longer shows.
             terminal.clear()?;
         }
-        terminal.draw(|frame| cc_hub_lib::ui::render(frame, app))?;
+        terminal.draw(|frame| hal_lib::ui::render(frame, app))?;
         draw_dur = t_draw.elapsed();
         // Diff size this frame pushed at the terminal. Drained even for
         // pane frames so their bytes can't leak into the next Grid
@@ -195,7 +195,7 @@ pub(super) fn draw(
 /// onto the real terminal. tmux addresses the escape to its attach
 /// client — the pane's pty, where the vt100 parser would drop it —
 /// so this hop is what carries an in-pane copy to the viewer's
-/// terminal when cc-hub runs on a remote box over ssh. Done here,
+/// terminal when hal runs on a remote box over ssh. Done here,
 /// between frames on the render thread, so a replay can never tear
 /// a ratatui write.
 pub(super) fn replay_osc52(terminal: &mut Term, app: &App) {

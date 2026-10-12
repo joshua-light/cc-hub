@@ -1,5 +1,5 @@
-use cc_hub_lib::app::App;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use hal_lib::app::App;
 
 /// F1 and Ctrl+Shift+V belong to the hub; every other key goes to the pane.
 pub(super) fn handle(app: &mut App, key: KeyEvent) {
@@ -12,7 +12,7 @@ pub(super) fn handle(app: &mut App, key: KeyEvent) {
                 && key.modifiers.contains(KeyModifiers::CONTROL)
                 && key.modifiers.contains(KeyModifiers::SHIFT) =>
         {
-            let status = match cc_hub_lib::clipboard::paste() {
+            let status = match hal_lib::clipboard::paste() {
                 Ok(text) if text.is_empty() => Some("clipboard empty".to_string()),
                 Ok(text) => match app.focused_pane() {
                     Some(pane) => pane

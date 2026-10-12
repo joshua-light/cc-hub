@@ -20,9 +20,9 @@ mod resource;
 mod usage;
 mod wake;
 
-use cc_hub_lib::ops;
 use error::{handle, CliError};
 use flags::{args_request_help, parse_flags, require_task};
+use hal_lib::ops;
 
 pub fn dispatch(args: &[String]) -> Option<i32> {
     let (verb, rest) = args.split_first()?;

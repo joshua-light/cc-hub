@@ -1,6 +1,6 @@
 # Keybindings reference
 
-Every key cc-hub binds, per tab and per popup. The status bar shows the
+Every key hal binds, per tab and per popup. The status bar shows the
 common ones for the current view.
 
 ## Global
@@ -14,9 +14,9 @@ These work on every tab when no popup is open. `Ctrl+L` also works in popups.
 | `q` | Quit |
 | `Ctrl+L` | Repaint the screen |
 
-Tabs run Tasks → Sessions → Builds → Agents → Metrics; cc-hub opens on
+Tabs run Tasks → Sessions → Builds → Agents → Metrics; hal opens on
 Sessions. Builds shows once a recipe exists. Agents shows once
-`~/.cc-hub/agents/` exists, unless `[harness].show_tab = false`.
+`~/.hal/agents/` exists, unless `[harness].show_tab = false`.
 
 ## Tasks
 

@@ -2,11 +2,11 @@
 //!
 //! The usage endpoint rate-limits the whole machine, so nothing in the Hub
 //! calls it directly. Every consumer (the statusline, the TUI, the resource
-//! broker via `cc-hub usage`) goes through [`read`], which serves the stored
+//! broker via `hal usage`) goes through [`read`], which serves the stored
 //! reading and asks the endpoint again only when the account is due. A failed
 //! ask never erases the last good reading; it only pushes the next ask out.
 //!
-//! The store is `~/.cc-hub/usage.json`, one [`Usage`] per account home, and
+//! The store is `~/.hal/usage.json`, one [`Usage`] per account home, and
 //! every read-probe-write runs under an advisory flock so two statuslines
 //! that wake together still make one request.
 
@@ -225,7 +225,7 @@ impl Usage {
         })
     }
 
-    /// The `cc-hub usage` contract: what a script gets on stdout.
+    /// The `hal usage` contract: what a script gets on stdout.
     pub fn report(&self, account: &Account) -> serde_json::Value {
         let now = now();
         let age = self
@@ -296,7 +296,7 @@ struct Store {
 
 impl Store {
     fn open() -> Option<Self> {
-        let dir = paths::cc_hub_home()?;
+        let dir = paths::hal_home()?;
         fs::create_dir_all(&dir).ok()?;
         Some(Self {
             file: dir.join("usage.json"),
@@ -362,7 +362,7 @@ fn probe(account: &Account) -> Outcome {
             "-H",
             "anthropic-beta: oauth-2025-04-20",
             "-H",
-            "User-Agent: cc-hub/1.0",
+            "User-Agent: hal/1.0",
         ])
         .output();
     match output {

@@ -9,7 +9,7 @@ use super::store::{
     TaskStatus,
 };
 
-/// In-memory snapshot of the personal board: every `~/.cc-hub/tasks/<id>/`
+/// In-memory snapshot of the personal board: every `~/.hal/tasks/<id>/`
 /// task, ordered by `created_at` (ties broken by id, which embeds nanos).
 /// Mutations write through the per-task locked store and update the snapshot
 /// from the state the write returned, so what the TUI shows is what landed.
@@ -395,17 +395,17 @@ mod tests {
         with_temp_home(|| {
             let mut b = PersonalBoard::load();
             let id = b.add("write the parser").unwrap().unwrap();
-            b.assign(&id, "/tmp/proj", "claude", "cchub-1-42").unwrap();
+            b.assign(&id, "/tmp/proj", "claude", "hal-1-42").unwrap();
             let t = PersonalBoard::load();
             let task = t.get(&id).unwrap();
             assert_eq!(task.status, TaskStatus::Planning);
             assert_eq!(task.cwd.as_deref(), Some("/tmp/proj"));
-            assert_eq!(task.tmux.as_deref(), Some("cchub-1-42"));
+            assert_eq!(task.tmux.as_deref(), Some("hal-1-42"));
             assert_eq!(task.session_id, None);
-            b.rebind_tmux(&id, "cchub-1-43").unwrap();
+            b.rebind_tmux(&id, "hal-1-43").unwrap();
             assert_eq!(
                 PersonalBoard::load().get(&id).unwrap().tmux.as_deref(),
-                Some("cchub-1-43")
+                Some("hal-1-43")
             );
         });
     }

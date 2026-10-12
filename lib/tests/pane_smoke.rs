@@ -3,7 +3,7 @@
 //! that kills the attach child after a deadline — that EOFs the master and
 //! the reader thread exits cleanly.
 
-use cc_hub_lib::platform::mux;
+use hal_lib::platform::mux;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
@@ -34,7 +34,7 @@ fn pane_attach_delivers_bytes() {
         eprintln!("pane_attach_delivers_bytes: tmux not on PATH, skipping");
         return;
     }
-    let name = format!("cchub-pane-raw-{}", std::process::id());
+    let name = format!("hal-pane-raw-{}", std::process::id());
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".into());
@@ -113,16 +113,16 @@ fn pane_attach_delivers_bytes() {
 /// must surface via [`TmuxPaneView::take_osc52`] so the main loop can
 /// replay it onto the hub's real terminal. This is the only route to the
 /// viewer's clipboard when the embedded client is the session's sole
-/// attachment — the exact shape of "ssh into a box, run cc-hub there".
+/// attachment — the exact shape of "ssh into a box, run hal there".
 #[test]
 fn embedded_pane_captures_osc52_copy() {
-    use cc_hub_lib::tmux_pane::TmuxPaneView;
+    use hal_lib::tmux_pane::TmuxPaneView;
 
     if !tmux_available() {
         eprintln!("embedded_pane_captures_osc52_copy: tmux not on PATH, skipping");
         return;
     }
-    let name = format!("cchub-pane-osc52-{}", std::process::id());
+    let name = format!("hal-pane-osc52-{}", std::process::id());
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".into());
@@ -162,7 +162,7 @@ fn embedded_pane_captures_osc52_copy() {
     let tmp = std::env::temp_dir().join(format!("{}.txt", name));
     std::fs::write(&tmp, payload).expect("write payload");
     let status = std::process::Command::new("tmux")
-        .args(["load-buffer", "-b", "cchub-clip", "-w", "-t", &client])
+        .args(["load-buffer", "-b", "hal-clip", "-w", "-t", &client])
         .arg(&tmp)
         .status()
         .expect("load-buffer -w");
@@ -199,14 +199,14 @@ fn embedded_pane_captures_osc52_copy() {
 /// session's.
 #[test]
 fn embedded_pane_switches_sessions() {
-    use cc_hub_lib::tmux_pane::TmuxPaneView;
+    use hal_lib::tmux_pane::TmuxPaneView;
 
     if !tmux_available() {
         eprintln!("embedded_pane_switches_sessions: tmux not on PATH, skipping");
         return;
     }
-    let from = format!("cchub-pane-from-{}", std::process::id());
-    let to = format!("cchub-pane-to-{}", std::process::id());
+    let from = format!("hal-pane-from-{}", std::process::id());
+    let to = format!("hal-pane-to-{}", std::process::id());
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".into());

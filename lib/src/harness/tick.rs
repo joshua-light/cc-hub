@@ -41,7 +41,7 @@ pub fn tick_once(spec: &Spec, event: Option<&Event>) -> io::Result<(Tick, AgentS
     );
     let prompt = trigger::render_prompt(spec, event);
     let header = serde_json::json!({
-        "type": "cc-hub-tick",
+        "type": "hal-tick",
         "agent": spec.name,
         "tick": state.ticks + 1,
         "event": event_id,

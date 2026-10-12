@@ -65,7 +65,7 @@ pub(super) fn render_title_bar(frame: &mut Frame, area: Rect, app: &App) {
     // Who is waiting on you is the tabs' to say; the bar names the app.
     let left_spans = vec![
         Span::styled(
-            " 󰚩 cc-hub ",
+            " 󰚩 hal ",
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),

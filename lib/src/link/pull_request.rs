@@ -102,10 +102,8 @@ mod tests {
         let bb: PullRequestUrl = format!("{}/overview?commentId=1", PR).parse().unwrap();
         assert_eq!(bb.repo(), "sample-project");
         assert_eq!(bb.number(), Some(11280));
-        let gh: PullRequestUrl = "https://github.com/octo/cc-hub/pull/7/files"
-            .parse()
-            .unwrap();
-        assert_eq!(gh.repo(), "cc-hub");
+        let gh: PullRequestUrl = "https://github.com/octo/hal/pull/7/files".parse().unwrap();
+        assert_eq!(gh.repo(), "hal");
         assert_eq!(gh.number(), Some(7));
         let unnumbered: PullRequestUrl =
             "https://bitbucket.example.com/projects/X/repos/thing/pull-requests/"

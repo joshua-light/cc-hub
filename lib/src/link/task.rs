@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use super::LinkError;
 
-/// `cc-hub://task?id=<tk-…>[&dir=<path>][&kind=<word>][&role=<word>]`: work
+/// `hal://task?id=<tk-…>[&dir=<path>][&kind=<word>][&role=<word>]`: work
 /// a Tasks-board card in an agent session bound to that card — the card's
 /// live session in `dir` if it has one, else a fresh one. The `task-runner`
 /// agent opens one for every In Progress card without a session.
@@ -86,7 +86,7 @@ mod tests {
     use crate::link::Link;
 
     fn task(query: &str) -> TaskLink {
-        let raw = format!("cc-hub://task?{}", query);
+        let raw = format!("hal://task?{}", query);
         match raw.parse::<Link>() {
             Ok(Link::Task(t)) => t,
             Ok(other) => panic!("{}: parsed as {}", raw, other.kind()),
@@ -96,9 +96,9 @@ mod tests {
 
     #[test]
     fn parses_task_with_dir_and_kind() {
-        let t = task("id=tk-1788509616255974000&dir=%2FUsers%2Fme%2Fgit%2Fself%2Fcc-hub&kind=hub");
+        let t = task("id=tk-1788509616255974000&dir=%2FUsers%2Fme%2Fgit%2Fself%2Fhal&kind=hub");
         assert_eq!(t.id.as_str(), "tk-1788509616255974000");
-        assert_eq!(t.dir, Some(PathBuf::from("/Users/me/git/self/cc-hub")));
+        assert_eq!(t.dir, Some(PathBuf::from("/Users/me/git/self/hal")));
         assert_eq!(t.kind.as_deref(), Some("hub"));
         assert!(!t.is_handover());
     }
@@ -116,7 +116,7 @@ mod tests {
         assert_eq!(t.dir, None);
         assert_eq!(t.kind, None);
         assert!(matches!(
-            "cc-hub://task?dir=%2Ftmp".parse::<Link>(),
+            "hal://task?dir=%2Ftmp".parse::<Link>(),
             Err(LinkError::MissingParam("id"))
         ));
     }
@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn only_a_board_id_can_be_addressed() {
         for bad in ["t-42", "tk-", "tk-abc", "42"] {
-            let raw = format!("cc-hub://task?id={}", bad);
+            let raw = format!("hal://task?id={}", bad);
             assert!(
                 matches!(raw.parse::<Link>(), Err(LinkError::BadTaskId(_))),
                 "{} should not parse as a board id",

@@ -332,7 +332,7 @@ mod tests {
             let mut app = App::new();
             app.enter_task_input();
             app.tasks.input = "fix the parser #bug".into();
-            app.tasks.context = "repro:\n  cc-hub task create".into();
+            app.tasks.context = "repro:\n  hal task create".into();
             assert!(app.submit_task_input());
 
             let t = app.selected_board_task().unwrap().clone();
@@ -341,11 +341,11 @@ mod tests {
             assert_eq!(t.artifacts[0].kind, "note");
             assert_eq!(t.artifacts[0].original, "typed");
             let stored = std::fs::read_to_string(&t.artifacts[0].path).unwrap();
-            assert_eq!(stored, "repro:\n  cc-hub task create");
+            assert_eq!(stored, "repro:\n  hal task create");
 
             // The note reaches the agent the card is later assigned to.
             let prompt = planning_prompt(&t);
-            assert!(prompt.contains("cc-hub task create"), "prompt: {prompt}");
+            assert!(prompt.contains("hal task create"), "prompt: {prompt}");
 
             // And the popup opens clean next time.
             app.enter_task_input();

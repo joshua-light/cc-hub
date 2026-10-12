@@ -4,13 +4,13 @@ use std::path::PathBuf;
 
 use super::store::TaskState;
 use crate::persist::lock_exclusive;
-use crate::platform::paths::cc_hub_home;
+use crate::platform::paths::hal_home;
 
 fn archive_path() -> Option<PathBuf> {
-    cc_hub_home().map(|h| h.join("tasks-archive-v2.json"))
+    hal_home().map(|h| h.join("tasks-archive-v2.json"))
 }
 
-/// Append removed tasks to `~/.cc-hub/tasks-archive-v2.json` (a bare JSON
+/// Append removed tasks to `~/.hal/tasks-archive-v2.json` (a bare JSON
 /// array of unified [`TaskState`]s), so `x` and `c` are recoverable beyond
 /// the in-session undo slot. The archive is a log, not a ledger: an undone
 /// delete leaves its copy behind. A corrupt archive is an `InvalidData`

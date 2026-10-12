@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn boot_time_name_defers_until_the_session_loads() {
         let mut app = App::new();
-        let tmux = "cchub-w-boot";
+        let tmux = "hal-w-boot";
         app.rename_target = Some(spawning_session_id(tmux));
         app.rename_buffer = "auth refactor".into();
         app.view = View::RenameSession;
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn boot_time_name_persists_to_real_id_when_already_loaded() {
         let mut app = App::new();
-        let tmux = "cchub-w-loaded";
+        let tmux = "hal-w-loaded";
         let mut real = fake_session("real-id-xyz", SessionState::Idle);
         real.tmux_session = Some(tmux.into());
         app.sessions.last_sessions = vec![real];
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn boot_time_name_waits_through_codex_process_only_card() {
         let mut app = App::new();
-        let tmux = "cchub-w-codex";
+        let tmux = "hal-w-codex";
         let mut process_only = fake_session("codex-123", SessionState::Idle);
         process_only.agent_id = "codex".into();
         process_only.agent_kind = crate::agent::AgentKind::Codex;
@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn empty_boot_time_name_cancels_and_stashes_nothing() {
         let mut app = App::new();
-        let tmux = "cchub-w-cancel";
+        let tmux = "hal-w-cancel";
         app.rename_target = Some(spawning_session_id(tmux));
         app.rename_buffer = "   ".into();
         app.view = View::RenameSession;
@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn a_boot_time_name_replaces_the_starting_label_at_once() {
         let mut app = App::new();
-        let tmux = "cchub-w-named";
+        let tmux = "hal-w-named";
         app.watch_spawn(tmux.into(), "claude".into(), "/tmp".into());
         assert!(app.enter_rename_session());
         app.rename_buffer = "Polish".into();
@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn enter_rename_on_a_boot_placeholder_starts_empty() {
         let mut app = App::new();
-        app.watch_spawn("cchub-w-ph".into(), "claude".into(), "/tmp".into());
+        app.watch_spawn("hal-w-ph".into(), "claude".into(), "/tmp".into());
         // Idempotent whether or not watch_spawn already auto-opened it.
         assert!(app.enter_rename_session());
         assert_eq!(app.rename_buffer, "");
@@ -336,7 +336,7 @@ mod tests {
     #[test]
     fn the_draft_follows_the_placeholder_to_the_real_session() {
         let mut app = App::new();
-        let tmux = "cchub-w-draft";
+        let tmux = "hal-w-draft";
         app.watch_spawn(tmux.into(), "claude".into(), "/tmp".into());
         assert!(app.enter_rename_session());
         app.rename_buffer = "Perf".into();
@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn rename_on_codex_process_only_card_stays_deferred() {
         let mut app = App::new();
-        let tmux = "cchub-w-codex-manual";
+        let tmux = "hal-w-codex-manual";
         let mut process_only = fake_session("codex-456", SessionState::Idle);
         process_only.agent_id = "codex".into();
         process_only.agent_kind = crate::agent::AgentKind::Codex;
@@ -381,7 +381,7 @@ mod tests {
     fn adopted_boot_time_name_survives_a_scan_that_predates_it() {
         crate::test_util::with_temp_home(|| {
             let mut app = App::new();
-            let tmux = "cchub-w-race";
+            let tmux = "hal-w-race";
             app.watch_spawn(tmux.into(), "claude".into(), "/tmp".into());
             app.rename_target = Some(spawning_session_id(tmux));
             app.rename_buffer = "Performance".into();

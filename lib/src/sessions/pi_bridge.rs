@@ -49,14 +49,14 @@ function latestModelFromEntries(entries: any[]): string | undefined {
 }
 
 export default function (pi: ExtensionAPI) {
-	const heartbeatDir = process.env.CC_HUB_HEARTBEAT_DIR;
-	const tmux = process.env.CC_HUB_TMUX;
-	const agent = process.env.CC_HUB_AGENT_ID ?? "pi";
+	const heartbeatDir = process.env.HAL_HEARTBEAT_DIR;
+	const tmux = process.env.HAL_TMUX;
+	const agent = process.env.HAL_AGENT_ID ?? "pi";
 	if (!heartbeatDir || !tmux) return;
 
 	const heartbeatPath = join(heartbeatDir, `${tmux}.json`);
 	let state: State = "idle";
-	let model = process.env.CC_HUB_MODEL;
+	let model = process.env.HAL_MODEL;
 	let writeSeq = 0;
 
 	const writeHeartbeat = async (ctx: any) => {

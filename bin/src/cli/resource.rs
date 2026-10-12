@@ -25,9 +25,9 @@ fn notify(args: &[String]) -> Result<(), CliError> {
     let text = value["text"]
         .as_str()
         .ok_or_else(|| CliError::Usage("missing text".into()))?;
-    let sent = cc_hub_lib::send::pane_ready_for_input(tmux);
+    let sent = hal_lib::send::pane_ready_for_input(tmux);
     if sent {
-        cc_hub_lib::send::send_notice(tmux, text).map_err(CliError::other)?;
+        hal_lib::send::send_notice(tmux, text).map_err(CliError::other)?;
     }
     super::print_json(&serde_json::json!({"ok": true, "sent": sent}));
     Ok(())
@@ -36,7 +36,7 @@ fn notify(args: &[String]) -> Result<(), CliError> {
 /// The broker names a Claude session before launching it, so the hub
 /// never sees it nameless and never opens the rename prompt for it.
 fn name(args: &[String]) -> Result<(), CliError> {
-    cc_hub_lib::resources::name_session(&worker(args)?)
+    hal_lib::resources::name_session(&worker(args)?)
         .map_err(|e| CliError::Other(format!("name session: {e}")))?;
     super::print_json(&serde_json::json!({"ok": true}));
     Ok(())
@@ -53,14 +53,14 @@ fn bind(args: &[String]) -> Result<(), CliError> {
     let sid = value["session_id"].as_str();
     // One worker at a time holds a task, whatever its role, so the card
     // always points at the worker that was bound last.
-    cc_hub_lib::tasks::PersonalBoard::load_result()
+    hal_lib::tasks::PersonalBoard::load_result()
         .map_err(CliError::other)?
         .bind_resource(task, field("cwd")?, field("account")?, field("tmux")?, sid)
         .map_err(CliError::other)?;
     if let Some(sid) = sid {
-        cc_hub_lib::tasks::session_links::link(
+        hal_lib::tasks::session_links::link(
             sid,
-            cc_hub_lib::tasks::session_links::TaskLink {
+            hal_lib::tasks::session_links::TaskLink {
                 task_id: task.into(),
                 title: format!("{} / {}", task, field("role")?),
             },
@@ -69,7 +69,7 @@ fn bind(args: &[String]) -> Result<(), CliError> {
         // A Codex session is first seen here, under the id it minted
         // itself; a Claude one was named before launch and keeps it.
         // Cosmetic, unlike the binding: a failure costs the name.
-        if let Err(e) = cc_hub_lib::resources::name_session(&value) {
+        if let Err(e) = hal_lib::resources::name_session(&value) {
             log::warn!("resource bind: naming session {} failed: {}", sid, e);
         }
     }
@@ -81,7 +81,7 @@ fn run_broker(args: &[String]) -> Result<(), CliError> {
     let source = include_str!("../../../broker/resource_manager.py");
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     source.hash(&mut hash);
-    let dir = cc_hub_lib::platform::paths::cache_dir().join("resources");
+    let dir = hal_lib::platform::paths::cache_dir().join("resources");
     std::fs::create_dir_all(&dir).map_err(CliError::other)?;
     let path = dir.join(format!("broker-{:x}.py", hash.finish()));
     // Atomic publication: another process can execute the same broker concurrently.
@@ -95,7 +95,7 @@ fn run_broker(args: &[String]) -> Result<(), CliError> {
     let status = std::process::Command::new("python3")
         .arg(path)
         .args(args)
-        .env("CC_HUB_BINARY", executable)
+        .env("HAL_BINARY", executable)
         .status()
         .map_err(|e| CliError::Other(format!("resource broker requires Python 3.11+: {e}")))?;
     if status.success() {

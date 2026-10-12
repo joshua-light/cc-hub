@@ -1,4 +1,4 @@
-//! User config at `~/.cc-hub/config.toml`, loaded once and exposed via
+//! User config at `~/.hal/config.toml`, loaded once and exposed via
 //! [`get`]. Missing file, missing section, and missing field all fall back
 //! to [`Default`], so this is a pure knob layer — removing the file yields
 //! the same behaviour as shipped defaults.
@@ -19,7 +19,7 @@ pub use agents::*;
 pub use sections::*;
 
 pub fn config_path() -> Option<PathBuf> {
-    crate::platform::paths::cc_hub_home().map(|h| h.join("config.toml"))
+    crate::platform::paths::hal_home().map(|h| h.join("config.toml"))
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

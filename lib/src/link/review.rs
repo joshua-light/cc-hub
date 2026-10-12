@@ -4,7 +4,7 @@ use std::str::FromStr;
 use super::pull_request::{pull_request_titled, PullRequestUrl};
 use super::LinkError;
 
-/// `cc-hub://review?depth=<light|full>&pr=<url>[&title=<text>][&post=<n>]`:
+/// `hal://review?depth=<light|full>&pr=<url>[&title=<text>][&post=<n>]`:
 /// review a pull request in a fresh agent session. `title` is the pull
 /// request's own title, as the page shows it; it names the session. `post`
 /// lets the review post its confident findings on its own — without it the
@@ -120,7 +120,7 @@ mod tests {
 
     fn review(depth: &str) -> ReviewLink {
         let raw = format!(
-            "cc-hub://review?depth={}&pr=https%3A%2F%2Fbitbucket.example.com%2Fprojects%2FAPP%2Frepos%2Fsample-project%2Fpull-requests%2F11280",
+            "hal://review?depth={}&pr=https%3A%2F%2Fbitbucket.example.com%2Fprojects%2FAPP%2Frepos%2Fsample-project%2Fpull-requests%2F11280",
             depth
         );
         match raw.parse::<Link>() {
@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn post_threshold_licenses_the_review_to_post() {
-        let r: Link = format!("cc-hub://review?depth=light&pr={}&post=80", PR)
+        let r: Link = format!("hal://review?depth=light&pr={}&post=80", PR)
             .parse()
             .unwrap();
         let Link::Review(r) = r else {
@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn post_must_be_a_percentage() {
         for bad in ["0", "101", "80%", "high", "-1", ">=80", ""] {
-            let raw = format!("cc-hub://review?depth=light&pr={}&post={}", PR, bad);
+            let raw = format!("hal://review?depth=light&pr={}&post={}", PR, bad);
             // An empty value reads as absent, like every other parameter.
             if bad.is_empty() {
                 let Ok(Link::Review(r)) = raw.parse::<Link>() else {
@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn title_param_names_the_session() {
         let r: Link = format!(
-            "cc-hub://review?depth=light&pr={}&title=APP-15883%20Fix%20%20the%0Aflaky%20test",
+            "hal://review?depth=light&pr={}&title=APP-15883%20Fix%20%20the%0Aflaky%20test",
             PR
         )
         .parse()
@@ -217,7 +217,7 @@ mod tests {
             review("light").session_title(),
             "Review: sample-project#11280"
         );
-        let r: Link = format!("cc-hub://review?depth=light&pr={}&title=%20%20", PR)
+        let r: Link = format!("hal://review?depth=light&pr={}&title=%20%20", PR)
             .parse()
             .unwrap();
         let Link::Review(r) = r else {
@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn session_title_is_capped() {
         let long = "x".repeat(200);
-        let r: Link = format!("cc-hub://review?depth=light&pr={}&title={}", PR, long)
+        let r: Link = format!("hal://review?depth=light&pr={}&title={}", PR, long)
             .parse()
             .unwrap();
         let Link::Review(r) = r else {
@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn unencoded_pr_is_fine_too() {
-        let r: Link = format!("cc-hub://review?pr={}&depth=light", PR)
+        let r: Link = format!("hal://review?pr={}&depth=light", PR)
             .parse()
             .unwrap();
         assert_eq!(r.kind(), "review");

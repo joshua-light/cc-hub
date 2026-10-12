@@ -100,7 +100,7 @@ impl Config {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SpawnConfig {
-    /// The command cc-hub invokes for the default Claude backend. Resolved
+    /// The command hal invokes for the default Claude backend. Resolved
     /// through the user's interactive shell so aliases / functions in their rc
     /// file expand.
     pub command: String,
@@ -109,7 +109,7 @@ pub struct SpawnConfig {
 impl Default for SpawnConfig {
     fn default() -> Self {
         Self {
-            command: "cc-hub-new".into(),
+            command: "hal-new".into(),
         }
     }
 }
@@ -135,7 +135,7 @@ impl Default for ConfiguredAgent {
             account: None,
             effort: None,
             kind: AgentKind::Claude,
-            command: "cc-hub-new".into(),
+            command: "hal-new".into(),
             use_bridge: false,
             models: Vec::new(),
             hotkey: None,

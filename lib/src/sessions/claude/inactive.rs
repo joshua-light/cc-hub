@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 /// the encoded directory name isn't losslessly decodable, so files without a
 /// usable `cwd` entry are skipped. Files whose cwd matches
 /// [`crate::title::scratch_cwd`] are also skipped — those are the one-shot
-/// `cc-hub-new -p` runs the titler fires, not real sessions.
+/// `hal-new -p` runs the titler fires, not real sessions.
 fn synthesize_inactive_from_jsonl(
     path: &Path,
     titles: &HashMap<String, String>,
@@ -82,9 +82,9 @@ pub(super) fn scan_orphan_jsonls(
         return (Vec::new(), 0);
     };
 
-    // Encoded form of the titler's scratch cwd, e.g. `-tmp-cc-hub-summaries`.
+    // Encoded form of the titler's scratch cwd, e.g. `-tmp-hal-summaries`.
     // Skipping this project dir up front avoids reading dozens of one-shot
-    // `cc-hub-new -p` JSONLs every scan just to throw them away inside
+    // `hal-new -p` JSONLs every scan just to throw them away inside
     // `synthesize_inactive_from_jsonl`.
     let scratch_proj_dir = scratch_project_dir_name();
 

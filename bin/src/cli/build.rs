@@ -1,10 +1,10 @@
-//! `cc-hub build …` — the Builds tab from a script or an agent session.
+//! `hal build …` — the Builds tab from a script or an agent session.
 //! Everything a key on the tab does, a verb here does too, through the same
-//! `cc_hub_lib::builds` calls. The `_run` and `_hold` verbs are the
+//! `hal_lib::builds` calls. The `_run` and `_hold` verbs are the
 //! detached processes those calls start, not for typing.
 
 use super::{print_json, CliError};
-use cc_hub_lib::builds::{self, hold, recipe, runner, Build, BuildStatus};
+use hal_lib::builds::{self, hold, recipe, runner, Build, BuildStatus};
 use std::time::Duration;
 
 pub(crate) fn build(args: &[String]) -> Result<(), CliError> {
