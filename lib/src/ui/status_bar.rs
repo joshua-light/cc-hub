@@ -178,8 +178,5 @@ pub(super) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         Style::default().fg(Color::DarkGray),
     ));
 
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(30, 30, 30))),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
