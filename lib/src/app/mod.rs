@@ -27,7 +27,7 @@ use crate::usage::UsageInfo;
 use ratatui::text::Line;
 use sessions::SpawnWatch;
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
 mod board;
@@ -84,6 +84,8 @@ pub struct App {
     pub last_refresh: Instant,
     pub live_view: Option<LiveView>,
     pub status_msg: Option<(String, Instant)>,
+    /// Whether `status_msg` came from [`Self::set_error`].
+    pub status_is_error: bool,
     /// The close staged behind [`View::ConfirmClose`].
     pub pending_close: Option<PendingClose>,
     pub usage: Option<UsageInfo>,
@@ -129,6 +131,12 @@ pub struct App {
     /// blocks the pane); without a watch the status bar says "started" and
     /// no card ever appears. See [`Self::check_spawn_watches`].
     spawn_watches: Vec<SpawnWatch>,
+    /// Last time [`Self::poll_spawn_watches`] asked tmux whether each pending
+    /// spawn's session still exists. Throttled like the dispatch probe.
+    last_spawn_probe_at: Option<Instant>,
+    /// Diagnoses of spawns that died during startup, sent back by the
+    /// threads that probe the user's shell.
+    spawn_failures: (mpsc::Sender<String>, mpsc::Receiver<String>),
     /// Boot-time names, keyed by the spawning tmux name: the one id that
     /// survives the placeholder-to-real transition. Each is persisted to the
     /// real session id once the scanner sees it
@@ -169,6 +177,7 @@ impl App {
             last_refresh: Instant::now(),
             live_view: None,
             status_msg: None,
+            status_is_error: false,
             pending_close: None,
             usage: None,
             usage_line: Line::default(),
@@ -192,6 +201,8 @@ impl App {
             pending_dispatch: VecDeque::new(),
             last_dispatch_probe_at: None,
             spawn_watches: Vec::new(),
+            last_spawn_probe_at: None,
+            spawn_failures: mpsc::channel(),
             pending_spawn_names: HashMap::new(),
             done_refused_on: None,
         }
@@ -208,6 +219,13 @@ impl App {
 
     pub fn set_status(&mut self, msg: String) {
         self.status_msg = Some((msg, Instant::now()));
+        self.status_is_error = false;
+    }
+
+    /// A status the user has to act on: shown in red, and for longer.
+    pub fn set_error(&mut self, msg: String) {
+        self.status_msg = Some((msg, Instant::now()));
+        self.status_is_error = true;
     }
 
     pub fn selected_session_id(&self) -> Option<String> {

@@ -97,6 +97,10 @@ impl Config {
     }
 }
 
+/// The shell command a Claude agent launches through unless configured
+/// otherwise. Users define it in their shell rc (see README).
+pub const DEFAULT_LAUNCH_COMMAND: &str = "hal-new";
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SpawnConfig {
@@ -109,7 +113,7 @@ pub struct SpawnConfig {
 impl Default for SpawnConfig {
     fn default() -> Self {
         Self {
-            command: "hal-new".into(),
+            command: DEFAULT_LAUNCH_COMMAND.into(),
         }
     }
 }
@@ -135,7 +139,7 @@ impl Default for ConfiguredAgent {
             account: None,
             effort: None,
             kind: AgentKind::Claude,
-            command: "hal-new".into(),
+            command: DEFAULT_LAUNCH_COMMAND.into(),
             use_bridge: false,
             models: Vec::new(),
             hotkey: None,

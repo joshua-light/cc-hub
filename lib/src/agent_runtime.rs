@@ -23,6 +23,9 @@ pub trait AgentRuntime: Send + Sync {
     ) -> io::Result<String>;
     /// Start a terminal in `cwd`; returns its tmux session name.
     fn spawn_terminal(&self, cwd: &str) -> io::Result<String>;
+    /// Why `agent`'s freshly spawned session ended before the agent came
+    /// up, as a status line. May block on a shell startup.
+    fn explain_exited_spawn(&self, agent: &str) -> String;
 }
 
 /// Shared test double: records every runtime call so controller tests can
@@ -126,6 +129,10 @@ pub(crate) mod testing {
                 None => Ok(self.spawn_name.clone()),
             }
         }
+
+        fn explain_exited_spawn(&self, agent: &str) -> String {
+            format!("{agent} explained")
+        }
     }
 }
 
@@ -170,5 +177,9 @@ impl AgentRuntime for SystemAgentRuntime {
 
     fn spawn_terminal(&self, cwd: &str) -> io::Result<String> {
         crate::spawn::spawn_terminal(cwd)
+    }
+
+    fn explain_exited_spawn(&self, agent: &str) -> String {
+        crate::spawn::explain_exited_spawn(agent)
     }
 }

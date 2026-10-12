@@ -11,6 +11,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
+use std::time::Duration;
+
+const ERROR_STATUS_TTL: Duration = Duration::from_secs(30);
 
 pub(super) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     let elapsed = app.last_refresh.elapsed().as_secs();
@@ -20,10 +23,20 @@ pub(super) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         models::relative_age(elapsed)
     };
 
+    // An error tells the user to fix something, so it outlives the usual
+    // flash long enough to be read and acted on.
+    let (ttl, color) = if app.status_is_error {
+        (
+            config::get().ui.status_msg_ttl().max(ERROR_STATUS_TTL),
+            Color::Red,
+        )
+    } else {
+        (config::get().ui.status_msg_ttl(), Color::Green)
+    };
     let fresh_status = app
         .status_msg
         .as_ref()
-        .filter(|(_, ts)| ts.elapsed() < config::get().ui.status_msg_ttl())
+        .filter(|(_, ts)| ts.elapsed() < ttl)
         .map(|(msg, _)| msg.as_str());
 
     let mut spans: Vec<Span> = Vec::new();
@@ -31,9 +44,7 @@ pub(super) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(msg) = fresh_status {
         spans.push(Span::styled(
             format!(" {} ", msg),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
     } else {
         let keybinds: &str = match app.view {

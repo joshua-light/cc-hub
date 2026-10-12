@@ -34,6 +34,10 @@ const SPAWN_WATCH_TIMEOUT: Duration = Duration::from_secs(15);
 /// outlast two of those, or a healthy terminal would be called stalled.
 const TERMINAL_WATCH_TIMEOUT: Duration = Duration::from_secs(25);
 
+/// How often [`App::poll_spawn_watches`] checks that pending spawns' tmux
+/// sessions still exist. Each check forks tmux, too costly for every frame.
+const SPAWN_PROBE_INTERVAL: Duration = Duration::from_millis(500);
+
 /// Marks a synthetic placeholder id (see [`spawning_session_id`]) so rename /
 /// titling can special-case a card the scanner hasn't issued a real id for.
 const SPAWNING_ID_PREFIX: &str = "spawning:";
@@ -204,23 +208,81 @@ impl App {
         while i < self.spawn_watches.len() {
             if self.spawn_watches[i].deadline <= now {
                 let w = self.spawn_watches.remove(i);
-                // The agent never came up, so its real session will never
-                // arrive — drop any boot-time name entry that would otherwise
-                // linger unresolved, and close a rename still typing into its
-                // placeholder, which the next rebuild takes off the screen.
-                self.pending_spawn_names.remove(&w.tmux_name);
-                if self.rename_target == Some(spawning_session_id(&w.tmux_name)) {
-                    self.close_rename_session();
-                }
+                self.forget_failed_spawn(&w);
                 let msg = crate::spawn::diagnose_stalled_spawn(&w.tmux_name, &w.agent);
                 log::warn!("spawn watch: {}", msg);
-                self.set_status(msg);
+                self.set_error(msg);
                 fired = true;
             } else {
                 i += 1;
             }
         }
         fired
+    }
+
+    /// Fail a pending spawn the moment its tmux session is gone instead of
+    /// at the deadline: a launch command the shell can't find kills the pane
+    /// within milliseconds, and without this the placeholder sat on
+    /// "Attaching…" for the whole timeout. Why it died takes a shell startup
+    /// to find out, so a thread asks and the answer lands on a later call.
+    /// Called every loop pass; tmux is asked at most every
+    /// [`SPAWN_PROBE_INTERVAL`]. Returns whether anything visible changed.
+    pub fn poll_spawn_watches(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(msg) = self.spawn_failures.1.try_recv() {
+            log::warn!("spawn watch: {}", msg);
+            self.set_error(msg);
+            changed = true;
+        }
+        if self.spawn_watches.is_empty() {
+            return changed;
+        }
+        let due = self
+            .last_spawn_probe_at
+            .is_none_or(|t| t.elapsed() >= SPAWN_PROBE_INTERVAL);
+        if !due {
+            return changed;
+        }
+        self.last_spawn_probe_at = Some(Instant::now());
+        let (dead, alive): (Vec<_>, Vec<_>) = std::mem::take(&mut self.spawn_watches)
+            .into_iter()
+            .partition(|w| !self.runtime.session_exists(&w.tmux_name));
+        self.spawn_watches = alive;
+        if dead.is_empty() {
+            return changed;
+        }
+        for w in dead {
+            log::warn!(
+                "spawn watch: {} [{}] exited during startup",
+                w.agent,
+                w.tmux_name
+            );
+            self.forget_failed_spawn(&w);
+            // A terminal is the shell itself: no launch command to look up.
+            if w.kind == SessionKind::Terminal {
+                self.set_error(format!("{} exited during startup", w.agent));
+                continue;
+            }
+            self.set_error(format!("{} exited during startup, checking why…", w.agent));
+            let runtime = std::sync::Arc::clone(&self.runtime);
+            let tx = self.spawn_failures.0.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(runtime.explain_exited_spawn(&w.agent));
+            });
+        }
+        self.rebuild_groups();
+        true
+    }
+
+    /// The agent never came up, so its real session will never arrive — drop
+    /// any boot-time name entry that would otherwise linger unresolved, and
+    /// close a rename still typing into its placeholder, which the next
+    /// rebuild takes off the screen.
+    fn forget_failed_spawn(&mut self, w: &SpawnWatch) {
+        self.pending_spawn_names.remove(&w.tmux_name);
+        if self.rename_target == Some(spawning_session_id(&w.tmux_name)) {
+            self.close_rename_session();
+        }
     }
 
     /// Bridge names typed while a session was still booting onto the real
@@ -263,7 +325,7 @@ impl App {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::app::test_support::fake_session;
+    use crate::app::test_support::{app_with, fake_session, status};
     use crate::app::View;
 
     // A watch clears as soon as any live session maps to its tmux name —
@@ -409,6 +471,60 @@ mod tests {
             .collect();
         assert_eq!(ids, vec!["hal-w-4".to_string()]);
         assert!(app.spawn_watches.is_empty());
+    }
+
+    // A launch command the shell can't find kills the tmux session at once.
+    // The next poll fails the watch then, not at the deadline, takes the
+    // placeholder off the grid, and the shell probe's answer replaces the
+    // interim error.
+    #[test]
+    fn a_spawn_whose_session_died_fails_at_once_with_the_reason() {
+        let (mut app, runtime) = app_with(Vec::new());
+        app.watch_spawn("hal-w-8".into(), "claude".into(), "/tmp".into());
+        runtime
+            .exists
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        assert!(app.poll_spawn_watches());
+        assert!(app.spawn_watches.is_empty());
+        assert!(app.sessions.groups.is_empty());
+        assert!(app.status_is_error);
+        assert_eq!(status(&app), "claude exited during startup, checking why…");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while status(&app) != "claude explained" && Instant::now() < deadline {
+            app.poll_spawn_watches();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(status(&app), "claude explained");
+        assert!(app.status_is_error);
+    }
+
+    #[test]
+    fn a_terminal_whose_shell_died_fails_without_a_probe() {
+        let (mut app, runtime) = app_with(Vec::new());
+        app.watch_terminal("hal-t-1".into(), "/tmp".into());
+        runtime
+            .exists
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        assert!(app.poll_spawn_watches());
+        assert!(app.spawn_watches.is_empty());
+        assert!(app.status_is_error);
+        assert!(
+            status(&app).ends_with("exited during startup"),
+            "{}",
+            status(&app)
+        );
+    }
+
+    #[test]
+    fn a_spawn_still_booting_keeps_its_watch() {
+        let (mut app, _runtime) = app_with(Vec::new());
+        app.watch_spawn("hal-w-9".into(), "claude".into(), "/tmp".into());
+        assert!(!app.poll_spawn_watches());
+        assert_eq!(app.spawn_watches.len(), 1);
+        assert!(app.status_msg.is_none());
     }
 
     // An expired watch takes its placeholder with it — the diagnosis status

@@ -88,6 +88,122 @@ fn stalled_spawn_message(agent: &str, tmux_name: &str, pane: &str) -> String {
     }
 }
 
+/// The default launch command's name before cc-hub became hal. Users who set
+/// up the old alias and upgraded have only this one defined.
+const LEGACY_LAUNCH_COMMAND: &str = "cc-hub-new";
+
+/// What the user's shell knows about an agent's launch command.
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(windows, allow(dead_code))] // Windows never probes; see below.
+enum LaunchProbe {
+    Defined,
+    /// Undefined; `legacy` when the pre-rename `cc-hub-new` still is.
+    Missing {
+        legacy: bool,
+    },
+    /// The probe itself failed (timeout, no shell), so no verdict.
+    Unknown,
+}
+
+/// Why `agent`'s detached session ended before the agent came up, for the
+/// status bar. The common cause is a launch command the shell can't find —
+/// a missing alias, or one still named for cc-hub — so this asks the user's
+/// interactive shell. Blocks for one shell startup; call it off the UI
+/// thread.
+pub fn explain_exited_spawn(agent: &str) -> String {
+    let command = config::get()
+        .agent(agent)
+        .map(|a| a.command)
+        .unwrap_or_default();
+    let Some(name) = command.split_whitespace().next() else {
+        return format!("{agent} exited during startup");
+    };
+    exited_spawn_message(agent, name, &shell_name(), probe_launch_command(name))
+}
+
+fn exited_spawn_message(agent: &str, name: &str, shell: &str, probe: LaunchProbe) -> String {
+    match probe {
+        LaunchProbe::Missing { legacy: true } => format!(
+            "{agent} didn't start: {name} isn't defined in {shell}. \
+             cc-hub is now hal: rename your {LEGACY_LAUNCH_COMMAND} alias to {name}"
+        ),
+        LaunchProbe::Missing { legacy: false } if name == config::DEFAULT_LAUNCH_COMMAND => {
+            format!(
+                "{agent} didn't start: {name} isn't defined in {shell}. \
+             Add alias {name}='claude' to your shell rc"
+            )
+        }
+        LaunchProbe::Missing { legacy: false } => format!(
+            "{agent} didn't start: {name} isn't defined in {shell}. \
+             Install it or fix [agents.{agent}].command"
+        ),
+        LaunchProbe::Defined | LaunchProbe::Unknown => {
+            format!("{agent} exited during startup. Run {name} in a terminal to see why")
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn shell_name() -> String {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+    std::path::Path::new(&shell)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or(shell)
+}
+
+#[cfg(windows)]
+fn shell_name() -> String {
+    "PowerShell".into()
+}
+
+/// Ask the shell the agent launches through whether `name` resolves. Same
+/// `-ic` and update kill-switch as the spawn itself, so rc aliases count and
+/// no updater prompt blocks the probe. The markers are echoed rather than
+/// read from the exit code: rc chatter can't fake them, and a failing rc
+/// line can't mask them.
+#[cfg(not(windows))]
+fn probe_launch_command(name: &str) -> LaunchProbe {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+    let defined = |cmd: &str, marker: &str| {
+        format!(
+            "command -v {} >/dev/null 2>&1 && echo {marker};",
+            terminal::shell_quote(cmd)
+        )
+    };
+    let mut script = defined(name, "__hal_defined__");
+    if name == config::DEFAULT_LAUNCH_COMMAND {
+        script.push_str(&defined(LEGACY_LAUNCH_COMMAND, "__hal_legacy__"));
+    }
+    let mut cmd = Command::new(shell);
+    cmd.env("DISABLE_AUTO_UPDATE", "true")
+        .arg("-ic")
+        .arg(script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let Some(output) = crate::title::run_with_timeout(cmd, config::get().title.resolve_timeout())
+    else {
+        return LaunchProbe::Unknown;
+    };
+    let out = String::from_utf8_lossy(&output.stdout);
+    let has = |marker: &str| out.lines().any(|l| l.trim() == marker);
+    if has("__hal_defined__") {
+        LaunchProbe::Defined
+    } else {
+        LaunchProbe::Missing {
+            legacy: has("__hal_legacy__"),
+        }
+    }
+}
+
+/// A failed launch leaves pwsh running in the pane on Windows, so the stalled
+/// path's pane capture reports it; there is nothing more to probe here.
+#[cfg(windows)]
+fn probe_launch_command(_name: &str) -> LaunchProbe {
+    LaunchProbe::Unknown
+}
+
 /// Start a terminal — a plain shell in `cwd`, in a detached session the
 /// terminal scan ([`crate::sessions::terminal`]) knows by its name.
 pub fn spawn_terminal(cwd: &str) -> io::Result<String> {
@@ -137,7 +253,60 @@ fn unique_session_name(prefix: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::stalled_spawn_message;
+    use super::{exited_spawn_message, stalled_spawn_message, LaunchProbe};
+
+    // The upgrade case: the shell still has the alias under its cc-hub name.
+    #[test]
+    fn a_missing_command_with_the_old_alias_says_to_rename_it() {
+        assert_eq!(
+            exited_spawn_message(
+                "claude",
+                "hal-new",
+                "zsh",
+                LaunchProbe::Missing { legacy: true }
+            ),
+            "claude didn't start: hal-new isn't defined in zsh. \
+             cc-hub is now hal: rename your cc-hub-new alias to hal-new"
+        );
+    }
+
+    #[test]
+    fn a_missing_default_command_says_how_to_define_it() {
+        assert_eq!(
+            exited_spawn_message(
+                "claude",
+                "hal-new",
+                "bash",
+                LaunchProbe::Missing { legacy: false }
+            ),
+            "claude didn't start: hal-new isn't defined in bash. \
+             Add alias hal-new='claude' to your shell rc"
+        );
+    }
+
+    #[test]
+    fn a_missing_custom_command_points_at_the_agent_config() {
+        assert_eq!(
+            exited_spawn_message(
+                "codex",
+                "codex",
+                "zsh",
+                LaunchProbe::Missing { legacy: false }
+            ),
+            "codex didn't start: codex isn't defined in zsh. \
+             Install it or fix [agents.codex].command"
+        );
+    }
+
+    #[test]
+    fn a_defined_command_that_exited_says_to_run_it_by_hand() {
+        for probe in [LaunchProbe::Defined, LaunchProbe::Unknown] {
+            assert_eq!(
+                exited_spawn_message("claude", "hal-new", "zsh", probe),
+                "claude exited during startup. Run hal-new in a terminal to see why"
+            );
+        }
+    }
 
     // A pane blocked at oh-my-zsh's update prompt: the prompt line must
     // surface in the status message so the user can see *why* the agent

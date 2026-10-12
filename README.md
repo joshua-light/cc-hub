@@ -7,7 +7,8 @@ context use and a live transcript tail.
 
 hal used to be called cc-hub. Its first run moves `~/.cc-hub` to `~/.hal`
 and the cache directory from `cc-hub` to `hal`, leaving symlinks at the old
-paths on Linux and macOS.
+paths on Linux and macOS. Rename your `cc-hub-new` alias (or `$PROFILE`
+function) to `hal-new` yourself: until you do, new sessions exit at once.
 
 ## Tabs
 
