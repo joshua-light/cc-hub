@@ -34,7 +34,7 @@ pub mod tool_count;
 #[cfg(test)]
 pub(crate) mod test_util;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use cache::state_derive_parse_count;
 pub use cache::{derive_state_cached, first_user_message_cached, retain_cached, StateDerivation};
 pub use io::{

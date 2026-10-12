@@ -1,4 +1,4 @@
-//! Embed a tmux session as a live, interactive pane inside cc-hub.
+//! Embed a tmux session as a live, interactive pane inside hal.
 //!
 //! - `osc52`: extracts clipboard escapes the vt100 parser would drop.
 //! - `encode`: encodes keys and mouse buttons as xterm bytes.
@@ -44,13 +44,13 @@ pub struct TmuxPaneView {
     fresh: Arc<AtomicBool>,
     owns_session: bool,
     /// OSC 52 escapes captured from the attach client's output, awaiting
-    /// replay onto cc-hub's real terminal by the main loop.
+    /// replay onto hal's real terminal by the main loop.
     osc52_pending: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
 impl TmuxPaneView {
     pub fn spawn(session_name: &str, rows: u16, cols: u16) -> std::io::Result<Self> {
-        // Redundant with the spawn-time enable for cc-hub-created sessions,
+        // Redundant with the spawn-time enable for hal-created sessions,
         // but needed for sessions that predate that code path.
         crate::send::enable_session_mouse(session_name);
         // Server-wide options: once per hub is enough. A tmux server that
@@ -100,10 +100,14 @@ impl TmuxPaneView {
             .take_writer()
             .map_err(|e| std::io::Error::other(format!("take writer: {}", e)))?;
 
+        // portable-pty only names the tty on unix; a psmux client has none.
+        #[cfg(unix)]
         let tty = pair
             .master
             .tty_name()
             .map(|p| p.to_string_lossy().into_owned());
+        #[cfg(not(unix))]
+        let tty = None;
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
         let exited = Arc::new(AtomicBool::new(false));
         let fresh = Arc::new(AtomicBool::new(false));
@@ -178,8 +182,8 @@ impl TmuxPaneView {
 
     /// Drain clipboard escapes (OSC 52) that tmux addressed to the embedded
     /// client. The vt100 parser drops them, so the main loop replays each
-    /// one onto cc-hub's own terminal — which is what lands an in-pane copy
-    /// on the viewer's clipboard when cc-hub runs on a remote box over ssh.
+    /// one onto hal's own terminal — which is what lands an in-pane copy
+    /// on the viewer's clipboard when hal runs on a remote box over ssh.
     pub fn take_osc52(&self) -> Vec<Vec<u8>> {
         self.osc52_pending
             .lock()
