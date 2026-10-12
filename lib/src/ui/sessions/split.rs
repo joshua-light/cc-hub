@@ -449,6 +449,7 @@ mod tests {
             }];
             app.sessions.handoff = Some(crate::handoff::Handoff {
                 session_id: "a-2".into(),
+                title: None,
                 draft: String::new(),
             });
             let mut terminal = Terminal::new(TestBackend::new(120, 6)).expect("terminal");

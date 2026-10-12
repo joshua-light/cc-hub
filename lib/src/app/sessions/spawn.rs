@@ -106,17 +106,20 @@ impl App {
     ///
     /// This is every fresh session the user starts by hand, so it is also
     /// where a pending [`crate::handoff::Handoff`] is taken: its draft is
-    /// queued to be typed once the new session is ready.
+    /// queued to be typed once the new session is ready, and its name, when
+    /// the source had one, is the new session's.
     pub fn watch_spawn(&mut self, tmux_name: String, agent: String, cwd: String) {
+        let mut title = None;
         if let Some(handoff) = self.sessions.handoff.take() {
             self.queue_pending_draft(tmux_name.clone(), handoff.draft);
+            title = handoff.title;
         }
-        self.watch_spawn_titled(tmux_name, agent, cwd, None);
+        self.watch_spawn_titled(tmux_name, agent, cwd, title);
     }
 
     /// [`Self::watch_spawn`] with a name inherited from a previous session —
-    /// a respawn continues one that is usually already named, so the title
-    /// is stashed for adoption instead of prompting the user again.
+    /// a respawn or a handoff continues one that is usually already named, so
+    /// the title is stashed for adoption instead of prompting the user again.
     pub fn watch_spawn_titled(
         &mut self,
         tmux_name: String,

@@ -84,6 +84,32 @@ mod tests {
     }
 
     #[test]
+    fn the_next_new_session_is_named_after_the_marked_one() {
+        crate::test_util::with_temp_home(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let mut source = session("sid-1", SessionState::Idle, Some("cc-agent-1"));
+            source.jsonl_path = Some(transcript_replying(dir.path(), "Done."));
+            source.title = Some("Plan (2)".into());
+            let (mut app, _runtime) = app_with(vec![source]);
+
+            app.execute(Command::Sessions(SessionsCommand::ToggleHandoff));
+            app.execute(Command::Sessions(SessionsCommand::SpawnAgentHere));
+
+            assert_eq!(
+                app.pending_spawn_names
+                    .get("mock-spawn")
+                    .map(String::as_str),
+                Some("Plan (3)")
+            );
+            assert_eq!(
+                app.view,
+                crate::app::View::Grid,
+                "a named spawn asks no name"
+            );
+        });
+    }
+
+    #[test]
     fn a_second_h_drops_the_mark() {
         crate::test_util::with_temp_home(|| {
             let dir = tempfile::tempdir().unwrap();

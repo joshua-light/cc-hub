@@ -58,7 +58,7 @@ Sessions. Builds shows once a recipe exists. Agents shows once
 | `A` | Choose the default agent until restart |
 | `p` | Pick a folder, start a session there |
 | `M` | Pick a bookmarked folder, start a session there |
-| `h` | Mark the session for a handoff, or drop the mark: the next session you start opens with its last reply |
+| `h` | Mark the session for a handoff, or drop the mark: the next session you start opens with its last reply, named after it: `Plan` → `Plan (2)` → `Plan (3)` |
 | `R` | Continue the session on another subscription account |
 | `r` | Rename the session |
 | `L` | Link the session to a task, or unlink it |
