@@ -108,12 +108,17 @@ pub struct SpawnConfig {
     /// through the user's interactive shell so aliases / functions in their rc
     /// file expand.
     pub command: String,
+    /// Ask for a name the moment a session the user starts by hand lands on
+    /// the grid; Enter on the name opens it. Off, the new session opens at
+    /// once, nameless until auto-titling or `r` names it.
+    pub ask_name: bool,
 }
 
 impl Default for SpawnConfig {
     fn default() -> Self {
         Self {
             command: DEFAULT_LAUNCH_COMMAND.into(),
+            ask_name: true,
         }
     }
 }

@@ -15,6 +15,7 @@ The resource broker has its own file, `~/.hal/resources.toml`; see
 | Key | Default | Meaning |
 |---|---|---|
 | `command` | `"hal-new"` | Command for the built-in `claude` agent. Runs through your interactive shell, so aliases and functions work. |
+| `ask_name` | `true` | Ask for a name when you start a session or terminal from the TUI; Enter on the name opens it. Off, the new session opens at once. A respawn keeps its old name and never asks. |
 
 ## `[agents.<id>]`
 

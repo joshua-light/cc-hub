@@ -296,9 +296,10 @@ mod tests {
             assert_eq!(picker.cwd, "/tmp/proj");
             assert_eq!(picker.selected, 0);
 
+            app.ask_spawn_name = true;
             app.model_picker_move(1);
             app.spawn_from_model_picker();
-            assert_eq!(app.view, crate::app::View::Grid);
+            assert_eq!(app.view, crate::app::View::RenameSession);
             assert!(app.model_picker.is_none());
             let spawns = runtime.spawns.lock().unwrap();
             assert_eq!(spawns.len(), 1);

@@ -143,6 +143,12 @@ pub struct App {
     /// ([`Self::adopt_pending_spawn_names`]). Filled by a name typed while
     /// booting, by respawns carrying the old name, and by board assignments.
     pending_spawn_names: HashMap<String, String>,
+    /// Whether a session started by hand asks for its name before it opens.
+    /// Seeded from `[spawn].ask_name`.
+    pub(crate) ask_spawn_name: bool,
+    /// Effects raised outside [`Self::execute`], by the pickers that spawn
+    /// a session; the key loop runs them after the key's handler returns.
+    queued_effects: Vec<Effect>,
     /// The card a Done was just refused on because its newest note still
     /// asks the user something. A second Done on that card goes through: a
     /// card may be abandoned on purpose, just not closed by accident with a
@@ -204,8 +210,15 @@ impl App {
             last_spawn_probe_at: None,
             spawn_failures: mpsc::channel(),
             pending_spawn_names: HashMap::new(),
+            ask_spawn_name: config::get().spawn.ask_name,
+            queued_effects: Vec::new(),
             done_refused_on: None,
         }
+    }
+
+    /// Effects queued since the last call, for the key loop to run.
+    pub fn take_queued_effects(&mut self) -> Vec<Effect> {
+        std::mem::take(&mut self.queued_effects)
     }
 
     pub fn update_usage(&mut self, usage: UsageInfo, rendered: Line<'static>) {

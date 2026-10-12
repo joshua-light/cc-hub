@@ -101,9 +101,9 @@ mod tests {
                     .map(String::as_str),
                 Some("Plan (3)")
             );
-            assert_eq!(
+            assert_ne!(
                 app.view,
-                crate::app::View::Grid,
+                crate::app::View::RenameSession,
                 "a named spawn asks no name"
             );
         });

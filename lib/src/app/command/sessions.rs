@@ -190,7 +190,7 @@ impl App {
     /// `f`/Enter: resume an inactive session in place (runtime spawn), type
     /// into a live tmux session (the docked pane in the split layout, the
     /// pane popup elsewhere), or focus the hosting OS window.
-    fn focus_selected_session(&mut self) -> Vec<Effect> {
+    pub(in crate::app) fn focus_selected_session(&mut self) -> Vec<Effect> {
         let Some(session) = self.selected_session_info().cloned() else {
             return Vec::new();
         };

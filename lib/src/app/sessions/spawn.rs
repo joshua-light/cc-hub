@@ -153,23 +153,16 @@ impl App {
             cwd,
             deadline: Instant::now() + SPAWN_WATCH_TIMEOUT,
         });
+        let named = title.is_some();
         if let Some(title) = title {
             self.pending_spawn_names.insert(tmux_name, title);
-            return;
         }
-        // With Haiku auto-titling off, prompt for the name now — during the
-        // boot — so the dead seconds while the agent writes its session file
-        // are spent naming it instead of waiting to. The rename targets the
-        // placeholder's row; the typed name is carried to the real session id in
-        // `adopt_pending_spawn_names` once the scanner sees it.
-        if !config::get().title.enabled {
-            self.enter_rename_session();
-        }
+        self.name_or_open_spawn(named);
     }
 
-    /// [`Self::watch_spawn`] for a terminal `t` opened: no handoff to take,
-    /// and the name is asked for at once, as for an agent with auto-titling
-    /// off — nothing would ever name a terminal otherwise.
+    /// [`Self::watch_spawn`] for a terminal `t` opened: no handoff to take.
+    /// Auto-titling never names a terminal, so the prompt is its one chance
+    /// at a name short of `r`.
     pub fn watch_terminal(&mut self, tmux_name: String, cwd: String) {
         self.watch(SpawnWatch {
             tmux_name,
@@ -178,7 +171,25 @@ impl App {
             cwd,
             deadline: Instant::now() + TERMINAL_WATCH_TIMEOUT,
         });
-        self.enter_rename_session();
+        self.name_or_open_spawn(false);
+    }
+
+    /// The last step of a spawn, with the cursor on its placeholder: ask
+    /// for the name (Enter on it opens the session, see `SubmitRename`), or
+    /// open the session at once when `[spawn].ask_name` is off or the name
+    /// came with it.
+    ///
+    /// The prompt opens during the boot so the dead seconds while the agent
+    /// writes its session file are spent naming it. It targets the
+    /// placeholder's row; `adopt_pending_spawn_names` carries the name to
+    /// the real session id once the scanner sees it.
+    fn name_or_open_spawn(&mut self, named: bool) {
+        if self.ask_spawn_name && !named {
+            self.enter_rename_session();
+        } else {
+            let effects = self.focus_selected_session();
+            self.queued_effects.extend(effects);
+        }
     }
 
     fn watch(&mut self, watch: SpawnWatch) {
@@ -326,7 +337,7 @@ impl App {
 mod tests {
     use super::*;
     use crate::app::test_support::{app_with, fake_session, status};
-    use crate::app::View;
+    use crate::app::{Effect, View};
 
     // A watch clears as soon as any live session maps to its tmux name —
     // even on the same tick its deadline passes (appearance wins over expiry).
@@ -360,6 +371,7 @@ mod tests {
     #[test]
     fn a_new_terminal_is_on_the_grid_at_once() {
         let mut app = App::new();
+        app.ask_spawn_name = true;
         app.watch_terminal("hal-sh-1-2".into(), "/tmp/proj".into());
         let t = app.selected_session_info().expect("the cursor is on it");
         assert_eq!(t.kind, SessionKind::Terminal);
@@ -370,6 +382,59 @@ mod tests {
             app.view,
             View::RenameSession,
             "a terminal asks for its name"
+        );
+    }
+
+    // By default a new session asks for its name and opens only on Enter.
+    #[test]
+    fn a_new_session_asks_its_name() {
+        let mut app = App::new();
+        app.ask_spawn_name = true;
+        app.watch_spawn("hal-w-10".into(), "claude".into(), "/tmp".into());
+        assert_eq!(app.view, View::RenameSession);
+        assert!(app.take_queued_effects().is_empty());
+    }
+
+    // With `[spawn].ask_name` off, a new session or terminal opens at once.
+    #[test]
+    fn without_the_name_prompt_a_new_session_opens() {
+        let mut app = App::new();
+        app.ask_spawn_name = false;
+        app.sessions.layout = crate::app::SessionsLayout::List;
+        app.watch_spawn("hal-w-11".into(), "claude".into(), "/tmp".into());
+        app.watch_terminal("hal-sh-1-3".into(), "/tmp".into());
+        assert_eq!(app.view, View::Grid);
+        assert_eq!(
+            app.take_queued_effects(),
+            [
+                Effect::OpenTmuxPane {
+                    tmux: "hal-w-11".into()
+                },
+                Effect::OpenTmuxPane {
+                    tmux: "hal-sh-1-3".into()
+                },
+            ]
+        );
+    }
+
+    // A respawn carries its old name, so there is nothing to ask.
+    #[test]
+    fn a_spawn_that_brings_its_name_opens() {
+        let mut app = App::new();
+        app.ask_spawn_name = true;
+        app.sessions.layout = crate::app::SessionsLayout::List;
+        app.watch_spawn_titled(
+            "hal-w-12".into(),
+            "claude".into(),
+            "/tmp".into(),
+            Some("Perf".into()),
+        );
+        assert_eq!(app.view, View::Grid);
+        assert_eq!(
+            app.take_queued_effects(),
+            [Effect::OpenTmuxPane {
+                tmux: "hal-w-12".into()
+            }]
         );
     }
 

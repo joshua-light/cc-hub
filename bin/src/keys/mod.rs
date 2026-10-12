@@ -59,16 +59,28 @@ pub(crate) async fn handle_key(
 ) {
     let on_tab = |tab: Tab| app.view == View::Grid && app.current_tab == tab;
     let on_sessions = on_tab(Tab::Sessions);
-    let on_metrics = on_tab(Tab::Metrics);
     let on_tasks = on_tab(Tab::Tasks);
     let on_agents = on_tab(Tab::Agents);
     let on_builds = on_tab(Tab::Builds);
-    if let Some(cmd) = map_command(app, &key, on_sessions, on_tasks, on_agents, on_builds) {
-        for effect in app.execute(cmd) {
-            crate::effects::apply_effect(app, effect, terminal, scan_tx, detail_tx).await;
+    let mut effects = match map_command(app, &key, on_sessions, on_tasks, on_agents, on_builds) {
+        Some(cmd) => app.execute(cmd),
+        None => {
+            handle_view_key(app, key, scan_tx);
+            Vec::new()
         }
-        return;
+    };
+    // A picker that spawns a session opens it from here: its handler has no
+    // way to hand back effects.
+    effects.extend(app.take_queued_effects());
+    for effect in effects {
+        crate::effects::apply_effect(app, effect, terminal, scan_tx, detail_tx).await;
     }
+}
+
+/// Keys no command covers: the Tasks modal editors, then the view's own
+/// handler.
+fn handle_view_key(app: &mut App, key: KeyEvent, scan_tx: &mpsc::Sender<ScanMsg>) {
+    let on_metrics = app.view == View::Grid && app.current_tab == Tab::Metrics;
     if tasks::handle(app, key) {
         return;
     }
