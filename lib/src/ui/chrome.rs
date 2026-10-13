@@ -16,8 +16,10 @@ const HINT_GRAY: Color = Color::Rgb(80, 80, 95);
 /// The tab strip, on the terminal's own background: ` icon Label ` per tab,
 /// over a hairline rule the width of the screen.
 /// The active tab is white and stands on a heavy accent stretch of that
-/// rule; the rest are gray.
-pub(super) fn render_tab_strip(frame: &mut Frame, area: Rect, app: &App) {
+/// rule; the rest are gray. A click on a name or its stretch of rule opens
+/// that tab.
+pub(super) fn render_tab_strip(frame: &mut Frame, area: Rect, app: &mut App) {
+    app.render.tabs.clear();
     if area.height < 2 {
         return;
     }
@@ -26,10 +28,16 @@ pub(super) fn render_tab_strip(frame: &mut Frame, area: Rect, app: &App) {
 
     let mut names: Vec<Span<'static>> = vec![Span::raw("  ")];
     let mut rule: Vec<Span<'static>> = vec![Span::styled("──", Style::default().fg(SEP_GRAY))];
+    // Icons advance one cell, so a name's width is its char count.
+    let mut x = area.x + 2;
     for tab in visible_tabs() {
         let active = tab == app.current_tab;
         let name = format!(" {} {} ", tab.icon(), tab.label());
         let width = name.chars().count();
+        app.render
+            .tabs
+            .push(Rect::new(x, tabs_y, width as u16, 2), tab);
+        x = x.saturating_add(width as u16);
         let (name_style, rule_span) = if active {
             (
                 Style::default()
@@ -143,7 +151,7 @@ mod tests {
             app.current_tab = Tab::Sessions;
             let mut terminal = Terminal::new(TestBackend::new(100, 3)).expect("terminal");
             terminal
-                .draw(|f| render_tab_strip(f, f.area(), &app))
+                .draw(|f| render_tab_strip(f, f.area(), &mut app))
                 .expect("render");
             let buf = terminal.backend().buffer();
             let row = |y: u16| -> String { (0..100).map(|x| buf[(x, y)].symbol()).collect() };
@@ -154,6 +162,28 @@ mod tests {
             let heavy: String = rule.chars().skip(col).take_while(|c| *c == '━').collect();
             assert_eq!(heavy.chars().count(), " 󰆍 Sessions ".chars().count());
             assert!((0..100).all(|x| buf[(x, 1)].bg == Color::Reset));
+        });
+    }
+
+    // Each tab is clickable over its name and its stretch of the rule.
+    #[test]
+    fn each_tab_is_a_target_over_its_name() {
+        crate::test_util::with_temp_home(|| {
+            let mut app = App::new();
+            let mut terminal = Terminal::new(TestBackend::new(100, 3)).expect("terminal");
+            terminal
+                .draw(|f| render_tab_strip(f, f.area(), &mut app))
+                .expect("render");
+            let buf = terminal.backend().buffer();
+            let names: String = (0..100).map(|x| buf[(x, 1)].symbol()).collect();
+
+            let start = names.find(" 󰆍 Sessions ").expect("sessions tab");
+            let col = names[..start].chars().count() as u16;
+            let end = col + " 󰆍 Sessions ".chars().count() as u16;
+            assert_eq!(app.render.tabs.at(col, 1), Some(Tab::Sessions));
+            assert_eq!(app.render.tabs.at(end - 1, 2), Some(Tab::Sessions));
+            assert_ne!(app.render.tabs.at(end, 1), Some(Tab::Sessions));
+            assert_eq!(app.render.tabs.at(col, 0), None);
         });
     }
 }

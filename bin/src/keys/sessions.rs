@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use hal_lib::app::{App, Command, View};
+use hal_lib::app::{App, Command, Tab, View};
 use hal_lib::focus;
 
 /// Sessions- and Global-tab command mapping (Tasks lives in
@@ -21,7 +21,7 @@ pub(super) fn map_sessions_command(
         (View::Grid, KeyCode::BackTab | KeyCode::Char('J')) => {
             Command::Global(G::CycleTab { back: true })
         }
-        (View::Grid, KeyCode::Char('m')) if on_sessions => Command::Global(G::SetTabMetrics),
+        (View::Grid, KeyCode::Char('m')) if on_sessions => Command::Global(G::SetTab(Tab::Metrics)),
         (View::Grid, KeyCode::Right | KeyCode::Char('l')) if on_sessions => {
             Command::Sessions(S::NavRight)
         }

@@ -133,8 +133,22 @@ Every key goes to the pane, except:
 | Key | Action |
 |---|---|
 | `F1` | Close the pane; in the split layout, give the keyboard back to the list |
-| Click | In the split layout: on a sidebar row, give the keyboard to the list with the cursor on that session; on the dock, type into its pane. The Agents and Builds tabs take clicks the same way |
 | `Ctrl+Shift+V` | Paste the host clipboard |
+
+## Mouse
+
+hal takes the mouse while a tab is on screen with no popup over it. To
+select text, drag with your terminal's bypass modifier held: usually
+`Shift`, `Option` in iTerm2.
+
+| Where | Click | Wheel |
+|---|---|---|
+| Tab strip | Open the tab, with the keyboard on its list | |
+| Sidebar (Sessions split, Agents, Builds) | Put the cursor on the row and the keyboard on the list | Move the cursor |
+| Page beside it | Give the page the keyboard; once the Sessions dock has it, clicks go to its pane | Scroll the page |
+| Sessions list and cards | Put the cursor on the session | Move the cursor |
+| Tasks board | Put the cursor on the card; on a column's empty space, on that column | Move the cursor in the column |
+| Metrics | | Move the cursor |
 
 ## Popups
 

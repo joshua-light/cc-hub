@@ -1,5 +1,5 @@
 use super::card::render_task_card;
-use crate::app::App;
+use crate::app::{App, Targets};
 use crate::models::SessionInfo;
 use crate::tasks::store::TaskStatus;
 use crate::ui::common::task_status_meta;
@@ -11,6 +11,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use std::collections::HashMap;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_task_column(
     frame: &mut Frame,
     area: Rect,
@@ -19,6 +20,7 @@ pub(super) fn render_task_column(
     status: TaskStatus,
     sessions_by_tmux: &HashMap<&str, &SessionInfo>,
     now_secs: u64,
+    cards: &mut Targets<(usize, usize)>,
 ) {
     // Icon/accent come from the shared status palette so the columns and
     // the task-link picker read the same.
@@ -112,6 +114,7 @@ pub(super) fn render_task_column(
             width: inner.width,
             height: card_height,
         };
+        cards.push(card_area, (col_idx, rel));
         let selected = col_focused && rel == sel;
         render_task_card(
             frame,

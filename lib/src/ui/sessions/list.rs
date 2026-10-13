@@ -21,7 +21,7 @@ use super::{
     keep_in_view, render_headers, render_no_sessions, row_title, session_mark, CardMarks,
     GROUP_GAP, GROUP_HEADER_HEIGHT,
 };
-use crate::app::App;
+use crate::app::{App, Targets};
 use crate::models::{first_line_truncated, SessionInfo, SessionKind};
 use crate::ui::common::{ctx_color, format_elapsed, selection_stripe, short_model, Cell, COL_SEP};
 use crate::ui::now_ms;
@@ -173,6 +173,7 @@ pub(super) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
         .map(|b| b.title.lines().next().unwrap_or("").chars().count() + 2)
         .max();
     let cols = plan_columns(area.width as usize, task_need);
+    let mut rows = Targets::default();
 
     for (gi, group) in app.sessions.groups.iter().enumerate() {
         let g_y = group_offsets[gi];
@@ -187,8 +188,10 @@ pub(super) fn render_list(frame: &mut Frame, area: Rect, app: &mut App) {
             let marks = CardMarks::of(app, gi, si, session);
             let badge = app.task_badge(&session.session_id);
             render_row(frame, row_area, session, badge.as_ref(), &cols, marks, now);
+            rows.push(row_area, (gi, si));
         }
     }
+    app.render.sessions = rows;
 }
 
 fn render_row(
@@ -447,6 +450,38 @@ mod tests {
             let idle = crate::ui::common::state_color(&SessionState::Idle);
             assert_ne!(dot(1), idle);
             assert_eq!(dot(5), idle);
+        });
+    }
+
+    // Each drawn row is a click target for its session, and only the rows.
+    #[cfg(unix)]
+    #[test]
+    fn each_row_is_a_target_for_its_session() {
+        use crate::models::{SessionInfo, SessionState};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        crate::test_util::with_temp_home(|| {
+            let session = |id: &str, pid: u32| SessionInfo {
+                pid,
+                session_id: id.into(),
+                cwd: "/tmp/p".into(),
+                project_name: "p".into(),
+                state: SessionState::Idle,
+                ..crate::test_util::session_info()
+            };
+            let mut app = App::new();
+            app.update_sessions(vec![session("a", 1), session("b", 2)]);
+            app.sessions.layout = crate::app::SessionsLayout::List;
+            let mut terminal = Terminal::new(TestBackend::new(120, 10)).expect("terminal");
+            terminal
+                .draw(|f| super::super::render_sessions_body(f, f.area(), &mut app))
+                .expect("render");
+
+            let hits: Vec<_> = (0..10)
+                .filter_map(|y| app.render.sessions.at(0, y))
+                .collect();
+            assert_eq!(hits, vec![(0, 0), (0, 1)]);
         });
     }
 }

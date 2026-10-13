@@ -49,8 +49,8 @@ pub enum GlobalCommand {
     CycleTab {
         back: bool,
     },
-    /// `m` on the Sessions tab.
-    SetTabMetrics,
+    /// A click on the tab strip; `m` on the Sessions tab opens Metrics.
+    SetTab(Tab),
 }
 
 /// Side effects [`App::execute`] cannot perform in-process: they need the
@@ -103,9 +103,9 @@ impl App {
                 }
                 self.metrics_scan_effect(was_metrics)
             }
-            GlobalCommand::SetTabMetrics => {
+            GlobalCommand::SetTab(tab) => {
                 let was_metrics = self.current_tab == Tab::Metrics;
-                self.set_tab(Tab::Metrics);
+                self.set_tab(tab);
                 self.metrics_scan_effect(was_metrics)
             }
         }

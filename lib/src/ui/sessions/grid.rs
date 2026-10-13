@@ -3,7 +3,7 @@ use super::{
     hold_header_above, keep_in_view, render_headers, render_no_sessions, CardMarks, GROUP_GAP,
     GROUP_HEADER_HEIGHT,
 };
-use crate::app::App;
+use crate::app::{App, Targets};
 use crate::ui::{cell_height, now_ms};
 use ratatui::layout::Rect;
 use ratatui::Frame;
@@ -40,6 +40,7 @@ pub(super) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let scroll = app.render.grid_scroll;
     let now = now_ms();
+    let mut cards = Targets::default();
     for (gi, group) in app.sessions.groups.iter().enumerate() {
         let g_y = group_offsets[gi];
         render_headers(frame, area, &app.sessions.groups, gi, g_y, scroll);
@@ -68,6 +69,8 @@ pub(super) fn render_grid(frame: &mut Frame, area: Rect, app: &mut App) {
             let cell_area = Rect::new(x, cy, w, cell_height());
             let badge = app.task_badge(&session.session_id);
             render_card(frame, cell_area, session, badge.as_ref(), marks, now);
+            cards.push(cell_area, (gi, si));
         }
     }
+    app.render.sessions = cards;
 }

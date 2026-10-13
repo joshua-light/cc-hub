@@ -63,7 +63,7 @@ pub enum View {
     BuildLog,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Tasks,
     Sessions,

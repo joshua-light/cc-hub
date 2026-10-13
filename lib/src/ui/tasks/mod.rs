@@ -13,7 +13,7 @@
 //! - `card`: one task card and its meta row
 //! - `info`: the Task Info popup
 
-use crate::app::{visible_task_columns, App, View};
+use crate::app::{visible_task_columns, App, Targets, View};
 use crate::models;
 use crate::ui::common::CURSOR;
 use crate::ui::now_ms;
@@ -31,7 +31,9 @@ mod info;
 
 pub(crate) use info::render_task_info;
 
-pub fn render_tasks_body(frame: &mut Frame, area: Rect, app: &App) {
+pub fn render_tasks_body(frame: &mut Frame, area: Rect, app: &mut App) {
+    app.render.task_columns.clear();
+    app.render.task_cards.clear();
     if area.height < 3 || area.width < 30 {
         let hint = Paragraph::new("(terminal too narrow — resize or switch to Sessions)")
             .alignment(Alignment::Center)
@@ -68,6 +70,7 @@ pub fn render_tasks_body(frame: &mut Frame, area: Rect, app: &App) {
         )
         .split(area);
 
+    let mut cards = Targets::default();
     let sessions_by_tmux = app.sessions_by_tmux();
     let now_secs = now_ms() / 1000;
     for (col_idx, status) in columns.iter().enumerate() {
@@ -79,8 +82,14 @@ pub fn render_tasks_body(frame: &mut Frame, area: Rect, app: &App) {
             *status,
             &sessions_by_tmux,
             now_secs,
+            &mut cards,
         );
     }
+    drop(sessions_by_tmux);
+    for (col_idx, col_area) in cols.iter().enumerate() {
+        app.render.task_columns.push(*col_area, col_idx);
+    }
+    app.render.task_cards = cards;
 }
 
 /// The one-row filter strip: query (with a cursor while editing), how many
@@ -158,4 +167,42 @@ pub(super) fn wrap_text(text: &str, width: usize) -> Vec<String> {
     }
     out.push(line);
     out
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    // Every column is a click target, and every card drawn in one is a
+    // target for its place in that column.
+    #[test]
+    fn the_board_records_its_columns_and_cards() {
+        crate::test_util::with_temp_home(|| {
+            let mut app = App::new();
+            app.tasks.board.add("first").unwrap();
+            app.tasks.board.add("second").unwrap();
+            let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("terminal");
+            terminal
+                .draw(|f| render_tasks_body(f, f.area(), &mut app))
+                .expect("render");
+
+            let columns: Vec<_> = (0..100)
+                .filter_map(|x| app.render.task_columns.at(x, 10))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            assert_eq!(
+                columns,
+                (0..visible_task_columns().len()).collect::<Vec<_>>()
+            );
+
+            let mut cards: Vec<_> = (0..20)
+                .filter_map(|y| app.render.task_cards.at(2, y))
+                .collect();
+            cards.dedup();
+            assert_eq!(cards, vec![(0, 0), (0, 1)]);
+        });
+    }
 }

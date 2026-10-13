@@ -1,3 +1,4 @@
+use super::Tab;
 use ratatui::layout::{Position, Rect};
 
 /// Layout state computed (and clamp-written) by `ui/` during draw.
@@ -16,8 +17,11 @@ use ratatui::layout::{Position, Rect};
 ///   layout); `ui/sessions/detail.rs` clamps [`Self::popup_scroll`].
 /// - `ui/builds.rs` writes [`Self::builds_scroll`].
 /// - `ui/sessions/split.rs` writes [`Self::dock_size`]; it,
-///   `ui/agents/table.rs` and `ui/builds.rs` write [`Self::split`] for the
+///   `ui/agents/list.rs` and `ui/builds.rs` write [`Self::split`] for the
 ///   tab on screen.
+/// - `ui/chrome.rs` writes [`Self::tabs`]; `ui/tasks/mod.rs` writes
+///   [`Self::task_columns`] and [`Self::task_cards`]; `ui/sessions/grid.rs`
+///   and `ui/sessions/list.rs` write [`Self::sessions`].
 /// - `ui/metrics/mod.rs` writes [`Self::metrics_view_height`],
 ///   [`Self::metrics_row_lines`], and [`Self::metrics_scroll`].
 pub struct RenderState {
@@ -59,6 +63,43 @@ pub struct RenderState {
     /// Where the tab on screen last drew its list and page, so a click can
     /// tell which one it landed on.
     pub split: SplitAreas,
+    /// Each tab's name in the strip.
+    pub tabs: Targets<Tab>,
+    /// Each Tasks column, by its index among the visible ones.
+    pub task_columns: Targets<usize>,
+    /// Each card on the board, as `(column, row)` — the board's cursor.
+    pub task_cards: Targets<(usize, usize)>,
+    /// Each session's row or card in the List and Cards layouts, as
+    /// `(group, index)`.
+    pub sessions: Targets<(usize, usize)>,
+}
+
+/// Things a click can land on, each where it was last drawn.
+pub struct Targets<T>(Vec<(Rect, T)>);
+
+impl<T: Copy> Targets<T> {
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub fn push(&mut self, area: Rect, target: T) {
+        self.0.push((area, target));
+    }
+
+    /// The target drawn at screen cell `(x, y)`.
+    pub fn at(&self, x: u16, y: u16) -> Option<T> {
+        let at = Position::new(x, y);
+        self.0
+            .iter()
+            .find(|(area, _)| area.contains(at))
+            .map(|(_, target)| *target)
+    }
+}
+
+impl<T> Default for Targets<T> {
+    fn default() -> Self {
+        Self(Vec::new())
+    }
 }
 
 /// A sidebar-and-page tab as last drawn: the sidebar, the page beside it
@@ -98,6 +139,10 @@ impl Default for RenderState {
             builds_scroll: 0,
             dock_size: (30, 100),
             split: SplitAreas::default(),
+            tabs: Targets::default(),
+            task_columns: Targets::default(),
+            task_cards: Targets::default(),
+            sessions: Targets::default(),
         }
     }
 }

@@ -63,6 +63,7 @@ impl<'a> CardMarks<'a> {
 /// Sessions-tab body: dispatch to whichever layout is active (see
 /// [`crate::app::SessionsLayout`]).
 pub(crate) fn render_sessions_body(frame: &mut Frame, area: Rect, app: &mut App) {
+    app.render.sessions.clear();
     match app.sessions.layout {
         crate::app::SessionsLayout::Split => split::render_split(frame, area, app),
         crate::app::SessionsLayout::Grid => grid::render_grid(frame, area, app),

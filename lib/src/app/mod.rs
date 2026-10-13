@@ -58,7 +58,7 @@ pub use harness_view::{Detail, HarnessView, Section};
 pub use metrics_view::MetricsView;
 pub use picker_list::PickerRow;
 pub use places::GhCreateInput;
-pub use render_state::{RenderState, SplitAreas};
+pub use render_state::{RenderState, SplitAreas, Targets};
 pub use sessions::{
     AgentPickerState, Dock, FinderLine, ModelPickerChoice, ModelPickerState, Period, RenameSubmit,
     RespawnChoice, RespawnPickerState, SessionFinderChoice, SessionFinderState, SessionsLayout,

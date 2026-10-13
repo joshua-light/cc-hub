@@ -1,23 +1,32 @@
-//! The mouse on a sidebar-and-page tab: a left click puts the keyboard on
-//! the side it lands on, and the wheel scrolls the side under the pointer.
-//! A pane with the keyboard takes every event.
+//! The mouse on any tab with nothing over it: a left click on the tab strip
+//! opens that tab, one on a sidebar, list or board puts the cursor on what
+//! it lands on, and one on a sidebar-and-page tab's page gives the page the
+//! keyboard. The wheel moves the cursor as the arrow keys would, or scrolls
+//! the page under the pointer. A pane with the keyboard takes every other
+//! event.
 
-use super::{App, BuildsCommand, Command, HarnessCommand, SessionsCommand, SessionsLayout};
-use super::{Tab, View};
+use super::{App, BuildsCommand, Command, Effect, GlobalCommand, HarnessCommand};
+use super::{SessionsCommand, SessionsLayout, Tab, TasksCommand, View};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
 
 impl App {
-    /// Whether the hub wants the terminal's mouse: while a pane or a
-    /// sidebar-and-page tab is on screen. Without capture the terminal turns
-    /// the wheel into arrow keys, and over the dock those would move the
-    /// list's cursor.
+    /// Whether the hub wants the terminal's mouse: while a tab is on screen
+    /// with nothing over it, or a pane is. Without capture the terminal
+    /// turns the wheel into arrow keys, and over the dock those would move
+    /// the list's cursor.
     pub fn wants_mouse(&self) -> bool {
-        match self.view {
-            View::TmuxPane | View::Dock | View::AgentDetail | View::BuildLog => true,
-            View::Grid => self.split_on_screen() || self.sessions.dock.pane().is_some(),
-            _ => false,
-        }
+        self.tab_on_screen() || self.view == View::TmuxPane
+    }
+
+    /// Whether the tab's body is on screen with nothing over it: the dock
+    /// and the Agents and Builds pages are drawn inside it; every other
+    /// view is a popup or an editor.
+    fn tab_on_screen(&self) -> bool {
+        matches!(
+            self.view,
+            View::Grid | View::Dock | View::AgentDetail | View::BuildLog
+        )
     }
 
     fn split_on_screen(&self) -> bool {
@@ -33,29 +42,42 @@ impl App {
         matches!(self.view, View::Dock | View::AgentDetail | View::BuildLog)
     }
 
-    /// Route a captured mouse event. The click that moves the focus goes no
-    /// further; one inside the pane that already has it does. The dock's
-    /// pane takes the wheel over it even without the keyboard.
-    pub fn mouse(&mut self, ev: MouseEvent) {
-        if self.click_moves_focus(ev) {
-            return;
+    /// Route a captured mouse event. A click that opens a tab, moves the
+    /// focus or the cursor goes no further; one inside the pane that already
+    /// has the keyboard does. The dock's pane takes the wheel over it even
+    /// without the keyboard.
+    pub fn mouse(&mut self, ev: MouseEvent) -> Vec<Effect> {
+        if let Some(tab) = self.clicked_tab(ev) {
+            return self.open_tab(tab);
+        }
+        if self.click_moves_focus(ev) || self.click_moves_cursor(ev) {
+            return Vec::new();
         }
         if let Some(pane) = self.focused_pane() {
             pane.send_mouse(ev);
-            return;
+            return Vec::new();
         }
         let up = match ev.kind {
             MouseEventKind::ScrollUp => true,
             MouseEventKind::ScrollDown => false,
-            _ => return,
+            _ => return Vec::new(),
         };
-        if self.view == View::Grid {
+        if self.view == View::Grid && self.current_tab == Tab::Sessions {
             if let Some(pane) = self.sessions.dock.pane_mut() {
                 if pane.covers(ev.column, ev.row) {
                     pane.send_mouse(ev);
-                    return;
+                    return Vec::new();
                 }
             }
+        }
+        // Metrics moves its cursor outside the command layer.
+        if self.view == View::Grid && self.current_tab == Tab::Metrics {
+            if up {
+                self.metrics_nav_up();
+            } else {
+                self.metrics_nav_down();
+            }
+            return Vec::new();
         }
         let on_page = self.split_on_screen()
             && self
@@ -63,9 +85,31 @@ impl App {
                 .split
                 .page
                 .contains(Position::new(ev.column, ev.row));
-        if let Some(cmd) = self.wheel_command(up, on_page) {
-            self.execute(cmd);
+        match self.wheel_command(up, on_page) {
+            Some(cmd) => self.execute(cmd),
+            None => Vec::new(),
         }
+    }
+
+    /// The tab a left click on the strip lands on.
+    fn clicked_tab(&self, ev: MouseEvent) -> Option<Tab> {
+        let clicked = ev.kind == MouseEventKind::Down(MouseButton::Left);
+        if !clicked || !self.tab_on_screen() {
+            return None;
+        }
+        self.render.tabs.at(ev.column, ev.row)
+    }
+
+    /// Open `tab` with the keyboard on its list: a page that has the
+    /// keyboard gives it back first, as `F1` would.
+    fn open_tab(&mut self, tab: Tab) -> Vec<Effect> {
+        if tab == self.current_tab {
+            return Vec::new();
+        }
+        if self.page_has_keyboard() {
+            self.focus_list(None);
+        }
+        self.execute(Command::Global(GlobalCommand::SetTab(tab)))
     }
 
     /// A wheel notch: the list's cursor moves, as its arrow keys would, or
@@ -74,8 +118,10 @@ impl App {
         use BuildsCommand as B;
         use HarnessCommand as H;
         use SessionsCommand as S;
+        use TasksCommand as T;
         Some(match (self.current_tab, &self.view, on_page) {
             (Tab::Sessions, View::Grid, _) => Command::Sessions(either(up, S::NavUp, S::NavDown)),
+            (Tab::Tasks, View::Grid, _) => Command::Tasks(either(up, T::NavUp, T::NavDown)),
             (Tab::Agents, View::Grid | View::AgentDetail, false) => {
                 Command::Harness(either(up, H::NavUp, H::NavDown))
             }
@@ -96,11 +142,7 @@ impl App {
     /// cursor on the item clicked; on the page, the page takes it.
     fn click_moves_focus(&mut self, ev: MouseEvent) -> bool {
         let clicked = ev.kind == MouseEventKind::Down(MouseButton::Left);
-        let between_sides = matches!(
-            self.view,
-            View::Grid | View::Dock | View::AgentDetail | View::BuildLog
-        );
-        if !clicked || !between_sides || !self.split_on_screen() {
+        if !clicked || !self.tab_on_screen() || !self.split_on_screen() {
             return false;
         }
         let at = Position::new(ev.column, ev.row);
@@ -111,6 +153,40 @@ impl App {
             return true;
         }
         split.page.contains(at) && !self.page_has_keyboard() && self.focus_page()
+    }
+
+    /// A left click on a board card or on a session's row or card in the
+    /// List and Cards layouts puts the cursor on it; one on a column's
+    /// empty space moves the cursor to that column.
+    fn click_moves_cursor(&mut self, ev: MouseEvent) -> bool {
+        let clicked = ev.kind == MouseEventKind::Down(MouseButton::Left);
+        if !clicked || self.view != View::Grid {
+            return false;
+        }
+        let (x, y) = (ev.column, ev.row);
+        let render = &self.render;
+        match self.current_tab {
+            Tab::Tasks => {
+                if let Some((col, row)) = render.task_cards.at(x, y) {
+                    self.tasks.focus(col, row);
+                    return true;
+                }
+                let col = render.task_columns.at(x, y);
+                if let Some(col) = col.filter(|col| *col != self.tasks.col) {
+                    self.tasks.focus(col, 0);
+                }
+                col.is_some()
+            }
+            Tab::Sessions => {
+                let session = render.sessions.at(x, y);
+                if let Some((group, index)) = session {
+                    self.sessions.sel_group = group;
+                    self.sessions.sel_in_group = index;
+                }
+                session.is_some()
+            }
+            Tab::Agents | Tab::Builds | Tab::Metrics => false,
+        }
     }
 
     fn focus_list(&mut self, item: Option<(usize, usize)>) {
@@ -209,9 +285,8 @@ mod tests {
         app
     }
 
-    // Away from Split, with no pane on screen, the terminal keeps the mouse;
-    // a wheel that does arrive over the list moves the cursor, as its arrow
-    // keys would.
+    // The List layout takes the mouse too; the wheel over it moves the
+    // cursor, as its arrow keys would.
     #[test]
     fn the_wheel_over_the_list_moves_the_cursor() {
         let mut app = App::new();
@@ -220,7 +295,7 @@ mod tests {
             fake_session("hal-b", SessionState::Idle),
         ]);
         app.sessions.layout = SessionsLayout::List;
-        assert!(!app.wants_mouse());
+        assert!(app.wants_mouse());
 
         app.mouse(wheel(MouseEventKind::ScrollDown));
         assert_eq!(app.sessions.sel_in_group, 1);
@@ -308,5 +383,87 @@ mod tests {
         app.mouse(click(3, 1));
         assert_eq!(app.view, View::Grid);
         assert_eq!(app.harness.selected, 1);
+    }
+
+    fn rect(x: u16, y: u16, width: u16, height: u16) -> ratatui::layout::Rect {
+        ratatui::layout::Rect::new(x, y, width, height)
+    }
+
+    // A click on a tab opens it, with the keyboard on its list even when
+    // the dock had it; landing on Metrics asks for its scan.
+    #[test]
+    fn a_click_on_a_tab_opens_it() {
+        crate::test_util::with_temp_home(|| {
+            let mut app = split_app();
+            app.view = View::Dock;
+            app.render.tabs.push(rect(2, 2, 10, 2), Tab::Tasks);
+            app.render.tabs.push(rect(12, 2, 10, 2), Tab::Metrics);
+
+            assert!(app.mouse(click(5, 3)).is_empty());
+            assert_eq!(app.current_tab, Tab::Tasks);
+            assert_eq!(app.view, View::Grid);
+
+            let effects = app.mouse(click(15, 2));
+            assert_eq!(app.current_tab, Tab::Metrics);
+            assert_eq!(effects, vec![crate::app::Effect::SpawnMetricsScan]);
+        });
+    }
+
+    // In the List and Cards layouts a click on a session's row or card
+    // puts the cursor on it; the board's targets, left from the Tasks tab,
+    // are not consulted.
+    #[test]
+    fn a_click_on_a_list_row_selects_that_session() {
+        let mut app = App::new();
+        app.update_sessions(vec![
+            fake_session("hal-a", SessionState::Idle),
+            fake_session("hal-b", SessionState::Idle),
+        ]);
+        app.sessions.layout = SessionsLayout::List;
+        app.render.sessions.push(rect(0, 1, 80, 1), (0, 0));
+        app.render.sessions.push(rect(0, 2, 80, 1), (0, 1));
+        app.render.task_columns.push(rect(0, 0, 80, 10), 3);
+
+        app.mouse(click(10, 2));
+        assert_eq!(app.sessions.sel_in_group, 1);
+        assert_eq!(app.tasks.col, 0);
+    }
+
+    // On the board a click on a card focuses its column and the card; one
+    // on another column's empty space moves the cursor to that column.
+    #[test]
+    fn a_click_on_the_board_moves_its_cursor() {
+        crate::test_util::with_temp_home(|| {
+            let mut app = App::new();
+            app.current_tab = Tab::Tasks;
+            app.tasks.board.add("first").unwrap();
+            app.tasks.board.add("second").unwrap();
+            app.render.task_columns.push(rect(0, 0, 30, 20), 0);
+            app.render.task_columns.push(rect(30, 0, 30, 20), 1);
+            app.render.task_cards.push(rect(1, 1, 28, 5), (0, 0));
+            app.render.task_cards.push(rect(1, 6, 28, 5), (0, 1));
+            assert!(app.wants_mouse());
+
+            app.mouse(click(10, 8));
+            assert_eq!((app.tasks.col, app.tasks.row), (0, 1));
+
+            app.mouse(click(40, 15));
+            assert_eq!((app.tasks.col, app.tasks.row), (1, 0));
+        });
+    }
+
+    #[test]
+    fn the_wheel_on_the_board_moves_the_card_cursor() {
+        crate::test_util::with_temp_home(|| {
+            let mut app = App::new();
+            app.current_tab = Tab::Tasks;
+            app.tasks.board.add("first").unwrap();
+            app.tasks.board.add("second").unwrap();
+
+            app.mouse(wheel(MouseEventKind::ScrollDown));
+            assert_eq!(app.tasks.row, 1);
+            app.mouse(wheel(MouseEventKind::ScrollUp));
+            assert_eq!(app.tasks.row, 0);
+        });
     }
 }

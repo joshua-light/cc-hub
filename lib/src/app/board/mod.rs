@@ -259,6 +259,14 @@ impl TasksView {
         }
     }
 
+    /// Put the cursor on card `row` of column `col`, or the column's last
+    /// card when it has fewer.
+    pub fn focus(&mut self, col: usize, row: usize) {
+        self.col = col.min(visible_task_columns().len() - 1);
+        self.row = row;
+        self.clamp_row();
+    }
+
     /// Keep the row cursor inside the focused column after the board shrank
     /// (delete, clear-done, status move).
     pub fn clamp_row(&mut self) {
