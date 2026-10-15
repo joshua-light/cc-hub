@@ -110,12 +110,12 @@ mod tests {
     }
 
     #[test]
-    fn merge_target_prompt_for_a_card_ends_with_the_note_to_write() {
+    fn merge_target_prompt_for_a_card_finishes_the_card() {
         let card: BoardTaskId = "tk-42".parse().unwrap();
         let prompt = merge(&format!("pr={}", PR)).prompt_for(&card);
         assert!(prompt.contains("When the merge is pushed"), "{}", prompt);
         assert!(
-            prompt.contains("hal board note --task tk-42 --text \"Pushed:"),
+            prompt.contains("hal board done --task tk-42 --text \"Pushed:"),
             "{}",
             prompt
         );

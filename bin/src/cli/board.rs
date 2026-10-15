@@ -18,7 +18,7 @@ use hal_lib::ops;
 use hal_lib::tasks::store::{self, TaskPriority};
 use hal_lib::tasks::{parse_tags, PersonalBoard};
 
-const VERBS: &str = "`add`, `note` or `notes`";
+const VERBS: &str = "`add`, `note`, `notes` or `done`";
 
 pub(crate) fn board_subcommand(args: &[String]) -> Result<(), CliError> {
     let (verb, rest) = args
@@ -28,6 +28,7 @@ pub(crate) fn board_subcommand(args: &[String]) -> Result<(), CliError> {
         "add" => board_add(rest),
         "note" => board_note(rest),
         "notes" => board_notes(rest),
+        "done" => board_done(rest),
         other => Err(CliError::Usage(format!(
             "unknown board verb: {} (try {})",
             other, VERBS
@@ -163,6 +164,27 @@ fn board_notes(args: &[String]) -> Result<(), CliError> {
         println!("── {} · {}", when(note.added_at), note.path);
         println!("{}", note.text);
     }
+    Ok(())
+}
+
+/// `hal board done --task ID [--text NOTE]`
+///
+/// What Done on the board does, for the session whose work it was: the
+/// closing note, the card to Done, and the card's broker seat given back,
+/// so the session ends a few seconds after it says so. A card that still
+/// waits on the user is refused. Emits
+/// `{"ok":true,"task_id":…,"status":"done","stopped":[worker…]}`.
+fn board_done(args: &[String]) -> Result<(), CliError> {
+    let f = parse_flags(args)?;
+    let task_id = super::require_task(&f)?;
+    let state = ops::task::task_finish(&task_id, f.text.as_deref())?;
+    let stopped = super::resource::stop_task(&state.task_id, "card done")?;
+    print_json(&serde_json::json!({
+        "ok": true,
+        "task_id": state.task_id,
+        "status": state.status.as_str(),
+        "stopped": stopped,
+    }));
     Ok(())
 }
 

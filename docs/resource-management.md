@@ -29,6 +29,7 @@ between them.
 hal resource start --task tk-ID --kind tps --role implementation --cwd /repo --prompt '…' [--title TEXT]
 hal resource status [--worker ID]
 hal resource stop --worker ID [--reason TEXT]
+hal resource stop --task tk-ID [--reason TEXT]   # every worker of a finished card
 hal resource retry --worker ID     # a blocked worker, once you know why it exited
 hal resource select --kind KIND --role ROLE   # preview an allocation
 ```

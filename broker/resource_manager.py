@@ -736,6 +736,12 @@ def live_worker(db, task):
     return next((w for w in db['workers'].values() if w['task'] == task and w['status'] in HOLDING), None)
 
 
+def unfinished_workers(db, task):
+    """Every worker of a card that has not ended or been asked to: what a
+    finished card still has to give back, blocked ones included."""
+    return [w for w in db['workers'].values() if w['task'] == task and w['status'] not in ('stopped', 'stopping')]
+
+
 def tmux_exists(name):
     return run(['tmux', 'has-session', '-t', '=' + name]).returncode == 0
 
@@ -1167,7 +1173,10 @@ def parser():
     commands.add_parser('status').add_argument('--worker')
     commands.add_parser('retry').add_argument('--worker', required=True)
     stop_p = commands.add_parser('stop')
-    stop_p.add_argument('--worker', required=True)
+    # A worker by id, or every worker of a card that was finished.
+    stopped = stop_p.add_mutually_exclusive_group(required=True)
+    stopped.add_argument('--worker')
+    stopped.add_argument('--task')
     stop_p.add_argument('--reason', default='stopped by operator')
     commands.add_parser('supervise')
     commands.add_parser('hook')
@@ -1185,7 +1194,9 @@ def main(argv=None):
             if result:
                 print(json.dumps(result))
             return 0
-        cfg = load_config()
+        # Stopping only touches the state: a hub with no accounts configured
+        # has no workers, and finishing its cards must not need any.
+        cfg = load_config() if args.verb != 'stop' else None
         if args.verb == 'accounts':
             result = refresh(cfg, args.refresh)
         elif args.verb == 'select':
@@ -1230,6 +1241,10 @@ def main(argv=None):
                     worker['status'] = 'waiting_for_capacity'
                     record(worker, 'retry_requested')
                     result = worker
+                elif args.verb == 'stop' and args.task:
+                    result = unfinished_workers(db, args.task)
+                    for worker in result:
+                        stop(worker, args.reason)
                 elif args.verb == 'stop':
                     worker = current_worker(db, args.worker)
                     stop(worker, args.reason)

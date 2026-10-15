@@ -171,6 +171,35 @@ pub fn task_artifact_add_text(
     })
 }
 
+/// Finish a card the way its own session would say it is finished: the
+/// closing note first, when there is one, then the card to Done. The note
+/// goes first because it is the record of what was done, and because it is
+/// what answers a wait the notes before it left open. A card that still asks
+/// the user something is refused — the board's first press of Done refuses it
+/// too — since closing it would record a task nobody did as a task done.
+/// Ending the card's session is the caller's: the board stops a broker
+/// worker, the TUI kills its pane.
+pub fn task_finish(task_id: &str, closing: Option<&str>) -> Result<TaskState, OpError> {
+    let _ = load_state(task_id)?;
+    if let Some(closing) = closing {
+        task_artifact_add_text(task_id, closing, "cli")?;
+    }
+    let asks = crate::tasks::activity::label(task_id)
+        .filter(|l| l.errand == crate::tasks::activity::Errand::Answer);
+    if let Some(asks) = asks {
+        return Err(OpError::Conflict {
+            msg: format!("not done — {} · answer it on the card first", asks.text),
+            recipe: None,
+        });
+    }
+    update_task(task_id, |s| {
+        if s.status != TaskStatus::Done {
+            s.status = TaskStatus::Done;
+            s.done_at = Some(now_unix_secs());
+        }
+    })
+}
+
 /// Whether the card's newest note is, word for word, `text`.
 fn newest_note_says(task: &TaskState, text: &str) -> bool {
     task.artifacts
@@ -333,6 +362,46 @@ mod tests {
             let after =
                 task_artifact_add_text("tk-plain", "Candidate: fix/linter", "cli").expect("note");
             assert_eq!(after.status, TaskStatus::Running);
+        });
+    }
+
+    /// A session that finished its card says what it did and the card is
+    /// Done, from whichever column it worked in.
+    #[test]
+    fn finishing_a_card_records_the_closing_note_and_moves_it_to_done() {
+        crate::test_util::with_temp_home(|| {
+            let mut state = TaskState::new("Polish: cache".into());
+            state.task_id = "tk-fin".into();
+            state.status = TaskStatus::Running;
+            store::write_task_state(&state).expect("write card");
+
+            let after = task_finish("tk-fin", Some("Pushed: two comments trimmed")).expect("done");
+            assert_eq!(after.status, TaskStatus::Done);
+            assert!(after.done_at.is_some());
+            let notes = task_notes("tk-fin").expect("notes");
+            assert_eq!(notes.last().unwrap().text, "Pushed: two comments trimmed");
+        });
+    }
+
+    /// A card that still asks a question is not done, and the closing note
+    /// that answers it is what lets it close.
+    #[test]
+    fn a_card_waiting_on_the_user_is_not_finished() {
+        crate::test_util::with_temp_home(|| {
+            let mut state = TaskState::new("Merge: cache".into());
+            state.task_id = "tk-ask".into();
+            state.status = TaskStatus::Running;
+            store::write_task_state(&state).expect("write card");
+            task_artifact_add_text("tk-ask", "Waiting: which side wins?", "cli").expect("wait");
+
+            assert!(matches!(
+                task_finish("tk-ask", None),
+                Err(OpError::Conflict { .. })
+            ));
+            assert_eq!(load_state("tk-ask").unwrap().status, TaskStatus::Running);
+
+            let after = task_finish("tk-ask", Some("Green: target's side kept")).expect("done");
+            assert_eq!(after.status, TaskStatus::Done);
         });
     }
 }

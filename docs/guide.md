@@ -39,6 +39,11 @@ next session, or you, reads them on the card. The note's first word matters:
 A card that still asks a question refuses the first press of Done. Answer it
 with a note (`Decided: …`), or press Done again to close it anyway.
 
+A session finishes its own card with `hal board done --task ID --text NOTE`:
+the note is its closing record, the card moves to Done, and the card's broker
+workers stop, so the session ends a few seconds later. A card that still asks
+a question is refused here too, with no second press to override it.
+
 ### Kinds
 
 A kind is a word from `[tasks].kinds` naming the deliverable (`T` picks it).

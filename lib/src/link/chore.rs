@@ -27,17 +27,19 @@ pub trait Chore {
     fn brief(&self) -> String;
 
     /// When the session is done, as the clause after "When": the moment it
-    /// writes its one note on the card.
+    /// finishes its card.
     fn done_when(&self) -> &'static str;
 
     /// The opening prompt once the chore is filed as board card `card`: the
-    /// standing orders, then where the outcome is written. The card is the
-    /// user's view of the work, so the session closes it out with one note.
+    /// standing orders, then how the session finishes it. The card is the
+    /// user's view of the work, so the session closes it out itself: one
+    /// note saying what changed, the card to Done, and its broker seat given
+    /// back, all in `hal board done`.
     fn prompt_for(&self, card: &BoardTaskId) -> String {
         format!(
             "{}\n\nThis work is card {} on the Tasks board. \
-             When {}, write one note on it: \
-             hal board note --task {} --text \"Pushed: <what changed, one line>\"",
+             When {}, finish the card as your last act: \
+             hal board done --task {} --text \"Pushed: <what changed, one line>\"",
             self.prompt(),
             card,
             self.done_when(),

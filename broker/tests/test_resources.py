@@ -642,6 +642,19 @@ PROJECT="keep-project"
         with patch.object(broker.time, 'time', return_value=time.time() + 10):
             self.assertEqual(self.supervise()[worker['id']]['status'], 'stopped')
 
+    def test_stop_by_task_ends_every_worker_of_the_card(self):
+        worker = self.start()
+        out = io.StringIO()
+        with patch('sys.stdout', out):
+            self.assertEqual(broker.main(['stop', '--task', worker['task'], '--reason', 'card done']), 0)
+        self.assertEqual([w['id'] for w in json.loads(out.getvalue())['result']], [worker['id']])
+        self.assertEqual(broker.state()['workers'][worker['id']]['status'], 'stopping')
+        # A card nothing works any more has nothing to give back.
+        out = io.StringIO()
+        with patch('sys.stdout', out):
+            self.assertEqual(broker.main(['stop', '--task', worker['task']]), 0)
+        self.assertEqual(json.loads(out.getvalue())['result'], [])
+
     def test_stop_retires_a_blocked_worker_at_once(self):
         worker = self.start()
         worker['status'] = 'blocked'

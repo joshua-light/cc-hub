@@ -78,6 +78,44 @@ fn bind(args: &[String]) -> Result<(), CliError> {
 }
 
 fn run_broker(args: &[String]) -> Result<(), CliError> {
+    let status = broker()?
+        .args(args)
+        .status()
+        .map_err(|e| CliError::Other(format!("resource broker requires Python 3.11+: {e}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(CliError::Reported("resource operation failed".into()))
+    }
+}
+
+/// Give back every seat a finished card still holds: its broker workers are
+/// asked to stop, and the supervisor ends their sessions a few seconds later,
+/// long enough for a session finishing its own card to hear the answer.
+/// Returns the workers asked; none when the broker never worked the card.
+pub(crate) fn stop_task(task: &str, reason: &str) -> Result<Vec<String>, CliError> {
+    let output = broker()?
+        .args(["stop", "--task", task, "--reason", reason])
+        .output()
+        .map_err(|e| CliError::Other(format!("resource broker requires Python 3.11+: {e}")))?;
+    let reply: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| CliError::Other(format!("resource broker: {e}")))?;
+    if reply["ok"] != true {
+        return Err(CliError::Other(format!(
+            "resource broker: {}",
+            reply["error"]
+        )));
+    }
+    Ok(reply["result"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|worker| worker["id"].as_str().map(String::from))
+        .collect())
+}
+
+/// The bundled broker, published once per version under the cache dir.
+fn broker() -> Result<std::process::Command, CliError> {
     let source = include_str!("../../../broker/resource_manager.py");
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     source.hash(&mut hash);
@@ -92,17 +130,9 @@ fn run_broker(args: &[String]) -> Result<(), CliError> {
         std::fs::rename(&temporary, &path).map_err(CliError::other)?;
     }
     let executable = std::env::current_exe().map_err(CliError::other)?;
-    let status = std::process::Command::new("python3")
-        .arg(path)
-        .args(args)
-        .env("HAL_BINARY", executable)
-        .status()
-        .map_err(|e| CliError::Other(format!("resource broker requires Python 3.11+: {e}")))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(CliError::Reported("resource operation failed".into()))
-    }
+    let mut command = std::process::Command::new("python3");
+    command.arg(path).env("HAL_BINARY", executable);
+    Ok(command)
 }
 
 /// The worker record the broker passes to its `_name` / `_bind` callbacks.

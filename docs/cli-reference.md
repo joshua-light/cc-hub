@@ -23,7 +23,7 @@ full. The other verbs document themselves: `hal help <verb>`.
 
 | Verb | Does | Details |
 |---|---|---|
-| `board` | Add a card, add or read its notes | `hal help board` |
+| `board` | Add a card, add or read its notes, finish it | `hal help board` |
 | `open` | Act on a `hal://` link | `hal help open` |
 | `agent` | Scaffold, run and inspect persistent agents | below |
 | `resource` | Accounts, task sessions and shared resources | `hal help resource`, [resource-management.md](resource-management.md) |

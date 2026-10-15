@@ -117,8 +117,8 @@ Links:
       request's review comments: switch to its branch, address every
       comment, track each as a Bitbucket task and close it once the fix is
       pushed, answer questions, ask when a comment is ambiguous, skip what is
-      already done, sign every reply as Claude/Codex, and note "Pushed: …"
-      on the card at the end. With subscription accounts configured the
+      already done, sign every reply as Claude/Codex, and finish the card
+      with `hal board done --text "Pushed: …"` at the end. With subscription accounts configured the
       session is started through the resource broker (`hal resource
       start`, role implementation, kind <word> or basic), so it runs on
       whichever account has room. The card reaches Running once its session
@@ -130,7 +130,7 @@ Links:
       in: switch to the pull request's branch, fetch, merge its target branch
       into it (no rebase, no force-push), resolve conflicts keeping both
       sides' intent, ask when one needs the author, check the result builds
-      where it can, push, and note "Pushed: …" on the card.
+      where it can, push, and finish the card with `hal board done`.
 
   hal://task?id=<tk-…>[&dir=<path>][&kind=<word>][&role=<word>]
       Spawn a session for one Tasks-board card in <dir> (default: the card's
@@ -211,6 +211,12 @@ Usage:
       is why the status comes back with the note.
   hal board notes --task ID [--json]
       The card's notes in attach order, each under a dated rule.
+  hal board done --task ID [--text NOTE]
+      Finish the card from the session that did its work: --text becomes its
+      closing note, the card moves to Done, and the broker workers on it are
+      stopped, so the session ends a few seconds later. A card that still
+      waits on you (`Waiting:`, `Needs you:`) is refused; a closing note is
+      what answers it. Emits {"ok":true,"status":"done","stopped":[…]}.
 
 A card is how a script hands the user something to look at: mint it here,
 then open it with `hal open "hal://task?id=<tk-…>&dir=<path>"`, which

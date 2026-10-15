@@ -115,7 +115,7 @@ mod tests {
     }
 
     #[test]
-    fn fix_prompt_for_a_card_ends_with_the_note_to_write() {
+    fn fix_prompt_for_a_card_finishes_the_card() {
         let card: BoardTaskId = "tk-42".parse().unwrap();
         let prompt = fix(&format!("pr={}", PR)).prompt_for(&card);
         assert!(prompt.starts_with(&fix(&format!("pr={}", PR)).prompt()));
@@ -125,7 +125,7 @@ mod tests {
             prompt
         );
         assert!(
-            prompt.contains("hal board note --task tk-42 --text \"Pushed:"),
+            prompt.contains("hal board done --task tk-42 --text \"Pushed:"),
             "{}",
             prompt
         );
