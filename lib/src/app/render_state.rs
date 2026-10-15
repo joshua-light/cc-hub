@@ -15,10 +15,8 @@ use ratatui::layout::{Position, Rect};
 /// - `ui/sessions/grid.rs` and `ui/sessions/list.rs` write
 ///   [`Self::grid_scroll`] through `sessions::keep_in_view` (one writer per
 ///   layout); `ui/sessions/detail.rs` clamps [`Self::popup_scroll`].
-/// - `ui/builds.rs` writes [`Self::builds_scroll`].
-/// - `ui/sessions/split.rs` writes [`Self::dock_size`]; it,
-///   `ui/agents/list.rs` and `ui/builds.rs` write [`Self::split`] for the
-///   tab on screen.
+/// - `ui/sessions/split.rs` writes [`Self::dock_size`]; it and
+///   `ui/agents/list.rs` write [`Self::split`] for the tab on screen.
 /// - `ui/chrome.rs` writes [`Self::tabs`]; `ui/tasks/mod.rs` writes
 ///   [`Self::task_columns`] and [`Self::task_cards`]; `ui/sessions/grid.rs`
 ///   and `ui/sessions/list.rs` write [`Self::sessions`].
@@ -54,9 +52,6 @@ pub struct RenderState {
     /// First visible row of the agent detail's open section, written by
     /// the renderer to keep the cursor on screen.
     pub agent_detail_scroll: usize,
-    /// Scroll offset (rows) of the Builds-tab list, written by the renderer
-    /// to keep the selected recipe on screen.
-    pub builds_scroll: u16,
     /// `(rows, cols)` inside the split layout's dock, written by
     /// `ui/sessions/split.rs`: the size the next attach starts at.
     pub dock_size: (u16, u16),
@@ -105,8 +100,7 @@ impl<T> Default for Targets<T> {
 /// A sidebar-and-page tab as last drawn: the sidebar, the page beside it
 /// (either empty when the screen is too narrow for both), and the item each
 /// visible sidebar row shows, top to bottom — `None` for headers and gaps.
-/// Sessions are `(group, index)`; the flat Agents and Builds lists are
-/// `(0, index)`.
+/// Sessions are `(group, index)`; the flat Agents list is `(0, index)`.
 #[derive(Default)]
 pub struct SplitAreas {
     pub sidebar: Rect,
@@ -136,7 +130,6 @@ impl Default for RenderState {
             task_info_scroll: 0,
             agents_scroll: 0,
             agent_detail_scroll: 0,
-            builds_scroll: 0,
             dock_size: (30, 100),
             split: SplitAreas::default(),
             tabs: Targets::default(),

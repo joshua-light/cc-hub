@@ -2,7 +2,6 @@
 //! on the tokio blocking pool and reports back as a [`ScanMsg`].
 
 use crate::scan_msg::ScanMsg;
-use hal_lib::app;
 use hal_lib::sessions::{count, scanner, watcher};
 use hal_lib::{config, harness, metrics, models, send, usage};
 use std::io;
@@ -66,86 +65,6 @@ pub(crate) fn spawn_harness(harness_tx: mpsc::Sender<ScanMsg>) -> bool {
         }
     });
     supervisor_on
-}
-
-/// Builds. Runners and holds are processes of their own; the TUI only
-/// reads their files back, every second, and asks the slower questions
-/// (what each player runs, who holds each resource) on a probe timer.
-pub(crate) fn spawn_builds(scan_tx: &mpsc::Sender<ScanMsg>) {
-    if config::get().builds.recipes.is_empty() {
-        return;
-    }
-    let builds_tx = scan_tx.clone();
-    tokio::spawn(async move {
-        let mut refresh = tokio::time::interval(config::get().builds.refresh());
-        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            refresh.tick().await;
-            let snapshot = tokio::task::spawn_blocking(builds_snapshot)
-                .await
-                .unwrap_or_default();
-            let _ = builds_tx.send(ScanMsg::Builds(snapshot)).await;
-        }
-    });
-    let probe_tx = scan_tx.clone();
-    tokio::spawn(async move {
-        let mut probe = tokio::time::interval(config::get().builds.probe());
-        probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            probe.tick().await;
-            let answer = tokio::task::spawn_blocking(builds_probe)
-                .await
-                .unwrap_or_default();
-            let _ = probe_tx.send(ScanMsg::BuildsProbe(answer)).await;
-        }
-    });
-}
-
-fn builds_snapshot() -> app::BuildsSnapshot {
-    use hal_lib::builds::{self, hold, recipe};
-    app::BuildsSnapshot {
-        recipes: recipe::all().map(|(name, _)| name.to_string()).collect(),
-        builds: builds::all(),
-        holds: recipe::all()
-            .filter_map(|(_, r)| r.resource.clone())
-            .map(|resource| {
-                let held = hold::read(&resource);
-                (resource, held)
-            })
-            .collect(),
-    }
-}
-
-fn builds_probe() -> app::BuildsProbe {
-    use hal_lib::builds::{hold, recipe};
-    let mut probe = app::BuildsProbe::default();
-    for (name, recipe) in recipe::all() {
-        if let Some(resource) = &recipe.resource {
-            probe
-                .holders
-                .insert(resource.clone(), hold::holder(resource));
-        }
-        if recipe.current.is_empty() {
-            continue;
-        }
-        let argv = recipe::expand(&recipe.current, recipe::Values::default());
-        let cwd = recipe.checkout.clone().unwrap_or_else(|| "~".into());
-        let output = recipe::command(&argv, &cwd)
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output();
-        match output {
-            Ok(out) if out.status.success() => {
-                let text = String::from_utf8_lossy(&out.stdout);
-                if let Some(commit) = text.split_whitespace().next() {
-                    probe.current.insert(name.to_string(), commit.to_string());
-                }
-            }
-            Ok(_) => {}
-            Err(e) => log::warn!("builds: {} current: {}", name, e),
-        }
-    }
-    probe
 }
 
 /// The session grid's scanner, and the detail loader that reads from its

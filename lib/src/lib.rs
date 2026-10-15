@@ -7,7 +7,6 @@ pub mod agent;
 pub mod agent_runtime;
 pub mod app;
 pub mod bookmarks;
-pub mod builds;
 pub mod clipboard;
 pub mod config;
 pub mod conversation;

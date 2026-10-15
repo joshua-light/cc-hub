@@ -26,7 +26,6 @@ full. The other verbs document themselves: `hal help <verb>`.
 | `board` | Add a card, add or read its notes | `hal help board` |
 | `open` | Act on a `hal://` link | `hal help open` |
 | `agent` | Scaffold, run and inspect persistent agents | below |
-| `build` | Run, cancel and list builds | `hal help build` |
 | `resource` | Accounts, task sessions and shared resources | `hal help resource`, [resource-management.md](resource-management.md) |
 | `usage` | Quota of a Claude account | `hal help usage` |
 | `wake` | `hal wake <name>`: agents watching `<name>` poll now. Prints `{"ok": true, "wake": "<name>"}` | none |

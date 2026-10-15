@@ -11,8 +11,7 @@
 //!   agent assignment).
 //! - `places`: the folder / places / bookmarks picker.
 //! - `dispatch`: prompts queued for sessions that are still booting.
-//! - `builds_view`, `harness_view`, `metrics_view`: the Builds, Agents and
-//!   Metrics tabs.
+//! - `harness_view`, `metrics_view`: the Agents and Metrics tabs.
 //! - `render_state`: layout state the renderer writes back.
 
 use crate::agent_runtime::{AgentRuntime, SystemAgentRuntime};
@@ -31,7 +30,6 @@ use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
 mod board;
-mod builds_view;
 mod command;
 mod dispatch;
 mod harness_view;
@@ -49,10 +47,7 @@ pub use board::{
     column_statuses, visible_task_columns, TaskField, TaskKindPickerState, TasksView,
     PROCEED_PROMPT, TASK_COLUMNS,
 };
-pub use builds_view::{BuildForm, BuildsProbe, BuildsSnapshot, BuildsView, FormField, LogView};
-pub use command::{
-    BuildsCommand, Command, Effect, GlobalCommand, HarnessCommand, SessionsCommand, TasksCommand,
-};
+pub use command::{Command, Effect, GlobalCommand, HarnessCommand, SessionsCommand, TasksCommand};
 pub use dispatch::{DispatchAction, PendingDispatch};
 pub use harness_view::{Detail, HarnessView, Section};
 pub use metrics_view::MetricsView;
@@ -71,7 +66,6 @@ pub struct App {
     pub sessions: SessionsView,
     pub metrics: MetricsView,
     pub harness: HarnessView,
-    pub builds: BuildsView,
     pub tasks: TasksView,
     pub view: View,
     pub detail: Option<SessionDetail>,
@@ -173,7 +167,6 @@ impl App {
             sessions: SessionsView::new(),
             metrics: MetricsView::new(),
             harness: HarnessView::default(),
-            builds: BuildsView::default(),
             tasks: TasksView::new(),
             view: View::Grid,
             detail: None,
@@ -270,15 +263,6 @@ impl App {
     /// Replace the Agents-tab snapshot (from the periodic disk scan).
     pub fn update_harness(&mut self, agents: Vec<crate::harness::AgentSnapshot>) {
         self.harness.update(agents);
-    }
-
-    /// Replace the Builds-tab snapshot (from the one-second disk read).
-    pub fn update_builds(&mut self, snapshot: BuildsSnapshot) {
-        self.builds.update(snapshot);
-    }
-
-    pub fn update_builds_probe(&mut self, probe: BuildsProbe) {
-        self.builds.probe = probe;
     }
 
     pub fn log_state_dump(&self) {

@@ -198,13 +198,13 @@ fn format_reset(iso: &str, fmt: &str) -> Option<String> {
     )
 }
 
-/// The one glyph every session, agent and build draws for its state. The
+/// The one glyph every session and agent draws for its state. The
 /// state lives in its colour alone ([`Dot`]), so a column of dots reads at
 /// a glance.
 pub(crate) const STATE_DOT: &str = "●";
 
 /// What a [`STATE_DOT`] says, whatever it belongs to: one palette for the
-/// Sessions, Agents and Builds lists, so a colour means the same thing on
+/// Sessions and Agents lists, so a colour means the same thing on
 /// every tab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Dot {
@@ -270,8 +270,8 @@ pub(crate) fn working_blink(now: u64) -> Color {
     }
 }
 
-/// Braille spinner for work in flight: a Processing session, a ticking agent,
-/// a running build. The frame derives from wall-clock time, so it advances
+/// Braille spinner for work in flight: a Processing session or a ticking
+/// agent. The frame derives from wall-clock time, so it advances
 /// on every repaint: at least once a second from the clock tick, faster
 /// while scan events stream in. Motion is the point: a turning glyph reads
 /// as alive where a static one reads as ambient.

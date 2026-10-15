@@ -1,5 +1,5 @@
 use crate::titles::Titles;
-use hal_lib::app::{self, App};
+use hal_lib::app::App;
 use hal_lib::sessions::count;
 use hal_lib::{harness, metrics, models, ui, usage};
 
@@ -26,10 +26,6 @@ pub(crate) enum ScanMsg {
     Harness(Vec<harness::AgentSnapshot>),
     /// A persistent agent finished a tick; carries its status-bar line.
     HarnessTick(harness::supervisor::TickReport),
-    /// Fresh on-disk snapshot of every build and hold (Builds tab).
-    Builds(app::BuildsSnapshot),
-    /// What each recipe's player runs and who holds each resource.
-    BuildsProbe(app::BuildsProbe),
     /// Result of a `send::send_prompt` run off the event-loop thread (see
     /// [`spawn_dispatch`](crate::workers::spawn_dispatch)). `ok` carries the
     /// finished status line, success or failure.
@@ -86,8 +82,6 @@ pub(crate) fn apply_scan_msg(app: &mut App, msg: ScanMsg, titles: &Titles) -> bo
             app.set_status(status);
         }
         ScanMsg::Harness(agents) => app.update_harness(agents),
-        ScanMsg::Builds(snapshot) => app.update_builds(snapshot),
-        ScanMsg::BuildsProbe(probe) => app.update_builds_probe(probe),
         ScanMsg::HarnessTick(report) => {
             if !report.ok {
                 app.set_status(report.status);

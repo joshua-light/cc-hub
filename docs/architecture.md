@@ -65,8 +65,6 @@ the TUI see each other's changes.
 - `link/`: parses `hal://` URLs and renders their prompts. Pure.
 - `harness/`: persistent agents: spec, triggers, supervisor, one tick,
   state and notes.
-- `builds/`: the build store, recipes, the runner (`hal build _run`) and
-  the resource hold.
 - `metrics/`: cost and token analysis over every transcript.
 - `spawn/`: builds an agent's command line and starts it in a detached
   multiplexer session.
@@ -100,7 +98,6 @@ cover the runtime.
 | Usage readings | `~/.hal/usage.json` | `usage` |
 | Persistent agents | `~/.hal/agents/<name>/` | `harness` |
 | Wakes | `~/.hal/wake/<name>` | `wake` |
-| Builds and holds | `~/.hal/builds/<id>/`, `builds/holds/` | `builds` |
 | Accounts, resources | `~/.hal/resources.toml`; broker state in `~/.hal/resources/` | broker, `resources` |
 | Pi heartbeats | `~/.hal/pi-heartbeats/<tmux>.json` | `sessions::pi_bridge` |
 | Titles, logs | the cache dir: `session-titles.json`, `hal_*.log` | `title`, `logging` |

@@ -6,13 +6,12 @@
 //! - `status_bar`: key hints, status message and refresh age
 //! - `popups`: overlays drawn over the body
 //! - `common`, `palette`: helpers and colours shared across the UI
-//! - `tasks`, `sessions`, `builds`, `agents`, `metrics`: one module per tab
+//! - `tasks`, `sessions`, `agents`, `metrics`: one module per tab
 //!   body
 //! - `artifacts`: task attachment cards for the Task Info popup
 
 pub mod agents;
 pub mod artifacts;
-pub mod builds;
 mod chrome;
 pub mod common;
 pub mod metrics;
@@ -67,7 +66,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     match app.current_tab {
         Tab::Tasks => tasks::render_tasks_body(frame, chunks[2], app),
         Tab::Sessions => sessions::render_sessions_body(frame, chunks[2], app),
-        Tab::Builds => builds::render_builds_body(frame, chunks[2], app),
         Tab::Agents => agents::render_agents_body(frame, chunks[2], app),
         Tab::Metrics => metrics::render_metrics_body(frame, chunks[2], app),
     }
@@ -97,9 +95,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         // the session's own title (both already rendered above), so editing
         // either needs no overlay.
         View::TaskFilter | View::RenameSession => {}
-        View::BuildForm => builds::render_build_form(frame, frame.area(), app),
-        // The dock and the Agents and Builds pages are drawn inside their
+        // The dock and the Agents page are drawn inside their
         // tab's body: focusing them moves the keyboard, not the picture.
-        View::Grid | View::Dock | View::AgentDetail | View::BuildLog => {}
+        View::Grid | View::Dock | View::AgentDetail => {}
     }
 }

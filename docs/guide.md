@@ -1,6 +1,6 @@
 # How hal works
 
-How the Tasks board, deep links, persistent agents, builds and account moves
+How the Tasks board, deep links, persistent agents and account moves
 behave. For keys see [keybindings.md](keybindings.md); for settings see
 [configuration.md](configuration.md); for verb syntax run `hal help <verb>`.
 
@@ -127,29 +127,6 @@ A run has no terminal, so it never shows on the Sessions tab. `n` opens an
 interactive session in the agent's folder, primed with why it last failed.
 Commands and the folder layout: `hal help agent` and
 [cli-reference.md](cli-reference.md).
-
-## Builds
-
-A build is one run of a recipe: its steps, in order, over a checkout at a ref
-(see [configuration.md](configuration.md#buildsrecipesname)). The first step
-to fail ends the build. Each build is `~/.hal/builds/<id>/` with
-`build.json` and `output.log`, driven by a detached `hal build _run <id>`
-that outlives the TUI. A recipe runs one build at a time, oldest first, and
-keeps its last twenty finished builds.
-
-Any step reports progress with `hal: commit|route|phase …` lines, and a
-later step can name the reported commit as `{commit}`. The runner sets
-`HAL_BUILD`, so a script also run by hand can stay quiet when nothing
-listens. `current` prints the commit the recipe's last run left in place.
-When that differs from the last successful build's, something else ran since,
-and the recipe's page says `now at <commit>`.
-
-A recipe with a `resource` claims it through the broker as the guest
-`Builds` and keeps it after the build ends. Builds come in bursts, and
-releasing between two of them would let another session in. `Space` on the
-tab, or `hal build reserve`/`release`, takes or frees it by hand. A cancel
-runs the recipe's `cancel`, then ends the running step if it still runs 15
-seconds later.
 
 ## Handing off to a fresh session
 

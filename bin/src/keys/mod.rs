@@ -4,7 +4,7 @@
 //!
 //! - `sessions`: Sessions-tab commands, close confirmation, session finder,
 //!   rename.
-//! - `tasks`, `harness`, `builds`: the Tasks, Agents and Builds tabs.
+//! - `tasks`, `harness`: the Tasks and Agents tabs.
 //! - `folder_picker`: the folder picker and its `gh repo create` input.
 //! - `pickers`: model, agent, respawn, task-kind and task-link pickers.
 //! - `metrics`: the Metrics tab.
@@ -16,7 +16,6 @@ use crossterm::event::{KeyCode, KeyEvent};
 use hal_lib::app::{App, Command, Tab, View};
 use tokio::sync::mpsc;
 
-mod builds;
 mod folder_picker;
 mod harness;
 mod metrics;
@@ -34,15 +33,11 @@ pub(super) fn map_command(
     on_sessions: bool,
     on_tasks: bool,
     on_agents: bool,
-    on_builds: bool,
 ) -> Option<Command> {
     if let Some(cmd) = tasks::map_tasks_command(app, key, on_tasks) {
         return Some(cmd);
     }
     if let Some(cmd) = harness::map_harness_command(app, key, on_agents) {
-        return Some(cmd);
-    }
-    if let Some(cmd) = builds::map_builds_command(app, key, on_builds) {
         return Some(cmd);
     }
     sessions::map_sessions_command(app, key, on_sessions)
@@ -61,8 +56,7 @@ pub(crate) async fn handle_key(
     let on_sessions = on_tab(Tab::Sessions);
     let on_tasks = on_tab(Tab::Tasks);
     let on_agents = on_tab(Tab::Agents);
-    let on_builds = on_tab(Tab::Builds);
-    let mut effects = match map_command(app, &key, on_sessions, on_tasks, on_agents, on_builds) {
+    let mut effects = match map_command(app, &key, on_sessions, on_tasks, on_agents) {
         Some(cmd) => app.execute(cmd),
         None => {
             handle_view_key(app, key, scan_tx);

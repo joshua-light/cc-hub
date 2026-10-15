@@ -5,7 +5,7 @@
 //! the page under the pointer. A pane with the keyboard takes every other
 //! event.
 
-use super::{App, BuildsCommand, Command, Effect, GlobalCommand, HarnessCommand};
+use super::{App, Command, Effect, GlobalCommand, HarnessCommand};
 use super::{SessionsCommand, SessionsLayout, Tab, TasksCommand, View};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
@@ -20,26 +20,23 @@ impl App {
     }
 
     /// Whether the tab's body is on screen with nothing over it: the dock
-    /// and the Agents and Builds pages are drawn inside it; every other
-    /// view is a popup or an editor.
+    /// and the Agents page are drawn inside it; every other view is a popup
+    /// or an editor.
     fn tab_on_screen(&self) -> bool {
-        matches!(
-            self.view,
-            View::Grid | View::Dock | View::AgentDetail | View::BuildLog
-        )
+        matches!(self.view, View::Grid | View::Dock | View::AgentDetail)
     }
 
     fn split_on_screen(&self) -> bool {
         match self.current_tab {
             Tab::Sessions => self.sessions.layout == SessionsLayout::Split,
-            Tab::Agents | Tab::Builds => true,
+            Tab::Agents => true,
             Tab::Tasks | Tab::Metrics => false,
         }
     }
 
     /// Whether the keyboard is on the page rather than the list.
     fn page_has_keyboard(&self) -> bool {
-        matches!(self.view, View::Dock | View::AgentDetail | View::BuildLog)
+        matches!(self.view, View::Dock | View::AgentDetail)
     }
 
     /// Route a captured mouse event. A click that opens a tab, moves the
@@ -115,7 +112,6 @@ impl App {
     /// A wheel notch: the list's cursor moves, as its arrow keys would, or
     /// the page under the pointer scrolls.
     fn wheel_command(&self, up: bool, on_page: bool) -> Option<Command> {
-        use BuildsCommand as B;
         use HarnessCommand as H;
         use SessionsCommand as S;
         use TasksCommand as T;
@@ -127,12 +123,6 @@ impl App {
             }
             (Tab::Agents, View::Grid | View::AgentDetail, true) => {
                 Command::Harness(either(up, H::DetailUp, H::DetailDown))
-            }
-            (Tab::Builds, View::Grid | View::BuildLog, false) => {
-                Command::Builds(either(up, B::NavUp, B::NavDown))
-            }
-            (Tab::Builds, View::Grid | View::BuildLog, true) => {
-                Command::Builds(either(up, B::LogUp, B::LogDown))
             }
             _ => return None,
         })
@@ -185,7 +175,7 @@ impl App {
                 }
                 session.is_some()
             }
-            Tab::Agents | Tab::Builds | Tab::Metrics => false,
+            Tab::Agents | Tab::Metrics => false,
         }
     }
 
@@ -208,12 +198,6 @@ impl App {
                 }
                 self.execute(Command::Harness(HarnessCommand::CloseDetail));
             }
-            Tab::Builds => {
-                if let Some((_, index)) = item {
-                    self.builds.select(index);
-                }
-                self.execute(Command::Builds(BuildsCommand::CloseLog));
-            }
             Tab::Tasks | Tab::Metrics => {}
         }
     }
@@ -223,10 +207,6 @@ impl App {
             Tab::Sessions => self.focus_dock(),
             Tab::Agents => {
                 self.execute(Command::Harness(HarnessCommand::OpenDetail));
-                true
-            }
-            Tab::Builds => {
-                self.execute(Command::Builds(BuildsCommand::OpenLog));
                 true
             }
             Tab::Tasks | Tab::Metrics => false,

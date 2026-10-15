@@ -35,7 +35,6 @@ pub struct Config {
     pub ui: UiConfig,
     pub metrics: MetricsConfig,
     pub harness: HarnessConfig,
-    pub builds: BuildsConfig,
     /// Retired with the Projects layer. Accepted and ignored so an old
     /// config keeps loading: `deny_unknown_fields` would otherwise fail the
     /// parse and drop every other setting back to defaults.
@@ -43,6 +42,9 @@ pub struct Config {
     _backlog: Option<IgnoredAny>,
     #[serde(rename = "auto_review")]
     _auto_review: Option<IgnoredAny>,
+    /// Retired with the Builds tab.
+    #[serde(rename = "builds")]
+    _builds: Option<IgnoredAny>,
 }
 pub fn get() -> &'static Config {
     static CFG: OnceLock<Config> = OnceLock::new();
@@ -122,6 +124,22 @@ mod tests {
         let cfg: Config = toml::from_str(src).unwrap();
         assert_eq!(cfg.ui.cell_width, 50);
     }
+
+    /// Nor may a recipe written for the retired Builds tab.
+    #[test]
+    fn retired_builds_recipes_are_ignored() {
+        let src = r#"
+            [builds.recipes.server]
+            resource = "build-box"
+            run = [["build-server", "{ref}"]]
+
+            [ui]
+            cell_width = 50
+        "#;
+        let cfg: Config = toml::from_str(src).unwrap();
+        assert_eq!(cfg.ui.cell_width, 50);
+    }
+
     #[test]
     fn partial_section_merges_with_defaults() {
         let src = r#"

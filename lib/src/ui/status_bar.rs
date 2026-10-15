@@ -5,7 +5,7 @@ use crate::app::{App, Tab, View};
 use crate::config;
 use crate::folder_picker::PickerMode;
 use crate::models;
-use crate::ui::{agents, builds};
+use crate::ui::agents;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -58,10 +58,8 @@ pub(super) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 Tab::Sessions => "enter/f:type in/resume  /:find any  n:new  h:handoff  R:respawn  A:default agent  N:new+model  p:new in…  i:info  z:ack  r:rename  L:link task  o:shell  M:bookmarks  ←/j/k/l:nav  v:layout  x:close  H:inactive  tab:next  q:quit",
                 Tab::Metrics => "enter:view transcript  j/k:select  r:refresh  tab:next  q:quit",
                 Tab::Agents => agents::hints(app),
-                Tab::Builds => builds::hints(app),
             },
             View::AgentDetail => agents::hints(app),
-            View::BuildForm | View::BuildLog => builds::hints(app),
             View::Popup => "j/k:scroll  esc:close  q:close",
             View::LiveTail => "j/k:scroll  G:bottom  esc:close",
             View::ConfirmClose => "y:confirm  n/esc:cancel",
@@ -130,7 +128,6 @@ pub(super) fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
                 Some(s) if app.sessions.holds.contains(&s.session_id) => "release ",
                 _ => "hold ",
             }),
-            (View::Grid, Tab::Builds) => builds::space_verb(app),
             _ => None,
         };
         if let Some(verb) = space_verb {

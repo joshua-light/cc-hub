@@ -12,20 +12,17 @@
 //! as thin arms under `bin/src/keys`; only their submit arms are commands.
 //!
 //! Each tab file holds its command enum and executor:
-//! - `builds`: [`BuildsCommand`], the Builds tab.
 //! - `harness`: [`HarnessCommand`], the Agents tab and its detail view.
 //! - `harness_settings`: setting edits and on/off writes to an agent's
 //!   `agent.toml` and state.
 //! - `sessions`: [`SessionsCommand`], the Sessions tab.
 //! - `tasks`: [`TasksCommand`], the Tasks board.
 
-mod builds;
 mod harness;
 mod harness_settings;
 mod sessions;
 mod tasks;
 
-pub use builds::BuildsCommand;
 pub use harness::HarnessCommand;
 pub use sessions::SessionsCommand;
 pub use tasks::TasksCommand;
@@ -38,7 +35,6 @@ pub enum Command {
     Sessions(SessionsCommand),
     Tasks(TasksCommand),
     Harness(HarnessCommand),
-    Builds(BuildsCommand),
 }
 
 /// Commands available on any tab.
@@ -84,7 +80,6 @@ impl App {
             Command::Sessions(c) => self.execute_sessions(c),
             Command::Tasks(c) => self.execute_tasks(c),
             Command::Harness(c) => self.execute_harness(c),
-            Command::Builds(c) => self.execute_builds(c),
         }
     }
 

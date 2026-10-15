@@ -19,8 +19,6 @@ function) to `hal-new` yourself: until you do, new sessions exit at once.
   works, green when it is done and waits for you, blue when it asks a
   question, gray when it idles or is on hold. Spawn, attach, resume, rename,
   link to a task, or continue on another account.
-- **Builds**: one card per build recipe; run and cancel its steps. Shown once
-  `config.toml` has a recipe.
 - **Agents**: persistent agents that wake on events and run unattended. Shown
   once `~/.hal/agents/` exists.
 - **Metrics**: tokens, cost, interrupted tools and context growth across
@@ -109,7 +107,7 @@ when an account runs out, set up the resource broker
 ## Documentation
 
 - [How hal works](docs/guide.md): the task board lifecycle, deep links,
-  persistent agents, builds and account moves.
+  persistent agents and account moves.
 - [Keybindings](docs/keybindings.md): every key, per tab and popup.
 - [Configuration](docs/configuration.md): every `~/.hal/config.toml` key
   and its default.

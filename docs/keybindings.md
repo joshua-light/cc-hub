@@ -14,9 +14,9 @@ These work on every tab when no popup is open. `Ctrl+L` also works in popups.
 | `q` | Quit |
 | `Ctrl+L` | Repaint the screen |
 
-Tabs run Tasks → Sessions → Builds → Agents → Metrics; hal opens on
-Sessions. Builds shows once a recipe exists. Agents shows once
-`~/.hal/agents/` exists, unless `[harness].show_tab = false`.
+Tabs run Tasks → Sessions → Agents → Metrics; hal opens on Sessions.
+Agents shows once `~/.hal/agents/` exists, unless
+`[harness].show_tab = false`.
 
 ## Tasks
 
@@ -71,26 +71,6 @@ Sessions. Builds shows once a recipe exists. Agents shows once
 `[agents.<id>].hotkey` adds a key that starts that agent in the selected
 session's folder. It overrides a built-in key it collides with.
 
-## Builds
-
-The recipes run down the side; the selected one's page beside them shows
-its build and that build's output, following the end.
-
-| Key | Action |
-|---|---|
-| `j` `k` / `↓` `↑` | Move between recipes |
-| `r` | Run the recipe on its checkout at the recipe's `ref` (else as it is now), on the route the recipe picks |
-| `n` | Run with a checkout, ref or route of your own (seeded from the last build) |
-| `c` | Cancel the recipe's running and queued builds |
-| `Enter` / `f` | Scroll the build output |
-| `Space` | Reserve the recipe's resource, or release it |
-
-New-build form: `Tab`/`↓` and `Shift+Tab`/`↑` change field, `←`/`→` step a
-choice, typing edits text, `Enter` runs, `Esc` cancels.
-
-Build output: `j`/`k` scroll, `PgUp`/`PgDn` page, `G`/`End` follow the end,
-`r`, `n`, `c` and `Space` as on the list, `Esc`/`F1`/`q` back to the list.
-
 ## Agents
 
 The agents run down the side; the selected one's page beside them leads
@@ -144,7 +124,7 @@ select text, drag with your terminal's bypass modifier held: usually
 | Where | Click | Wheel |
 |---|---|---|
 | Tab strip | Open the tab, with the keyboard on its list | |
-| Sidebar (Sessions split, Agents, Builds) | Put the cursor on the row and the keyboard on the list | Move the cursor |
+| Sidebar (Sessions split, Agents) | Put the cursor on the row and the keyboard on the list | Move the cursor |
 | Page beside it | Give the page the keyboard; once the Sessions dock has it, clicks go to its pane | Scroll the page |
 | Sessions list and cards | Put the cursor on the session | Move the cursor |
 | Tasks board | Put the cursor on the card; on a column's empty space, on that column | Move the cursor in the column |

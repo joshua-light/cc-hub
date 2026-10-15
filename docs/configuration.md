@@ -126,47 +126,9 @@ Persistent agents (the Agents tab).
 | `show_tab` | `true` | Show the Agents tab. It also stays hidden until `~/.hal/agents/` exists. |
 | `refresh_secs` | `3` | How often the TUI rereads agent state (minimum 1). |
 
-## `[builds]`
-
-| Key | Default | Meaning |
-|---|---|---|
-| `refresh_secs` | `1` | How often the TUI rereads builds (minimum 1). |
-| `probe_secs` | `15` | How often it runs each recipe's `current` and asks the broker who holds its resource (minimum 5). |
-| `recipes` | `{}` | Build recipes, below. The Builds tab appears once one exists. |
-
-### `[builds.recipes.<name>]`
-
-Each command, and each `run` step, is an argv, run in the build's checkout through a login shell.
-In an argument, `{ref}`, `{route}` and `{commit}` stand for the build's
-values. An argument that is only a placeholder with no value is dropped.
-
-| Key | Default | Meaning |
-|---|---|---|
-| `description` | `""` | Shown on the recipe's card. |
-| `checkout` | none | Folder a new build starts in. |
-| `ref` | none | What a build that names no ref builds, read when it starts: `"HEAD"` builds the last commit. Without it, such a build takes the working tree. |
-| `resource` | none | A `resources.toml` resource the builds need. Claimed before the first build and held until released. |
-| `routes` | `[]` | Routes a build may ask for. With none asked for, the recipe picks. |
-| `run` | `[]` | The steps, each an argv, run in order. The build succeeds when every step exits 0 and stops at the first that does not. Any step reports progress with `hal: commit <sha>`, `hal: route <name>` and `hal: phase <text>` lines; a later step can use the reported `{commit}`. |
-| `cancel` | `[]` | Stops a running step, including work it started elsewhere. |
-| `current` | `[]` | Prints the commit the recipe's last run left in place. |
-
-```toml
-[builds.recipes.build-server]
-description = "the game server, built on a second machine from a warm cache"
-checkout = "~/src/game"
-resource = "build-box"
-routes = ["swap", "scripts", "full"]
-run = [
-    ["build-server", "{ref}", "{route}"],
-    ["ssh", "-o", "RemoteCommand=none", "buildbox", "~/env/restart"],
-]
-cancel = ["build-server", "cancel"]
-current = ["ssh", "-o", "RemoteCommand=none", "buildbox", "cat ~/build/state/built"]
-```
-
 ## Retired keys
 
-These keys belonged to the removed Projects layer. hal still accepts and
-ignores them, so an old file keeps loading: `[backlog]`, `[auto_review]`,
-`[ui].show_projects_tab` and `[projects].default_orchestrator_agent`.
+These keys belonged to the removed Projects layer and Builds tab. hal still
+accepts and ignores them, so an old file keeps loading: `[backlog]`,
+`[auto_review]`, `[builds]`, `[ui].show_projects_tab` and
+`[projects].default_orchestrator_agent`.

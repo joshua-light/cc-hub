@@ -39,7 +39,6 @@ pub(crate) async fn run(terminal: &mut Term, frame_bytes: Arc<AtomicU64>) -> io:
 
     workers::spawn_usage(scan_tx.clone());
     app.harness.supervisor_on = workers::spawn_harness(scan_tx.clone());
-    workers::spawn_builds(&scan_tx);
     workers::spawn_session_scanner(scan_tx.clone(), detail_rx);
     workers::spawn_task_stats(scan_tx.clone());
 

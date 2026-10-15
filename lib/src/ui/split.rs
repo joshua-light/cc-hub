@@ -1,4 +1,4 @@
-//! The sidebar-and-page layout the Sessions, Agents and Builds tabs share:
+//! The sidebar-and-page layout the Sessions and Agents tabs share:
 //! a narrow list on the left, the selected item's page on the right. One
 //! side has the keyboard: the page's frame turns white while it is the one,
 //! the list's cursor row fades while it is not, and with
@@ -110,7 +110,7 @@ pub(crate) fn page_title(mark: Span<'static>, name: &str) -> Line<'static> {
     ])
 }
 
-/// One sidebar row of the Agents and Builds tabs: ` mark name`, nothing
+/// One sidebar row of the Agents tab: ` mark name`, nothing
 /// more. The cursor is the row's background, `cursor` (see
 /// [`Split::cursor_bg`]), and its name alone is bold.
 pub(crate) struct SidebarRow {

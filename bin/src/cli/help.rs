@@ -8,7 +8,6 @@ pub(crate) fn print_cli_help(topic: &[String]) -> Result<(), CliError> {
         Some("open") => print!("{}", OPEN_HELP),
         Some("agent") => print!("{}", AGENT_HELP),
         Some("board") => print!("{}", BOARD_HELP),
-        Some("build") => print!("{}", BUILD_HELP),
         Some("resource") => print!("{}", RESOURCE_HELP),
         Some("usage") => print!("{}", USAGE_HELP),
         Some(other) => {
@@ -33,9 +32,6 @@ Desktop-facing topics:
 
 Persistent agents (Agents tab):
   agent             Scaffold, run, poke, pause and inspect persistent agents
-
-Builds (Builds tab):
-  build             Run, cancel and list builds of a [builds.recipes] recipe
 
 Tasks board:
   board             Add a card to the personal Tasks board
@@ -223,39 +219,4 @@ The notes are a task's record. The `task` skill writes the brief it agreed
 with the user as one note, the branch it built as another, and what
 verification found as a third; a session taking the card over reads them
 first. A hand-over link (`&role=…`) is refused for a card with no note.
-"#;
-
-const BUILD_HELP: &str = r#"hal build — builds of a `[builds.recipes.<name>]` recipe (the Builds tab)
-
-Usage:
-  hal build run [--recipe R] [--wait]
-  hal build start [--recipe R] [--cwd DIR] [--ref REF] [--route R] [--wait]
-  hal build list
-  hal build cancel --build ID
-  hal build reserve [--resource NAME]
-  hal build release [--resource NAME]
-
-A build is one run of a recipe: its steps, in order, until one fails.
-
-`run` is `r` on the tab: the recipe's checkout (its last build's, else its
-own) at the recipe's `ref`, on the route the recipe picks. A recipe without a
-`ref` takes the working tree as it is now.
-
-`start` is `n`: a run with a checkout, ref or route of your own. Without
-`--ref` it takes the recipe's `ref`, else the working tree of `--cwd`
-(default: here), as it stands when the build starts. Without `--route` the
-recipe picks one.
-
-Both return at once; `--wait` returns when the build has finished, exiting
-non-zero unless it succeeded. `--recipe` may be left out when only one recipe
-exists.
-
-A recipe runs one build at a time, oldest first. A recipe with a `resource`
-claims it before its first build, as the guest `Builds`, and keeps it after
-the build ends, so a session cannot slip in between two builds. `reserve`
-takes it ahead of any build, queueing behind whoever has it; `release` lets it
-go. Space on the tab does whichever of the two applies.
-
-Each build lives in ~/.hal/builds/<id>/: build.json and output.log.
-Every command prints one JSON line.
 "#;

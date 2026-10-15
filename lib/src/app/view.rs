@@ -57,17 +57,12 @@ pub enum View {
     TaskFilter,
     /// Agents tab: runs, artifacts, log and settings of the focused agent.
     AgentDetail,
-    /// Builds tab: the new-build form behind `n`.
-    BuildForm,
-    /// Builds tab: the selected build's output, following its end.
-    BuildLog,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Tasks,
     Sessions,
-    Builds,
     Agents,
     Metrics,
 }
@@ -77,7 +72,6 @@ impl Tab {
         match self {
             Tab::Tasks => "Tasks",
             Tab::Sessions => "Sessions",
-            Tab::Builds => "Builds",
             Tab::Agents => "Agents",
             Tab::Metrics => "Metrics",
         }
@@ -89,20 +83,13 @@ impl Tab {
         match self {
             Tab::Tasks => "󰢨",
             Tab::Sessions => "󰆍",
-            Tab::Builds => "󰣪",
             Tab::Agents => "󱙺",
             Tab::Metrics => "󰄨",
         }
     }
 }
 
-pub const TABS: &[Tab] = &[
-    Tab::Tasks,
-    Tab::Sessions,
-    Tab::Builds,
-    Tab::Agents,
-    Tab::Metrics,
-];
+pub const TABS: &[Tab] = &[Tab::Tasks, Tab::Sessions, Tab::Agents, Tab::Metrics];
 
 /// Tabs shown in the strip and reachable via ⇥, in [`TABS`] order.
 pub fn visible_tabs() -> Vec<Tab> {
@@ -112,8 +99,6 @@ pub fn visible_tabs() -> Vec<Tab> {
         // config hides it; `hal agent new` creates the dir.
         .filter(|t| match t {
             Tab::Agents => config::get().harness.show_tab && crate::harness::root_exists(),
-            // Builds shows once a recipe exists to build with.
-            Tab::Builds => !config::get().builds.recipes.is_empty(),
             _ => true,
         })
         .collect()
@@ -257,7 +242,7 @@ impl App {
     /// page when it closes; from anywhere else, on the grid.
     fn remember_view_under_overlay(&mut self) {
         self.under_overlay = match self.view {
-            View::AgentDetail | View::BuildLog => self.view.clone(),
+            View::AgentDetail => self.view.clone(),
             _ => View::Grid,
         };
     }

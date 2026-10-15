@@ -2,7 +2,6 @@
 
 use serde::de::IgnoredAny;
 use serde::Deserialize;
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -164,7 +163,7 @@ pub struct UiConfig {
     /// stays visible and Space still approves it (the action keys off the
     /// card's status, not the column it renders in).
     pub show_planning_column: bool,
-    /// On the list-and-page tabs (Sessions' split layout, Builds, Agents),
+    /// On the list-and-page tabs (Sessions' split layout, Agents),
     /// draw the side without the keyboard dim. Off by default: the page's
     /// frame alone says where typing goes.
     pub dim_unfocused: bool,
@@ -250,39 +249,6 @@ impl Default for HarnessConfig {
             enabled: true,
             show_tab: true,
             refresh_secs: 3,
-        }
-    }
-}
-
-/// The Builds tab (`lib/src/builds/`). It shows once a recipe exists.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct BuildsConfig {
-    pub recipes: BTreeMap<String, crate::builds::Recipe>,
-    /// How often the TUI re-reads builds from disk.
-    pub refresh_secs: u64,
-    /// How often it asks each recipe's `current` what its last run left in
-    /// place, and the broker who holds each recipe's resource. Both cost a process or an
-    /// ssh round trip, so this is slower than the refresh.
-    pub probe_secs: u64,
-}
-
-impl BuildsConfig {
-    pub fn refresh(&self) -> Duration {
-        Duration::from_secs(self.refresh_secs.max(1))
-    }
-
-    pub fn probe(&self) -> Duration {
-        Duration::from_secs(self.probe_secs.max(5))
-    }
-}
-
-impl Default for BuildsConfig {
-    fn default() -> Self {
-        Self {
-            recipes: BTreeMap::new(),
-            refresh_secs: 1,
-            probe_secs: 15,
         }
     }
 }
