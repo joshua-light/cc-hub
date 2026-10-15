@@ -175,7 +175,7 @@ def ceiling(cfg, rules, account):
 # ─── account probes ──────────────────────────────────────────────────────
 
 # The cheapest model a wake-up prompt can run on; see `wake`.
-WAKE_MODEL = 'claude-haiku-4-5-20251001'
+WAKE_MODEL = 'claude-haiku-5-5'
 
 
 def rpc(account, requests):
