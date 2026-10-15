@@ -86,7 +86,7 @@ fn sidebar_row(agent: &AgentSnapshot) -> SidebarRow {
         false => Color::White,
     };
     SidebarRow {
-        mark: mark(agent, crate::ui::now_ms()),
+        mark: mark(agent),
         name: agent.name.clone(),
         name_style: Style::default().fg(name),
     }

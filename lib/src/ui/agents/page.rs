@@ -24,7 +24,7 @@ pub(super) fn render_page(frame: &mut Frame, split: Split, app: &mut App, now: i
     let area = split.page;
 
     let block = split
-        .page_block(page_title(mark(agent, crate::ui::now_ms()), &agent.name))
+        .page_block(page_title(mark(agent), &agent.name))
         .title(facts(agent).right_aligned());
     let inner = block.inner(area);
     frame.render_widget(block, area);

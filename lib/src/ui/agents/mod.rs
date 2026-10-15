@@ -26,10 +26,10 @@ pub(crate) use list::render_agents_body;
 
 /// An agent's mark: a hollow ring while it is switched off, so off and on
 /// differ in shape, not just shade; else its [`dot`].
-fn mark(agent: &AgentSnapshot, now: u64) -> Span<'static> {
+fn mark(agent: &AgentSnapshot) -> Span<'static> {
     match agent.is_off() {
         true => Span::styled(OFF_RING, Style::default().fg(Dot::Resting.steady())),
-        false => dot(agent).span(now),
+        false => dot(agent).span(),
     }
 }
 
@@ -94,8 +94,8 @@ mod tests {
             spec.enabled = false;
         }
         assert_eq!(dot(&off), Dot::Resting);
-        assert_eq!(mark(&off, 0).content, OFF_RING);
-        assert_eq!(mark(&snap("c", ticked(true)), 0).content, "●");
+        assert_eq!(mark(&off).content, OFF_RING);
+        assert_eq!(mark(&snap("c", ticked(true))).content, "●");
     }
 }
 

@@ -249,8 +249,10 @@ impl Dot {
         }
     }
 
-    pub fn span(self, now: u64) -> Span<'static> {
-        Span::styled(STATE_DOT, Style::default().fg(self.color(now)))
+    /// The dot an agent draws: steady, so a running one is plain
+    /// white rather than half the time the gray of a resting one.
+    pub fn span(self) -> Span<'static> {
+        Span::styled(STATE_DOT, Style::default().fg(self.steady()))
     }
 }
 
