@@ -240,7 +240,26 @@ fn once(args: &[String]) -> Result<(), CliError> {
             });
         }
     }
-    let payload = event_payload(&a)?;
+    let payload = match event_payload(&a)? {
+        Some(payload) => Some(payload),
+        // The supervisor never runs a poll agent without its poll's event,
+        // and neither does a run by hand.
+        None if spec.trigger.kind == spec::TriggerKind::Poll => {
+            match harness::trigger::poll(&spec).map_err(CliError::other)? {
+                Some(out) => Some(out),
+                None => {
+                    print_json(&serde_json::json!({
+                        "ok": true,
+                        "agent": name,
+                        "tick": null,
+                        "result": "the poll printed no event; nothing to run",
+                    }));
+                    return Ok(());
+                }
+            }
+        }
+        None => None,
+    };
     let event = payload.map(|p| Event::synthetic("once", p, "once"));
     eprintln!(
         "[{}] running one tick (model={}, tools={})…",
@@ -275,10 +294,24 @@ fn once(args: &[String]) -> Result<(), CliError> {
     }
 }
 
+/// With an event, that event in the inbox; without one, a run by hand
+/// exactly as the `p` key makes it ([`harness::run_now`]).
 fn poke(args: &[String]) -> Result<(), CliError> {
     let a = parse(args);
     let (name, dir) = resolve_dir(&a)?;
-    let payload = event_payload(&a)?.unwrap_or_default();
+    let Some(payload) = event_payload(&a)? else {
+        let spec = spec::load(&dir).map_err(CliError::Usage)?;
+        let run = harness::run_now(&dir, spec.trigger.kind).map_err(CliError::other)?;
+        print_json(&serde_json::json!({
+            "ok": true,
+            "agent": name,
+            "run": match run {
+                harness::RunNow::Fired => "the trigger fires on the next pass",
+                harness::RunNow::Queued => "an empty event is queued",
+            },
+        }));
+        return Ok(());
+    };
     let id = harness::poke(&dir, &payload).map_err(CliError::other)?;
     print_json(
         &serde_json::json!({ "ok": true, "agent": name, "event": id, "inbox": harness::inbox_path(&dir) }),

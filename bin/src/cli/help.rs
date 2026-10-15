@@ -171,7 +171,8 @@ Usage:
   hal agent once <name> [--event TEXT | --event-file F] [--force]
                                               Run one tick now, print the outcome
   hal agent poke <name> [--event TEXT | --event-file F]
-                                              Drop an event into the inbox (any trigger kind)
+                                              Drop an event into the inbox; without one, run now
+                                              the way the trigger would (a poll agent polls)
   hal agent pause <name>                   Skip this agent until resumed
   hal agent resume <name>                  Resume; also clears a budget/failure halt
   hal agent reset <name>                   Clear ticks/spend bookkeeping (workdir untouched)

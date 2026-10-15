@@ -81,7 +81,7 @@ with how it is doing.
 | `j` `k` / `↓` `↑` | Move |
 | `Enter` / `f` / `i` | Move the keyboard to the agent's page |
 | `Space` | Turn the agent off or on (on also clears a halt) |
-| `p` | Run now |
+| `p` | Run now, the way the trigger would: a poll agent polls |
 | `n` | Interactive Claude session in the agent's folder |
 
 On the page:

@@ -3,6 +3,7 @@ use crate::agent::AgentKind;
 use crate::app::harness_view::Section;
 use crate::app::App;
 use crate::config;
+use crate::harness::spec::TriggerKind;
 use crate::{models, spawn, title};
 
 /// Agents-tab commands (persistent agents, `lib/src/harness/`).
@@ -200,14 +201,18 @@ impl App {
         }
     }
 
-    /// `p`: queue an empty event, and say when it will actually run.
+    /// `p`: run the agent the way its trigger would, and say when.
     fn harness_run_now(&mut self) {
         use crate::harness::{self, AgentStatus as S};
         let Some(agent) = self.harness.selected() else {
             return;
         };
         let (name, dir, status) = (agent.name.clone(), agent.dir.clone(), agent.status());
-        if let Err(e) = harness::poke(&dir, "") {
+        let Some(kind) = agent.spec.as_ref().ok().map(|spec| spec.trigger.kind) else {
+            self.set_status(format!("{}: agent.toml doesn't load, nothing to run", name));
+            return;
+        };
+        if let Err(e) = harness::run_now(&dir, kind) {
             self.set_status(format!("{}: couldn't queue a run: {}", name, e));
             return;
         }
@@ -215,11 +220,14 @@ impl App {
             _ if !self.harness.supervisor_on => {
                 "queued — but the supervisor is off ([harness] enabled in config.toml)"
             }
+            S::Sleeping if kind == TriggerKind::Poll => {
+                "polling now — it runs if the poll finds an event"
+            }
             S::Sleeping => "starting a run",
             S::Ticking => "queued after the current run",
             S::Disabled | S::Paused => "queued — runs once you turn it on (space)",
             S::Halted => "queued — it is halted; space resumes it",
-            S::Broken => "queued — but agent.toml doesn't load",
+            S::Broken => unreachable!("a spec that loads is not broken"),
         };
         self.set_status(format!("{}: {}", name, when));
     }
@@ -336,6 +344,29 @@ mod tests {
                 1
             );
             assert_eq!(status(&app), "bb-prs: starting a run");
+        });
+    }
+
+    #[test]
+    fn p_on_a_poll_agent_polls_instead_of_queueing_an_empty_event() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, _rt, dir) = app_with_agent();
+            std::fs::write(
+                dir.join("agent.toml"),
+                "[trigger]\nkind = \"poll\"\ncommand = \"true\"\n[prompt]\ninstruction = \"go\"\n",
+            )
+            .unwrap();
+            app.harness.update(vec![crate::harness::snapshot(&dir)]);
+            harness(&mut app, HarnessCommand::RunNow);
+            assert_eq!(
+                crate::harness::trigger::pending_count(&crate::harness::inbox_path(&dir)),
+                0
+            );
+            assert!(crate::wake::Wake::of_agent(&dir).last().is_some());
+            assert_eq!(
+                status(&app),
+                "bb-prs: polling now — it runs if the poll finds an event"
+            );
         });
     }
 

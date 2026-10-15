@@ -110,7 +110,9 @@ A polling agent can also list wakes (`trigger.wake = ["board"]`). A wake is
 a "look now" with no payload: the poll runs within a second instead of at the
 end of its interval, and still decides what counts as an event. The board
 wakes `board` on every status change; a script wakes anything with
-`hal wake <name>`.
+`hal wake <name>`. A run by hand (`p`, or `hal agent poke` with no event)
+goes through the same door: a polling agent polls now and runs only on what
+the poll prints.
 
 Agents report with `hal agent note`. The Agents tab lists the agents, the
 ones that run first and the paused or disabled ones after them, each by its

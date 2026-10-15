@@ -72,7 +72,9 @@ pause and halt, so you can iterate on a spec, but honours the daily and total
 budgets unless `--force`. Prints `ok`, `tick`, `subtype`, `turns`,
 `compactions`, `cost_usd`, `context_start`, `context_end`, `duration_s`,
 `session_id`, `result`, `stderr` and `log`. A failed tick prints the same
-line with `"ok": false` and exits 1.
+line with `"ok": false` and exits 1. Without an event, a poll agent runs its
+poll first and ticks on what it prints, as the supervisor would; when it
+prints nothing there is no tick, and `tick` is `null`.
 
 ### agent poke
 
@@ -83,6 +85,12 @@ hal agent poke NAME [--event TEXT | --event-file PATH]
 Drops an event file into the agent's `inbox/`. Every trigger kind checks the
 inbox first, so this wakes the agent on its next loop pass. Prints `agent`,
 `event` (the file name, which becomes the event id) and `inbox`.
+
+Without an event it runs the agent now, the same way `p` on the Agents tab
+does. A poll or interval agent's trigger fires on the next pass: a poll agent
+polls at once and runs only if the poll prints an event, and output it already
+printed before still counts. An inbox agent gets an empty event. Prints `agent`
+and `run`.
 
 ### agent pause, resume, reset
 

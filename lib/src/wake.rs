@@ -12,7 +12,7 @@
 //! else, and the same poll keeps working for an agent nobody wakes.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The board's wake: every card status change touches it.
@@ -40,6 +40,19 @@ impl Wake {
             name: name.to_string(),
             path: crate::platform::paths::hal_home()?.join("wake").join(name),
         })
+    }
+
+    /// An agent's own wake, at `<agent dir>/wake`: what a run by hand
+    /// touches. Nobody subscribes to it by name; its agent's loop always
+    /// listens.
+    pub fn of_agent(dir: &Path) -> Self {
+        Self {
+            name: dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            path: dir.join("wake"),
+        }
     }
 
     pub fn name(&self) -> &str {

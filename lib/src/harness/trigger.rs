@@ -150,6 +150,19 @@ pub fn drop_event(inbox: &Path, label: &str, payload: &str) -> io::Result<String
 
 // ---- poll -----------------------------------------------------------------
 
+/// The spec's poll, once: what a supervisor pass would see. `Ok(None)`
+/// for a spec without a command, as for a poll that prints nothing.
+pub fn poll(spec: &Spec) -> Result<Option<String>, String> {
+    let Some(command) = &spec.trigger.command else {
+        return Ok(None);
+    };
+    run_poll(
+        command,
+        &spec.dir,
+        Duration::from_secs(spec.trigger.timeout_s),
+    )
+}
+
 /// Run the poll command; non-empty trimmed stdout is a candidate event.
 /// `Ok(None)` on empty output; `Err` says why the command failed, for the
 /// agent's event log.

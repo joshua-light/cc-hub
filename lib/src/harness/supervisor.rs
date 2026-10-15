@@ -76,7 +76,9 @@ async fn agent_loop(dir: PathBuf, tx: mpsc::Sender<TickReport>) {
         .await;
     }
     let mut pacing = Pacing::default();
-    let mut wakes: HashMap<String, Stamp> = HashMap::new();
+    let mut wakes: HashMap<String, Look> = HashMap::new();
+    let own = Wake::of_agent(&dir);
+    let mut asked: Look = None;
     // The last spec error written to the event log, so an error that persists
     // is logged once, not every loop.
     let mut spec_error: Option<String> = None;
@@ -112,8 +114,10 @@ async fn agent_loop(dir: PathBuf, tx: mpsc::Sender<TickReport>) {
         // there is an event — so forgetting when it last ran is the whole
         // mechanism.
         if woken(&spec, &mut wakes) {
-            pacing.last_poll = None;
-            pacing.last_interval = None;
+            pacing.look_now();
+        }
+        if happened(&own, &mut asked) {
+            pacing.run_now();
         }
 
         // Inbox first, for every trigger kind: a poke or an answer must not
@@ -188,20 +192,29 @@ async fn agent_loop(dir: PathBuf, tx: mpsc::Sender<TickReport>) {
 /// news, the same reason the task watcher ignores the board it starts with.
 /// A name dropped from the spec is forgotten, so putting it back reads as
 /// new again — cheap, and only ever one extra poll.
-fn woken(spec: &Spec, seen: &mut HashMap<String, Stamp>) -> bool {
+fn woken(spec: &Spec, seen: &mut HashMap<String, Look>) -> bool {
     seen.retain(|name, _| spec.trigger.wake.contains(name));
     let mut news = false;
     for name in &spec.trigger.wake {
-        let Some(stamp) = Wake::named(name).and_then(|w| w.last()) else {
+        let Some(wake) = Wake::named(name) else {
             continue;
         };
-        match seen.get(name) {
-            Some(&known) if known == stamp => {}
-            Some(_) => news = true,
-            None => {}
-        }
-        seen.insert(name.clone(), stamp);
+        news |= happened(&wake, seen.entry(name.clone()).or_default());
     }
+    news
+}
+
+/// What a loop saw of a wake at its last look: `None` before the first
+/// look, `Some(None)` when the wake had never happened.
+type Look = Option<Option<Stamp>>;
+
+/// True when `wake` happened since the last look, which it then replaces.
+/// The first look only records, for the reason [`woken`] gives — but a wake
+/// that had never happened is news the first time it does.
+fn happened(wake: &Wake, look: &mut Look) -> bool {
+    let last = wake.last();
+    let news = last.is_some() && look.is_some_and(|seen| seen != last);
+    *look = Some(last);
     news
 }
 
@@ -272,6 +285,22 @@ struct Pacing {
     poll_error: Option<String>,
 }
 
+impl Pacing {
+    /// A wake: the trigger fires on this pass instead of at the end of its
+    /// interval, and still decides whether there is an event.
+    fn look_now(&mut self) {
+        self.last_poll = None;
+        self.last_interval = None;
+    }
+
+    /// A run by hand: the pass a restart makes. The trigger fires, and a
+    /// poll's output counts even when it is the one the last pass printed.
+    fn run_now(&mut self) {
+        self.look_now();
+        self.last_digest = None;
+    }
+}
+
 async fn next_event(spec: &Spec, inbox: &std::path::Path, pacing: &mut Pacing) -> Option<Event> {
     let inbox_owned = inbox.to_path_buf();
     if let Ok(Ok(Some(ev))) = tokio::task::spawn_blocking(move || trigger::take(&inbox_owned)).await
@@ -286,13 +315,10 @@ async fn next_event(spec: &Spec, inbox: &std::path::Path, pacing: &mut Pacing) -
                 return None;
             }
             pacing.last_poll = Some(Instant::now());
-            let command = spec.trigger.command.clone()?;
-            let cwd = spec.dir.clone();
-            let timeout = Duration::from_secs(spec.trigger.timeout_s);
-            let polled =
-                tokio::task::spawn_blocking(move || trigger::run_poll(&command, &cwd, timeout))
-                    .await
-                    .ok()?;
+            let spec_for_poll = spec.clone();
+            let polled = tokio::task::spawn_blocking(move || trigger::poll(&spec_for_poll))
+                .await
+                .ok()?;
             let out = match polled {
                 Ok(out) => {
                     if pacing.poll_error.take().is_some() {
@@ -334,7 +360,8 @@ async fn next_event(spec: &Spec, inbox: &std::path::Path, pacing: &mut Pacing) -
 // `dirs::home_dir()` honours on unix and ignores on Windows.
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{tick_is_stale, woken, Stamp, Wake};
+    use super::{happened, tick_is_stale, woken, Look, Pacing, Wake};
+    use crate::harness::spec::TriggerKind;
     use crate::test_util::with_temp_home;
     use std::collections::HashMap;
 
@@ -354,7 +381,7 @@ mod tests {
         with_temp_home(|| {
             Wake::named("board").unwrap().now().unwrap();
             let spec = watching("board");
-            let mut seen: HashMap<String, Stamp> = HashMap::new();
+            let mut seen: HashMap<String, Look> = HashMap::new();
 
             assert!(!woken(&spec, &mut seen), "a wake older than the loop");
             assert!(!woken(&spec, &mut seen), "nothing happened since");
@@ -366,13 +393,66 @@ mod tests {
     }
 
     #[test]
-    fn a_wake_nobody_ever_touched_is_quiet() {
+    fn a_wake_nobody_ever_touched_is_news_the_first_time_it_happens() {
         with_temp_home(|| {
             let spec = watching("board");
-            let mut seen: HashMap<String, Stamp> = HashMap::new();
-            assert!(!woken(&spec, &mut seen));
-            assert!(seen.is_empty());
+            let mut seen: HashMap<String, Look> = HashMap::new();
+            assert!(!woken(&spec, &mut seen), "never happened");
+            assert!(!woken(&spec, &mut seen), "still never happened");
+
+            Wake::named("board").unwrap().now().unwrap();
+            assert!(woken(&spec, &mut seen), "the first time");
         });
+    }
+
+    #[test]
+    fn a_run_by_hand_reaches_the_loop_once_even_the_first_ever() {
+        with_temp_home(|| {
+            let dir = dirs::home_dir().unwrap().join(".hal/agents/bb-prs");
+            std::fs::create_dir_all(&dir).unwrap();
+            let own = Wake::of_agent(&dir);
+            let mut asked: Look = None;
+            assert!(!happened(&own, &mut asked), "the loop's first look");
+
+            let run = crate::harness::run_now(&dir, TriggerKind::Poll).unwrap();
+            assert_eq!(run, crate::harness::RunNow::Fired);
+            assert!(happened(&own, &mut asked));
+            assert!(!happened(&own, &mut asked), "and only once");
+            assert_eq!(
+                crate::harness::trigger::pending_count(&crate::harness::inbox_path(&dir)),
+                0
+            );
+        });
+    }
+
+    #[test]
+    fn a_run_by_hand_on_an_inbox_agent_queues_an_empty_event() {
+        with_temp_home(|| {
+            let dir = dirs::home_dir().unwrap().join(".hal/agents/bb-prs");
+            let run = crate::harness::run_now(&dir, TriggerKind::Inbox).unwrap();
+            assert_eq!(run, crate::harness::RunNow::Queued);
+            assert_eq!(
+                crate::harness::trigger::pending_count(&crate::harness::inbox_path(&dir)),
+                1
+            );
+        });
+    }
+
+    #[test]
+    fn a_run_by_hand_polls_now_and_counts_output_already_seen() {
+        let mut pacing = Pacing {
+            last_poll: Some(std::time::Instant::now()),
+            last_digest: Some("abc".into()),
+            ..Pacing::default()
+        };
+        pacing.look_now();
+        assert!(pacing.last_poll.is_none(), "a wake polls now");
+        assert!(pacing.last_digest.is_some(), "but still dedupes");
+
+        pacing.last_poll = Some(std::time::Instant::now());
+        pacing.run_now();
+        assert!(pacing.last_poll.is_none(), "a run by hand polls now");
+        assert!(pacing.last_digest.is_none(), "and counts what it prints");
     }
 
     #[test]

@@ -99,6 +99,27 @@ pub fn poke(dir: &Path, payload: &str) -> io::Result<String> {
     trigger::drop_event(&inbox_path(dir), "poke", payload)
 }
 
+/// What a run by hand became.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunNow {
+    /// The trigger fires on the loop's next pass, as on its timer: a poll
+    /// agent runs only if its poll prints an event.
+    Fired,
+    /// An inbox agent has no trigger, so an empty event was queued.
+    Queued,
+}
+
+/// Run the agent by hand the way its trigger would, never around it: a
+/// run that skipped a poll agent's poll would hand the model an empty event.
+pub fn run_now(dir: &Path, kind: spec::TriggerKind) -> io::Result<RunNow> {
+    match kind {
+        spec::TriggerKind::Inbox => poke(dir, "").map(|_| RunNow::Queued),
+        spec::TriggerKind::Poll | spec::TriggerKind::Interval => crate::wake::Wake::of_agent(dir)
+            .now()
+            .map(|_| RunNow::Fired),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
