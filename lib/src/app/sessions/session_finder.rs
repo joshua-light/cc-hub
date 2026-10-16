@@ -277,11 +277,13 @@ impl App {
         }
     }
 
-    /// Enter on the session finder: reopen the highlighted session. A
-    /// still-live session is attached (tmux pane) or window-focused — never
-    /// resumed into a duplicate process; a dead one is resumed in its cwd
-    /// and its fresh pane attached. An empty match list keeps the finder
-    /// open, mirroring the model picker.
+    /// Enter on the session finder: reopen the highlighted session the way
+    /// the grid opens one — cursor on its card, then the dock in the split
+    /// layout and the pane popup elsewhere. A still-live session is opened
+    /// as Enter on its card would — never resumed into a duplicate process;
+    /// a dead one is resumed in its cwd and lands like a respawn, its name
+    /// carried over. An empty match list keeps the finder open, mirroring
+    /// the model picker.
     pub fn confirm_session_finder(&mut self) -> Vec<Effect> {
         let Some(choice) = self
             .session_finder
@@ -296,12 +298,25 @@ impl App {
         // Live already? Match by session id or by transcript path — a Pi/
         // Codex resume runs on the same file, so a second spawn would put
         // two processes on one JSONL (see `focus_selected_session`).
-        let live = self.sessions.last_sessions.iter().find(|s| {
-            s.state != SessionState::Inactive
-                && (s.session_id == choice.session_id
-                    || s.jsonl_path.as_deref() == Some(choice.jsonl_path.as_path()))
-        });
+        let live = self
+            .sessions
+            .last_sessions
+            .iter()
+            .find(|s| {
+                s.state != SessionState::Inactive
+                    && (s.session_id == choice.session_id
+                        || s.jsonl_path.as_deref() == Some(choice.jsonl_path.as_path()))
+            })
+            .cloned();
         if let Some(live) = live {
+            let on_grid = self
+                .sessions
+                .position_of(|s| s.session_id == live.session_id)
+                .is_some();
+            if on_grid {
+                self.select_session_by_id(&live.session_id);
+                return self.focus_selected_session();
+            }
             let sid = crate::models::short_sid(&live.session_id).to_string();
             if let Some(tmux) = live.tmux_session.clone() {
                 self.set_status(format!("attached live {} [{}]", sid, tmux));
@@ -334,7 +349,9 @@ impl App {
                     crate::models::short_sid(&choice.session_id),
                     tmux
                 ));
-                vec![Effect::OpenTmuxPane { tmux }]
+                let title = choice.titled.then_some(choice.label);
+                self.watch_spawn_titled(tmux, choice.agent_id, choice.cwd, title);
+                Vec::new()
             }
             Err(e) => {
                 self.set_status(format!("resume failed: {}", e));
@@ -557,22 +574,27 @@ mod app_tests {
         });
     }
 
+    // A resumed pick lands like a respawn: its placeholder card takes the
+    // cursor and the dock takes the keyboard, its name carried over.
     #[test]
-    fn session_finder_confirm_resumes_a_dead_session_and_attaches() {
+    fn session_finder_confirm_resumes_a_dead_session_into_the_dock() {
         crate::test_util::with_temp_home(|| {
             let (mut app, runtime) = app_with(vec![]);
+            app.ask_spawn_name = true;
             app.execute(Command::Sessions(SessionsCommand::OpenSessionFinder));
             app.update_session_index(vec![indexed("sid-old")]);
 
             let effects = app.execute(Command::Sessions(SessionsCommand::ConfirmSessionFinder));
-            assert_eq!(
-                effects,
-                vec![Effect::OpenTmuxPane {
-                    tmux: "mock-spawn".into(),
-                }]
-            );
-            assert_eq!(app.view, crate::app::View::Grid);
+            assert!(effects.is_empty(), "{effects:?}");
+            assert!(app.take_queued_effects().is_empty());
+            assert_eq!(app.view, crate::app::View::Dock);
             assert!(app.session_finder.is_none());
+            let card = app.selected_session_info().expect("placeholder selected");
+            assert_eq!(card.tmux_session.as_deref(), Some("mock-spawn"));
+            assert_eq!(
+                app.pending_spawn_names.get("mock-spawn").map(String::as_str),
+                Some("Old refactor")
+            );
             let spawns = runtime.spawns.lock().unwrap();
             assert_eq!(spawns.len(), 1);
             assert_eq!(spawns[0].cwd, "/tmp/proj");
@@ -581,23 +603,42 @@ mod app_tests {
         });
     }
 
+    // Outside the split layout there is no dock, and the pick opens in the
+    // pane popup, as Enter on a card does there.
     #[test]
-    fn session_finder_confirm_attaches_a_live_session_instead_of_respawning() {
+    fn session_finder_confirm_opens_the_pane_outside_the_split() {
         crate::test_util::with_temp_home(|| {
-            let (mut app, runtime) = app_with(vec![session(
-                "sid-old",
-                SessionState::Processing,
-                Some("cc-agent-live"),
-            )]);
+            let (mut app, _rt) = app_with(vec![]);
+            app.sessions.layout = crate::app::SessionsLayout::List;
+            app.execute(Command::Sessions(SessionsCommand::OpenSessionFinder));
+            app.update_session_index(vec![indexed("sid-old")]);
+
+            app.execute(Command::Sessions(SessionsCommand::ConfirmSessionFinder));
+            assert_eq!(
+                app.take_queued_effects(),
+                vec![Effect::OpenTmuxPane {
+                    tmux: "mock-spawn".into(),
+                }]
+            );
+        });
+    }
+
+    #[test]
+    fn session_finder_confirm_docks_a_live_session_instead_of_respawning() {
+        crate::test_util::with_temp_home(|| {
+            let (mut app, runtime) = app_with(vec![
+                session("sid-other", SessionState::Processing, Some("cc-agent-other")),
+                session("sid-old", SessionState::Processing, Some("cc-agent-live")),
+            ]);
             app.execute(Command::Sessions(SessionsCommand::OpenSessionFinder));
             app.update_session_index(vec![indexed("sid-old")]);
 
             let effects = app.execute(Command::Sessions(SessionsCommand::ConfirmSessionFinder));
+            assert!(effects.is_empty(), "{effects:?}");
+            assert_eq!(app.view, crate::app::View::Dock);
             assert_eq!(
-                effects,
-                vec![Effect::OpenTmuxPane {
-                    tmux: "cc-agent-live".into(),
-                }]
+                app.selected_session_info().map(|s| s.session_id.as_str()),
+                Some("sid-old")
             );
             assert!(
                 runtime.spawns.lock().unwrap().is_empty(),
