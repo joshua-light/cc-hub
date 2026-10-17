@@ -30,8 +30,8 @@ impl App {
         }
     }
 
-    /// `tmux_session_name → SessionInfo` over the latest unfiltered scan,
-    /// built fresh per call. The Tasks board reads live agent state for its
+    /// `tmux_session_name → SessionInfo` over the latest scan, built fresh
+    /// per call. The Tasks board reads live agent state for its
     /// cards through it.
     pub fn sessions_by_tmux(&self) -> HashMap<&str, &SessionInfo> {
         let mut out = HashMap::new();
@@ -91,13 +91,24 @@ impl App {
     pub fn update_sessions(&mut self, mut sessions: Vec<SessionInfo>) -> bool {
         // Tick transcripts belong to the Agents tab. They are headless
         // `claude -p` runs, so a card here could never be attached — `f`
-        // would have nothing to open.
+        // would have nothing to open. A board card's session is the card's,
+        // even when an agent planted its directory under its own `work/`.
         let agent_sessions = crate::harness::AgentSessions::of(&self.harness.agents);
         if !agent_sessions.is_empty() {
+            let card_tmux: HashSet<&str> = self
+                .tasks
+                .board
+                .tasks()
+                .iter()
+                .filter_map(|t| t.tmux.as_deref())
+                .collect();
             sessions.retain(|s| {
-                agent_sessions
-                    .owner(&s.session_id, std::path::Path::new(&s.cwd))
-                    .is_none()
+                s.tmux_session
+                    .as_deref()
+                    .is_some_and(|name| card_tmux.contains(name))
+                    || agent_sessions
+                        .owner(&s.session_id, std::path::Path::new(&s.cwd))
+                        .is_none()
             });
         }
         // Refresh the session→task sidecar so links written by another
@@ -238,6 +249,48 @@ mod tests {
             app.selected_session_info().map(|s| s.state.clone()),
             Some(SessionState::Idle)
         );
+    }
+
+    // auto-merge plants its worktrees under its own `work/`, and the broker
+    // session it starts there is a card's, not a tick's: it stays on the
+    // grid, and the card reads it as live instead of gone.
+    #[test]
+    fn a_cards_session_under_an_agents_work_dir_stays_on_the_grid() {
+        crate::test_util::with_temp_home(|| {
+            let mut app = App::new();
+            let dir = std::path::Path::new("/tmp/agents/auto-merge");
+            app.harness.agents = vec![crate::harness::AgentSnapshot {
+                name: "auto-merge".into(),
+                dir: dir.to_path_buf(),
+                spec: Err("not loaded".into()),
+                state: Default::default(),
+                notes: Vec::new(),
+                events: Vec::new(),
+                inbox_pending: 0,
+            }];
+            let tree = dir.join("work/trees/repo-42");
+            let id = app.tasks.board.add("Merge: #42").unwrap().unwrap();
+            app.tasks
+                .board
+                .assign(&id, &tree.to_string_lossy(), "codex", "halr-merge")
+                .unwrap();
+
+            let mut merge = fake_session("halr-merge", SessionState::Processing);
+            merge.cwd = tree.to_string_lossy().into_owned();
+            let mut tick = fake_session("tick", SessionState::Processing);
+            tick.cwd = dir.join("work").to_string_lossy().into_owned();
+            tick.tmux_session = None;
+            app.update_sessions(vec![merge, tick]);
+
+            let ids: Vec<&str> = app
+                .sessions
+                .last_sessions
+                .iter()
+                .map(|s| s.session_id.as_str())
+                .collect();
+            assert_eq!(ids, ["halr-merge"], "the tick stays off the grid");
+            assert!(app.sessions_by_tmux().contains_key("halr-merge"));
+        });
     }
 
     #[test]
