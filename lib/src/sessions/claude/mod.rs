@@ -257,6 +257,27 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
 
     let jsonl_map = resolve_jsonl_paths(&raw_sessions, clears, &claimed);
 
+    // A `claude -p` some skill started (the Haiku pass of session-flow) or a
+    // daemon-hosted background session gets no card. It still holds its
+    // transcript, though: an unclaimed one would come back through the orphan
+    // scan as an Inactive card. Split after dedup, so a background job doesn't
+    // hand its conversation to the dead terminal session it was moved out of.
+    let (hidden, raw_sessions): (Vec<RawSession>, Vec<RawSession>) = raw_sessions
+        .into_iter()
+        .partition(|raw| raw.is_headless() || raw.is_background());
+    for raw in &hidden {
+        debug!(
+            "session file: hiding sid={} pid={} kind={:?} entrypoint={:?}",
+            short_sid(&raw.session_id),
+            raw.pid,
+            raw.kind,
+            raw.entrypoint
+        );
+    }
+    let hidden_paths = hidden
+        .iter()
+        .filter_map(|raw| jsonl_map.get(&raw.session_id).cloned().flatten());
+
     // Snapshot tmux once per scan so we can tag each session with its hosting
     // tmux session name (if any) without reshelling per pid.
     let tmux_panes = crate::send::tmux_panes();
@@ -399,6 +420,7 @@ fn scan_claude_sessions(titles: &HashMap<String, String>) -> Vec<SessionInfo> {
     let claimed_paths: HashSet<PathBuf> = sessions
         .iter()
         .filter_map(|s| s.jsonl_path.clone())
+        .chain(hidden_paths)
         .collect();
     let (orphans, total_in_window) = scan_orphan_jsonls(&claimed_paths, titles);
     info!(
@@ -475,6 +497,47 @@ mod tests {
         let json = r#"{"pid":1,"sessionId":"s","cwd":"/x","startedAt":1}"#;
         let raw: RawSession = serde_json::from_str(json).expect("deserialize");
         assert_eq!(raw.status, None);
+    }
+
+    // The shape a `claude -p` child writes: `kind` still says interactive,
+    // only `entrypoint` tells it apart from a terminal session.
+    #[test]
+    fn a_print_mode_run_is_headless_and_a_terminal_session_is_not() {
+        let print = r#"{"pid":39752,"sessionId":"71245a6f","cwd":"/x","startedAt":1,
+            "kind":"interactive","entrypoint":"sdk-cli","status":"busy"}"#;
+        let terminal = r#"{"pid":19213,"sessionId":"3b0786c1","cwd":"/x","startedAt":1,
+            "kind":"interactive","entrypoint":"cli","status":"busy"}"#;
+        let legacy = r#"{"pid":1,"sessionId":"s","cwd":"/x","startedAt":1}"#;
+        let headless = |json| {
+            serde_json::from_str::<RawSession>(json)
+                .unwrap()
+                .is_headless()
+        };
+        assert!(headless(print));
+        assert!(!headless(terminal));
+        assert!(!headless(legacy));
+    }
+
+    // A `claude --bg` job and the spare the daemon keeps warm both say
+    // `"kind":"bg"` and `"entrypoint":"cli"`, like a terminal session would.
+    #[test]
+    fn a_daemon_hosted_session_is_background_and_a_terminal_session_is_not() {
+        let job = r#"{"pid":29743,"sessionId":"2b553bf3","cwd":"/x","startedAt":1,
+            "kind":"bg","entrypoint":"cli","jobId":"2b553bf3","status":"busy"}"#;
+        let spare = r#"{"pid":30498,"sessionId":"9bbd8976","cwd":"/x","startedAt":1,
+            "kind":"bg","entrypoint":"cli","jobId":"9bbd8976","spare":true,"status":"idle"}"#;
+        let terminal = r#"{"pid":19213,"sessionId":"3b0786c1","cwd":"/x","startedAt":1,
+            "kind":"interactive","entrypoint":"cli","status":"busy"}"#;
+        let legacy = r#"{"pid":1,"sessionId":"s","cwd":"/x","startedAt":1}"#;
+        let background = |json| {
+            serde_json::from_str::<RawSession>(json)
+                .unwrap()
+                .is_background()
+        };
+        assert!(background(job));
+        assert!(background(spare));
+        assert!(!background(terminal));
+        assert!(!background(legacy));
     }
 
     // A second home with no sessions of its own must not evict the first

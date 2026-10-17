@@ -82,6 +82,35 @@ pub struct RawSession {
     /// clients that don't write it.
     #[serde(default)]
     pub status: Option<String>,
+    /// How the process was started: `"cli"` for a terminal session,
+    /// `"sdk-cli"` for `claude -p`, `"sdk-ts"` / `"sdk-py"` for the Agent
+    /// SDK. Absent on older clients.
+    #[serde(default)]
+    pub entrypoint: Option<String>,
+    /// Where the process lives: `"interactive"` for its own terminal (a
+    /// `claude -p` says so too), `"bg"` for the Claude Code daemon. Absent on
+    /// older clients.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+impl RawSession {
+    /// A `claude -p` or Agent SDK run: nobody types into it, so it is a tool
+    /// some other process is using, not a session. It even inherits its
+    /// parent's tmux pane, so finding a session by pane could land on it.
+    pub fn is_headless(&self) -> bool {
+        self.entrypoint
+            .as_deref()
+            .is_some_and(|e| e.starts_with("sdk-"))
+    }
+
+    /// A session the Claude Code daemon hosts: a `claude --bg` job, or a
+    /// spare it keeps warm for the next one. `claude agents` is its window;
+    /// the tmux pane it descends from belongs to whichever session started
+    /// the daemon.
+    pub fn is_background(&self) -> bool {
+        self.kind.as_deref() == Some("bg")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
