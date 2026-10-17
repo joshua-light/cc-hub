@@ -592,7 +592,9 @@ mod app_tests {
             let card = app.selected_session_info().expect("placeholder selected");
             assert_eq!(card.tmux_session.as_deref(), Some("mock-spawn"));
             assert_eq!(
-                app.pending_spawn_names.get("mock-spawn").map(String::as_str),
+                app.pending_spawn_names
+                    .get("mock-spawn")
+                    .map(String::as_str),
                 Some("Old refactor")
             );
             let spawns = runtime.spawns.lock().unwrap();
@@ -627,7 +629,11 @@ mod app_tests {
     fn session_finder_confirm_docks_a_live_session_instead_of_respawning() {
         crate::test_util::with_temp_home(|| {
             let (mut app, runtime) = app_with(vec![
-                session("sid-other", SessionState::Processing, Some("cc-agent-other")),
+                session(
+                    "sid-other",
+                    SessionState::Processing,
+                    Some("cc-agent-other"),
+                ),
                 session("sid-old", SessionState::Processing, Some("cc-agent-live")),
             ]);
             app.execute(Command::Sessions(SessionsCommand::OpenSessionFinder));
