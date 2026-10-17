@@ -5,12 +5,16 @@ coding agents, and finds every Claude Code, Pi and Codex session on your
 machine to show them in one grid, with each session's state, running tool,
 context use and a live transcript tail.
 
+![The Sessions tab: sessions grouped by folder, the selected one's pane live beside them](docs/screenshots/sessions.png)
+
 hal used to be called cc-hub. Its first run moves `~/.cc-hub` to `~/.hal`
 and the cache directory from `cc-hub` to `hal`, leaving symlinks at the old
 paths on Linux and macOS. Rename your `cc-hub-new` alias (or `$PROFILE`
 function) to `hal-new` yourself: until you do, new sessions exit at once.
 
 ## Tabs
+
+![The Tasks tab: To-Do, In Progress, Review and Done, each card showing its agent's state](docs/screenshots/tasks.png)
 
 - **Tasks**: a kanban board (To-Do, In Progress, Review, Done). Hand a card to
   an agent, approve its plan, attach to its session.
